@@ -29,21 +29,37 @@ export function runRigInspection(
         return inspection;
     }
 
-    log(`Installed Rig CLI version: ${inspection.cliVersion}`);
-    log(`Installed Rig CLI protocol version: ${String(inspection.cliProtocolVersion)}`);
+    for (const line of formatRigInspection(inspection)) log(line);
+    return inspection;
+}
+
+export function formatRigInspection(inspection: RigCliInstallationInspection): readonly string[] {
+    const lines = [
+        `Installed Rig CLI version: ${inspection.cliVersion}`,
+        `Installed Rig CLI protocol version: ${String(inspection.cliProtocolVersion)}`,
+    ];
     if (inspection.data.status === "absent") {
-        log("Rig data has not been created.");
+        lines.push("Rig data has not been created.");
     } else if (inspection.data.status === "uninitialized") {
-        log("Rig data exists but is not initialized for this Rig version.");
+        lines.push("Rig data exists but has not been initialized.");
     } else if (inspection.data.status === "initialized") {
-        log("Rig data is initialized.");
-        log(`Rig data epoch: ${inspection.data.epoch}`);
-        log(`Rig data schema version: ${String(inspection.data.schemaVersion)}`);
+        lines.push(
+            "Rig data is initialized.",
+            `Rig data epoch: ${inspection.data.epoch}`,
+            `Rig data schema version: ${String(inspection.data.schemaVersion)}`,
+        );
         if (inspection.data.schemaCompatibility === "upgrade_required") {
-            log("Rig data requires an ordinary schema upgrade by this installed CLI.");
+            lines.push("Rig data requires an ordinary schema upgrade by this installed CLI.");
         }
     } else {
-        log(inspection.data.message);
+        lines.push(inspection.data.message);
     }
-    return inspection;
+    return lines;
+}
+
+/** Exit 2 tells launchers the inspection succeeded but the installation cannot be used safely. */
+export function rigInspectionExitCode(inspection: RigCliInstallationInspection): 0 | 2 {
+    return inspection.data.status === "incompatible" || inspection.data.status === "unavailable"
+        ? 2
+        : 0;
 }

@@ -6,6 +6,13 @@ import { reportCliFailure } from "./reportCliFailure.js";
 
 installCliFailureReporting();
 
-main().then(() => {
+main().then((exitCode) => {
+    if (exitCode !== undefined) {
+        process.exitCode = exitCode;
+        if (exitCode !== 0) {
+            process.stdout.write("", () => process.exit(exitCode));
+            return;
+        }
+    }
     if (process.env.RIG_GYM_IN_PROCESS_DAEMON === "1") process.exit(0);
 }, reportCliFailure);

@@ -36,6 +36,8 @@ import type { WebappStore } from "../webapps/index.js";
 export interface SessionStore {
     /** Stable identity for this initialized Rig data generation. */
     readonly dataEpoch: string;
+    /** Schema version observed from the initialized store after migration. */
+    readonly dataSchemaVersion: number;
     readonly globalEventQueue: GlobalEventQueue;
     /** The ephemeral stream every local client follows. Never persisted. */
     readonly liveEvents: LiveGlobalEventQueue;

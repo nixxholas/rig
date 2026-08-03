@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
     MAXIMUM_RIG_PROTOCOL_VERSION,
@@ -7,6 +7,8 @@ import {
 import {
     discoverRigInstallation,
     MAXIMUM_INSTALLATION_RESPONSE_BYTES,
+    RigInstallationDiscoveryHttpError,
+    RigInstallationDiscoveryTimeoutError,
     RigInstallationDiscoveryUnsupportedError,
     rigInstallationCompatibility,
 } from "@/discoverRigInstallation.js";
@@ -120,41 +122,188 @@ describe("discoverRigInstallation", () => {
         }
     });
 
-    it("bounds discovery time and response size", async () => {
+    it("cancels a non-404 HTTP response before throwing its typed status error", async () => {
+        let cancelled = false;
+        const body = new ReadableStream<Uint8Array>({
+            cancel() {
+                cancelled = true;
+            },
+            start(controller) {
+                controller.enqueue(new TextEncoder().encode("forbidden"));
+            },
+        });
+
+        const result = discoverRigInstallation({
+            endpoint: "http://daemon.test",
+            fetch: async () => new Response(body, { status: 403 }),
+            token: "secret",
+        });
+
+        await expect(result).rejects.toMatchObject({
+            name: RigInstallationDiscoveryHttpError.name,
+            status: 403,
+        });
+        expect(cancelled).toBe(true);
+    });
+
+    it("cancels a streamed response that exceeds the 16 KB limit", async () => {
+        let cancelled = false;
+        const body = new ReadableStream<Uint8Array>({
+            cancel() {
+                cancelled = true;
+            },
+            start(controller) {
+                controller.enqueue(new Uint8Array(MAXIMUM_INSTALLATION_RESPONSE_BYTES + 1));
+            },
+        });
+
         await expect(
             discoverRigInstallation({
                 endpoint: "http://daemon.test",
-                fetch: (_input, init) =>
-                    new Promise((_resolve, reject) => {
-                        init?.signal?.addEventListener(
-                            "abort",
-                            () => reject(new DOMException("Aborted", "AbortError")),
-                            { once: true },
-                        );
-                    }),
-                timeoutMs: 1,
+                fetch: async () => new Response(body),
                 token: "secret",
             }),
-        ).rejects.toThrow("Rig installation discovery timed out.");
+        ).rejects.toThrow("Rig returned an installation response larger than 16 KB.");
+        expect(cancelled).toBe(true);
+    });
 
+    it("cancels and releases a reader that fails while reading the response", async () => {
+        const reader = {
+            cancel: vi.fn().mockResolvedValue(undefined),
+            read: vi.fn().mockRejectedValue(new Error("stream failed")),
+            releaseLock: vi.fn(),
+        };
+        const response = {
+            body: { getReader: () => reader },
+            headers: new Headers(),
+            ok: true,
+        } as unknown as Response;
+
+        await expect(
+            discoverRigInstallation({
+                endpoint: "http://daemon.test",
+                fetch: async () => response,
+                token: "secret",
+            }),
+        ).rejects.toThrow("stream failed");
+        expect(reader.cancel).toHaveBeenCalledTimes(1);
+        expect(reader.releaseLock).toHaveBeenCalledTimes(1);
+    });
+
+    it("preserves a caller abort and removes its temporary listener", async () => {
+        const caller = new AbortController();
+        const callerError = new Error("The caller stopped discovery.");
+        const addEventListener = vi.spyOn(caller.signal, "addEventListener");
+        const removeEventListener = vi.spyOn(caller.signal, "removeEventListener");
         let cancelled = false;
         const body = new ReadableStream<Uint8Array>({
             cancel() {
                 cancelled = true;
             },
         });
+        const request = discoverRigInstallation({
+            endpoint: "http://daemon.test",
+            fetch: async () => new Response(body),
+            signal: caller.signal,
+            token: "secret",
+        });
+        const expectation = expect(request).rejects.toBe(callerError);
+
+        caller.abort(callerError);
+
+        await expectation;
+        expect(cancelled).toBe(true);
+        expect(addEventListener).toHaveBeenCalledWith("abort", expect.any(Function), {
+            once: true,
+        });
+        expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    });
+
+    it("preserves a network failure instead of misclassifying it as a timeout", async () => {
+        const networkError = new Error("The network connection closed.");
+
         await expect(
             discoverRigInstallation({
                 endpoint: "http://daemon.test",
-                fetch: async () =>
-                    new Response(body, {
-                        headers: {
-                            "content-length": String(MAXIMUM_INSTALLATION_RESPONSE_BYTES + 1),
-                        },
-                    }),
+                fetch: async () => {
+                    throw networkError;
+                },
+                timeoutMs: 1,
                 token: "secret",
             }),
-        ).rejects.toThrow("Rig returned an installation response larger than 16 KB.");
-        expect(cancelled).toBe(true);
+        ).rejects.toBe(networkError);
+    });
+
+    it("uses the first abort cause when a fetch response arrives after cancellation", async () => {
+        const caller = new AbortController();
+        const callerError = new Error("The caller stopped discovery.");
+        let resolveCallerResponse: (response: Response) => void;
+        const callerResponse = new Promise<Response>((resolve) => {
+            resolveCallerResponse = resolve;
+        });
+        const callerRequest = discoverRigInstallation({
+            endpoint: "http://daemon.test",
+            fetch: async () => callerResponse,
+            signal: caller.signal,
+            token: "secret",
+        });
+        const callerExpectation = expect(callerRequest).rejects.toBe(callerError);
+
+        caller.abort(callerError);
+        resolveCallerResponse!(new Response(JSON.stringify(discovery())));
+
+        await callerExpectation;
+
+        vi.useFakeTimers();
+        try {
+            let resolveTimeoutResponse: (response: Response) => void;
+            const timeoutResponse = new Promise<Response>((resolve) => {
+                resolveTimeoutResponse = resolve;
+            });
+            const timeoutRequest = discoverRigInstallation({
+                endpoint: "http://daemon.test",
+                fetch: async () => timeoutResponse,
+                timeoutMs: 1,
+                token: "secret",
+            });
+            const timeoutExpectation = expect(timeoutRequest).rejects.toBeInstanceOf(
+                RigInstallationDiscoveryTimeoutError,
+            );
+
+            await vi.advanceTimersByTimeAsync(1);
+            resolveTimeoutResponse!(new Response(JSON.stringify(discovery())));
+
+            await timeoutExpectation;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("reports a typed timeout and cancels an in-progress response read", async () => {
+        vi.useFakeTimers();
+        try {
+            let cancelled = false;
+            const body = new ReadableStream<Uint8Array>({
+                cancel() {
+                    cancelled = true;
+                },
+            });
+            const request = discoverRigInstallation({
+                endpoint: "http://daemon.test",
+                fetch: async () => new Response(body),
+                timeoutMs: 1,
+                token: "secret",
+            });
+            const expectation = expect(request).rejects.toBeInstanceOf(
+                RigInstallationDiscoveryTimeoutError,
+            );
+
+            await vi.advanceTimersByTimeAsync(1);
+
+            await expectation;
+            expect(cancelled).toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

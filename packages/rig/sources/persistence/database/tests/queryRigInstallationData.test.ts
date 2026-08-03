@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+    closeSync,
+    existsSync,
+    mkdirSync,
+    openSync,
+    readdirSync,
+    rmSync,
+    writeFileSync,
+    writeSync,
+} from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,11 +50,15 @@ describe("queryRigInstallationData", () => {
         expect(queryRigInstallationData(databasePath)).toEqual({ status: "uninitialized" });
     });
 
-    it("treats a foreign non-SQLite file as uninitialized", () => {
+    it("reports a garbage non-SQLite file as unavailable instead of safely initializable", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         writeFileSync(databasePath, "not a SQLite database");
 
-        expect(queryRigInstallationData(databasePath)).toEqual({ status: "uninitialized" });
+        expect(queryRigInstallationData(databasePath)).toEqual({
+            message: expect.stringContaining("damaged"),
+            reason: "unreadable",
+            status: "unavailable",
+        });
     });
 
     it("returns the same initialized epoch on every read and reopen", () => {
@@ -117,24 +130,48 @@ describe("queryRigInstallationData", () => {
         });
     });
 
-    it("treats a current schema without its committed identity as uninitialized", () => {
+    it("reports a current schema without its committed identity as damaged", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         const opened = openSessionDatabase(databasePath);
         migrateSessionDatabase(opened.database, { createDataEpoch: () => "missing-epoch" });
         opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
         opened.client.close();
 
-        expect(queryRigInstallationData(databasePath)).toEqual({ status: "uninitialized" });
+        expect(queryRigInstallationData(databasePath)).toEqual({
+            message: expect.stringContaining("damaged"),
+            reason: "unreadable",
+            status: "unavailable",
+        });
     });
 
-    it("treats an invalid committed identity as uninitialized", () => {
+    it("reports an invalid committed identity as damaged", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         const opened = openSessionDatabase(databasePath);
         migrateSessionDatabase(opened.database, { createDataEpoch: () => "valid-epoch" });
         opened.database.run(sql.raw("UPDATE rig_data_identity SET epoch = ''"));
         opened.client.close();
 
-        expect(queryRigInstallationData(databasePath)).toEqual({ status: "uninitialized" });
+        expect(queryRigInstallationData(databasePath)).toEqual({
+            message: expect.stringContaining("damaged"),
+            reason: "unreadable",
+            status: "unavailable",
+        });
+    });
+
+    it("reports a structurally corrupt Rig schema as unavailable", () => {
+        const databasePath = join(testDirectory(), "sessions.sqlite");
+        const opened = openSessionDatabase(databasePath);
+        migrateSessionDatabase(opened.database, { createDataEpoch: () => "corrupt-epoch" });
+        opened.client.close();
+        const descriptor = openSync(databasePath, "r+");
+        writeSync(descriptor, Buffer.alloc(32, 0xff), 0, 32, 100);
+        closeSync(descriptor);
+
+        expect(queryRigInstallationData(databasePath)).toEqual({
+            message: expect.stringContaining("damaged"),
+            reason: "unreadable",
+            status: "unavailable",
+        });
     });
 
     it("preserves the epoch while safely rejecting a newer schema", () => {

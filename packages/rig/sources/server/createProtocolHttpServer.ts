@@ -160,7 +160,6 @@ import type {
     SetPresenceResponse,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import { CURRENT_SESSION_DATABASE_VERSION } from "../persistence/database/migrateSessionDatabase.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import type { SessionUsageSummary } from "../session/usage/index.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
@@ -535,7 +534,7 @@ async function handleRequest(
             data: {
                 epoch: store.dataEpoch,
                 schemaCompatibility: "current",
-                schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
+                schemaVersion: store.dataSchemaVersion,
                 status: "initialized",
             },
             formatVersion: 1,

@@ -23,6 +23,7 @@ import { agentSessionSharing } from "./migrations/18-agent-session-sharing.js";
 import { sessionShareEntryLog } from "./migrations/19-session-share-entry-log.js";
 import { rigDataIdentity } from "./migrations/20-rig-data-identity.js";
 import { rigDataIdentityFormat } from "./migrations/21-rig-data-identity-format.js";
+import { rigDataIdentityNamedChecks } from "./migrations/22-rig-data-identity-named-checks.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -52,10 +53,12 @@ const migrations: readonly SessionDatabaseMigration[] = [
     sessionShareEntryLog,
     (database, context) => rigDataIdentity(database, context.createDataEpoch()),
     rigDataIdentityFormat,
+    rigDataIdentityNamedChecks,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
+export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;
 /** First schema version whose committed transaction contains a stable data epoch. */
-export const RIG_DATA_IDENTITY_SCHEMA_VERSION = 20;
+export const RIG_DATA_IDENTITY_SCHEMA_VERSION = RIG_DATA_IDENTITY_MIGRATION_INDEX + 1;
 
 export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;
 

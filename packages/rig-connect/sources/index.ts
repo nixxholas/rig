@@ -8,6 +8,7 @@ export {
     DEFAULT_INSTALLATION_DISCOVERY_TIMEOUT_MS,
     MAXIMUM_INSTALLATION_RESPONSE_BYTES,
     RigInstallationDiscoveryHttpError,
+    RigInstallationDiscoveryTimeoutError,
     RigInstallationDiscoveryUnsupportedError,
     rigInstallationCompatibility,
 } from "./discoverRigInstallation.js";

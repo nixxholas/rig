@@ -36,8 +36,12 @@ import type { ExternalToolCall } from "../external-tools/index.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
-import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import {
+    CURRENT_SESSION_DATABASE_VERSION,
+    migrateSessionDatabase,
+} from "../persistence/database/migrateSessionDatabase.js";
 import { queryRigDataEpoch } from "../persistence/database/queryRigDataEpoch.js";
+import { querySessionDatabaseVersion } from "../persistence/database/querySessionDatabaseVersion.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import {
@@ -102,6 +106,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly #createTerminalEventId = createEventIdFactory();
     readonly #projects: ProjectRepository;
     readonly dataEpoch: string;
+    readonly dataSchemaVersion: number;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
     readonly liveEvents = new LiveGlobalEventQueue();
     readonly presence: PresenceStore;
@@ -120,6 +125,10 @@ export class InMemorySessionStore implements SessionStore {
         this.#database = opened.database;
         migrateSessionDatabase(this.#database);
         this.dataEpoch = queryRigDataEpoch(this.#database);
+        this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
+        if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
+            throw new Error("The in-memory Rig store did not reach the current schema version.");
+        }
         this.webapps = new WebappStore({
             publish: (event) => this.#publishGlobalEvent(event),
             tx: () => this.#activeTransaction ?? this.#database,

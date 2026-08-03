@@ -58,9 +58,9 @@ export function queryRigInstallationData(
         const identityTable = opened.database.get(
             sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rig_data_identity'`,
         );
-        if (identityTable === undefined) return { status: "uninitialized" };
+        if (identityTable === undefined) return damagedData();
         const epoch = queryRigDataEpochIfPresent(opened.database);
-        if (epoch === undefined) return { status: "uninitialized" };
+        if (epoch === undefined) return damagedData();
         return {
             epoch,
             schemaCompatibility:
@@ -87,7 +87,7 @@ function queryFutureEpoch(database: Parameters<typeof queryRigDataEpochIfPresent
 }
 
 function classifyInspectionError(error: unknown): RigInstallationData {
-    if (error instanceof TransformDecodeCheckError) return { status: "uninitialized" };
+    if (error instanceof TransformDecodeCheckError) return damagedData();
     if (!(error instanceof Database.SqliteError)) {
         return unavailable("unreadable", "Rig data exists but cannot be inspected.");
     }
@@ -116,14 +116,21 @@ function classifyInspectionError(error: unknown): RigInstallationData {
         );
     }
     if (
-        code === "SQLITE_CORRUPT" ||
+        code.startsWith("SQLITE_CORRUPT") ||
         code === "SQLITE_ERROR" ||
         code === "SQLITE_NOTADB" ||
         code === "SQLITE_SCHEMA"
     ) {
-        return { status: "uninitialized" };
+        return damagedData();
     }
     return unavailable("unreadable", "Rig data exists but cannot be inspected.");
+}
+
+function damagedData(): RigInstallationData {
+    return unavailable(
+        "unreadable",
+        "Rig data exists but is damaged or is not a Rig database that can be initialized safely.",
+    );
 }
 
 function unavailable(

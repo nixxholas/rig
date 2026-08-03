@@ -11,9 +11,9 @@ import { parseSessionEnvironmentOptions } from "./parseSessionEnvironmentOptions
 import { formatCliHelp, formatDesktopCliHelp } from "./formatCliHelp.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { RigUserError } from "../RigUserError.js";
-import { runRigInspection } from "./runRigInspection.js";
+import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
 
-export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<0 | 2 | void> {
     if (argv.length === 1 && argv[0] === "--server") {
         await runLocalProtocolServer({
             happyIntegration: "enabled",
@@ -44,8 +44,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
                 hint: "Usage: rig inspect [--json]",
             });
         }
-        runRigInspection({ json: commandArgs[0] === "--json" });
-        return;
+        const inspection = runRigInspection({ json: commandArgs[0] === "--json" });
+        return rigInspectionExitCode(inspection);
     }
     const options: RunAppOptions = {
         cwd: process.cwd(),

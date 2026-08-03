@@ -34,6 +34,7 @@ import { ProjectRegistrationError } from "../../project/ProjectRepository.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
+import { CURRENT_SESSION_DATABASE_VERSION } from "../../persistence/database/migrateSessionDatabase.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -1997,6 +1998,7 @@ describe("createProtocolHttpServer", () => {
     it("serves authenticated installation identity without opening a stream", async () => {
         const { close, socketPath, store } = await startServer();
         try {
+            expect(store.dataSchemaVersion).toBe(CURRENT_SESSION_DATABASE_VERSION);
             const response = await requestRawJson(socketPath, "/installation", {
                 body: "",
                 method: "GET",
@@ -2008,7 +2010,7 @@ describe("createProtocolHttpServer", () => {
                 data: {
                     epoch: store.dataEpoch,
                     schemaCompatibility: "current",
-                    schemaVersion: expect.any(Number),
+                    schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
                     status: "initialized",
                 },
                 formatVersion: 1,

@@ -84,8 +84,12 @@ import {
     openSessionDatabase,
     type SessionDatabase,
 } from "../persistence/database/openSessionDatabase.js";
-import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import {
+    CURRENT_SESSION_DATABASE_VERSION,
+    migrateSessionDatabase,
+} from "../persistence/database/migrateSessionDatabase.js";
 import { queryRigDataEpoch } from "../persistence/database/queryRigDataEpoch.js";
+import { querySessionDatabaseVersion } from "../persistence/database/querySessionDatabaseVersion.js";
 import { durablePermissionHandoff } from "../persistence/session/durablePermissionHandoff.js";
 import { durableUserInputPrune } from "../persistence/session/durableUserInputPrune.js";
 import { durableUserInputSave } from "../persistence/session/durableUserInputSave.js";
@@ -193,6 +197,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly #createTerminalEventId = createEventIdFactory();
     #database: SessionDatabase;
     readonly dataEpoch: string;
+    readonly dataSchemaVersion: number;
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #now: () => number;
@@ -260,6 +265,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (options.databasePath !== ":memory:") chmodSync(options.databasePath, 0o600);
         migrateSessionDatabase(this.#database);
         this.dataEpoch = queryRigDataEpoch(this.#database);
+        this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
+        if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
+            throw new Error("The persistent Rig store did not reach the current schema version.");
+        }
         this.#loadSecretRegistrations();
         for (const secret of options.secrets ?? []) this.registerSecret(secret);
         this.#globalEventQueue =

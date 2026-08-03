@@ -3,9 +3,9 @@ import { Type, type Static } from "@sinclair/typebox";
 const exact = { additionalProperties: false } as const;
 const schemaVersionSchema = Type.Integer({ minimum: 0 });
 const messageSchema = Type.String({ minLength: 1 });
-const rigDataEpochSchema = Type.String({ maxLength: 128, minLength: 1 });
+export const rigDataEpochSchema = Type.String({ maxLength: 128, minLength: 1 });
 
-const rigInitializedDataSchema = Type.Object(
+export const rigInitializedDataSchema = Type.Object(
     {
         epoch: rigDataEpochSchema,
         schemaCompatibility: Type.Union([

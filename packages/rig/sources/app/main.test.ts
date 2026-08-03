@@ -7,7 +7,7 @@ import { runDesktop } from "./runDesktop.js";
 import { runExec } from "./runExec.js";
 import { runLocalProtocolServer } from "../server/index.js";
 import { runHappyAuthCommand } from "../happy/index.js";
-import { runRigInspection } from "./runRigInspection.js";
+import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
 
 vi.mock("./runApp.js", () => ({ runApp: vi.fn() }));
 vi.mock("./runDesktop.js", () => ({ runDesktop: vi.fn() }));
@@ -15,7 +15,10 @@ vi.mock("./runExec.js", () => ({ runExec: vi.fn() }));
 vi.mock("../readPackageVersion.js", () => ({ readPackageVersion: vi.fn(() => "1.2.3") }));
 vi.mock("../server/index.js", () => ({ runLocalProtocolServer: vi.fn() }));
 vi.mock("../happy/index.js", () => ({ runHappyAuthCommand: vi.fn() }));
-vi.mock("./runRigInspection.js", () => ({ runRigInspection: vi.fn() }));
+vi.mock("./runRigInspection.js", () => ({
+    rigInspectionExitCode: vi.fn(() => 0),
+    runRigInspection: vi.fn(),
+}));
 
 describe("main command dispatch", () => {
     beforeEach(() => {
@@ -27,6 +30,15 @@ describe("main command dispatch", () => {
         vi.mocked(readPackageVersion).mockClear();
         vi.mocked(runHappyAuthCommand).mockReset();
         vi.mocked(runRigInspection).mockReset();
+        vi.mocked(runRigInspection).mockReturnValue({
+            cliProtocolVersion: 5,
+            cliVersion: "1.2.3",
+            data: { status: "absent" },
+            formatVersion: 1,
+            source: "cli",
+        });
+        vi.mocked(rigInspectionExitCode).mockReset();
+        vi.mocked(rigInspectionExitCode).mockReturnValue(0);
     });
 
     it("starts the internal server only for its exact private invocation", async () => {
@@ -87,12 +99,32 @@ describe("main command dispatch", () => {
     });
 
     it("inspects machine-readable installation state without starting a session or daemon", async () => {
-        await main(["inspect", "--json"]);
+        await expect(main(["inspect", "--json"])).resolves.toBe(0);
 
         expect(runRigInspection).toHaveBeenCalledWith({ json: true });
         expect(runApp).not.toHaveBeenCalled();
         expect(runLocalProtocolServer).not.toHaveBeenCalled();
     });
+
+    it("returns status 2 when inspection completed with unusable data", async () => {
+        vi.mocked(rigInspectionExitCode).mockReturnValue(2);
+
+        await expect(main(["inspect"])).resolves.toBe(2);
+        expect(rigInspectionExitCode).toHaveBeenCalledWith(
+            expect.objectContaining({ data: { status: "absent" } }),
+        );
+    });
+
+    it.each([["--bogus"], ["--json", "extra"]])(
+        "rejects bogus inspection arguments %j",
+        async (...arguments_) => {
+            await expect(main(["inspect", ...arguments_])).rejects.toThrow(
+                "Rig does not recognize that inspection option.",
+            );
+            expect(runRigInspection).not.toHaveBeenCalled();
+            expect(runLocalProtocolServer).not.toHaveBeenCalled();
+        },
+    );
 
     it("starts Happy QR authentication without opening a session", async () => {
         await main(["happy", "auth"]);

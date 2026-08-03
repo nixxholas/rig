@@ -32,14 +32,21 @@ export async function discoverRigInstallation(
     options: DiscoverRigInstallationOptions,
 ): Promise<RigDaemonInstallationDiscovery> {
     const controller = new AbortController();
-    let timedOut = false;
+    let abortCause: "caller" | "timeout" | undefined;
+    let timeoutError: RigInstallationDiscoveryTimeoutError | undefined;
     const timeout = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
+        if (abortCause !== undefined) return;
+        abortCause = "timeout";
+        timeoutError = new RigInstallationDiscoveryTimeoutError();
+        controller.abort(timeoutError);
     }, options.timeoutMs ?? DEFAULT_INSTALLATION_DISCOVERY_TIMEOUT_MS);
-    const abort = () => controller.abort(options.signal?.reason);
-    if (options.signal?.aborted === true) abort();
-    else options.signal?.addEventListener("abort", abort, { once: true });
+    const abortForCaller = () => {
+        if (abortCause !== undefined) return;
+        abortCause = "caller";
+        controller.abort(options.signal?.reason);
+    };
+    if (options.signal?.aborted === true) abortForCaller();
+    else options.signal?.addEventListener("abort", abortForCaller, { once: true });
     let bytes: Uint8Array;
     try {
         const response = await (options.fetch ?? globalThis.fetch)(
@@ -53,18 +60,22 @@ export async function discoverRigInstallation(
                 signal: controller.signal,
             },
         );
+        if (controller.signal.aborted) {
+            await response.body?.cancel().catch(() => undefined);
+            throw controller.signal.reason;
+        }
         if (!response.ok) {
             await response.body?.cancel().catch(() => undefined);
             if (response.status === 404) throw new RigInstallationDiscoveryUnsupportedError();
             throw new RigInstallationDiscoveryHttpError(response.status);
         }
-        bytes = await readBoundedInstallationResponse(response);
+        bytes = await readBoundedInstallationResponse(response, controller.signal);
     } catch (error) {
-        if (timedOut) throw new Error("Rig installation discovery timed out.");
+        if (abortCause === "timeout") throw timeoutError;
         throw error;
     } finally {
         clearTimeout(timeout);
-        options.signal?.removeEventListener("abort", abort);
+        options.signal?.removeEventListener("abort", abortForCaller);
     }
     try {
         return Value.Decode(
@@ -112,7 +123,22 @@ export class RigInstallationDiscoveryHttpError extends Error {
     }
 }
 
-async function readBoundedInstallationResponse(response: Response): Promise<Uint8Array> {
+/** The endpoint did not finish its complete response within the configured bound. */
+export class RigInstallationDiscoveryTimeoutError extends Error {
+    constructor() {
+        super("Rig installation discovery timed out.");
+        this.name = "RigInstallationDiscoveryTimeoutError";
+    }
+}
+
+async function readBoundedInstallationResponse(
+    response: Response,
+    signal: AbortSignal,
+): Promise<Uint8Array> {
+    if (signal.aborted) {
+        await response.body?.cancel().catch(() => undefined);
+        throw signal.reason;
+    }
     const declaredLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAXIMUM_INSTALLATION_RESPONSE_BYTES) {
         await response.body?.cancel().catch(() => undefined);
@@ -120,23 +146,38 @@ async function readBoundedInstallationResponse(response: Response): Promise<Uint
     }
     if (response.body === null) return new Uint8Array();
     const reader = response.body.getReader();
+    let cancellation: Promise<void> | undefined;
+    const cancelReader = (): Promise<void> => {
+        cancellation ??= reader.cancel().catch(() => undefined);
+        return cancellation;
+    };
+    const abortReading = () => {
+        void cancelReader();
+    };
     const chunks: Uint8Array[] = [];
     let length = 0;
+    signal.addEventListener("abort", abortReading, { once: true });
     try {
+        if (signal.aborted) {
+            await cancelReader();
+            throw signal.reason;
+        }
         for (;;) {
             const { done, value } = await reader.read();
+            if (signal.aborted) throw signal.reason;
             if (done) break;
             length += value.byteLength;
             if (length > MAXIMUM_INSTALLATION_RESPONSE_BYTES) {
-                await reader.cancel().catch(() => undefined);
+                await cancelReader();
                 throw new Error("Rig returned an installation response larger than 16 KB.");
             }
             chunks.push(value);
         }
     } catch (error) {
-        await reader.cancel().catch(() => undefined);
+        await cancelReader();
         throw error;
     } finally {
+        signal.removeEventListener("abort", abortReading);
         reader.releaseLock();
     }
     const body = new Uint8Array(length);

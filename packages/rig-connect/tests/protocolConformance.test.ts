@@ -2,13 +2,19 @@ import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import { happyComputeErrorSchema } from "../../happy-plugins/sources/computeTypes.js";
 
-// The daemon's own declarations, read from source so this check needs no build
-// step and no published type surface. It is a type-only import in a test, so
-// nothing from the daemon reaches this library's bundle.
+// The daemon's own declarations are read from source so this check needs no
+// build step and no published type surface. Type-only imports preserve the
+// browser bundle boundary; runtime schema imports run only in this Vitest
+// conformance check.
 import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
     PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
     createSessionShareRequestSchema as daemonCreateSessionShareRequestSchema,
+    rigCliInstallationInspectionSchema as daemonRigCliInstallationInspectionSchema,
+    rigDaemonInstallationDiscoverySchema as daemonRigDaemonInstallationDiscoverySchema,
+    rigDataEpochSchema as daemonRigDataEpochSchema,
+    rigInitializedDataSchema as daemonRigInitializedDataSchema,
+    rigInstallationDataSchema as daemonRigInstallationDataSchema,
     sessionShareOwnerResponseSchema as daemonSessionShareOwnerResponseSchema,
     systemNoticePayloadSchema as daemonSystemNoticePayloadSchema,
 } from "../../rig/sources/protocol/index.js";
@@ -26,6 +32,13 @@ import {
     sessionShareOwnerResponseSchema,
     systemNoticePayloadSchema,
 } from "@/protocol.js";
+import {
+    rigCliInstallationInspectionSchema,
+    rigDaemonInstallationDiscoverySchema,
+    rigDataEpochSchema,
+    rigInitializedDataSchema,
+    rigInstallationCliDataSchema,
+} from "@/RigInstallationInspection.js";
 
 /**
  * The protocol types are declared locally so a browser bundle carries no daemon
@@ -233,6 +246,63 @@ type _DaemonRigDaemonInstallationDiscovery = Assignable<
 describe("protocol conformance", () => {
     it("keeps the browser-safe compute error schema structurally identical to the daemon source", () => {
         expect(computeServiceErrorSchema).toEqual(happyComputeErrorSchema);
+    });
+
+    it("keeps duplicated installation schemas structurally identical to the daemon", () => {
+        expect(rigDataEpochSchema).toStrictEqual(daemonRigDataEpochSchema);
+        expect(rigInitializedDataSchema).toStrictEqual(daemonRigInitializedDataSchema);
+        expect(rigInstallationCliDataSchema).toStrictEqual(daemonRigInstallationDataSchema);
+        expect(rigCliInstallationInspectionSchema).toStrictEqual(
+            daemonRigCliInstallationInspectionSchema,
+        );
+        expect(rigDaemonInstallationDiscoverySchema).toStrictEqual(
+            daemonRigDaemonInstallationDiscoverySchema,
+        );
+
+        const invalidDiscoveryValues = [
+            {
+                daemonProtocolVersion: 5,
+                daemonVersion: "0.0.127",
+                data: {
+                    epoch: "installation-epoch",
+                    schemaCompatibility: "current",
+                    schemaVersion: 18,
+                    status: "initialized",
+                },
+                formatVersion: 1,
+                source: "daemon",
+                unexpected: true,
+            },
+            {
+                daemonProtocolVersion: 5,
+                daemonVersion: "0.0.127",
+                data: {
+                    epoch: "x".repeat(129),
+                    schemaCompatibility: "current",
+                    schemaVersion: 18,
+                    status: "initialized",
+                },
+                formatVersion: 1,
+                source: "daemon",
+            },
+            {
+                daemonProtocolVersion: 5,
+                daemonVersion: "0.0.127",
+                data: {
+                    epoch: "installation-epoch",
+                    schemaCompatibility: "current",
+                    schemaVersion: -1,
+                    status: "initialized",
+                },
+                formatVersion: 1,
+                source: "daemon",
+            },
+        ];
+
+        for (const value of invalidDiscoveryValues) {
+            expect(Value.Check(rigDaemonInstallationDiscoverySchema, value)).toBe(false);
+            expect(Value.Check(daemonRigDaemonInstallationDiscoverySchema, value)).toBe(false);
+        }
     });
 
     it("keeps the embedded protocol types assignable from the daemon's own types", () => {

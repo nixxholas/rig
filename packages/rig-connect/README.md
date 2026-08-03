@@ -47,6 +47,8 @@ discovery, inspection may report `absent`, `uninitialized`, `initialized` (inclu
 `upgrade_required`), `incompatible`, or `unavailable` without starting or contacting the daemon.
 The daemon contract is separately exported as
 `rigDaemonInstallationDiscoverySchema` / `RigDaemonInstallationDiscovery`.
+The command exits with status 0 for a completed safe inspection and status 2 when the result is
+`incompatible` or `unavailable`; JSON is still emitted in either case.
 
 Local plugin interfaces read the complete plugin and application catalog through one live
 subscription:

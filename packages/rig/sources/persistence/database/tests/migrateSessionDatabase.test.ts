@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
     CURRENT_SESSION_DATABASE_VERSION,
     migrateSessionDatabase,
+    RIG_DATA_IDENTITY_MIGRATION_INDEX,
     RIG_DATA_IDENTITY_SCHEMA_VERSION,
 } from "../migrateSessionDatabase.js";
 import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
@@ -82,6 +83,48 @@ describe("migrateSessionDatabase", () => {
         expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
+        opened.client.close();
+    });
+
+    it("pins the data identity migration at index 19", () => {
+        expect(RIG_DATA_IDENTITY_MIGRATION_INDEX).toBe(19);
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded" });
+        opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
+        opened.database.run(
+            sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
+        );
+
+        migrateSessionDatabase(opened.database, { createDataEpoch: () => "pinned-epoch" });
+
+        expect(
+            opened.database.get(sql.raw("SELECT epoch, format_version FROM rig_data_identity")),
+        ).toEqual({ epoch: "pinned-epoch", format_version: 1 });
+        opened.client.close();
+    });
+
+    it("creates and enforces the named identity constraints", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database, { createDataEpoch: () => "checked-epoch" });
+        const tableSql = opened.database.get<{ sql: string }>(
+            sql.raw("SELECT sql FROM sqlite_master WHERE name = 'rig_data_identity'"),
+        )?.sql;
+
+        expect(tableSql).toContain("CONSTRAINT rig_data_identity_singleton");
+        expect(tableSql).toContain("CONSTRAINT rig_data_identity_format_version");
+        expect(() =>
+            opened.database.run(sql.raw("UPDATE rig_data_identity SET format_version = 2")),
+        ).toThrow();
+        expect(() =>
+            opened.database.run(
+                sql.raw(
+                    "INSERT INTO rig_data_identity (singleton, epoch, format_version) VALUES (2, 'other', 1)",
+                ),
+            ),
+        ).toThrow();
+        expect(
+            opened.database.get(sql.raw("SELECT singleton, format_version FROM rig_data_identity")),
+        ).toEqual({ format_version: 1, singleton: 1 });
         opened.client.close();
     });
 

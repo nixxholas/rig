@@ -14,7 +14,7 @@ import {
 export const rigDataIdentityTable = sqliteTable(
     "rig_data_identity",
     {
-        singleton: integer("singleton").primaryKey(),
+        singleton: integer("singleton").notNull().primaryKey(),
         epoch: text("epoch").notNull(),
         formatVersion: integer("format_version").notNull().default(1),
     },
