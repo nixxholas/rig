@@ -1,9 +1,9 @@
 import { readPackageManifest } from "./release/readPackageManifest.js";
 import { assertHappyRuntimeDependencies } from "./release/assertHappyRuntimeDependencies.js";
 import { assertRegistryLatestMatchesManifest } from "./release/assertRegistryLatestMatchesManifest.js";
-import { createReleaseTestEnvironment } from "./release/createReleaseTestEnvironment.js";
 import { resolveReleasePackage } from "./release/resolveReleasePackage.js";
 import { runCommand } from "./release/runCommand.js";
+import { validateRelease } from "./release/validateRelease.js";
 
 const VERSION_BUMPS = new Set([
     "major",
@@ -103,11 +103,7 @@ async function release(): Promise<void> {
     }
 
     console.log("Validating the release...");
-    runCommand("pnpm", ["run", "check"]);
-    runCommand("pnpm", ["test"], {
-        environment: createReleaseTestEnvironment(),
-    });
-    runCommand("pnpm", releasePackage.buildArguments);
+    validateRelease(releasePackage);
 
     if (!retryingRelease) {
         console.log(`Creating the ${releaseInput} release commit and tag...`);
