@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChatDelta } from "@/ChatElement.js";
-import { connectRig } from "@/connectRig.js";
+import { connectRig, ProjectRegistrationError } from "@/index.js";
 import type { SessionFinished } from "@/connectRig.js";
 import type {
     GlobalStreamHello,
@@ -138,6 +138,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
             {
                 createdAt: 1,
                 id: "project-1",
+                initializationAttempt: 1,
                 initializationStatus: "ready",
                 kind: "regular",
                 name: "Before",
@@ -146,6 +147,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
                 path: "/work",
                 presence: "present",
                 settings: {},
+                storageKey: "project-1",
                 updatedAt: 1,
                 version: 3,
                 worktreeSupport: "supported",
@@ -224,6 +226,69 @@ const randomValues = (bytes: Uint8Array): Uint8Array => {
 };
 
 describe("connectRig mutations", () => {
+    it("retries project registration with one identity and returns the authoritative entity", async () => {
+        const bodies: { path: string; projectId: string }[] = [];
+        const project = {
+            ...groupsCatalog().projects[0]!,
+            id: "registered-project",
+            path: "/projects/registered",
+        };
+        let attempt = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (_input, init) => {
+                bodies.push(JSON.parse(String(init?.body)));
+                attempt += 1;
+                if (attempt === 1) return Promise.reject(new TypeError("connection lost"));
+                return Promise.resolve(new Response(JSON.stringify({ project }), { status: 200 }));
+            },
+            mutationRetryDelayMs: 1,
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        try {
+            await expect(rig.projects.add("/projects/registered")).resolves.toEqual(project);
+            expect(bodies).toHaveLength(2);
+            expect(bodies[0]).toEqual(bodies[1]);
+            expect(bodies[0]).toMatchObject({ path: "/projects/registered" });
+            expect(bodies[0]?.projectId).toEqual(expect.any(String));
+        } finally {
+            rig.close();
+        }
+    });
+
+    it("throws displayable typed project registration failures", async () => {
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: () =>
+                Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            error: {
+                                code: "not_git_top_level",
+                                message: "Choose the Git repository's top-level folder.",
+                            },
+                        }),
+                        { status: 422 },
+                    ),
+                ),
+            randomValues,
+            token: "secret",
+        });
+        try {
+            const error = await rig.projects.add("/projects/nested").catch((reason) => reason);
+            expect(error).toBeInstanceOf(ProjectRegistrationError);
+            expect(error).toMatchObject({
+                code: "not_git_top_level",
+                message: "Choose the Git repository's top-level folder.",
+                status: 422,
+            });
+        } finally {
+            rig.close();
+        }
+    });
+
     it("supports loading process output and terminal presence through the shared transport", async () => {
         const calls: { init?: RequestInit; url: URL }[] = [];
         const rig = connectRig({

@@ -1,4 +1,4 @@
-export { connectRig } from "./connectRig.js";
+export { connectRig, ProjectRegistrationError } from "./connectRig.js";
 export type {
     ConnectRigOptions,
     CreateSessionInput,
@@ -8,7 +8,9 @@ export type {
     GroupTarget,
     ModelSelection,
     MurmurOperationOptions,
+    ProjectAddOptions,
     RigConnection,
+    RigProjects,
     RigGroupsConnection,
     RigGroupsSubscriptionOptions,
     RigInboxConnection,
@@ -184,6 +186,7 @@ export type {
     RemoteTerminalGroupState,
     RemoteTerminalSummary,
     Project,
+    ProjectRegistrationErrorCode,
     ProjectWorkspace,
     SessionGoal,
     SessionContextUsage,

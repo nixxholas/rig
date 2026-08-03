@@ -18,6 +18,7 @@ import type {
     ProjectWorkspace,
     ReorderRequest,
     GlobalEvent,
+    RegisterProjectRequest,
     RegisterSecretRequest,
     SecretSummary,
     SessionEvent,
@@ -324,6 +325,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 get: (sessionId) => this.get(sessionId),
                 listByRoot: (rootSessionId) => this.#listSubagentSessionsByRoot(rootSessionId),
                 listProjects: () => this.#projects.listProjects(),
+                registerProject: (path) => this.#projects.registerProject({ path }),
                 listProjectWorkspaces: (projectId) => this.#projects.listWorkspaces(projectId),
                 listProjectSessions: (target) => queryWorkspaceSessions(this.#tx(), target),
                 queryAgentTreeUsage: (sessionId) => this.queryAgentTreeUsage(sessionId),
@@ -843,6 +845,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     listProjects(): readonly Project[] {
         return this.#projects.listProjects();
+    }
+
+    registerProject(request: RegisterProjectRequest): Promise<Project> {
+        return this.#projects.registerProject(request);
     }
 
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {

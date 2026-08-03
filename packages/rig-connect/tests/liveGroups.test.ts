@@ -94,6 +94,31 @@ async function withGroupsConnection(
 }
 
 describe("rig-connect groups against a live daemon", () => {
+    it("adds a project to the connected catalog from its durable event without polling", async () => {
+        const repository = await createRepository();
+        const { endpoint, store } = await startDaemon();
+        const rig = connectRig({ endpoint, token: "secret" });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
+
+            const project = await rig.projects.add(repository);
+
+            await waitFor(
+                () => connection.projects().some((candidate) => candidate.id === project.id),
+                "the registered project event to update the catalog",
+            );
+            expect(connection.projects().find((candidate) => candidate.id === project.id)).toEqual(
+                expect.objectContaining({ path: project.path }),
+            );
+            expect(store.list()).toEqual([]);
+            expect(store.listWorkspaces()).toEqual([]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("receives the groups that already exist on the opening frame", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-groups-a" });

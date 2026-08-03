@@ -300,6 +300,36 @@ export const listProjectsTool = defineTool({
     locks: [],
 });
 
+export const addProjectTool = defineTool({
+    name: "add_project",
+    label: "Add project",
+    description:
+        "Register an existing local Git repository as a Rig project without creating a chat or workspace. The path must be the repository's top-level folder.",
+    arguments: Type.Object(
+        {
+            path: Type.String({
+                description: "Absolute Git repository path on the machine running Rig.",
+            }),
+        },
+        { additionalProperties: false },
+    ),
+    returnType: Type.Object({
+        current: Type.Boolean(),
+        id: Type.String(),
+        name: Type.String(),
+        path: Type.String(),
+    }),
+    requiresAutoOrFullAccess: true,
+    shouldReviewInAutoMode: () => true,
+    shouldRunInFullAccessInAutoMode: () => true,
+    describeAutoPermissionAction: ({ path }) =>
+        `inspect and register the local Git repository at ${JSON.stringify(path)} as a Rig project`,
+    execute: ({ path }, context) => requireCrossWorkspace(context).addProject(path),
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+    toUI: (result) => `Added project ${result.name}.`,
+    locks: [],
+});
+
 export const delegateToWorkspaceTool = defineTool({
     name: "delegate_to_workspace",
     label: "Delegate to workspace",
@@ -398,4 +428,4 @@ export const workspaceTools = [
     delegateToWorkspaceTool,
 ] as const;
 
-export const crossWorkspaceTools = [listProjectsTool] as const;
+export const crossWorkspaceTools = [listProjectsTool, addProjectTool] as const;

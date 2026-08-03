@@ -15,6 +15,7 @@ function project(id: string, overrides: Partial<Project> = {}): Project {
     return {
         createdAt: 1,
         id,
+        initializationAttempt: 1,
         initializationStatus: "ready",
         kind: "regular",
         name: id,
@@ -23,6 +24,7 @@ function project(id: string, overrides: Partial<Project> = {}): Project {
         path: `/work/${id}`,
         presence: "present",
         settings: {},
+        storageKey: id,
         updatedAt: 1,
         version: 1,
         worktreeSupport: "supported",

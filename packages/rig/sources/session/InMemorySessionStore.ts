@@ -13,6 +13,7 @@ import type {
     ProjectSettingsUpdate,
     ProjectWorkspace,
     ReorderRequest,
+    RegisterProjectRequest,
     RegisterSecretRequest,
     SecretSummary,
     SessionAgentMetadata,
@@ -196,6 +197,7 @@ export class InMemorySessionStore implements SessionStore {
                             session.agentMetadata().rootSessionId === rootSessionId &&
                             session.isSubagent(),
                     ),
+                registerProject: (path) => this.#projects.registerProject({ path }),
                 queryAgentTreeUsage: (sessionId) => this.queryAgentTreeUsage(sessionId),
                 ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
@@ -669,6 +671,10 @@ export class InMemorySessionStore implements SessionStore {
 
     listProjects(): readonly Project[] {
         return this.#projects.listProjects();
+    }
+
+    registerProject(request: RegisterProjectRequest): Promise<Project> {
+        return this.#projects.registerProject(request);
     }
 
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {

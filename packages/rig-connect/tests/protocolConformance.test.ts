@@ -90,6 +90,10 @@ type _TranscriptWindow = Assignable<local.SessionTranscriptWindow, daemon.Sessio
 type _TranscriptTurn = Assignable<local.SessionTranscriptTurn, daemon.SessionTranscriptTurn>;
 type _GlobalHello = Assignable<local.GlobalStreamHello, daemon.GlobalStreamHello>;
 type _Project = Assignable<local.Project, daemon.Project>;
+type _ProjectRegistrationErrorCode = Assignable<
+    local.ProjectRegistrationErrorCode,
+    daemon.ProjectRegistrationErrorCode
+>;
 type _Workspace = Assignable<local.ProjectWorkspace, daemon.ProjectWorkspace>;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;

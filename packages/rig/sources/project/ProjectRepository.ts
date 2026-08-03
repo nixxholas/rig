@@ -1,8 +1,18 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import {
+    access,
+    lstat,
+    mkdir,
+    readFile,
+    readdir,
+    rename,
+    rm,
+    stat,
+    writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 
 import { createId } from "@paralleldrive/cuid2";
 import sharp from "sharp";
@@ -14,10 +24,12 @@ import {
     type Project,
     type ProjectAvatarSource,
     type ProjectEvent,
+    type ProjectRegistrationErrorCode,
     type ProjectSettings,
     type ProjectSettingsUpdate,
     type ProjectWorkspace,
     type ProjectWorkspaceEvent,
+    type RegisterProjectRequest,
     type ReorderRequest,
 } from "../protocol/index.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -126,6 +138,16 @@ export interface ProjectSessionSettings {
     workspaceId?: string;
 }
 
+export class ProjectRegistrationError extends Error {
+    constructor(
+        readonly code: ProjectRegistrationErrorCode,
+        message: string,
+    ) {
+        super(message);
+        this.name = "ProjectRegistrationError";
+    }
+}
+
 export interface ProjectRepositoryOptions {
     database: SessionDatabase;
     /** Replaces both Git execution surfaces at once, so a test can drive lifecycle without Git. */
@@ -223,6 +245,42 @@ export class ProjectRepository {
         requestedProjectId?: string,
     ): ResolvedProjectOwnership {
         const path = normalizeProjectCwd(cwd);
+        return this.#resolvePath(path, assertedWorkspaceId, requestedProjectId);
+    }
+
+    /**
+     * Adds one explicit Git project without creating a session.
+     *
+     * Validation happens before the shared folder import so the stored identity is always the
+     * canonical root of one working tree. A linked worktree is its own valid top-level folder; a
+     * managed workspace Rig already knows still resolves to its owning project.
+     */
+    async registerProject(request: RegisterProjectRequest): Promise<Project> {
+        if (!isAbsolute(request.path)) {
+            throw new ProjectRegistrationError(
+                "invalid_request",
+                "The project path must be absolute.",
+            );
+        }
+        if (request.projectId !== undefined) {
+            try {
+                clientChosenId(request.projectId, "project");
+            } catch {
+                throw new ProjectRegistrationError(
+                    "invalid_request",
+                    "The project ID must be a cuid2 identity.",
+                );
+            }
+        }
+        const path = await this.#validateRegistrationPath(request.path);
+        return this.#resolvePath(path, undefined, request.projectId).project;
+    }
+
+    #resolvePath(
+        path: string,
+        assertedWorkspaceId?: string,
+        requestedProjectId?: string,
+    ): ResolvedProjectOwnership {
         const workspace = queryWorkspaceByPath(this.#database, path);
         if (workspace !== undefined) {
             if (workspace.status !== "ready") {
@@ -271,6 +329,76 @@ export class ProjectRepository {
         });
         if (kind === "regular") this.scheduleInitialization(id);
         return { project };
+    }
+
+    async #validateRegistrationPath(requestedPath: string): Promise<string> {
+        let details;
+        try {
+            details = await stat(requestedPath);
+        } catch (error) {
+            if (isMissingPathError(error)) {
+                throw new ProjectRegistrationError(
+                    "path_missing",
+                    "The project folder does not exist.",
+                );
+            }
+            throw new ProjectRegistrationError(
+                "path_inaccessible",
+                "The project folder is not accessible.",
+            );
+        }
+        if (!details.isDirectory()) {
+            throw new ProjectRegistrationError(
+                "not_directory",
+                "The project path is not a folder.",
+            );
+        }
+        try {
+            await access(requestedPath, constants.R_OK | constants.X_OK);
+        } catch {
+            throw new ProjectRegistrationError(
+                "path_inaccessible",
+                "The project folder is not accessible.",
+            );
+        }
+
+        const path = normalizeProjectCwd(requestedPath);
+        try {
+            const gitMetadata = await stat(join(path, ".git"));
+            await access(
+                join(path, ".git"),
+                gitMetadata.isDirectory() ? constants.R_OK | constants.X_OK : constants.R_OK,
+            );
+        } catch (error) {
+            if (!isMissingPathError(error)) {
+                throw new ProjectRegistrationError(
+                    "path_inaccessible",
+                    "The Git repository is not accessible.",
+                );
+            }
+        }
+        let topLevel: string;
+        try {
+            topLevel = await readGitTopLevel(this.#git, path);
+        } catch (error) {
+            if (isInaccessiblePathError(error)) {
+                throw new ProjectRegistrationError(
+                    "path_inaccessible",
+                    "The Git repository is not accessible.",
+                );
+            }
+            throw new ProjectRegistrationError(
+                "not_git_repository",
+                "The project folder is not a Git repository.",
+            );
+        }
+        if (topLevel !== path) {
+            throw new ProjectRegistrationError(
+                "not_git_top_level",
+                "Choose the Git repository's top-level folder.",
+            );
+        }
+        return path;
     }
 
     close(): void {
@@ -1757,4 +1885,18 @@ function normalizeFuturePath(path: string): string {
         existingAncestor = parent;
     }
     return resolve(normalizeProjectCwd(existingAncestor), ...missingSegments);
+}
+
+function isMissingPathError(error: unknown): boolean {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function isInaccessiblePathError(error: unknown): boolean {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === "EACCES" || code === "EPERM") return true;
+    const message = errorToMessage(error);
+    return /(?:permission denied|operation not permitted|could not open|unable to access|unsafe repository|dubious ownership)/iu.test(
+        message,
+    );
 }

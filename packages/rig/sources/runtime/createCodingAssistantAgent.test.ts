@@ -67,6 +67,9 @@ describe("createCodingAssistantAgent", () => {
             cwd: "/tmp/rig-app-test",
             env: {},
             workspaces: {
+                addProject: async () => {
+                    throw new Error("unused");
+                },
                 archive: async () => {
                     throw new Error("unused");
                 },
@@ -218,6 +221,9 @@ describe("createCodingAssistantAgent", () => {
                 wait: async () => undefined,
             },
             workspaces: {
+                addProject: async () => {
+                    throw new Error("unused");
+                },
                 archive: async () => {
                     throw new Error("unused");
                 },
@@ -773,6 +779,9 @@ describe("createCodingAssistantAgent", () => {
 
     it("explains workspace isolation only when workspace tools are present", async () => {
         const workspaces = {
+            addProject: async () => {
+                throw new Error("unused");
+            },
             archive: async () => {
                 throw new Error("unused");
             },

@@ -57,6 +57,8 @@ export type {
     ProjectKind,
     ProjectNameSource,
     ProjectPresence,
+    ProjectRegistrationErrorCode,
+    ProjectRegistrationErrorResponse,
     ProjectResponse,
     ProjectSettings,
     ProjectSettingsUpdate,
@@ -72,6 +74,7 @@ export type {
     ProjectWorkspaceComputeInput,
     RemoteTerminalGroupState,
     RemoteTerminalsChangedEvent,
+    RegisterProjectRequest,
     RenameProjectRequest,
     RenameProjectWorkspaceRequest,
     ReorderRequest,
@@ -123,8 +126,11 @@ export {
     pluginInstallClassificationSchema,
     projectSettingsSchema,
     projectSettingsUpdateSchema,
+    projectRegistrationErrorCodeSchema,
+    projectRegistrationErrorResponseSchema,
     projectWorkspaceComputeSchema,
     projectWorkspaceComputeInputSchema,
+    registerProjectRequestSchema,
     updateProjectSettingsRequestSchema,
 } from "./ProjectProtocol.js";
 export type {

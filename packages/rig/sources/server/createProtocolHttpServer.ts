@@ -58,6 +58,7 @@ import type {
     ListSubagentsResponse,
     ModelCatalog,
     ProjectResponse,
+    ProjectRegistrationErrorResponse,
     ProjectScope,
     ProjectWorkspaceResponse,
     ReorderRequest,
@@ -122,6 +123,7 @@ import {
     globalSecurityPolicySchema,
     listFileTreeRequestSchema,
     RIG_PROTOCOL_VERSION,
+    registerProjectRequestSchema,
     sendMurmurFriendRequestRequestSchema,
     SESSION_DRAFT_MAX_LENGTH,
     signupMurmurAccountRequestSchema,
@@ -134,6 +136,7 @@ import {
 import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
+import { ProjectRegistrationError } from "../project/ProjectRepository.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { isOpenQuestion } from "../user-input/index.js";
 import type {
@@ -1171,8 +1174,37 @@ async function handleRequest(
         return;
     }
 
-    if (request.method === "GET" && route.name === "projects") {
-        sendJson<ListProjectsResponse>(response, 200, { projects: store.listProjects() });
+    if (route.name === "projects") {
+        if (request.method === "GET") {
+            sendJson<ListProjectsResponse>(response, 200, { projects: store.listProjects() });
+            return;
+        }
+        if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const body = await readJson<unknown>(request, 20 * 1024);
+        if (!Value.Check(registerProjectRequestSchema, body)) {
+            sendProjectRegistrationError(
+                response,
+                400,
+                "invalid_request",
+                "A project path and optional project ID are required.",
+            );
+            return;
+        }
+        try {
+            const project = await store.registerProject(body);
+            sendJson<ProjectResponse>(response, 200, { project });
+        } catch (error) {
+            if (!(error instanceof ProjectRegistrationError)) throw error;
+            sendProjectRegistrationError(
+                response,
+                projectRegistrationStatus(error),
+                error.code,
+                error.message,
+            );
+        }
         return;
     }
 
@@ -4120,6 +4152,24 @@ function isPathInsideDirectory(directory: string, path: string): boolean {
 function attachmentContentDisposition(name: string): string {
     const safeName = basename(name).replaceAll("\\", "_").replaceAll('"', "_");
     return `attachment; filename="${safeName || "attachment"}"`;
+}
+
+function sendProjectRegistrationError(
+    response: ServerResponse,
+    status: number,
+    code: ProjectRegistrationError["code"],
+    message: string,
+): void {
+    sendJson<ProjectRegistrationErrorResponse>(response, status, {
+        error: { code, message },
+    });
+}
+
+function projectRegistrationStatus(error: ProjectRegistrationError): number {
+    if (error.code === "path_missing") return 404;
+    if (error.code === "path_inaccessible") return 403;
+    if (error.code === "invalid_request") return 400;
+    return 422;
 }
 
 function sendPluginAppError(response: ServerResponse, error: unknown): void {

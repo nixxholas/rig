@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceContext } from "../../agent/context/WorkspaceContext.js";
 import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
 import {
+    addProjectTool,
     archiveWorkspaceTool,
     createWorkspaceTool,
     delegateToWorkspaceTool,
@@ -185,6 +186,32 @@ describe("workspace tools", () => {
         );
     });
 
+    it("adds projects through the reviewed cross-workspace action", async () => {
+        const harness = createJustBashToolHarness();
+        const addProject = vi.fn(async () => ({
+            current: false,
+            id: "project-2",
+            name: "Another project",
+            path: "/projects/another",
+        }));
+        harness.context.workspaces = workspaceContext({ addProject, crossWorkspace: true });
+
+        await expect(
+            addProjectTool.execute({ path: "/projects/another" }, harness.context, {}),
+        ).resolves.toMatchObject({ id: "project-2", path: "/projects/another" });
+        expect(addProject).toHaveBeenCalledWith("/projects/another");
+        expect(addProjectTool.requiresAutoOrFullAccess).toBe(true);
+        expect(
+            addProjectTool.shouldReviewInAutoMode({ path: "/projects/another" }, harness.context),
+        ).toBe(true);
+        expect(
+            addProjectTool.shouldRunInFullAccessInAutoMode(
+                { path: "/projects/another" },
+                harness.context,
+            ),
+        ).toBe(true);
+    });
+
     it("delegates within the current project without cross-workspace access", async () => {
         const harness = createJustBashToolHarness();
         const delegate = vi.fn(async () => ({
@@ -312,6 +339,7 @@ describe("workspace tools", () => {
 
 function workspaceContext(overrides: Partial<WorkspaceContext>): WorkspaceContext {
     return {
+        addProject: vi.fn(),
         archive: vi.fn(),
         create: vi.fn(),
         crossWorkspace: false,

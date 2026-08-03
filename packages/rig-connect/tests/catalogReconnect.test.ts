@@ -92,6 +92,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
             {
                 createdAt: 1,
                 id: "project-1",
+                initializationAttempt: 1,
                 initializationStatus: "ready",
                 kind: "regular",
                 name: "Project",
@@ -100,6 +101,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
                 path: "/work",
                 presence: "present",
                 settings: {},
+                storageKey: "project-1",
                 updatedAt: 1,
                 version: 3,
                 worktreeSupport: "supported",

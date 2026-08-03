@@ -71,6 +71,7 @@ export interface AgentSessionRepository {
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
     listProjects?(): readonly Project[];
+    registerProject?(path: string): Promise<Project>;
     listProjectWorkspaces?(projectId: string): readonly ProjectWorkspace[];
     listProjectSessions?(target: {
         projectId: string;
@@ -217,6 +218,18 @@ export class AgentSessionManager {
             name: project.name,
             path: project.path,
         }));
+    }
+
+    async registerProject(sessionId: string, path: string): Promise<AgentProject> {
+        const register = this.#repository.registerProject;
+        if (register === undefined) throw new Error("This session cannot add projects.");
+        const project = await register(path);
+        return {
+            current: project.id === this.#current(sessionId).snapshot().projectId,
+            id: project.id,
+            name: project.name,
+            path: project.path,
+        };
     }
 
     listWorkspaces(

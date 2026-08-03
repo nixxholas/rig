@@ -271,6 +271,19 @@ also maintain focus/presence through the shared transport. `onMutationRejected` 
 even when no view is currently subscribed to the affected entity. Loading earlier transcript turns
 and process output remain the only operations with a loading state.
 
+Project registration is entity-first because the daemon must validate the host folder before there
+is anything safe to predict:
+
+```ts
+const project = await rig.projects.add("/Users/steve/Developer/my-project");
+```
+
+Rig Connect assigns one project ID and reuses it across transport retries, so a response lost after
+the daemon commits converges on the same entity. The returned value is the authoritative `Project`
+shape used by the catalog. Invalid folders reject with `ProjectRegistrationError`; its `code`,
+`status`, and human-readable message are safe to display. An optional `{ projectId, signal }`
+controls identity and cancellation.
+
 ## The groups
 
 A session does not live alone. Above it is a project, and inside a project are worktrees; both hold

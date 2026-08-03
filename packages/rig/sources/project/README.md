@@ -23,6 +23,13 @@ project and workspace events
 database access and receive `TX`; the repository owns lifecycle work around
 those operations, including filesystem cleanup and Git orchestration.
 
+Explicit registration validates an absolute folder as a readable canonical Git
+top-level before entering the same path import used by session resolution.
+Registration accepts both a repository's primary checkout and linked worktree
+roots, is idempotent by canonical path, and restores an archived project instead
+of creating another entity. The import and its durable event commit in one
+transaction.
+
 `getManagedWorkspacesDirectory.ts` selects the user-facing root for new
 workspaces: `~/Happy/Workspaces` on macOS, `~/happy/workspaces` on Linux, or
 the absolute `RIG_WORKSPACES_DIRECTORY` override. A workspace's absolute path

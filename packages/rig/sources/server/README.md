@@ -34,6 +34,11 @@ The production files at this level are the server's public and operational
 shape. HTTP-only helpers stay here with the route code. Tests live in
 `tests/`.
 
+`POST /projects` is the project-registration boundary. Its strict body is
+`{ path, projectId? }`; it returns the same authoritative `Project` entity as
+the catalog and maps project-domain path failures to stable, displayable codes.
+It never creates a session or workspace.
+
 Fatal daemon failures are observed before the CLI exit handler runs. The daemon
 writes the original stack to its structured log and synchronously creates a
 compact Node diagnostic report with JavaScript and native stacks. Reports are

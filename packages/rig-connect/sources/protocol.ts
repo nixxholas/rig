@@ -1187,14 +1187,16 @@ export interface Project {
         hash: string;
         height: number;
         mediaType: "image/webp";
-        source: string;
+        source: "repository" | "hosting" | "user";
         url: string;
         width: number;
     };
     avatarBuiltin?: "home";
     createdAt: number;
+    defaultBranch?: string;
     git?: GitRepositoryFacts;
     id: string;
+    initializationAttempt: number;
     initializationError?: string;
     initializationStatus: "initializing" | "ready" | "failed";
     kind: "regular" | "home";
@@ -1208,6 +1210,7 @@ export interface Project {
             | { generation: number; type: "local" }
             | { generation: number; image: string; type: "docker" };
     };
+    storageKey: string;
     updatedAt: number;
     version: number;
     worktreeSupport: "supported" | "unsupported" | "unknown";
@@ -1342,6 +1345,122 @@ export interface PluginAppContribution {
 }
 
 const exact = { additionalProperties: false } as const;
+
+const projectGitFactsSchema = Type.Object(
+    {
+        ahead: Type.Number(),
+        behind: Type.Number(),
+        branch: Type.Optional(Type.String()),
+        detached: Type.Boolean(),
+        head: Type.Optional(Type.String()),
+        upstream: Type.Optional(Type.String()),
+    },
+    exact,
+);
+
+const projectWorkspaceComputeSchema = Type.Union([
+    Type.Object(
+        {
+            generation: Type.Integer({ minimum: 1 }),
+            type: Type.Literal("local"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            generation: Type.Integer({ minimum: 1 }),
+            image: Type.String({ minLength: 1 }),
+            type: Type.Literal("docker"),
+        },
+        exact,
+    ),
+]);
+
+export const projectSchema = Type.Object(
+    {
+        archivedAt: Type.Optional(Type.Number()),
+        avatar: Type.Optional(
+            Type.Object(
+                {
+                    hash: Type.String(),
+                    height: Type.Number(),
+                    mediaType: Type.Literal("image/webp"),
+                    source: Type.Union([
+                        Type.Literal("repository"),
+                        Type.Literal("hosting"),
+                        Type.Literal("user"),
+                    ]),
+                    url: Type.String(),
+                    width: Type.Number(),
+                },
+                exact,
+            ),
+        ),
+        avatarBuiltin: Type.Optional(Type.Literal("home")),
+        createdAt: Type.Number(),
+        defaultBranch: Type.Optional(Type.String()),
+        git: Type.Optional(projectGitFactsSchema),
+        id: Type.String({ minLength: 1 }),
+        initializationAttempt: Type.Integer({ minimum: 0 }),
+        initializationError: Type.Optional(Type.String()),
+        initializationStatus: Type.Union([
+            Type.Literal("initializing"),
+            Type.Literal("ready"),
+            Type.Literal("failed"),
+        ]),
+        kind: Type.Union([Type.Literal("regular"), Type.Literal("home")]),
+        name: Type.String(),
+        nameSource: Type.Union([
+            Type.Literal("folder"),
+            Type.Literal("git_remote"),
+            Type.Literal("user"),
+        ]),
+        orderKey: Type.String(),
+        path: Type.String(),
+        presence: Type.Union([Type.Literal("present"), Type.Literal("missing")]),
+        settings: Type.Object(
+            {
+                defaultWorkspaceCompute: Type.Optional(projectWorkspaceComputeSchema),
+            },
+            exact,
+        ),
+        storageKey: Type.String(),
+        updatedAt: Type.Number(),
+        version: Type.Number(),
+        worktreeSupport: Type.Union([
+            Type.Literal("supported"),
+            Type.Literal("unsupported"),
+            Type.Literal("unknown"),
+        ]),
+        worktreeSupportReason: Type.Optional(Type.String()),
+    },
+    exact,
+);
+
+export const projectResponseSchema = Type.Object({ project: projectSchema }, exact);
+
+export const projectRegistrationErrorCodeSchema = Type.Union([
+    Type.Literal("invalid_request"),
+    Type.Literal("path_missing"),
+    Type.Literal("not_directory"),
+    Type.Literal("path_inaccessible"),
+    Type.Literal("not_git_repository"),
+    Type.Literal("not_git_top_level"),
+]);
+export type ProjectRegistrationErrorCode = Static<typeof projectRegistrationErrorCodeSchema>;
+
+export const projectRegistrationErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            {
+                code: projectRegistrationErrorCodeSchema,
+                message: Type.String({ minLength: 1 }),
+            },
+            exact,
+        ),
+    },
+    exact,
+);
 const pluginResourcePathSchema = Type.String({
     maxLength: 160,
     minLength: 1,

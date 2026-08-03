@@ -10,6 +10,7 @@ import type {
     Project,
     ProjectSettingsUpdate,
     ProjectWorkspace,
+    RegisterProjectRequest,
     ReorderRequest,
     RegisterSecretRequest,
     SecretSummary,
@@ -93,6 +94,7 @@ export interface SessionStore {
     ): void;
     listProjects(): readonly Project[];
     listWorkspaces(projectId?: string): readonly ProjectWorkspace[];
+    registerProject(request: RegisterProjectRequest): Promise<Project>;
     renameProject(
         projectId: string,
         name: string,

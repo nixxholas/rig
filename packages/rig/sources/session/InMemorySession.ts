@@ -6463,6 +6463,7 @@ export class InMemorySession {
                     owned: true,
                 });
                 options.workspaces = {
+                    addProject: (path) => agentManager.registerProject(this.id, path),
                     archive: async (workspaceId) =>
                         workspaceResult(await agentManager.archiveWorkspace(this.id, workspaceId)),
                     create: async (input) =>

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -675,6 +675,64 @@ describe("createProtocolHttpServer", () => {
             expect((await client.getProject(project.id)).project.archivedAt).toBeUndefined();
         } finally {
             await close();
+        }
+    });
+
+    it("registers projects without sessions and returns strict typed path failures", async () => {
+        const repository = await mkdtemp(join(tmpdir(), "rig-project-registration-http-"));
+        await execFile("git", ["init", "--quiet", "--initial-branch=main"], { cwd: repository });
+        const store = new InMemorySessionStore();
+        const { client, close, socketPath } = await startServer({ store });
+        try {
+            const projectId = createId();
+            const first = await client.registerProject({ path: repository, projectId });
+            const repeated = await client.registerProject({ path: repository, projectId });
+
+            expect(repeated).toEqual(first);
+            expect(first.project).toMatchObject({ id: projectId });
+            expect(first.project.path).toBe(await realpath(repository));
+            expect(store.list()).toEqual([]);
+            expect(store.listWorkspaces()).toEqual([]);
+
+            const invalid = await requestRawJson(socketPath, "/projects", {
+                body: JSON.stringify({ extra: true, path: repository }),
+                method: "POST",
+            });
+            expect(invalid.statusCode).toBe(400);
+            expect(JSON.parse(invalid.body)).toEqual({
+                error: {
+                    code: "invalid_request",
+                    message: "A project path and optional project ID are required.",
+                },
+            });
+
+            const invalidProjectId = await requestRawJson(socketPath, "/projects", {
+                body: JSON.stringify({ path: repository, projectId: "not-a-cuid2" }),
+                method: "POST",
+            });
+            expect(invalidProjectId.statusCode).toBe(400);
+            expect(JSON.parse(invalidProjectId.body)).toEqual({
+                error: {
+                    code: "invalid_request",
+                    message: "The project ID must be a cuid2 identity.",
+                },
+            });
+
+            const missing = await requestRawJson(socketPath, "/projects", {
+                body: JSON.stringify({ path: join(repository, "missing") }),
+                method: "POST",
+            });
+            expect(missing.statusCode).toBe(404);
+            expect(JSON.parse(missing.body)).toEqual({
+                error: {
+                    code: "path_missing",
+                    message: "The project folder does not exist.",
+                },
+            });
+        } finally {
+            await close();
+            store.close();
+            await rm(repository, removeFixtureOptions);
         }
     });
 

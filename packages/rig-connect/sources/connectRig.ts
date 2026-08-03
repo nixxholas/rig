@@ -52,6 +52,7 @@ import type {
     GlobalEvent,
     MutationId,
     Project,
+    ProjectRegistrationErrorCode,
     ProjectWorkspace,
     ProtocolSession,
     RemoteTerminalGroupState,
@@ -91,6 +92,8 @@ import {
     listMurmurContactsResponseSchema,
     listMurmurFriendRequestsResponseSchema,
     pluginInstallClassificationSchema,
+    projectRegistrationErrorResponseSchema,
+    projectResponseSchema,
     sendMurmurFriendRequestResponseSchema,
     signupMurmurAccountResponseSchema,
     startMurmurServiceResponseSchema,
@@ -424,6 +427,33 @@ export interface TerminalPresence {
     setFocused: (focused: boolean) => Promise<void>;
 }
 
+export interface ProjectAddOptions {
+    /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
+    projectId?: string;
+    signal?: AbortSignal;
+}
+
+export interface RigProjects {
+    /**
+     * Registers a Git top-level folder and returns Rig's authoritative project entity.
+     *
+     * Ambiguous transport failures retry with one project identity, so a response lost after the
+     * daemon commits still converges on the entity that was already created.
+     */
+    add(path: string, options?: ProjectAddOptions): Promise<Project>;
+}
+
+export class ProjectRegistrationError extends Error {
+    constructor(
+        readonly code: ProjectRegistrationErrorCode,
+        readonly status: number,
+        message: string,
+    ) {
+        super(message);
+        this.name = "ProjectRegistrationError";
+    }
+}
+
 export type GroupTarget =
     | { kind: "project"; projectId: string }
     | { kind: "workspace"; projectId: string; workspaceId: string };
@@ -505,6 +535,8 @@ export interface RigConnection {
     listMurmurContacts: (options?: MurmurOperationOptions) => Promise<ListMurmurContactsResponse>;
     /** Reads the complete current friendship graph once. */
     listMurmurFriends: (options?: MurmurOperationOptions) => Promise<GetMurmurFriendsResponse>;
+    /** Entity-first project catalog actions. */
+    projects: RigProjects;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -2659,6 +2691,63 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return { data, status: response.status };
     };
 
+    const projects: RigProjects = {
+        add: async (path, addOptions = {}) => {
+            const projectId = addOptions.projectId ?? nextEntityId();
+            const operation = combinedSignal(rootController.signal, addOptions.signal);
+            let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+            try {
+                for (;;) {
+                    operation.signal.throwIfAborted();
+                    try {
+                        const response = await requestJson("projects", {
+                            body: JSON.stringify({ path, projectId }),
+                            headers: { "content-type": "application/json" },
+                            method: "POST",
+                            signal: operation.signal,
+                        });
+                        if (response.status >= 400) {
+                            throw (
+                                projectRegistrationResponseError(response.status, response.data) ??
+                                new MutationHttpError(
+                                    response.status,
+                                    `Rig rejected project registration with status ${String(response.status)}.`,
+                                    undefined,
+                                    response.data,
+                                )
+                            );
+                        }
+                        try {
+                            return Value.Decode(projectResponseSchema, response.data).project;
+                        } catch {
+                            throw new ProjectRegistrationProtocolError();
+                        }
+                    } catch (error) {
+                        if (
+                            error instanceof ProjectRegistrationError ||
+                            error instanceof ProjectRegistrationProtocolError
+                        ) {
+                            throw error;
+                        }
+                        if (error instanceof MutationHttpError) {
+                            const registrationError = projectRegistrationResponseError(
+                                error.status,
+                                error.data,
+                            );
+                            if (registrationError !== undefined) throw registrationError;
+                        }
+                        if (!isRetryableMutationError(error)) throw error;
+                        await wait(retryDelay, operation.signal);
+                        operation.signal.throwIfAborted();
+                        retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
+                    }
+                }
+            } finally {
+                operation.detach();
+            }
+        },
+    };
+
     const requestMurmur = async <Schema extends TSchema>(
         path: string,
         schema: Schema,
@@ -3896,6 +3985,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         listMurmurContacts,
         listMurmurFriends,
         listMurmurFriendRequests,
+        projects,
         readBackgroundProcess,
         readPluginLog,
         recordActivity,
@@ -4127,6 +4217,25 @@ class MutationHttpError extends Error {
         this.status = status;
         this.retryAfterMs = retryAfterMs;
         this.data = data;
+    }
+}
+
+class ProjectRegistrationProtocolError extends Error {
+    constructor() {
+        super("Rig returned an invalid project registration response.");
+        this.name = "ProjectRegistrationProtocolError";
+    }
+}
+
+function projectRegistrationResponseError(
+    status: number,
+    data: unknown,
+): ProjectRegistrationError | undefined {
+    try {
+        const response = Value.Decode(projectRegistrationErrorResponseSchema, data);
+        return new ProjectRegistrationError(response.error.code, status, response.error.message);
+    } catch {
+        return undefined;
     }
 }
 

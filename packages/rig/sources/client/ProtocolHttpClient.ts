@@ -64,6 +64,7 @@ import type {
     ReadBackgroundProcessResponse,
     ReadProjectFileResponse,
     ReadProjectFileRevisionResponse,
+    RegisterProjectRequest,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
     RewindSessionResponse,
@@ -610,6 +611,10 @@ export class ProtocolHttpClient {
 
     listProjects(): Promise<ListProjectsResponse> {
         return this.#requestJson("GET", "/projects");
+    }
+
+    registerProject(request: RegisterProjectRequest): Promise<ProjectResponse> {
+        return this.#requestJson("POST", "/projects", request);
     }
 
     getProject(projectId: string): Promise<ProjectResponse> {

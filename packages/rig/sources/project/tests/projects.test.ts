@@ -1,5 +1,14 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+    access,
+    mkdir,
+    mkdtemp,
+    readFile,
+    realpath,
+    rm,
+    symlink,
+    writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -27,7 +36,7 @@ import type { InMemorySession, InMemorySessionOptions } from "../../session/InMe
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { NativeProcessManager } from "../../processes/index.js";
 import type { GitCommandRunner } from "../../git/types.js";
-import { ProjectRepository } from "../ProjectRepository.js";
+import { ProjectRegistrationError, ProjectRepository } from "../ProjectRepository.js";
 
 const execFile = promisify(execFileCallback);
 const cleanups: (() => Promise<void>)[] = [];
@@ -37,6 +46,113 @@ afterEach(async () => {
 });
 
 describe("projects", () => {
+    it("validates every project registration path failure before importing it", async () => {
+        const fixture = await createFixture({
+            projectGit: async (cwd, args) => {
+                if (args[0] !== "rev-parse" || args[1] !== "--show-toplevel") {
+                    throw new Error("Unexpected Git command.");
+                }
+                if (cwd.endsWith("inaccessible")) {
+                    const error = new Error("fatal: Permission denied") as NodeJS.ErrnoException;
+                    error.code = "EACCES";
+                    throw error;
+                }
+                if (cwd.endsWith("not-git")) throw new Error("fatal: not a git repository");
+                if (cwd.endsWith("nested")) return join(cwd, "..");
+                return cwd;
+            },
+        });
+        const file = join(fixture.root, "file");
+        const inaccessible = join(fixture.root, "inaccessible");
+        const notGit = join(fixture.root, "not-git");
+        const nested = join(fixture.root, "repository", "nested");
+        await Promise.all([
+            writeFile(file, "not a directory"),
+            mkdir(inaccessible),
+            mkdir(notGit),
+            mkdir(nested, { recursive: true }),
+        ]);
+
+        const expected = [
+            [join(fixture.root, "missing"), "path_missing"],
+            [file, "not_directory"],
+            [inaccessible, "path_inaccessible"],
+            [notGit, "not_git_repository"],
+            [nested, "not_git_top_level"],
+        ] as const;
+        for (const [path, code] of expected) {
+            await expect(fixture.store.registerProject({ path })).rejects.toMatchObject({
+                code,
+                name: "ProjectRegistrationError",
+            } satisfies Partial<ProjectRegistrationError>);
+        }
+        expect(fixture.store.listProjects()).toEqual([]);
+    });
+
+    it("registers Git roots and linked worktree roots without creating chats or workspaces", async () => {
+        const fixture = await createFixture({ durableGlobalEventQueue: true });
+        const repository = await createRepository(fixture.root, "registered-project");
+        const linkedWorktree = join(fixture.root, "linked-worktree");
+        await git(repository, ["worktree", "add", "-q", "-b", "linked-worktree", linkedWorktree]);
+        const projectId = createId();
+
+        const [first, repeated] = await Promise.all([
+            fixture.store.registerProject({ path: repository, projectId }),
+            fixture.store.registerProject({ path: repository, projectId }),
+        ]);
+        const worktree = await fixture.store.registerProject({ path: linkedWorktree });
+
+        expect(first).toEqual(repeated);
+        expect(first).toMatchObject({ id: projectId });
+        expect(first.path).toBe(await realpath(repository));
+        expect(worktree.path).toBe(await realpath(linkedWorktree));
+        expect(worktree.id).not.toBe(first.id);
+        expect(fixture.store.listProjects()).toHaveLength(2);
+        expect(fixture.store.listWorkspaces()).toEqual([]);
+        expect(fixture.store.list()).toEqual([]);
+        expect(
+            fixture.store.globalEventQueue
+                .list()
+                ?.filter((entry) => entry.event.type === "project_created"),
+        ).toHaveLength(2);
+    });
+
+    it("answers an ambiguous registration retry with the existing project and restores it once", async () => {
+        const fixture = await createFixture({ durableGlobalEventQueue: true });
+        const repository = await createRepository(fixture.root, "registered-retry");
+        const projectId = createId();
+        const created = await fixture.store.registerProject({ path: repository, projectId });
+        const archived = await fixture.store.archiveProject(created.id, created.version);
+        if (archived === undefined) throw new Error("Expected the project to be archived.");
+
+        const restored = await fixture.store.registerProject({ path: repository, projectId });
+        const repeated = await fixture.store.registerProject({
+            path: repository,
+            projectId: createId(),
+        });
+
+        expect(restored.archivedAt).toBeUndefined();
+        expect(repeated.id).toBe(restored.id);
+        expect(repeated.path).toBe(restored.path);
+        expect(fixture.store.listProjects()).toHaveLength(1);
+        const events = fixture.store.globalEventQueue.list()?.map((entry) => entry.event) ?? [];
+        expect(events.filter((event) => event.type === "project_created")).toHaveLength(1);
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    data: { project: expect.objectContaining({ archivedAt: expect.any(Number) }) },
+                    type: "project_updated",
+                }),
+                expect.objectContaining({
+                    data: {
+                        project: expect.not.objectContaining({ archivedAt: expect.anything() }),
+                    },
+                    type: "project_updated",
+                }),
+            ]),
+        );
+    });
+
     it("rolls back a project mutation when its durable event cannot be stored", () => {
         const opened = openSessionDatabase(":memory:");
         migrateSessionDatabase(opened.database);

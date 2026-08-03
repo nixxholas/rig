@@ -241,6 +241,41 @@ export interface CreateProjectWorkspaceRequest {
     name: string;
 }
 
+export const registerProjectRequestSchema = Type.Object(
+    {
+        path: Type.String({ maxLength: 16_384, minLength: 1 }),
+        projectId: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+    },
+    { additionalProperties: false },
+);
+export type RegisterProjectRequest = Static<typeof registerProjectRequestSchema>;
+
+export const projectRegistrationErrorCodeSchema = Type.Union([
+    Type.Literal("invalid_request"),
+    Type.Literal("path_missing"),
+    Type.Literal("not_directory"),
+    Type.Literal("path_inaccessible"),
+    Type.Literal("not_git_repository"),
+    Type.Literal("not_git_top_level"),
+]);
+export type ProjectRegistrationErrorCode = Static<typeof projectRegistrationErrorCodeSchema>;
+
+export const projectRegistrationErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            {
+                code: projectRegistrationErrorCodeSchema,
+                message: Type.String({ minLength: 1 }),
+            },
+            { additionalProperties: false },
+        ),
+    },
+    { additionalProperties: false },
+);
+export type ProjectRegistrationErrorResponse = Static<
+    typeof projectRegistrationErrorResponseSchema
+>;
+
 export interface RenameProjectRequest {
     mutationId?: string;
     name: string;
