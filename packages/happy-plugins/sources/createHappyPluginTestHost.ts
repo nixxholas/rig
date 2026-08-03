@@ -11,11 +11,15 @@ import { createHappyPluginClient } from "./createHappyPluginClient.js";
 import { happyComputeErrorStatus, normalizeHappyComputeError } from "./computeErrorSemantics.js";
 import {
     HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+    HAPPY_COMPUTE_DEFAULT_PROVISIONING_TIMEOUT_MS,
+    HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+    HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS,
     createHappyComputeBodySchema,
     execHappyComputeBodySchema,
     happyComputeCallCompletionSchema,
     happyComputeProvisioningProgressSchema,
     readHappyComputeBodySchema,
+    registerHappyComputeProviderInputSchema,
     writeHappyComputeBodySchema,
     type HappyComputeCallCompletion,
     type HappyComputeError,
@@ -82,7 +86,6 @@ import {
 import { writePluginWorkspaceFile } from "./writePluginWorkspaceFile.js";
 
 const CALL_TIMEOUT_MS = 10_000;
-const PROVISION_TIMEOUT_MS = 5 * 60_000;
 const MAXIMUM_COMPUTE_COMPLETION_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_BODY_BYTES = 1024 * 1024;
 
@@ -186,10 +189,16 @@ interface TestNetworkRegistration {
 
 interface TestComputeRegistration {
     id: string;
+    provisioningTimeoutMs: number;
     response?: ServerResponse;
 }
 
 interface TestComputeCall extends TestCall<HappyComputeCallCompletion> {
+    acknowledgment:
+        | { status: "acknowledged" }
+        | { status: "awaiting_acknowledgment" }
+        | { status: "not_required" };
+    acknowledge(): void;
     operation: Extract<HappyComputeEvent, { type: "call" }>["operation"];
     progress?: (progress: HappyComputeProvisioningProgress) => void;
 }
@@ -204,9 +213,13 @@ type TestComputeInstanceBase = {
 type TestComputeInstance =
     | (TestComputeInstanceBase & { reason?: string; state: "unprovisioned" })
     | (TestComputeInstanceBase & {
-          phase: "checking_out_code" | "copying_files_to_compute" | "preparing_compute";
+          lastProgressAt: number;
+          message: string;
+          percent?: number;
+          phase: HappyComputePreparationPhase;
           providerInstanceId?: string;
           registrationId?: string;
+          startedAt: number;
           state: "provisioning";
       })
     | (TestComputeInstanceBase & {
@@ -280,6 +293,14 @@ export async function createHappyPluginTestHost(
     ): void => {
         const event: HappyComputePreparationEvent = {
             createdAt: Date.now(),
+            ...(instance.state === "provisioning"
+                ? {
+                      elapsedMs: Math.max(0, Date.now() - instance.startedAt),
+                      lastProgressAt: instance.lastProgressAt,
+                      ...(instance.percent === undefined ? {} : { percent: instance.percent }),
+                      startedAt: instance.startedAt,
+                  }
+                : {}),
             ...(error === undefined ? {} : { error }),
             instanceId: instance.id,
             message,
@@ -309,7 +330,7 @@ export async function createHappyPluginTestHost(
                 workspaceSource: instance.workspaceSource,
             };
             computeInstances.set(instance.id, failed);
-            publishComputeEvent(failed, "failed", failed.reason!, "unprovisioned", {
+            publishComputeEvent(instance, "failed", failed.reason!, "unprovisioned", {
                 code: "preparing_compute",
                 message: failed.reason!,
                 retryable: true,
@@ -319,7 +340,7 @@ export async function createHappyPluginTestHost(
         }
         instance = { ...instance, registrationId: registration.id };
         computeInstances.set(instance.id, instance);
-        const deadlineAt = Date.now() + PROVISION_TIMEOUT_MS;
+        const deadlineAt = Date.now() + registration.provisioningTimeoutMs;
         try {
             const completion = await invokeTestCompute(
                 registration,
@@ -333,22 +354,18 @@ export async function createHappyPluginTestHost(
                 (progress) => {
                     const current = computeInstances.get(instanceId);
                     if (current?.state !== "provisioning") return;
-                    const valid =
-                        (current.phase === "preparing_compute" &&
-                            progress.phase === "checking_out_code") ||
-                        (current.phase === "checking_out_code" &&
-                            progress.phase === "copying_files_to_compute");
-                    if (!valid) {
-                        throw new Error(
-                            `Provisioning progress cannot move from ${current.phase} to ${progress.phase}.`,
-                        );
-                    }
-                    computeInstances.set(current.id, {
-                        ...current,
+                    const { percent: _previousPercent, ...withoutPercent } = current;
+                    const next: TestComputeInstance = {
+                        ...withoutPercent,
+                        lastProgressAt: Date.now(),
+                        message: progress.message,
+                        ...(progress.percent === undefined ? {} : { percent: progress.percent }),
                         phase: progress.phase,
-                    });
-                    publishComputeEvent(current, progress.phase, progress.message, "provisioning");
+                    };
+                    computeInstances.set(current.id, next);
+                    publishComputeEvent(next, progress.phase, progress.message, "provisioning");
                 },
+                HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS,
             );
             if ("error" in completion) throw new Error(completion.error.message);
             if (completion.operation !== "start") {
@@ -356,23 +373,17 @@ export async function createHappyPluginTestHost(
             }
             const current = computeInstances.get(instance.id);
             if (current?.state !== "provisioning") return;
-            if (current.phase !== "copying_files_to_compute") {
-                throw new Error(
-                    "The test compute provider completed provisioning without reporting its checkout and file-copy phases.",
-                );
-            }
+            const verificationMessage = "Verifying that the compute is ready.";
             instance = {
                 ...current,
+                lastProgressAt: Date.now(),
+                message: verificationMessage,
+                phase: "verifying_compute",
                 providerInstanceId: completion.result.instanceId,
                 registrationId: registration.id,
             };
             computeInstances.set(instance.id, instance);
-            publishComputeEvent(
-                instance,
-                "verifying_compute",
-                "Verifying that the compute is ready.",
-                "provisioning",
-            );
+            publishComputeEvent(instance, "verifying_compute", verificationMessage, "provisioning");
             const probe = await invokeTestCompute(
                 registration,
                 computeCalls,
@@ -419,7 +430,7 @@ export async function createHappyPluginTestHost(
                 workspaceSource: current.workspaceSource,
             };
             computeInstances.set(current.id, failed);
-            publishComputeEvent(failed, "failed", failed.reason!, "unprovisioned", {
+            publishComputeEvent(current, "failed", failed.reason!, "unprovisioned", {
                 code: "preparing_compute",
                 message: failed.reason!,
                 retryable: true,
@@ -439,8 +450,8 @@ export async function createHappyPluginTestHost(
                 request.method === "GET" ||
                 request.method === "DELETE" ||
                 (request.method === "POST" &&
-                    (url.pathname === "/compute/providers" ||
-                        url.pathname.endsWith("/stop") ||
+                    (url.pathname.endsWith("/stop") ||
+                        url.pathname.endsWith("/acknowledge") ||
                         url.pathname === "/hooks/system-prompt" ||
                         url.pathname === "/tracing/subscriptions"));
             const body = requestHasNoBody
@@ -541,6 +552,8 @@ export async function createHappyPluginTestHost(
                                       name: declaredCompute.name,
                                       pluginFolder: "test-plugin",
                                       pluginName: "Test Plugin",
+                                      provisioningTimeoutMs:
+                                          computeRegistration.provisioningTimeoutMs,
                                   },
                               ],
                 });
@@ -611,7 +624,19 @@ export async function createHappyPluginTestHost(
                     });
                     return;
                 }
-                computeRegistration = { id: `test-compute-${String(nextId++)}` };
+                const registrationInput = decodeRequest(
+                    registerHappyComputeProviderInputSchema,
+                    body,
+                    "Compute provider registration",
+                );
+                computeRegistration = {
+                    id: `test-compute-${String(nextId++)}`,
+                    provisioningTimeoutMs: Math.min(
+                        registrationInput.provisioningTimeoutMs ??
+                            HAPPY_COMPUTE_DEFAULT_PROVISIONING_TIMEOUT_MS,
+                        HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+                    ),
+                };
                 send(response, 201, { registrationId: computeRegistration.id });
                 return;
             }
@@ -659,6 +684,30 @@ export async function createHappyPluginTestHost(
                 parts[2] === computeRegistration?.id &&
                 parts[3] === "calls" &&
                 parts[4] !== undefined &&
+                parts[5] === "acknowledge"
+            ) {
+                const call = computeCalls.get(parts[4]);
+                if (call?.operation !== "start") {
+                    send(response, 400, {
+                        code: "invalid_request",
+                        message:
+                            "That compute provisioning call is no longer awaiting acknowledgment.",
+                        retryable: false,
+                    });
+                    return;
+                }
+                call.acknowledge();
+                send(response, 200, {});
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length === 6 &&
+                parts[0] === "compute" &&
+                parts[1] === "providers" &&
+                parts[2] === computeRegistration?.id &&
+                parts[3] === "calls" &&
+                parts[4] !== undefined &&
                 parts[5] === "progress"
             ) {
                 const call = computeCalls.get(parts[4]);
@@ -670,6 +719,7 @@ export async function createHappyPluginTestHost(
                     });
                     return;
                 }
+                call.acknowledge();
                 call.progress(
                     decodeRequest(
                         happyComputeProvisioningProgressSchema,
@@ -698,6 +748,7 @@ export async function createHappyPluginTestHost(
                     });
                     return;
                 }
+                call.acknowledge();
                 const completion = decodeRequest(
                     happyComputeCallCompletionSchema,
                     body,
@@ -796,7 +847,7 @@ export async function createHappyPluginTestHost(
                     computeInstances.set(instance.id, stopped);
                     if (instance.state === "unprovisioned" || instance.state === "provisioning") {
                         publishComputeEvent(
-                            stopped,
+                            instance,
                             "stopped",
                             `Compute preparation stopped. ${reason}`,
                             "stopped",
@@ -822,12 +873,16 @@ export async function createHappyPluginTestHost(
                         instance.reason === undefined
                             ? "Preparing compute for its first use."
                             : `Preparing compute again. The previous attempt failed: ${instance.reason}`;
+                    const startedAt = Date.now();
                     const provisioning: TestComputeInstance = {
                         createdAt: instance.createdAt,
                         id: instance.id,
+                        lastProgressAt: startedAt,
+                        message: preparationMessage,
                         phase: "preparing_compute",
                         provider: instance.provider,
                         state: "provisioning",
+                        startedAt,
                         workspaceSource: instance.workspaceSource,
                     };
                     computeInstances.set(instance.id, provisioning);
@@ -842,8 +897,12 @@ export async function createHappyPluginTestHost(
                     });
                     send(response, 409, {
                         code: "preparing_compute",
+                        elapsedMs: 0,
+                        lastProgressAt: provisioning.lastProgressAt,
                         message: preparationMessage,
+                        phase: provisioning.phase,
                         retryable: true,
+                        startedAt: provisioning.startedAt,
                         state: "provisioning",
                     });
                     return;
@@ -851,8 +910,13 @@ export async function createHappyPluginTestHost(
                 if (instance.state === "provisioning") {
                     send(response, 409, {
                         code: "preparing_compute",
-                        message: "Preparing compute.",
+                        elapsedMs: Math.max(0, Date.now() - instance.startedAt),
+                        lastProgressAt: instance.lastProgressAt,
+                        message: instance.message,
+                        ...(instance.percent === undefined ? {} : { percent: instance.percent }),
+                        phase: instance.phase,
                         retryable: true,
+                        startedAt: instance.startedAt,
                         state: "provisioning",
                     });
                     return;
@@ -1792,6 +1856,7 @@ function invokeTestCompute(
     event: TestComputeCallEvent,
     timeoutMs = CALL_TIMEOUT_MS,
     progress?: (progress: HappyComputeProvisioningProgress) => void,
+    acknowledgmentTimeoutMs?: number,
 ): Promise<HappyComputeCallCompletion> {
     if (registration.response === undefined) {
         return Promise.reject(new Error("No compute provider is attached to the fake Happy host."));
@@ -1799,7 +1864,12 @@ function invokeTestCompute(
     const callId = createCallId();
     return new Promise((resolve, reject) => {
         let settled = false;
-        const cleanup = () => clearTimeout(timer);
+        let acknowledgmentTimer: NodeJS.Timeout | undefined;
+        let completionTimer: NodeJS.Timeout | undefined;
+        const cleanup = () => {
+            if (acknowledgmentTimer !== undefined) clearTimeout(acknowledgmentTimer);
+            if (completionTimer !== undefined) clearTimeout(completionTimer);
+        };
         const finishReject = (error: Error) => {
             if (settled) return;
             settled = true;
@@ -1813,20 +1883,41 @@ function invokeTestCompute(
             cleanup();
             resolve(completion);
         };
-        const timer = setTimeout(() => {
-            registration.response?.write(`${JSON.stringify({ callId, type: "cancel" })}\n`);
-            finishReject(
-                new Error(`The fake compute call timed out after ${String(timeoutMs)}ms.`),
-            );
-        }, timeoutMs);
-        timer.unref();
-        calls.set(callId, {
+        const call: TestComputeCall = {
+            acknowledgment:
+                acknowledgmentTimeoutMs === undefined
+                    ? { status: "not_required" }
+                    : { status: "awaiting_acknowledgment" },
+            acknowledge: () => {
+                if (call.acknowledgment.status !== "awaiting_acknowledgment") return;
+                if (acknowledgmentTimer !== undefined) clearTimeout(acknowledgmentTimer);
+                acknowledgmentTimer = undefined;
+                call.acknowledgment = { status: "acknowledged" };
+            },
             cleanup,
             operation: event.operation,
             ...(progress === undefined ? {} : { progress }),
             reject: finishReject,
             resolve: finishResolve,
-        });
+        };
+        completionTimer = setTimeout(() => {
+            registration.response?.write(`${JSON.stringify({ callId, type: "cancel" })}\n`);
+            finishReject(
+                new Error(`The fake compute call timed out after ${String(timeoutMs)}ms.`),
+            );
+        }, timeoutMs);
+        completionTimer.unref();
+        if (acknowledgmentTimeoutMs !== undefined) {
+            acknowledgmentTimer = setTimeout(() => {
+                finishReject(
+                    new Error(
+                        `The fake compute provider did not acknowledge provisioning within ${String(acknowledgmentTimeoutMs)}ms.`,
+                    ),
+                );
+            }, acknowledgmentTimeoutMs);
+            acknowledgmentTimer.unref();
+        }
+        calls.set(callId, call);
         registration.response!.write(
             `${JSON.stringify({
                 ...event,
@@ -1869,7 +1960,7 @@ function failTestComputeGeneration(
                 workspaceSource: instance.workspaceSource,
             };
             instances.set(instance.id, unprovisioned);
-            publishPreparation(unprovisioned, "failed", reason, "unprovisioned", {
+            publishPreparation(instance, "failed", reason, "unprovisioned", {
                 code: "preparing_compute",
                 message: reason,
                 retryable: true,
@@ -1886,7 +1977,7 @@ function failTestComputeGeneration(
         instances.set(instance.id, failed);
         if (instance.state === "provisioning") {
             const message = `Compute preparation failed. ${reason}`;
-            publishPreparation(failed, "failed", message, "failed", {
+            publishPreparation(instance, "failed", message, "failed", {
                 code: "instance_failed",
                 message,
                 retryable: false,

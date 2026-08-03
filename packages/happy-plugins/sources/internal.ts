@@ -23,6 +23,7 @@ export {
     readHappyComputeBodySchema,
     readHappyComputeInputSchema,
     readHappyComputeResponseSchema,
+    registerHappyComputeProviderInputSchema,
     registerHappyComputeProviderResponseSchema,
     startHappyComputeHandlerInputSchema,
     stopHappyComputeInputSchema,

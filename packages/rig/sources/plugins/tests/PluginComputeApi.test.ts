@@ -122,6 +122,7 @@ describe("plugin compute API", () => {
                 name: "memory-compute",
                 pluginFolder: "memory-compute",
                 pluginName: "Memory Compute",
+                provisioningTimeoutMs: 300_000,
             },
         ]);
         const instance = await client.compute.create({
@@ -145,7 +146,11 @@ describe("plugin compute API", () => {
             }),
         ).rejects.toMatchObject({
             code: "preparing_compute",
+            elapsedMs: expect.any(Number),
+            lastProgressAt: expect.any(Number),
+            phase: expect.any(String),
             retryable: true,
+            startedAt: expect.any(Number),
             state: "provisioning",
             status: 409,
         });
@@ -197,6 +202,7 @@ describe("plugin compute API", () => {
                 name: "memory-compute",
                 pluginFolder: "memory-compute",
                 pluginName: "Memory Compute",
+                provisioningTimeoutMs: 300_000,
             },
         ]);
         await expect(

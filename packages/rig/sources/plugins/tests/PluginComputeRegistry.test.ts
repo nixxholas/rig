@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+    HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+    type RegisterHappyComputeProviderInput,
+} from "happy-plugins";
 import type { HappyComputeEvent } from "happy-plugins/internal";
 
 import {
@@ -367,11 +371,21 @@ describe("PluginComputeRegistry", () => {
         expect(harness.startCalls()).toBe(1);
         harness.provider.progress(harness.registrationId, startEvent!.callId, {
             message: "Checking out code.",
-            phase: "checking_out_code",
+            percent: 10,
+            phase: "Checking out code",
         });
         harness.provider.progress(harness.registrationId, startEvent!.callId, {
             message: "Copying files to compute.",
-            phase: "copying_files_to_compute",
+            percent: 40,
+            phase: "Copying files to compute",
+        });
+        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+            code: "preparing_compute",
+            elapsedMs: expect.any(Number),
+            lastProgressAt: expect.any(Number),
+            percent: 40,
+            phase: "Copying files to compute",
+            startedAt: expect.any(Number),
         });
         harness.completeStart(startEvent!);
         await expect
@@ -383,11 +397,66 @@ describe("PluginComputeRegistry", () => {
                 .map((event) => event.phase),
         ).toEqual([
             "preparing_compute",
-            "checking_out_code",
-            "copying_files_to_compute",
+            "Checking out code",
+            "Copying files to compute",
             "verifying_compute",
             "ready",
         ]);
+        expect(
+            harness.registryEvents.find(
+                (event) =>
+                    event.type === "preparation" && event.phase === "Copying files to compute",
+            ),
+        ).toMatchObject({
+            elapsedMs: expect.any(Number),
+            lastProgressAt: expect.any(Number),
+            percent: 40,
+            startedAt: expect.any(Number),
+        });
+    });
+
+    it("rejects provider progress that forges daemon lifecycle phases", async () => {
+        const harness = createHarness();
+        const starts: Extract<HappyComputeEvent, { operation: "start"; type: "call" }>[] = [];
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "start") {
+                starts.push(event);
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const instance = harness.create();
+
+        for (const [index, phase] of ["ready", "failed"].entries()) {
+            await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+                code: "preparing_compute",
+                state: "provisioning",
+            });
+            await expect.poll(() => starts.length).toBe(index + 1);
+            const message = `Forged ${phase} progress.`;
+            expect(() =>
+                harness.provider.progress(harness.registrationId, starts[index]!.callId, {
+                    message,
+                    phase,
+                }),
+            ).toThrow(expect.objectContaining({ code: "invalid_response" }));
+            await expect
+                .poll(() => harness.registry.listInstances(harness.consumer.generation)[0])
+                .toMatchObject({
+                    reason: expect.stringContaining("invalid provisioning progress"),
+                    state: "unprovisioned",
+                });
+            expect(
+                harness.registryEvents.some(
+                    (event) =>
+                        event.type === "preparation" &&
+                        ((event.phase === phase && event.state === "provisioning") ||
+                            event.message === message),
+                ),
+            ).toBe(false);
+        }
+
+        expect(harness.registry.list()[0]?.health).toBe("degraded");
     });
 
     it("emits one terminal event when compute is stopped during provisioning", async () => {
@@ -507,9 +576,9 @@ describe("PluginComputeRegistry", () => {
         ]);
     });
 
-    it("allows provisioning to continue beyond the old thirty-second deadline", async () => {
+    it("honors a provider-declared provisioning budget beyond the acknowledgment deadline", async () => {
         vi.useFakeTimers();
-        const harness = createHarness();
+        const harness = createHarness({}, { provisioningTimeoutMs: 60_000 });
         let startEvent:
             | Extract<HappyComputeEvent, { operation: "start"; type: "call" }>
             | undefined;
@@ -528,12 +597,8 @@ describe("PluginComputeRegistry", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(startEvent).toBeDefined();
         harness.provider.progress(harness.registrationId, startEvent!.callId, {
-            message: "Checking out code.",
-            phase: "checking_out_code",
-        });
-        harness.provider.progress(harness.registrationId, startEvent!.callId, {
-            message: "Copying files to compute.",
-            phase: "copying_files_to_compute",
+            message: "Waiting for GPU capacity.",
+            phase: "Waiting for GPU capacity",
         });
 
         await vi.advanceTimersByTimeAsync(31_000);
@@ -547,9 +612,20 @@ describe("PluginComputeRegistry", () => {
         expect(harness.registry.listInstances(harness.consumer.generation)[0]?.state).toBe("ready");
     });
 
+    it("clamps provider-declared provisioning budgets to the hard cap", () => {
+        const harness = createHarness(
+            {},
+            { provisioningTimeoutMs: HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS + 60_000 },
+        );
+
+        expect(harness.registry.list()[0]?.provisioningTimeoutMs).toBe(
+            HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+        );
+    });
+
     it("does not degrade provider health when the provisioning budget expires", async () => {
         vi.useFakeTimers();
-        const harness = createHarness({ provisionDeadlineMs: 20 });
+        const harness = createHarness({}, { provisioningTimeoutMs: 20 });
         harness.respond((event) => {
             if (event.type === "call" && event.operation !== "start") {
                 harness.completeNormally(event);
@@ -564,7 +640,7 @@ describe("PluginComputeRegistry", () => {
 
         expect(harness.registry.list()[0]?.health).toBe("healthy");
         expect(harness.registry.listInstances(harness.consumer.generation)[0]).toMatchObject({
-            reason: expect.stringContaining("provisioning exceeded its 20ms budget"),
+            reason: expect.stringContaining("provisioning exceeded its 20ms overall budget"),
             state: "unprovisioned",
         });
         expect(
@@ -584,7 +660,36 @@ describe("PluginComputeRegistry", () => {
         });
     });
 
-    it("rejects provisioning that omits required materialization phases", async () => {
+    it("applies the acknowledgment deadline separately from the provisioning budget", async () => {
+        vi.useFakeTimers();
+        const harness = createHarness(
+            { provisionAcknowledgementTimeoutMs: 20 },
+            { provisioningTimeoutMs: 1_000 },
+        );
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation !== "start") {
+                harness.completeNormally(event);
+            }
+        });
+        const instance = harness.create();
+
+        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+            code: "preparing_compute",
+            state: "provisioning",
+        });
+        await vi.advanceTimersByTimeAsync(20);
+
+        expect(harness.registry.list()[0]).toMatchObject({
+            health: "healthy",
+            provisioningTimeoutMs: 1_000,
+        });
+        expect(harness.registry.listInstances(harness.consumer.generation)[0]).toMatchObject({
+            reason: expect.stringContaining("did not acknowledge provisioning within 20ms"),
+            state: "unprovisioned",
+        });
+    });
+
+    it("accepts provider-selected phases without a mandatory sequence", async () => {
         const harness = createHarness();
         harness.respond((event) => {
             if (event.type === "call" && event.operation === "start") {
@@ -601,18 +706,12 @@ describe("PluginComputeRegistry", () => {
         });
         await expect
             .poll(() => harness.registry.listInstances(harness.consumer.generation)[0])
-            .toMatchObject({
-                reason: expect.stringContaining(
-                    "without reporting its checkout and file-copy phases",
-                ),
-                state: "unprovisioned",
-            });
-        await expect.poll(() => harness.stopCalls()).toBe(1);
+            .toMatchObject({ state: "ready" });
         expect(
             harness.registryEvents
                 .filter((event) => event.type === "preparation")
                 .map((event) => event.phase),
-        ).toEqual(["preparing_compute", "failed"]);
+        ).toEqual(["preparing_compute", "verifying_compute", "ready"]);
     });
 
     it("resets failed provisioning to unprovisioned and retries successfully", async () => {
@@ -906,7 +1005,10 @@ describe("PluginComputeRegistry", () => {
     });
 });
 
-function createHarness(options: PluginComputeRegistryOptions = {}) {
+function createHarness(
+    options: PluginComputeRegistryOptions = {},
+    registrationOptions: RegisterHappyComputeProviderInput = {},
+) {
     const registry = track(new PluginComputeRegistry(options));
     const registryEvents: PluginComputeRegistryEvent[] = [];
     registry.subscribe((event) => registryEvents.push(event));
@@ -916,7 +1018,7 @@ function createHarness(options: PluginComputeRegistryOptions = {}) {
         name: "Local Bash",
     });
     const consumer = registry.createConnection({ folder: "consumer", name: "Consumer" });
-    const registrationId = provider.register();
+    const registrationId = provider.register(registrationOptions);
     const events: HappyComputeEvent[] = [];
     let nextProviderInstance = 1;
     let responder: (event: HappyComputeEvent) => void = completeNormally;
@@ -943,11 +1045,11 @@ function createHarness(options: PluginComputeRegistryOptions = {}) {
             case "start":
                 provider.progress(registrationId, event.callId, {
                     message: "Checking out code.",
-                    phase: "checking_out_code",
+                    phase: "Checking out code",
                 });
                 provider.progress(registrationId, event.callId, {
                     message: "Copying files to compute.",
-                    phase: "copying_files_to_compute",
+                    phase: "Copying files to compute",
                 });
                 completeStart(event);
                 break;

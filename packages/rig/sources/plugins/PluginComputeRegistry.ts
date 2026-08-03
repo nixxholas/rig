@@ -3,29 +3,34 @@ import { randomUUID } from "node:crypto";
 import { Value } from "@sinclair/typebox/value";
 import {
     HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+    HAPPY_COMPUTE_DEFAULT_PROVISIONING_TIMEOUT_MS,
+    HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+    HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS,
     type CreateHappyComputeInput,
     type ExecHappyComputeHandlerInput,
     type HappyComputeError,
     type HappyComputeErrorCode,
     type HappyComputeInstance,
     type HappyComputeInstanceState,
+    type HappyComputePreparationPhase,
     type HappyComputeProvisioningProgress,
     type HappyComputeProvider,
     type HappyComputeProviderManifest,
     type HappyComputeWorkspaceSource,
     type ReadHappyComputeInput,
     type WriteHappyComputeInput,
+    type RegisterHappyComputeProviderInput,
 } from "happy-plugins";
 import {
     happyComputeCallCompletionSchema,
     happyComputeProvisioningProgressSchema,
     normalizeHappyComputeError,
+    registerHappyComputeProviderInputSchema,
     type HappyComputeCallCompletion,
     type HappyComputeEvent,
 } from "happy-plugins/internal";
 
 const DEFAULT_OPERATION_DEADLINE_MS = 10_000;
-const DEFAULT_PROVISION_DEADLINE_MS = 5 * 60_000;
 const EXEC_DEADLINE_GRACE_MS = 2_000;
 const MAX_ACTIVE_COMPUTE_INSTANCES = 256;
 const MAX_PENDING_COMPUTE_CALLS = 256;
@@ -35,7 +40,6 @@ const READINESS_PROBE_COMMAND_TIMEOUT_MS = 5_000;
 
 export const MAX_COMPUTE_INSTANCE_LIFETIME_MS = 2 * 60 * 60_000;
 export const MAX_COMPUTE_INSTANCE_IDLE_MS = 30 * 60_000;
-export const MAX_COMPUTE_PROVISION_DEADLINE_MS = 5 * 60_000;
 
 type ComputeOperation = "exec" | "read" | "start" | "stop" | "write";
 type ComputeCallEvent = Extract<HappyComputeEvent, { type: "call" }>;
@@ -70,6 +74,11 @@ type ComputeProviderState =
     | { reason: string; status: "failed" };
 
 type PendingComputeCall = {
+    acknowledgment:
+        | { status: "acknowledged" }
+        | { status: "awaiting_acknowledgment" }
+        | { status: "not_required" };
+    acknowledge(): void;
     cleanup(): void;
     operation: ComputeOperation;
     progress?: (progress: HappyComputeProvisioningProgress) => void;
@@ -78,6 +87,7 @@ type PendingComputeCall = {
 };
 
 type ComputeInvokeOptions = {
+    acknowledgmentDeadlineMs?: number;
     deadlineAttribution?: "provider" | "provisioning";
     progress?: (progress: HappyComputeProvisioningProgress) => void;
 };
@@ -94,6 +104,7 @@ type ComputeRegistration = {
     onRequiredRegistrationRetired?: (retirement: PluginComputeRegistrationRetirement) => void;
     owner: ComputeOwner;
     pendingCalls: Map<string, PendingComputeCall>;
+    provisioningTimeoutMs: number;
     state: ComputeProviderState;
 };
 
@@ -112,10 +123,13 @@ type ComputeInstance =
       })
     | (ComputeInstanceBase & {
           attemptId: string;
+          lastProgressAt: number;
           message: string;
-          phase: PluginComputePreparationPhase;
+          percent?: number;
+          phase: HappyComputePreparationPhase;
           providerInstanceId?: string;
           registration?: ComputeRegistration;
+          startedAt: number;
           state: "provisioning";
       })
     | (ComputeInstanceBase & {
@@ -144,25 +158,22 @@ type ComputeTombstone = {
     state: "failed" | "stopped";
 };
 
-export type PluginComputePreparationPhase =
-    | "checking_out_code"
-    | "copying_files_to_compute"
-    | "failed"
-    | "preparing_compute"
-    | "ready"
-    | "stopped"
-    | "verifying_compute";
+export type PluginComputePreparationPhase = HappyComputePreparationPhase;
 
 export type PluginComputeRegistryEvent =
     | { type: "catalog_changed" }
     | {
           consumerGeneration: string;
           createdAt: number;
+          elapsedMs?: number;
           error?: HappyComputeError;
           instanceId: string;
+          lastProgressAt?: number;
           message: string;
+          percent?: number;
           phase: PluginComputePreparationPhase;
           provider: string;
+          startedAt?: number;
           state: "failed" | "provisioning" | "ready" | "stopped" | "unprovisioned";
           type: "preparation";
       };
@@ -170,11 +181,12 @@ export type PluginComputeRegistryEvent =
 export interface PluginComputeConnection {
     readonly generation: string;
     attach(registrationId: string, send: (event: HappyComputeEvent) => boolean): () => void;
+    acknowledge(registrationId: string, callId: string): void;
     assertReady(): void;
     close(): void;
     complete(registrationId: string, callId: string, completion: unknown): void;
     progress(registrationId: string, callId: string, progress: unknown): void;
-    register(): string;
+    register(input?: RegisterHappyComputeProviderInput): string;
     unregister(registrationId: string): void;
 }
 
@@ -188,14 +200,24 @@ export interface PluginComputeConnectionOptions {
 
 export class PluginComputeError extends Error {
     readonly code: HappyComputeErrorCode;
+    readonly elapsedMs: number | undefined;
+    readonly lastProgressAt: number | undefined;
+    readonly percent: number | undefined;
+    readonly phase: string | undefined;
     readonly retryable: boolean;
+    readonly startedAt: number | undefined;
     readonly state: HappyComputeInstanceState | undefined;
 
     constructor(error: HappyComputeError) {
         super(error.message);
         this.name = "PluginComputeError";
         this.code = error.code;
+        this.elapsedMs = error.code === "preparing_compute" ? error.elapsedMs : undefined;
+        this.lastProgressAt = error.code === "preparing_compute" ? error.lastProgressAt : undefined;
+        this.percent = error.code === "preparing_compute" ? error.percent : undefined;
+        this.phase = error.code === "preparing_compute" ? error.phase : undefined;
         this.retryable = error.retryable;
+        this.startedAt = error.code === "preparing_compute" ? error.startedAt : undefined;
         this.state = error.state;
     }
 }
@@ -215,8 +237,8 @@ export interface PluginComputeRegistryOptions {
     maxLifetimeMs?: number;
     maxTombstones?: number;
     now?: () => number;
-    /** Lowers the aggregate background provisioning budget. Intended for deterministic tests. */
-    provisionDeadlineMs?: number;
+    /** Lowers the start acknowledgment deadline. Intended for deterministic tests. */
+    provisionAcknowledgementTimeoutMs?: number;
     reaperIntervalMs?: number;
 }
 
@@ -238,7 +260,7 @@ export class PluginComputeRegistry {
     readonly #maxLifetimeMs: number;
     readonly #maxTombstones: number;
     readonly #now: () => number;
-    readonly #provisionDeadlineMs: number;
+    readonly #provisionAcknowledgementTimeoutMs: number;
     readonly #registrations = new Map<string, ComputeRegistration>();
     readonly #recoveryTasks = new Map<string, Promise<void>>();
     readonly #reaper: NodeJS.Timeout;
@@ -267,9 +289,9 @@ export class PluginComputeRegistry {
             MAX_RETAINED_COMPUTE_TOMBSTONES,
         );
         this.#now = options.now ?? Date.now;
-        this.#provisionDeadlineMs = Math.min(
-            options.provisionDeadlineMs ?? DEFAULT_PROVISION_DEADLINE_MS,
-            MAX_COMPUTE_PROVISION_DEADLINE_MS,
+        this.#provisionAcknowledgementTimeoutMs = Math.min(
+            options.provisionAcknowledgementTimeoutMs ?? HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS,
+            HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS,
         );
         this.#reaper = setInterval(
             () => this.#reapExpiredInstances(),
@@ -310,6 +332,17 @@ export class PluginComputeRegistry {
         };
         return {
             generation: owner.generation,
+            acknowledge: (registrationId, callId) => {
+                const registration = requireOwned(registrationId);
+                const call = registration.pendingCalls.get(callId);
+                if (call === undefined || call.operation !== "start") {
+                    throw computeError(
+                        "invalid_request",
+                        "That compute provisioning call is no longer awaiting acknowledgment.",
+                    );
+                }
+                call.acknowledge();
+            },
             attach: (registrationId, send) => {
                 const registration = requireOwned(registrationId);
                 if (registration.state.status !== "registered") {
@@ -365,6 +398,7 @@ export class PluginComputeRegistry {
                         "That plugin compute call is no longer active.",
                     );
                 }
+                call.acknowledge();
                 let decoded: HappyComputeCallCompletion;
                 try {
                     decoded = Value.Decode(happyComputeCallCompletionSchema, completion);
@@ -406,6 +440,7 @@ export class PluginComputeRegistry {
                     );
                 }
                 try {
+                    call.acknowledge();
                     const decoded = Value.Decode(happyComputeProvisioningProgressSchema, progress);
                     if (call.operation !== "start" || call.progress === undefined) {
                         throw new Error(
@@ -424,7 +459,7 @@ export class PluginComputeRegistry {
                     throw computeError("invalid_response", failure);
                 }
             },
-            register: () => {
+            register: (input = {}) => {
                 if (ownerClosed || this.#closed) {
                     throw computeError(
                         "invalid_request",
@@ -454,7 +489,16 @@ export class PluginComputeRegistry {
                         `A compute provider named "${owner.compute.name}" is already registered.`,
                     );
                 }
+                const registrationInput = Value.Decode(
+                    registerHappyComputeProviderInputSchema,
+                    input,
+                );
                 const id = randomUUID();
+                const provisioningTimeoutMs = Math.min(
+                    registrationInput.provisioningTimeoutMs ??
+                        HAPPY_COMPUTE_DEFAULT_PROVISIONING_TIMEOUT_MS,
+                    HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+                );
                 this.#registrations.set(id, {
                     id,
                     ...(options.onRequiredRegistrationRetired === undefined
@@ -464,6 +508,7 @@ export class PluginComputeRegistry {
                           }),
                     owner,
                     pendingCalls: new Map(),
+                    provisioningTimeoutMs,
                     state: { status: "registered" },
                 });
                 return id;
@@ -503,6 +548,7 @@ export class PluginComputeRegistry {
                         name: registration.owner.compute.name,
                         pluginFolder: registration.owner.folder,
                         pluginName: registration.owner.name,
+                        provisioningTimeoutMs: registration.provisioningTimeoutMs,
                     },
                 ];
             })
@@ -696,7 +742,12 @@ export class PluginComputeRegistry {
         const callId = randomUUID();
         return new Promise<ComputeOperationCompletion<T>>((resolve, reject) => {
             let settled = false;
-            const finish = () => clearTimeout(timer);
+            let acknowledgmentTimer: NodeJS.Timeout | undefined;
+            let deadlineTimer: NodeJS.Timeout | undefined;
+            const finish = () => {
+                if (acknowledgmentTimer !== undefined) clearTimeout(acknowledgmentTimer);
+                if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+            };
             const fail = (error: PluginComputeError) => {
                 if (settled) return;
                 settled = true;
@@ -704,10 +755,32 @@ export class PluginComputeRegistry {
                 finish();
                 reject(error);
             };
-            const timer = setTimeout(() => {
+            const call: PendingComputeCall = {
+                acknowledgment:
+                    options.acknowledgmentDeadlineMs === undefined
+                        ? { status: "not_required" }
+                        : { status: "awaiting_acknowledgment" },
+                acknowledge: () => {
+                    if (call.acknowledgment.status !== "awaiting_acknowledgment") return;
+                    if (acknowledgmentTimer !== undefined) clearTimeout(acknowledgmentTimer);
+                    acknowledgmentTimer = undefined;
+                    call.acknowledgment = { status: "acknowledged" };
+                },
+                cleanup: finish,
+                operation: event.operation,
+                ...(options.progress === undefined ? {} : { progress: options.progress }),
+                reject: fail,
+                resolve: (completion) => {
+                    if (settled) return;
+                    settled = true;
+                    finish();
+                    resolve(completion as ComputeOperationCompletion<T>);
+                },
+            };
+            deadlineTimer = setTimeout(() => {
                 const message =
                     options.deadlineAttribution === "provisioning"
-                        ? `Compute provisioning exceeded its ${String(deadlineMs)}ms budget while running ${event.operation}.`
+                        ? `Compute provisioning exceeded its ${String(deadlineMs)}ms overall budget while running ${event.operation}.`
                         : `The compute provider missed its ${event.operation} deadline after ${String(deadlineMs)}ms.`;
                 const state = registration.state;
                 if (state.status === "healthy" || state.status === "degraded") {
@@ -722,19 +795,24 @@ export class PluginComputeRegistry {
                 }
                 fail(computeError("deadline_exceeded", message));
             }, deadlineMs);
-            timer.unref();
-            registration.pendingCalls.set(callId, {
-                cleanup: finish,
-                operation: event.operation,
-                ...(options.progress === undefined ? {} : { progress: options.progress }),
-                reject: fail,
-                resolve: (completion) => {
-                    if (settled) return;
-                    settled = true;
-                    finish();
-                    resolve(completion as ComputeOperationCompletion<T>);
-                },
-            });
+            deadlineTimer.unref();
+            if (options.acknowledgmentDeadlineMs !== undefined) {
+                acknowledgmentTimer = setTimeout(() => {
+                    const message = `The compute provider did not acknowledge provisioning within ${String(options.acknowledgmentDeadlineMs)}ms.`;
+                    const state = registration.state;
+                    if (state.status === "healthy" || state.status === "degraded") {
+                        try {
+                            state.send({ callId, type: "cancel" });
+                        } catch {
+                            // The missed acknowledgment remains the useful failure.
+                        }
+                    }
+                    this.#recordProviderFailure(registration, message);
+                    fail(computeError("deadline_exceeded", message));
+                }, options.acknowledgmentDeadlineMs);
+                acknowledgmentTimer.unref();
+            }
+            registration.pendingCalls.set(callId, call);
             try {
                 const state = registration.state;
                 if (
@@ -780,14 +858,31 @@ export class PluginComputeRegistry {
                 return instance;
             case "unprovisioned": {
                 const provisioning = this.#beginProvisioning(instance);
-                throw computeError("preparing_compute", provisioning.message, "provisioning");
+                throw this.#preparingError(provisioning);
             }
             case "provisioning":
-                throw computeError("preparing_compute", instance.message, "provisioning");
+                throw this.#preparingError(instance);
             case "unavailable":
                 this.#recoverUnavailableInstance(instance);
                 throw computeError("preparing_compute", instance.reason, "unavailable");
         }
+    }
+
+    #preparingError(
+        instance: Extract<ComputeInstance, { state: "provisioning" }>,
+    ): PluginComputeError {
+        const elapsedMs = Math.max(0, this.#now() - instance.startedAt);
+        return new PluginComputeError({
+            code: "preparing_compute",
+            elapsedMs,
+            lastProgressAt: instance.lastProgressAt,
+            message: instance.message,
+            ...(instance.percent === undefined ? {} : { percent: instance.percent }),
+            phase: instance.phase,
+            retryable: true,
+            startedAt: instance.startedAt,
+            state: "provisioning",
+        });
     }
 
     #beginProvisioning(
@@ -797,15 +892,18 @@ export class PluginComputeRegistry {
             instance.reason === undefined
                 ? "Preparing compute for its first use."
                 : `Preparing compute again. The previous attempt failed: ${instance.reason}`;
+        const startedAt = this.#now();
         const provisioning: Extract<ComputeInstance, { state: "provisioning" }> = {
             attemptId: randomUUID(),
             consumerGeneration: instance.consumerGeneration,
             createdAt: instance.createdAt,
             id: instance.id,
+            lastProgressAt: startedAt,
             message,
             phase: "preparing_compute",
             provider: instance.provider,
             state: "provisioning",
+            startedAt,
             workspaceSource: instance.workspaceSource,
         };
         this.#instances.set(instance.id, provisioning);
@@ -830,7 +928,7 @@ export class PluginComputeRegistry {
             }
             current = { ...current, registration };
             this.#instances.set(instanceId, current);
-            const deadlineAt = Date.now() + this.#deadline("start");
+            const deadlineAt = Date.now() + registration.provisioningTimeoutMs;
             const completion = await this.#invoke(
                 registration,
                 {
@@ -839,6 +937,7 @@ export class PluginComputeRegistry {
                 },
                 remainingDeadline(deadlineAt),
                 {
+                    acknowledgmentDeadlineMs: this.#provisionAcknowledgementTimeoutMs,
                     deadlineAttribution: "provisioning",
                     progress: (progress) =>
                         this.#reportProviderProgress(instanceId, attemptId, progress),
@@ -865,17 +964,6 @@ export class PluginComputeRegistry {
                     "retired provisioning",
                 );
                 return;
-            }
-            if (current.phase !== "copying_files_to_compute") {
-                const message =
-                    "The compute provider completed provisioning without reporting its checkout and file-copy phases.";
-                this.#recordProviderFailure(registration, message);
-                this.#stopProviderInstanceBestEffort(
-                    registration,
-                    providerInstanceId,
-                    "incomplete provisioning progress",
-                );
-                throw computeError("invalid_response", message);
             }
             const duplicate = [...this.#instances.values()].some(
                 (candidate) =>
@@ -997,25 +1085,24 @@ export class PluginComputeRegistry {
     ): void {
         const current = this.#currentProvisioning(instanceId, attemptId);
         if (current === undefined) return;
-        const valid =
-            (current.phase === "preparing_compute" && progress.phase === "checking_out_code") ||
-            (current.phase === "checking_out_code" &&
-                progress.phase === "copying_files_to_compute");
-        if (!valid) {
-            throw new Error(
-                `Provisioning progress cannot move from ${current.phase} to ${progress.phase}.`,
-            );
-        }
-        this.#updatePreparation(current, progress.phase, progress.message);
+        this.#updatePreparation(current, progress.phase, progress.message, progress.percent);
     }
 
     #updatePreparation(
         instance: Extract<ComputeInstance, { state: "provisioning" }>,
         phase: PluginComputePreparationPhase,
         message: string,
+        percent?: number,
     ): void {
         if (this.#instances.get(instance.id) !== instance) return;
-        const next = { ...instance, message, phase };
+        const { percent: _previousPercent, ...withoutPercent } = instance;
+        const next = {
+            ...withoutPercent,
+            lastProgressAt: this.#now(),
+            message,
+            ...(percent === undefined ? {} : { percent }),
+            phase,
+        };
         this.#instances.set(instance.id, next);
         this.#emitPreparation(next, phase, message, "provisioning");
     }
@@ -1035,7 +1122,7 @@ export class PluginComputeRegistry {
             workspaceSource: instance.workspaceSource,
         };
         this.#instances.set(instance.id, unprovisioned);
-        this.#emitPreparation(unprovisioned, "failed", reason, "unprovisioned", {
+        this.#emitPreparation(instance, "failed", reason, "unprovisioned", {
             code: "preparing_compute",
             message: reason,
             retryable: true,
@@ -1458,7 +1545,7 @@ export class PluginComputeRegistry {
                     ? `Compute preparation failed. ${reason}`
                     : `Compute preparation stopped. ${reason}`;
             this.#emitPreparation(
-                tombstone,
+                instance,
                 state === "failed" ? "failed" : "stopped",
                 message,
                 state,
@@ -1520,7 +1607,6 @@ export class PluginComputeRegistry {
 
     #deadline(operation: ComputeOperation, commandTimeoutMs?: number): number {
         if (this.#callTimeoutMs !== undefined) return this.#callTimeoutMs;
-        if (operation === "start") return this.#provisionDeadlineMs;
         if (operation === "exec") {
             return (
                 (commandTimeoutMs ?? HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS) +
@@ -1535,15 +1621,25 @@ export class PluginComputeRegistry {
     }
 
     #emitPreparation(
-        instance: Pick<ComputeInstanceBase, "consumerGeneration" | "id" | "provider">,
+        instance: ComputeInstance | ComputeTombstone,
         phase: PluginComputePreparationPhase,
         message: string,
         state: "failed" | "provisioning" | "ready" | "stopped" | "unprovisioned",
         error?: HappyComputeError,
     ): void {
+        const preparation =
+            instance.state === "provisioning"
+                ? {
+                      elapsedMs: Math.max(0, this.#now() - instance.startedAt),
+                      lastProgressAt: instance.lastProgressAt,
+                      ...(instance.percent === undefined ? {} : { percent: instance.percent }),
+                      startedAt: instance.startedAt,
+                  }
+                : {};
         this.#emit({
             consumerGeneration: instance.consumerGeneration,
             createdAt: this.#now(),
+            ...preparation,
             ...(error === undefined ? {} : { error }),
             instanceId: instance.id,
             message,

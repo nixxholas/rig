@@ -7,11 +7,13 @@ import {
     happyComputeCallCompletionSchema,
     happyComputeEventSchema,
     happyComputeProvisioningProgressSchema,
+    registerHappyComputeProviderInputSchema,
     type HappyComputeCallCompletion,
     type HappyComputeCallEvent,
     type HappyComputeProvisioningProgress,
     type HappyComputeProviderHandlers,
     type HappyComputeRegistration,
+    type RegisterHappyComputeProviderInput,
 } from "./computeTypes.js";
 import { HappyComputeProviderError } from "./HappyComputeProviderError.js";
 import { startHappyPluginEventRegistration } from "./startHappyPluginEventRegistration.js";
@@ -34,7 +36,9 @@ type ProviderExecResult = Static<typeof providerExecResultSchema>;
 export async function startHappyComputeProvider(
     handlers: HappyComputeProviderHandlers,
     transport: HappyMcpTransport,
+    options: RegisterHappyComputeProviderInput = {},
 ): Promise<HappyComputeRegistration> {
+    const registrationOptions = Value.Decode(registerHappyComputeProviderInputSchema, options);
     const calls = new Map<string, AbortController>();
     const registration = await startHappyPluginEventRegistration({
         deletePath: (registrationId) => `/compute/providers/${encodeURIComponent(registrationId)}`,
@@ -50,15 +54,26 @@ export async function startHappyComputeProvider(
             const controller = new AbortController();
             calls.get(event.callId)?.abort();
             calls.set(event.callId, controller);
-            void executeComputeCall(event, handlers, controller.signal, async (progress) => {
-                Value.Assert(happyComputeProvisioningProgressSchema, progress);
-                await transport.request(
-                    "POST",
-                    `/compute/providers/${encodeURIComponent(registrationId)}/calls/${encodeURIComponent(event.callId)}/progress`,
-                    emptyResponseSchema,
-                    progress,
-                );
-            })
+            const acknowledge =
+                event.operation === "start"
+                    ? transport.request(
+                          "POST",
+                          `/compute/providers/${encodeURIComponent(registrationId)}/calls/${encodeURIComponent(event.callId)}/acknowledge`,
+                          emptyResponseSchema,
+                      )
+                    : Promise.resolve({});
+            void acknowledge
+                .then(() =>
+                    executeComputeCall(event, handlers, controller.signal, async (progress) => {
+                        Value.Assert(happyComputeProvisioningProgressSchema, progress);
+                        await transport.request(
+                            "POST",
+                            `/compute/providers/${encodeURIComponent(registrationId)}/calls/${encodeURIComponent(event.callId)}/progress`,
+                            emptyResponseSchema,
+                            progress,
+                        );
+                    }),
+                )
                 .then((completion) =>
                     transport.request(
                         "POST",
@@ -79,6 +94,7 @@ export async function startHappyComputeProvider(
             calls.clear();
         },
         recover: false,
+        registerBody: registrationOptions,
         registerPath: "/compute/providers",
         transport,
     });

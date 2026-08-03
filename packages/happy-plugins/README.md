@@ -421,7 +421,9 @@ type HappyComputeProviderHandlers = {
     stop(input: { instanceId: string }, context: HappyComputeHandlerContext): void | Promise<void>;
 };
 
-await happy.compute.register(handlers);
+await happy.compute.register(handlers, {
+    provisioningTimeoutMs: 15 * 60_000,
+});
 await happy.ready("Ready.");
 ```
 
@@ -441,22 +443,24 @@ itself. `invalid_request`, `instance_not_found`, `provider_not_found`, and
 `capacity_exhausted` are consumer-attributable and do not affect provider health. Untyped handler
 exceptions become provider-attributable `invalid_response` failures.
 
-The `start` handler must report both materialization phases, in order. Rig treats a successful
-completion that omits them as an invalid provider response:
+The SDK acknowledges a `start` job before invoking the handler. The handler can then report
+human-readable phases or periodic heartbeats, with an optional percentage, throughout
+materialization:
 
 ```ts
 await context.reportProgress({
-    phase: "checking_out_code",
-    message: "Checking out code.",
+    phase: "Waiting for GPU capacity",
+    message: "Waiting for a GPU instance.",
 });
 await context.reportProgress({
-    phase: "copying_files_to_compute",
+    phase: "Copying files to compute",
     message: "Copying files to compute.",
+    percent: 70,
 });
 ```
 
 Consumers use the same namespace. Provider catalog entries include
-`health: "healthy" | "degraded" | "failed"`:
+`health: "healthy" | "degraded" | "failed"` and the effective `provisioningTimeoutMs`:
 
 ```ts
 await happy.compute.list();
@@ -470,9 +474,10 @@ const ready = new Promise<void>((resolve, reject) => {
 });
 const preparation = await happy.compute.events.subscribe((event) => {
     if (event.instanceId !== instanceId) return;
-    if (event.phase === "ready") resolveReady();
-    if (event.phase === "failed") rejectReady(new Error(event.error?.message ?? event.message));
-    if (event.phase === "stopped") rejectReady(new Error(event.message));
+    if (event.state === "ready") resolveReady();
+    if (event.state === "unprovisioned" || event.state === "failed" || event.state === "stopped") {
+        rejectReady(new Error(event.error?.message ?? event.message));
+    }
 });
 const instance = await happy.compute.create({
     provider: "local-bash",
@@ -508,23 +513,35 @@ stop remain flat.
 The first exec, read, or write atomically starts one background provisioning attempt and fails fast
 with `preparing_compute`, `state: "provisioning"`, and `retryable: true`. Concurrent first users
 share that attempt and receive the same answer; no consumer call waits for sandbox creation. The
-provider's background `start` call shares one five-minute provisioning budget with checkout,
-copy/upload, and Rig's bounded `exec("true")` probe. Every handle follows one daemon-owned
+error also carries the current `phase`, `startedAt`, `elapsedMs`, `lastProgressAt`, and optional
+`percent`, so polling consumers can explain long waits without operation-specific logic.
+
+The provider must acknowledge the background job within 30 seconds. Its handler, file
+copy/upload, and Rig's bounded `exec("true")` probe then share the registration's declared
+provisioning budget. The default is five minutes and the hard cap is 30 minutes. Provider progress
+does not extend that budget, and silence is informational rather than a second failure timer.
+Every handle follows one daemon-owned
 `unprovisioned -> provisioning -> ready -> unavailable -> failed | stopped` lifecycle.
 
 Rig publishes durable `compute_preparation` events for preparing, checkout, file copy,
 verification, readiness, retryable failure, terminal failure, and provisioning cancellation. Every
-attempt ends with `ready`, `failed`, or `stopped`, so a subscriber never has to infer that
-preparation ended from a missing event. Each carries a human-readable message; failures also carry
-their typed compute error and attributed reason. These event names and messages are intended for
-future forwarding into session chat timelines. Agent-session wiring remains out of scope.
+attempt publishes a final event whose state is `ready`, `unprovisioned`, `failed`, or `stopped`, so
+a subscriber never has to infer that preparation ended from a missing event. Each carries a
+human-readable message; failures also carry their typed compute error and attributed reason. These
+event names and messages are intended for future forwarding into session chat timelines.
+Agent-session wiring remains out of scope.
+
+The daemon-owned `state` field is the authoritative lifecycle signal. Use `phase` only as
+human-readable progress text. Provider progress cannot use the reserved daemon phase names
+`preparing_compute`, `verifying_compute`, `ready`, `failed`, or `stopped`; attempting to publish
+one is an `invalid_response` provider protocol failure.
 
 A provisioning failure always resets the handle to `unprovisioned`, and the next use starts a new
 single-flight attempt. Only a materialized instance whose provider generation dies becomes
 terminally `failed`. Provider recovery can move `unavailable` back to `ready`; `failed` and
 `stopped` are terminal. A never-materialized handle is reaped two hours after creation so abandoned
 metadata cannot hold the global capacity budget forever. Provisioning itself is protected by its
-five-minute budget and is not reaped mid-attempt. Materialized lifetime and 30-minute idle clocks
+declared budget and is not reaped mid-attempt. Materialized lifetime and 30-minute idle clocks
 begin only after the readiness probe succeeds.
 
 For this first contract, `workspaceSource` has one form: `local_directory`. Happy retains the path
@@ -569,12 +586,14 @@ renames it over the destination. This makes retrying an interrupted write safe.
 The local reference is
 [`examples/local-bash`](examples/local-bash): it copies the source below the plugin's writable
 folder, uses bounded temp-file-plus-rename writes, runs `/bin/bash`, and implements idempotent
-provider stop.
+provider stop. It explicitly registers the five-minute default provisioning budget and reports
+source-check and copy phases.
 [`examples/daytona`](examples/daytona) uses Daytona's REST API directly: it creates an
 `ubuntu:24.04` sandbox, uploads at most 32 MiB of source files while skipping individual files over
 1 MiB, bounds command and file output, uploads writes to a sibling temporary path before an atomic
 sandbox-side `mv`, and treats delete 404 as success. It reads
-`DAYTONA_API_KEY` at startup. A missing key does not prevent plugin readiness; the first
+`DAYTONA_API_KEY` at startup, declares a ten-minute provisioning budget, and reports sandbox-create
+and upload phases. A missing key does not prevent plugin readiness; the first
 provisioning attempt reports a clear failure event, resets the handle to `unprovisioned`, and lets
 a later use retry after the Daytona plugin restarts with the key set.
 

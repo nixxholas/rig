@@ -185,6 +185,7 @@ describe("plugin registration", () => {
             expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
                 health: "healthy",
                 name: "cloud",
+                provisioningTimeoutMs: 300_000,
             }),
         );
 
@@ -215,6 +216,7 @@ describe("plugin registration", () => {
             expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
                 health: "degraded",
                 name: "cloud",
+                provisioningTimeoutMs: 300_000,
             }),
         );
         expect(harness.computeEvents.map((event) => event.data.phase)).toEqual([
@@ -235,6 +237,7 @@ describe("plugin registration", () => {
             expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
                 health: "failed",
                 name: "cloud",
+                provisioningTimeoutMs: 300_000,
             }),
         );
         provider.close();

@@ -246,6 +246,7 @@ handles remain listable while their provider is offline. Provider appearance, he
 disappearance invalidate the plugin catalog and publish the same whole-catalog `plugins_changed`
 event used for plugin lifecycle changes. Both `GET /compute/providers` and the `/plugins` compute
 contribution include `healthy`, `degraded`, or `failed` health.
+They also expose the effective `provisioningTimeoutMs` for the active generation.
 
 Instances are leased to the consumer plugin process generation that created them and follow one
 stored `unprovisioned -> provisioning -> ready -> unavailable -> failed | stopped` lifecycle.
@@ -256,22 +257,32 @@ wait for an environment. The first exec or file operation atomically moves `unpr
 and cannot create parallel sandboxes. Calls during transient recovery fail fast through the same
 code instead of holding an inference request open.
 
-Provisioning ends with the cheap `exec("true")` probe. Background materialization, provider phases,
-and the probe share a capped five-minute provisioning budget. Provider handlers report
-`checking_out_code` and `copying_files_to_compute` progress while the attempt is running; both
-phases are required, in that order, before a successful completion.
-Rig publishes durable `compute_preparation` events for preparing, provider phases, verification,
-success, retryable failure, terminal failure, and cancellation. Every attempt ends with `ready`,
-`failed`, or `stopped`; terminalization emits from the single lifecycle transition, so concurrent
-cleanup cannot double-publish. Messages are deliberately suitable for a future session integration
-to forward unchanged into chat timelines; session wiring remains out of scope. A failed attempt
-emits a typed `preparing_compute` error in its failure event, resets the handle to `unprovisioned`,
-and lets the next use start a fresh single-flight attempt. It becomes terminally failed only after
-materialization if its provider generation dies.
+Provisioning is a background job. The provider must acknowledge the job within 30 seconds, then
+materialization and the final cheap `exec("true")` probe run under the provider's declared
+`provisioningTimeoutMs`. The default is five minutes and Rig clamps declarations to a 30-minute
+hard cap, which allows GPU providers to request a realistic 15-minute budget without weakening
+ordinary operation deadlines. Missing the acknowledgment deadline is provider-attributable;
+exceeding the overall job budget fails and resets the attempt without degrading provider health.
 
-Expiry of the aggregate provisioning budget fails the attempt loudly and resets it, but never
-counts against provider health. Ordinary read, write, exec, and stop deadline misses remain
-provider-attributable.
+Provider handlers can report or heartbeat arbitrary human-readable phases such as "Requesting
+instance", "Waiting for GPU capacity", and "Copying files to compute", with an optional percent.
+Updates do not extend the overall budget. Silence does not fail a job before that budget expires;
+the last known phase and update time remain visible instead.
+Rig publishes durable `compute_preparation` events for preparing, provider phases, verification,
+success, retryable failure, terminal failure, and cancellation. Every attempt publishes a final
+event whose state is `ready`, `unprovisioned`, `failed`, or `stopped`; terminalization emits from
+the single lifecycle transition, so concurrent cleanup cannot double-publish. Messages are
+deliberately suitable for a future session integration to forward unchanged into chat timelines;
+session wiring remains out of scope. A failed attempt emits a typed `preparing_compute` error in
+its failure event, resets the handle to `unprovisioned`, and lets the next use start a fresh
+single-flight attempt. It becomes terminally failed only after materialization if its provider
+generation dies.
+
+Event consumers must use the daemon-owned `state` as the authoritative lifecycle signal and treat
+`phase` as display text only. The progress schema reserves `preparing_compute`,
+`verifying_compute`, `ready`, `failed`, and `stopped` for daemon events. A provider attempting to
+publish one of those names produces a provider-attributable `invalid_response` and no forged
+preparation event.
 
 Explicit stop transitions immediately to terminal `stopped`; provider cleanup is best-effort and
 deadline-bound. Explicit stop, consumer cleanup, reaping, and daemon shutdown join one cleanup task
@@ -288,7 +299,9 @@ the tombstone reason; `instance_not_found` means the ID never existed or its tom
 `GET /compute/instances` exposes the same lifecycle records to the owning consumer generation.
 
 Every compute failure that crosses the socket uses the TypeBox-validated
-`{ code, message, retryable, state? }` shape. The public codes are `provider_not_found`,
+`{ code, message, retryable, state? }` shape. While provisioning, `preparing_compute` also carries
+`phase`, `startedAt`, `elapsedMs`, `lastProgressAt`, and optional `percent`, matching the visible
+event stream. The public codes are `provider_not_found`,
 `provider_unhealthy`, `provider_lost`, `instance_not_found`, `instance_failed`,
 `preparing_compute`, `deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and
 `invalid_request`. `preparing_compute`, capacity exhaustion, and deadlines are retryable; dead

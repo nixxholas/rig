@@ -11,6 +11,7 @@ import type {
     HappyComputeProviderHandlers,
     HappyComputeRegistration,
     ReadHappyComputeInput,
+    RegisterHappyComputeProviderInput,
     StopHappyComputeInput,
     WriteHappyComputeInput,
 } from "./computeTypes.js";
@@ -1312,7 +1313,10 @@ export interface HappyPluginClient {
             list(): Promise<readonly HappyComputeInstance[]>;
         };
         list(): Promise<readonly HappyComputeProvider[]>;
-        register(handlers: HappyComputeProviderHandlers): Promise<HappyComputeRegistration>;
+        register(
+            handlers: HappyComputeProviderHandlers,
+            options?: RegisterHappyComputeProviderInput,
+        ): Promise<HappyComputeRegistration>;
         stop(input: StopHappyComputeInput): Promise<void>;
     };
     /** Register middleware that may replace the composed system prompt before an agent turn. */

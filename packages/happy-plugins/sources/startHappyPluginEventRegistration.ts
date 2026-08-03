@@ -29,6 +29,7 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
     label: string;
     onEvent: (event: Static<TEventSchema>, registrationId: string) => void | Promise<void>;
     onGenerationClosed?: (registrationId: string) => void;
+    registerBody?: unknown;
     registerPath: string;
     recover?: boolean;
     transport: HappyMcpTransport;
@@ -58,6 +59,7 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
             "POST",
             options.registerPath,
             registerHappyPluginStreamResponseSchema,
+            options.registerBody,
         );
         const generation: RegistrationGeneration = {
             registrationId: response.registrationId,

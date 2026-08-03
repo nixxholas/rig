@@ -29,7 +29,9 @@ describe("Happy compute lifecycle", () => {
         await writeFile(join(source, "message.txt"), "hello");
 
         const localBash = createLocalBashComputeProvider(instanceParent);
-        const registration = await host.client.compute.register(localBash.handlers);
+        const registration = await host.client.compute.register(localBash.handlers, {
+            provisioningTimeoutMs: 120_000,
+        });
         await host.compute.waitForProvider();
         await host.client.ready("Ready.");
         const preparationEvents: string[] = [];
@@ -43,6 +45,7 @@ describe("Happy compute lifecycle", () => {
                 name: "local-bash",
                 pluginFolder: "test-plugin",
                 pluginName: "Test Plugin",
+                provisioningTimeoutMs: 120_000,
             },
         ]);
         const instance = await host.client.compute.create({
@@ -63,12 +66,20 @@ describe("Happy compute lifecycle", () => {
             state: "provisioning",
         });
         await waitForReady(host, instance.instanceId);
+        const acknowledgmentIndex = host.requests.findIndex((request) =>
+            request.path.endsWith("/acknowledge"),
+        );
+        const firstProgressIndex = host.requests.findIndex((request) =>
+            request.path.endsWith("/progress"),
+        );
+        expect(acknowledgmentIndex).toBeGreaterThanOrEqual(0);
+        expect(firstProgressIndex).toBeGreaterThan(acknowledgmentIndex);
         await expect
             .poll(() => preparationEvents)
             .toEqual([
                 "preparing_compute",
-                "checking_out_code",
-                "copying_files_to_compute",
+                "Checking local source code",
+                "Copying files to compute",
                 "verifying_compute",
                 "ready",
             ]);
@@ -141,7 +152,7 @@ describe("Happy compute lifecycle", () => {
             { workspaceSource: { path: source, type: "local_directory" } },
             context,
         );
-        expect(phases).toEqual(["checking_out_code", "copying_files_to_compute"]);
+        expect(phases).toEqual(["Checking local source code", "Copying files to compute"]);
 
         await expect(
             Promise.resolve(localBash.handlers.read({ instanceId, path: "missing.txt" }, context)),
@@ -245,15 +256,15 @@ describe("Happy compute lifecycle", () => {
             .toEqual(["preparing_compute", "checking_out_code", "stopped"]);
 
         releaseStart();
+        const completionPrefix = `/compute/providers/${registration.registrationId}/calls/`;
         await expect
             .poll(() =>
                 host.requests.some(
                     (request) =>
                         request.method === "POST" &&
-                        request.path.startsWith(
-                            `/compute/providers/${registration.registrationId}/calls/`,
-                        ) &&
-                        !request.path.endsWith("/progress"),
+                        request.path.startsWith(completionPrefix) &&
+                        request.path.slice(completionPrefix.length).length > 0 &&
+                        !request.path.slice(completionPrefix.length).includes("/"),
                 ),
             )
             .toBe(true);

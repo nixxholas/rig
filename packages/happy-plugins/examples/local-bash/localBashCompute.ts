@@ -70,7 +70,7 @@ export function createLocalBashComputeProvider(
                 }
                 await context.reportProgress({
                     message: "Checking the local source code.",
-                    phase: "checking_out_code",
+                    phase: "Checking local source code",
                 });
                 let sourcePath: string;
                 try {
@@ -89,7 +89,7 @@ export function createLocalBashComputeProvider(
                 }
                 await context.reportProgress({
                     message: "Copying files to the local compute.",
-                    phase: "copying_files_to_compute",
+                    phase: "Copying files to compute",
                 });
                 await mkdir(instanceParent, { recursive: true });
                 const root = await mkdtemp(join(instanceParent, "local-bash-"));

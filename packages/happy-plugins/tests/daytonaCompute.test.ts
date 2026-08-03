@@ -106,7 +106,7 @@ describe("Daytona compute example", () => {
         ).resolves.toEqual(Buffer.from("saved"));
         await provider.handlers.stop({ instanceId }, context);
 
-        expect(phases).toEqual(["checking_out_code", "copying_files_to_compute"]);
+        expect(phases).toEqual(["Creating Daytona sandbox", "Uploading source files"]);
         expect(requests[0]).toMatchObject({
             body: {
                 autoDeleteInterval: 0,

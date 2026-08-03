@@ -518,7 +518,18 @@ export type ComputePreparationPhase = HappyComputePreparationPhase;
 export interface ComputePreparationEvent {
     computeInstanceId: string;
     createdAt: number;
-    data: Pick<HappyComputePreparationEvent, "error" | "message" | "phase" | "provider" | "state">;
+    data: Pick<
+        HappyComputePreparationEvent,
+        | "elapsedMs"
+        | "error"
+        | "lastProgressAt"
+        | "message"
+        | "percent"
+        | "phase"
+        | "provider"
+        | "startedAt"
+        | "state"
+    >;
     id: EventId;
     type: "compute_preparation";
 }

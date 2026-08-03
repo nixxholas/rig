@@ -114,10 +114,6 @@ export function createDaytonaComputeProvider(
                         "DAYTONA_API_KEY is missing. Set it before starting a Daytona sandbox.",
                     );
                 }
-                await context.reportProgress({
-                    message: "Checking the source code for Daytona.",
-                    phase: "checking_out_code",
-                });
                 let source: string;
                 try {
                     source = await realpath(workspaceSource.path);
@@ -133,6 +129,10 @@ export function createDaytonaComputeProvider(
                         "The Daytona compute source must be a directory.",
                     );
                 }
+                await context.reportProgress({
+                    message: "Creating a Daytona sandbox.",
+                    phase: "Creating Daytona sandbox",
+                });
                 const response = await request(`${apiBaseUrl}/sandbox`, {
                     body: JSON.stringify({
                         autoDeleteInterval: 0,
@@ -154,8 +154,8 @@ export function createDaytonaComputeProvider(
                 instances.set(instance.id, instance);
                 try {
                     await context.reportProgress({
-                        message: "Copying files to the Daytona compute.",
-                        phase: "copying_files_to_compute",
+                        message: "Uploading source files to the Daytona sandbox.",
+                        phase: "Uploading source files",
                     });
                     await uploadSource(instance, source, request, context.signal, log);
                 } catch (error) {

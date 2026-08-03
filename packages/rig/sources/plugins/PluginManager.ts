@@ -532,7 +532,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
                         state.status === "running" ? this.#appRegistry.list(plugin.folderName) : [],
                     ...(compute === undefined
                         ? {}
-                        : { compute: { health: compute.health, name: compute.name } }),
+                        : {
+                              compute: {
+                                  health: compute.health,
+                                  name: compute.name,
+                                  provisioningTimeoutMs: compute.provisioningTimeoutMs,
+                              },
+                          }),
                     dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
                     description: plugin.manifest.description,
                     directory: plugin.directory,
@@ -1068,10 +1074,16 @@ export class PluginManager implements ManagedNetworkInterceptor {
             computeInstanceId: progress.instanceId,
             createdAt: progress.createdAt,
             data: {
+                ...(progress.elapsedMs === undefined ? {} : { elapsedMs: progress.elapsedMs }),
                 ...(progress.error === undefined ? {} : { error: progress.error }),
+                ...(progress.lastProgressAt === undefined
+                    ? {}
+                    : { lastProgressAt: progress.lastProgressAt }),
                 message: progress.message,
+                ...(progress.percent === undefined ? {} : { percent: progress.percent }),
                 phase: progress.phase,
                 provider: progress.provider,
+                ...(progress.startedAt === undefined ? {} : { startedAt: progress.startedAt }),
                 state: progress.state,
             },
             id: this.#createEventId(),

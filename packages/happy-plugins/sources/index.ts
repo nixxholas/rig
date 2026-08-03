@@ -3,9 +3,12 @@ export { createHappyPluginClient as connectHappy } from "./createHappyPluginClie
 export { HappyComputeProviderError } from "./HappyComputeProviderError.js";
 export {
     HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+    HAPPY_COMPUTE_DEFAULT_PROVISIONING_TIMEOUT_MS,
     HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
     HAPPY_COMPUTE_MAX_COMMAND_TIMEOUT_MS,
     HAPPY_COMPUTE_MAX_FILE_BYTES,
+    HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+    HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS,
 } from "./computeTypes.js";
 export type {
     CreateHappyComputeInput,
@@ -32,6 +35,7 @@ export type {
     HappyComputeStartHandlerContext,
     HappyComputeWorkspaceSource,
     ReadHappyComputeInput,
+    RegisterHappyComputeProviderInput,
     StartHappyComputeHandlerInput,
     StopHappyComputeInput,
     WriteHappyComputeInput,

@@ -42,7 +42,19 @@ export function normalizeHappyComputeError(error: HappyComputeError): HappyCompu
                 ...(error.state === undefined ? {} : { state: error.state }),
             };
         case "preparing_compute":
-            return error;
+            return {
+                code: error.code,
+                ...(error.elapsedMs === undefined ? {} : { elapsedMs: error.elapsedMs }),
+                ...(error.lastProgressAt === undefined
+                    ? {}
+                    : { lastProgressAt: error.lastProgressAt }),
+                message: error.message,
+                ...(error.percent === undefined ? {} : { percent: error.percent }),
+                ...(error.phase === undefined ? {} : { phase: error.phase }),
+                retryable: true,
+                ...(error.startedAt === undefined ? {} : { startedAt: error.startedAt }),
+                state: error.state,
+            };
         case "instance_failed":
         case "instance_not_found":
         case "invalid_request":

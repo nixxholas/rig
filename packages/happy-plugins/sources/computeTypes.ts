@@ -5,6 +5,9 @@ const nonEmptyText = Type.String({ minLength: 1 });
 const instanceIdSchema = Type.String({ maxLength: 128, minLength: 1 });
 
 export const HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+export const HAPPY_COMPUTE_DEFAULT_PROVISIONING_TIMEOUT_MS = 5 * 60_000;
+export const HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS = 30 * 60_000;
+export const HAPPY_COMPUTE_PROVISIONING_ACK_TIMEOUT_MS = 30_000;
 export const HAPPY_COMPUTE_MAX_COMMAND_TIMEOUT_MS = 5 * 60_000;
 export const HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 export const HAPPY_COMPUTE_MAX_FILE_BYTES = 1024 * 1024;
@@ -43,6 +46,10 @@ export const happyComputeProviderContributionSchema = Type.Object(
     {
         health: happyComputeProviderHealthSchema,
         name: happyComputeProviderNameSchema,
+        provisioningTimeoutMs: Type.Integer({
+            maximum: HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+            minimum: 1,
+        }),
     },
     exact,
 );
@@ -56,6 +63,10 @@ export const happyComputeProviderSchema = Type.Object(
         name: happyComputeProviderNameSchema,
         pluginFolder: Type.String({ maxLength: 255, minLength: 1 }),
         pluginName: nonEmptyText,
+        provisioningTimeoutMs: Type.Integer({
+            maximum: HAPPY_COMPUTE_MAX_PROVISIONING_TIMEOUT_MS,
+            minimum: 1,
+        }),
     },
     exact,
 );
@@ -346,6 +357,13 @@ const nonRetryableComputeErrorCodeSchema = Type.Union([
 const computeErrorState = {
     state: Type.Optional(happyComputeInstanceStateSchema),
 };
+const computePreparationDetails = {
+    elapsedMs: Type.Optional(Type.Integer({ minimum: 0 })),
+    lastProgressAt: Type.Optional(Type.Integer({ minimum: 0 })),
+    percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
+    phase: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+    startedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+};
 export const happyComputeErrorSchema = Type.Union([
     Type.Object(
         {
@@ -367,6 +385,7 @@ export const happyComputeErrorSchema = Type.Union([
     ),
     Type.Object(
         {
+            ...computePreparationDetails,
             code: Type.Literal("preparing_compute"),
             message: nonEmptyText,
             retryable: Type.Literal(true),
@@ -427,16 +446,18 @@ export const happyComputeCallCompletionSchema = Type.Union([
 ]);
 export type HappyComputeCallCompletion = Static<typeof happyComputeCallCompletionSchema>;
 
-export const happyComputeProvisioningPhaseSchema = Type.Union([
-    Type.Literal("checking_out_code"),
-    Type.Literal("copying_files_to_compute"),
-]);
+export const happyComputeProvisioningPhaseSchema = Type.String({
+    maxLength: 128,
+    minLength: 1,
+    pattern: "^(?!(?:preparing_compute|verifying_compute|ready|failed|stopped)$).+",
+});
 export type HappyComputeProvisioningPhase = Static<typeof happyComputeProvisioningPhaseSchema>;
 
 export const happyComputeProvisioningProgressSchema = Type.Object(
     {
         message: nonEmptyText,
         phase: happyComputeProvisioningPhaseSchema,
+        percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
     },
     exact,
 );
@@ -444,25 +465,24 @@ export type HappyComputeProvisioningProgress = Static<
     typeof happyComputeProvisioningProgressSchema
 >;
 
-export const happyComputePreparationPhaseSchema = Type.Union([
-    Type.Literal("preparing_compute"),
-    Type.Literal("checking_out_code"),
-    Type.Literal("copying_files_to_compute"),
-    Type.Literal("verifying_compute"),
-    Type.Literal("ready"),
-    Type.Literal("failed"),
-    Type.Literal("stopped"),
-]);
+export const happyComputePreparationPhaseSchema = Type.String({
+    maxLength: 128,
+    minLength: 1,
+});
 export type HappyComputePreparationPhase = Static<typeof happyComputePreparationPhaseSchema>;
 
 export const happyComputePreparationEventSchema = Type.Object(
     {
         createdAt: Type.Integer({ minimum: 0 }),
+        elapsedMs: Type.Optional(Type.Integer({ minimum: 0 })),
         error: Type.Optional(happyComputeErrorSchema),
         instanceId: instanceIdSchema,
+        lastProgressAt: Type.Optional(Type.Integer({ minimum: 0 })),
         message: nonEmptyText,
+        percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
         phase: happyComputePreparationPhaseSchema,
         provider: happyComputeProviderNameSchema,
+        startedAt: Type.Optional(Type.Integer({ minimum: 0 })),
         state: Type.Union([
             Type.Literal("provisioning"),
             Type.Literal("ready"),
@@ -476,6 +496,16 @@ export const happyComputePreparationEventSchema = Type.Object(
 );
 export type HappyComputePreparationEvent = Static<typeof happyComputePreparationEventSchema>;
 
+export const registerHappyComputeProviderInputSchema = Type.Object(
+    {
+        provisioningTimeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+    },
+    exact,
+);
+export type RegisterHappyComputeProviderInput = Static<
+    typeof registerHappyComputeProviderInputSchema
+>;
+
 export const registerHappyComputeProviderResponseSchema = Type.Object(
     { registrationId: nonEmptyText },
     exact,
@@ -487,6 +517,8 @@ export interface HappyComputeHandlerContext {
 }
 
 export interface HappyComputeStartHandlerContext extends HappyComputeHandlerContext {
+    /** Aborted when the overall provisioning budget expires or the provider generation retires. */
+    readonly signal: AbortSignal;
     /** Publishes human-readable materialization progress through Rig's compute event stream. */
     reportProgress(progress: HappyComputeProvisioningProgress): Promise<void>;
 }

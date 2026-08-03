@@ -50,6 +50,7 @@ import {
     PluginApiRequestError,
     PluginApiRequestTooLargeError,
     readHappyComputeBodySchema,
+    registerHappyComputeProviderInputSchema,
     readPluginWorkspaceFile,
     writeHappyComputeBodySchema,
     writePluginWorkspaceFile,
@@ -130,8 +131,21 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
                               });
                     sendJson(response, happyComputeErrorStatus(computeError.code), {
                         code: computeError.code,
+                        ...(computeError.elapsedMs === undefined
+                            ? {}
+                            : { elapsedMs: computeError.elapsedMs }),
+                        ...(computeError.lastProgressAt === undefined
+                            ? {}
+                            : { lastProgressAt: computeError.lastProgressAt }),
                         message: computeError.message,
+                        ...(computeError.percent === undefined
+                            ? {}
+                            : { percent: computeError.percent }),
+                        ...(computeError.phase === undefined ? {} : { phase: computeError.phase }),
                         retryable: computeError.retryable,
+                        ...(computeError.startedAt === undefined
+                            ? {}
+                            : { startedAt: computeError.startedAt }),
                         ...(computeError.state === undefined ? {} : { state: computeError.state }),
                     });
                     return;
@@ -249,11 +263,17 @@ async function handleRequest(
             response.write(
                 `${JSON.stringify({
                     createdAt: event.createdAt,
+                    ...(event.elapsedMs === undefined ? {} : { elapsedMs: event.elapsedMs }),
                     ...(event.error === undefined ? {} : { error: event.error }),
                     instanceId: event.instanceId,
+                    ...(event.lastProgressAt === undefined
+                        ? {}
+                        : { lastProgressAt: event.lastProgressAt }),
                     message: event.message,
+                    ...(event.percent === undefined ? {} : { percent: event.percent }),
                     phase: event.phase,
                     provider: event.provider,
+                    ...(event.startedAt === undefined ? {} : { startedAt: event.startedAt }),
                     state: event.state,
                     type: "compute_preparation",
                 })}\n`,
@@ -371,8 +391,13 @@ async function handleRequest(
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     if (request.method === "POST" && url.pathname === "/compute/providers") {
         assertStartupContribution(options, "Compute provider registration");
+        const body = await readJson(
+            request,
+            registerHappyComputeProviderInputSchema,
+            "Compute provider registration",
+        );
         sendJson(response, 201, {
-            registrationId: requireCompute(options).register(),
+            registrationId: requireCompute(options).register(body),
         });
         return;
     }
@@ -412,6 +437,20 @@ async function handleRequest(
         });
         response.flushHeaders();
         response.once("close", detach);
+        return;
+    }
+    if (
+        parts.length === 6 &&
+        parts[0] === "compute" &&
+        parts[1] === "providers" &&
+        parts[2] !== undefined &&
+        parts[3] === "calls" &&
+        parts[4] !== undefined &&
+        parts[5] === "acknowledge" &&
+        request.method === "POST"
+    ) {
+        requireCompute(options).acknowledge(parts[2], parts[4]);
+        sendJson(response, 200, {});
         return;
     }
     if (

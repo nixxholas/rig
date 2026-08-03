@@ -10,6 +10,7 @@ import {
     execHappyComputeInputSchema,
     execHappyComputeResponseSchema,
     happyComputeErrorSchema,
+    type HappyComputeError,
     type HappyComputeErrorCode,
     type HappyComputeInstanceState,
     happyComputeExecResultSchema,
@@ -80,7 +81,12 @@ const requiredSettingSchema = Type.String({ minLength: 1, pattern: "\\S" });
 /** An HTTP error returned by the owning Happy daemon for an otherwise valid SDK request. */
 export class HappyPluginApiError extends Error {
     readonly code: HappyComputeErrorCode | (string & {}) | undefined;
+    readonly elapsedMs: number | undefined;
+    readonly lastProgressAt: number | undefined;
+    readonly percent: number | undefined;
+    readonly phase: string | undefined;
     readonly retryable: boolean;
+    readonly startedAt: number | undefined;
     readonly state: HappyComputeInstanceState | undefined;
     readonly status: number;
 
@@ -90,11 +96,17 @@ export class HappyPluginApiError extends Error {
         code?: HappyComputeErrorCode | (string & {}),
         retryable = false,
         state?: HappyComputeInstanceState,
+        preparation?: Extract<HappyComputeError, { code: "preparing_compute" }>,
     ) {
         super(message);
         this.name = "HappyPluginApiError";
         this.code = code;
+        this.elapsedMs = preparation?.elapsedMs;
+        this.lastProgressAt = preparation?.lastProgressAt;
+        this.percent = preparation?.percent;
+        this.phase = preparation?.phase;
         this.retryable = retryable;
+        this.startedAt = preparation?.startedAt;
         this.state = state;
         this.status = status;
     }
@@ -232,7 +244,8 @@ export function createHappyPluginClient(
                         listHappyComputeProvidersResponseSchema,
                     )
                 ).providers,
-            register: (handlers) => startHappyComputeProvider(handlers, streamTransport),
+            register: (handlers, registrationOptions) =>
+                startHappyComputeProvider(handlers, streamTransport, registrationOptions),
             stop: async (input) => {
                 Value.Assert(stopHappyComputeInputSchema, input);
                 await request(
@@ -520,6 +533,7 @@ function requestJson<TSchema_ extends TSchema>(options: {
                                         payload.code,
                                         payload.retryable,
                                         payload.state,
+                                        payload.code === "preparing_compute" ? payload : undefined,
                                     ),
                                 );
                                 return;
