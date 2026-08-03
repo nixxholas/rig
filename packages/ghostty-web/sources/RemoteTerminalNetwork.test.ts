@@ -12,6 +12,7 @@ import { RemoteTerminalProtocolClient } from "./RemoteTerminalProtocolClient.js"
 import { ThrottledTcpProxy } from "./testing/ThrottledTcpProxy.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
+const networkConditionTimeoutMs = 10_000;
 
 afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -80,9 +81,13 @@ describe("remote terminal client/server over a constrained network", () => {
             const started = performance.now();
             inputReceivedAt = 0;
             client.writeInput(character);
-            await vi.waitFor(() => expect(inputReceivedAt).toBeGreaterThan(0));
+            await vi.waitFor(() => expect(inputReceivedAt).toBeGreaterThan(0), {
+                timeout: networkConditionTimeoutMs,
+            });
             inputToPtySamples.push(inputReceivedAt - started);
-            await vi.waitFor(() => expect(client.appliedOutputOffset).toBe(outputBefore + 1));
+            await vi.waitFor(() => expect(client.appliedOutputOffset).toBe(outputBefore + 1), {
+                timeout: networkConditionTimeoutMs,
+            });
             inputToRenderSamples.push(performance.now() - started);
             ttfbSamples.push(inputToRenderSamples.at(-1)! - renderReadyTimes.at(-1)!);
         }
@@ -97,8 +102,12 @@ describe("remote terminal client/server over a constrained network", () => {
             densePayloadBytes += dense.length;
             const started = performance.now();
             await driver.publishOutput(dense);
-            await vi.waitFor(() =>
-                expect(client.appliedOutputOffset).toBeGreaterThanOrEqual(5 + densePayloadBytes),
+            await vi.waitFor(
+                () =>
+                    expect(client.appliedOutputOffset).toBeGreaterThanOrEqual(
+                        5 + densePayloadBytes,
+                    ),
+                { timeout: networkConditionTimeoutMs },
             );
             denseReadySamples.push(performance.now() - started);
             const [serverScreen, clientScreen] = await Promise.all([
