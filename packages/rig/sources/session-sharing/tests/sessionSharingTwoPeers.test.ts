@@ -294,9 +294,9 @@ describe("session sharing between two peers over the real Murmur transport", () 
         const shareId = created.share.shareId;
 
         // The friend receives the invitation, joins, and catches up the owner's two entries.
+        // Nothing here re-announces the owner's runtime or wakes the share: joining has to
+        // backfill history on its own, or a member never sees a transcript that predates it.
         await pumpUntil([ownerMurmur, friendMurmur], () => {
-            ownerMurmur.announceRuntime();
-            ownerRuntime.wake(ownerSessionId);
             const history = friendRuntime.contract.replicaHistory(shareId);
             return history !== undefined && history.entries.length >= 2;
         });
@@ -346,7 +346,107 @@ describe("session sharing between two peers over the real Murmur transport", () 
             .replicas.find((candidate) => candidate.grant.shareId === shareId);
         expect(ended?.state).toBe("ended");
     }, 30_000);
+
+    it("catches a late member up with the transcript that already exists", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const owner = await createPeer(relay);
+        const early = await createPeer(relay);
+        const late = await createPeer(relay);
+
+        const ownerProfile: MurmurProfile = { firstName: "Dana", lastName: "Owner" };
+        const earlyProfile: MurmurProfile = { firstName: "Robin", lastName: "First" };
+        const lateProfile: MurmurProfile = { firstName: "Sam", lastName: "Later" };
+
+        const ownerMurmur = new FakeMurmurService(owner, ownerProfile, () => [
+            friendship(early, earlyProfile),
+            friendship(late, lateProfile),
+        ]);
+        const earlyMurmur = new FakeMurmurService(early, earlyProfile, () => [
+            friendship(owner, ownerProfile),
+        ]);
+        const lateMurmur = new FakeMurmurService(late, lateProfile, () => [
+            friendship(owner, ownerProfile),
+        ]);
+
+        const ownerHost = createHost(ownerMurmur);
+        createHost(earlyMurmur);
+        const lateHost = createHost(lateMurmur);
+
+        const ownerSessionId = ownerHost.store.create({ cwd: "/tmp/late-member-owner" }).id;
+        for (const [position, text] of ["First finding.", "Second finding."].entries()) {
+            ownerHost.store.upsertMessage(ownerSessionId, {
+                isPartial: false,
+                message: {
+                    blocks: [{ text, type: "text" }],
+                    id: `entry-${position}`,
+                    role: "user",
+                },
+                position,
+            });
+        }
+
+        await pumpUntil([ownerMurmur, earlyMurmur, lateMurmur], async () => {
+            try {
+                const created = await ownerHost.runtime.contract.create(ownerSessionId, {
+                    friends: [{ displayName: "Robin", peerId: early.peerId }],
+                    includeFriendMessagesInModel: true,
+                    mutationId: "mutation-create-late",
+                });
+                return created.share.state === "active";
+            } catch {
+                return false;
+            }
+        });
+        const shareId = ownerHost.runtime.contract.getOwner(ownerSessionId)!.share.shareId;
+        const published = ownerHost.store.sessionShares.queryEntryPage(shareId, {
+            afterSequence: 0,
+            maxBytes: 1 << 20,
+            maxItems: 100,
+        });
+        expect(published.entries.length).toBeGreaterThanOrEqual(2);
+
+        // The late friend is invited only now, after the whole transcript is already
+        // committed to the group. Everything it must ever see is history.
+        await pumpUntil([ownerMurmur, lateMurmur], async () => {
+            try {
+                await ownerHost.runtime.contract.add(ownerSessionId, {
+                    friend: { displayName: "Sam", peerId: late.peerId },
+                    mutationId: "mutation-add-late",
+                });
+                return true;
+            } catch {
+                return false;
+            }
+        });
+
+        await pumpUntil([ownerMurmur, lateMurmur], () => {
+            const history = lateHost.runtime.contract.replicaHistory(shareId);
+            return history !== undefined && history.entries.length >= published.entries.length;
+        });
+
+        const history = lateHost.runtime.contract.replicaHistory(shareId)!;
+        expect(history.entries.map((entry) => entry.canonicalJson)).toEqual(
+            published.entries.map((entry) => entry.canonicalJson),
+        );
+    }, 30_000);
 });
+
+/** One Rig daemon's worth of session-sharing state for a peer. */
+function createHost(murmur: FakeMurmurService): {
+    runtime: ReturnType<typeof createSessionShareRuntime>;
+    store: PersistentSessionStore;
+} {
+    const store = new PersistentSessionStore({ databasePath: ":memory:" });
+    const runtime = createSessionShareRuntime({
+        daemonStore: store.sessionShareDaemonStore,
+        deliverFriendMessage: () => {},
+        murmur,
+        shareStore: store.sessionShares,
+    });
+    cleanups.push(() => store.close());
+    cleanups.push(() => void runtime.close());
+    return { runtime, store };
+}
 
 /**
  * Pump both peers, optionally driving a side effect each round, until the

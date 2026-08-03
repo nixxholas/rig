@@ -2,6 +2,7 @@ import type { UserMessage } from "../agent/types.js";
 import type { MurmurServiceContract } from "../murmur/types.js";
 import type { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
 import type { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
+import type { SessionShareReplicaRecord } from "../persistence/session-sharing/types.js";
 import type { SessionEvent } from "../protocol/index.js";
 import { MurmurShareDirectory, type ReceivedShareInvitation } from "./MurmurShareDirectory.js";
 import { MurmurSessionShareTransport } from "./MurmurSessionShareTransport.js";
@@ -98,27 +99,45 @@ export function createSessionShareRuntime(
         const localPeerId = (await options.murmur.getAccount()).account?.id;
         if (localPeerId === undefined) return;
         const existing = options.daemonStore.queryReplica(invitation.shareId);
+        // A member never learns the owner's member IDs, so its grant is local
+        // bookkeeping: a re-invitation after a revocation opens the next epoch.
+        const grant = {
+            grantEpoch: existing === undefined ? 1 : existing.grantEpoch + 1,
+            murmurPeerId: localPeerId,
+            shareId: invitation.shareId,
+            shareMemberId: invitation.shareId,
+        };
         try {
             await service.joinReplica({
-                grant: {
-                    // A member never learns the owner's member IDs, so its grant is local
-                    // bookkeeping: a re-invitation after a revocation opens the next epoch.
-                    grantEpoch: existing === undefined ? 1 : existing.grantEpoch + 1,
-                    murmurPeerId: localPeerId,
-                    shareId: invitation.shareId,
-                    shareMemberId: invitation.shareId,
-                },
+                grant,
                 memberCount: existing?.memberCount ?? 0,
                 ownerPeerId: invitation.ownerPeerId,
                 state: "active",
                 title: existing?.title ?? "",
             });
         } catch {
-            // A share whose invitation cannot be joined yet stays stored; the next
-            // service start replays it from the directory's pending invitations.
+            // The invitation's one-use key package is spent either way, so it is retired
+            // rather than replayed on every start against a bundle that is already gone.
+            await directory.retireInvitation(invitation);
             return;
         }
+        await directory.retireInvitation(invitation);
         await backfillReplica(transport, invitation.shareId);
+    };
+
+    /** Resume a replica this daemon already joined in an earlier run. */
+    const resumeReplica = async (replica: SessionShareReplicaRecord): Promise<void> => {
+        const grant = {
+            grantEpoch: replica.grantEpoch,
+            murmurPeerId: replica.murmurPeerId,
+            shareId: replica.shareId,
+            shareMemberId: replica.shareMemberId,
+        };
+        // Murmur holds the durable replica; without reloading it the daemon has no
+        // member session at all, so nothing replicates and nothing can be retried.
+        if ((await transport.loadMember(grant)) === undefined) return;
+        service.observeReplica(grant);
+        await backfillReplica(transport, replica.shareId);
     };
 
     const unregisterRouter = options.murmur.registerEventRouter(async (received) => {
@@ -138,8 +157,8 @@ export function createSessionShareRuntime(
             daemonStore: options.daemonStore,
             directory,
             joinReplica,
+            resumeReplica,
             service,
-            transport,
         });
     };
     const unobserveRuntime = options.murmur.onRuntimeChanged((runtime) => {
@@ -193,10 +212,19 @@ async function startForRuntime(context: {
     daemonStore: PersistentSessionShareDaemonStore;
     directory: MurmurShareDirectory;
     joinReplica: (invitation: ReceivedShareInvitation) => Promise<void>;
+    resumeReplica: (replica: SessionShareReplicaRecord) => Promise<void>;
     service: SessionShareService;
-    transport: MurmurSessionShareTransport;
 }): Promise<void> {
     await recoverShares(context.service);
+    for (const replica of context.daemonStore.queryReplicas()) {
+        if (replica.state !== "active") continue;
+        try {
+            await context.resumeReplica(replica);
+        } catch {
+            // A replica that cannot resume yet keeps its durable rows and tries again on
+            // the next start rather than failing every other share behind it.
+        }
+    }
     try {
         await context.directory.publishKeyPackageOffers();
         for (const invitation of await context.directory.pendingInvitations()) {
@@ -205,9 +233,6 @@ async function startForRuntime(context: {
     } catch {
         // Nothing here is load-bearing for daemon startup: a missed offer is re-requested
         // by the owner that needs it, and a missed invitation replays on the next start.
-    }
-    for (const replica of context.daemonStore.queryReplicas()) {
-        if (replica.state === "active") await backfillReplica(context.transport, replica.shareId);
     }
 }
 

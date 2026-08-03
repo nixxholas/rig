@@ -399,6 +399,21 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
         return invitations;
     }
 
+    /**
+     * Forget one invitation once it has been acted on.
+     *
+     * Its key package is one-use and already consumed, so a retained invitation
+     * could only be replayed against a bundle that no longer exists — every
+     * later start would retry a join that can never succeed.
+     */
+    async retireInvitation(invitation: ReceivedShareInvitation): Promise<void> {
+        const runtime = this.#runtime();
+        if (runtime === undefined) return;
+        await runtime.store.transaction(async (transaction) => {
+            await transaction.delete(invitationKey(invitation.ownerPeerId, invitation.shareId));
+        });
+    }
+
     async #applyEffect(effect: DirectoryEffect): Promise<void> {
         if (effect.type === "offered") {
             for (const listener of this.#keyPackageListeners) listener(effect.murmurPeerId);

@@ -71,8 +71,8 @@ export interface MurmurSessionShareTransportOptions {
 /** What happened to one received event, and therefore who owns its relay cursor. */
 export type SessionShareEventOutcome = "applied" | "retained" | "unowned";
 
-/** Bounded history pages one retry pass will commit before yielding. */
-const MAX_HISTORY_RETRY_PAGES = 256;
+/** Bounded retry passes one catch-up will make before yielding to the next wake. */
+const MAX_HISTORY_RETRY_PASSES = 512;
 
 type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<void>;
 type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
@@ -87,6 +87,8 @@ interface MemberSession {
     readonly grant: SessionShareTransportGrant;
     readonly session: SharedSessionMember;
     state: SharedSessionState | undefined;
+    /** Murmur ended this replica and retired its cursors; it only absorbs events now. */
+    terminated: boolean;
 }
 
 function grantKey(grant: SessionShareTransportGrant): string {
@@ -142,6 +144,20 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         if (this.#owners.has(owner.shareId)) return;
         const loaded = await this.#loadOwnerSession(owner.shareId);
         if (loaded !== undefined) return;
+        // Creating a share Rig already has a transcript for means Murmur lost the durable
+        // owner state this share was built on. Starting a fresh group at sequence zero
+        // would make every replayed entry look like a duplicate and silently publish
+        // nothing, so the share degrades visibly instead.
+        const existing = await this.#entrySource(owner.shareId).readPage({
+            afterSequence: 0,
+            maximumBytes: 1024,
+            maximumEntries: 1,
+        });
+        if (existing.entries.length > 0) {
+            throw new Error(
+                "This shared session has a transcript but no Murmur state to resume it, so it cannot be republished.",
+            );
+        }
         const session = await SharedSessionOwner.create(owner.shareId, {
             callbacks: this.#ownerCallbacks(owner.shareId),
             client: runtime.client,
@@ -179,11 +195,11 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                     timestamp: entry.createdAt,
                 });
             } catch (error: unknown) {
-                // Rig only records an entry after Murmur has durably committed it, so
-                // Murmur is never behind Rig's outbox. A gap here therefore means this
-                // sequence is already committed — a crash between Murmur's append and
-                // Rig's acknowledgement — and skipping it is the idempotent answer.
-                // Anything else is a real failure that must degrade the share.
+                // Rig only acknowledges an outbox page after Murmur has durably committed
+                // it, so recovery re-sends a prefix Murmur already has and a gap here is
+                // that duplicate. The one way Murmur could be genuinely behind is losing
+                // its own store, which `createOwner` refuses outright, so skipping is the
+                // idempotent answer rather than a silent drop.
                 if (!isSequenceGap(error)) throw error;
             }
             owner.lastAppendedSequence = entry.shareSequence;
@@ -244,7 +260,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
 
     async joinMember(grant: SessionShareTransportGrant): Promise<void> {
         const key = grantKey(grant);
-        if (this.#members.has(key)) return;
+        if (this.#members.get(key)?.terminated === false) return;
         const runtime = this.#requireRuntime();
         const accepted = await this.#directory.acceptedInvitation(grant.shareId);
         if (accepted === undefined) {
@@ -259,7 +275,8 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
             keyPackageBundle: accepted.bundle,
             store: runtime.store,
         });
-        this.#members.set(key, { grant, session, state: session.state });
+        this.#evictTombstones(grant.shareId, key);
+        this.#members.set(key, { grant, session, state: session.state, terminated: false });
     }
 
     async loadMember(
@@ -267,7 +284,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
     ): Promise<SessionShareTransportGrant | undefined> {
         const key = grantKey(grant);
         const existing = this.#members.get(key);
-        if (existing !== undefined) return existing.grant;
+        if (existing !== undefined && !existing.terminated) return existing.grant;
         const runtime = this.#runtime();
         if (runtime === undefined) return undefined;
         let session: SharedSessionMember;
@@ -281,13 +298,13 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         } catch {
             return undefined;
         }
-        this.#members.set(key, { grant, session, state: session.state });
+        this.#members.set(key, { grant, session, state: session.state, terminated: false });
         return grant;
     }
 
     async postMember(post: SessionShareTransportMemberPost): Promise<void> {
         const member = this.#members.get(grantKey(post.grant));
-        if (member === undefined) {
+        if (member === undefined || member.terminated) {
             throw new Error("This shared session has no active membership to post into.");
         }
         await member.session.post(post.clientMessageId, post.text);
@@ -308,18 +325,25 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
         const sessions = [
             ...(owner === undefined ? [] : [owner.session]),
+            // A terminated replica is kept only to absorb trailing events; Murmur has
+            // deleted its protocol rows, so retrying it would fail on history it no
+            // longer has.
             ...[...this.#members.values()]
-                .filter((member) => member.grant.shareId === shareId)
+                .filter((member) => member.grant.shareId === shareId && !member.terminated)
                 .map((member) => member.session),
         ];
         const reports = [];
         for (const session of sessions) {
-            // Murmur commits one history page per retry, so a member catching up on a
-            // share that already had a transcript needs as many passes as it has pages.
-            for (let page = 0; page < MAX_HISTORY_RETRY_PAGES; page += 1) {
+            // Murmur commits at most one history page per retry, and a pass that only
+            // discovers the next offer reports zero pages while still having made
+            // progress. So a single zero is not "done" — only two in a row are, and a
+            // member catching up needs one pass per page until then.
+            let idle = 0;
+            for (let pass = 0; pass < MAX_HISTORY_RETRY_PASSES && idle < 2; pass += 1) {
                 const report = await session.retry();
                 reports.push(report);
-                if (report.historyPages === 0 || report.failures.length > 0) break;
+                if (report.failures.length > 0) break;
+                idle = report.historyPages === 0 && report.published === 0 ? idle + 1 : 0;
             }
         }
         const failures = reports.flatMap((report) => report.failures);
@@ -442,6 +466,22 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         this.#grants.get(grant.shareId)?.delete(grant.murmurPeerId);
     }
 
+    /**
+     * Drop the tombstones a fresh membership makes obsolete.
+     *
+     * A tombstone exists only to absorb events still in flight for a replica Murmur
+     * terminated. Once this peer holds a live membership in the same share again, the
+     * new session owns that topic, so the old markers are dead weight rather than a
+     * per-epoch leak for the life of the daemon.
+     */
+    #evictTombstones(shareId: string, keep: string): void {
+        for (const [key, member] of this.#members) {
+            if (key !== keep && member.grant.shareId === shareId && member.terminated) {
+                this.#members.delete(key);
+            }
+        }
+    }
+
     #ownerCallbacks(shareId: string): SharedSessionCallbacks {
         return {
             persistEntry: async () => {
@@ -456,6 +496,10 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
             },
             terminate: async (_transaction, termination) => {
                 this.#grants.delete(shareId);
+                // Murmur has deleted this group's rows, so the cached owner session can no
+                // longer append or retry. Dropping it makes the next attempt fail loudly
+                // through `#requireOwner` instead of writing into a session that is gone.
+                this.#owners.delete(shareId);
                 await this.#emitOwner(shareId, {
                     error: terminationMessage(termination),
                     recoverable: false,
@@ -489,6 +533,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 // this topic's cursors when it terminated, so a trailing event from the
                 // same batch must be absorbed here; letting it fall through to the
                 // default path would try to advance a cursor that no longer exists.
+                if (member !== undefined) member.terminated = true;
                 await this.#emitMember(grant, {
                     grant,
                     reason: stopped ? "stopped" : "revoked",

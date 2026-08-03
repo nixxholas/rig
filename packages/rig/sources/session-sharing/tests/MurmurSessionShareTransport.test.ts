@@ -136,10 +136,9 @@ describe("the Murmur session-share transport", () => {
         const owner = createPeer(relay);
         const friend = createPeer(relay);
         const shareId = "share-alpha";
-        const appended: SessionShareOpaqueEntry[] = [
-            entry(shareId, 1, "Looking at the failing test."),
-            entry(shareId, 2, "Found the cause."),
-        ];
+        // Filled after the owner exists, the way the real service does it: a share is
+        // created first and its transcript only reaches the log once published.
+        const appended: SessionShareOpaqueEntry[] = [];
         const invitations: SharedSessionInvitation[] = [];
         const friendBundle: MlsKeyPackageBundle = createMlsKeyPackage(friend.identity);
 
@@ -198,6 +197,10 @@ describe("the Murmur session-share transport", () => {
         });
 
         await ownerTransport.createOwner({ ownerPeerId: owner.peerId, shareId });
+        appended.push(
+            entry(shareId, 1, "Looking at the failing test."),
+            entry(shareId, 2, "Found the cause."),
+        );
         await ownerTransport.appendOwnerEntries(shareId, appended);
         await ownerTransport.inviteMany([grant]);
 

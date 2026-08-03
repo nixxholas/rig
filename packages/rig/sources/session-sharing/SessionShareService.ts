@@ -318,6 +318,18 @@ export class SessionShareService {
         await this.#transport.joinMember(replica.grant);
     }
 
+    // A replica restored on daemon start is already durable and its Murmur session is
+    // reloaded by the transport, so resuming only needs the event subscription back.
+    observeReplica(grant: SessionShareTransportGrant): void {
+        this.#assertOpen();
+        const key = grantKey(grant);
+        this.#memberSubscriptions.get(key)?.();
+        this.#memberSubscriptions.set(
+            key,
+            this.#transport.handleMemberEvents(grant, (event) => this.#handleMemberEvent(event)),
+        );
+    }
+
     async post(post: SessionShareTransportMemberPost): Promise<void> {
         this.#assertOpen();
         await this.#transport.postMember(post);
