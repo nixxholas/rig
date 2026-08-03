@@ -4,6 +4,7 @@ import type { ProjectAvatarSource } from "../../protocol/index.js";
 import { projectAvatarAssets, projects } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export interface ProjectSetAvatarInput {
     asset: {
@@ -27,15 +28,11 @@ export function projectSetAvatar(
             .select({
                 avatarHash: projects.avatarHash,
                 avatarSource: projects.avatarSource,
-                version: projects.version,
             })
             .from(projects)
             .where(eq(projects.id, input.projectId))
             .get();
         if (latest === undefined) return "missing";
-        if (input.expectedVersion !== undefined && latest.version !== input.expectedVersion) {
-            throw new Error("The project changed before the avatar could be saved.");
-        }
         if (input.source !== "user" && latest.avatarSource === "user") return "preserved";
 
         tx.insert(projectAvatarAssets)
@@ -53,15 +50,27 @@ export function projectSetAvatar(
                 target: projectAvatarAssets.hash,
             })
             .run();
-        tx.update(projects)
+        const changed = tx
+            .update(projects)
             .set({
                 avatarHash: input.asset.hash,
                 avatarSource: input.source,
                 updatedAtMs: input.now,
+                ...(input.source === "user"
+                    ? { userMutationVersion: sql`${projects.version} + 1` }
+                    : {}),
                 version: sql`${projects.version} + 1`,
             })
-            .where(and(eq(projects.id, input.projectId), eq(projects.version, latest.version)))
-            .run();
+            .where(
+                and(
+                    eq(projects.id, input.projectId),
+                    projectNotUserMutatedSince(input.expectedVersion),
+                ),
+            )
+            .run().changes;
+        if (changed === 0) {
+            throw new Error("The project changed before the avatar could be saved.");
+        }
         if (latest.avatarHash !== null && latest.avatarHash !== input.asset.hash) {
             dereferenceIfUnused(tx, latest.avatarHash, input.now);
         }

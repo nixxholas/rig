@@ -134,6 +134,101 @@ describe("projects", () => {
         });
     });
 
+    it("keeps stale settings saves as conflicts after user project mutations", async () => {
+        const fixture = await createFixture();
+        const session = fixture.store.create({ cwd: fixture.home });
+        const project = fixture.store.getProject(session.snapshot().projectId)!;
+        const renamed = fixture.store.renameProject(
+            project.id,
+            "Renamed project",
+            project.version,
+        )!;
+
+        expect(() =>
+            fixture.store.setProjectSettings(
+                project.id,
+                { defaultWorkspaceCompute: { type: "local" } },
+                project.version,
+            ),
+        ).toThrow("changed before its settings could be saved");
+
+        const configured = fixture.store.setProjectSettings(
+            project.id,
+            { defaultWorkspaceCompute: { type: "local" } },
+            renamed.version,
+        )!;
+        expect(() =>
+            fixture.store.setProjectSettings(
+                project.id,
+                {
+                    defaultWorkspaceCompute: {
+                        image: "workspace-dev:latest",
+                        type: "docker",
+                    },
+                },
+                renamed.version,
+            ),
+        ).toThrow("changed before its settings could be saved");
+        expect(fixture.store.getProject(project.id)).toMatchObject({
+            settings: { defaultWorkspaceCompute: { generation: 1, type: "local" } },
+            version: configured.version,
+        });
+    });
+
+    it("rejects impossible future versions for settings and archive", async () => {
+        const fixture = await createFixture();
+        const directory = join(fixture.root, "future-version");
+        await mkdir(directory);
+        const projectId = fixture.store.create({ cwd: directory }).snapshot().projectId;
+        const project = fixture.store.getProject(projectId)!;
+        const futureVersion = project.version + 1_000_000;
+
+        expect(() =>
+            fixture.store.setProjectSettings(
+                projectId,
+                { defaultWorkspaceCompute: { type: "local" } },
+                futureVersion,
+            ),
+        ).toThrow("The project changed before its settings could be saved.");
+        await expect(fixture.store.archiveProject(projectId, futureVersion)).rejects.toThrow(
+            "The project changed before it could be archived.",
+        );
+    });
+
+    it("renames after enrichment but rejects a concurrent user mutation", async () => {
+        const fixture = await createFixture();
+        const session = fixture.store.create({ cwd: fixture.home });
+        const project = fixture.store.getProject(session.snapshot().projectId)!;
+
+        fixture.store.applyGitFacts(
+            { projectId: project.id },
+            {
+                ahead: 0,
+                behind: 0,
+                branch: "main",
+                detached: false,
+                head: "a".repeat(40),
+            },
+        );
+        expect(fixture.store.getProject(project.id)?.version).toBe(project.version + 1);
+
+        const renamed = fixture.store.renameProject(
+            project.id,
+            "Renamed after enrichment",
+            project.version,
+        )!;
+        expect(renamed.name).toBe("Renamed after enrichment");
+
+        fixture.store.setProjectSettings(
+            project.id,
+            { defaultWorkspaceCompute: { type: "local" } },
+            renamed.version,
+        );
+        expect(() =>
+            fixture.store.renameProject(project.id, "Overlapping rename", renamed.version),
+        ).toThrow("The project changed before it could be renamed.");
+    });
+
     it("enriches a Git top-level project from its upstream and repository logo", async () => {
         const fixture = await createFixture();
         const repository = join(fixture.root, "local-folder");
@@ -1255,8 +1350,10 @@ describe("projects", () => {
         await mkdir(directory);
         const session = fixture.store.create({ cwd: directory });
         const projectId = session.snapshot().projectId;
+        const staleVersion = fixture.store.getProject(projectId)!.version;
+        fixture.store.renameProject(projectId, "Renamed folder", staleVersion);
 
-        await expect(fixture.store.archiveProject(projectId, 999)).rejects.toThrow(
+        await expect(fixture.store.archiveProject(projectId, staleVersion)).rejects.toThrow(
             /changed before it could be archived/,
         );
 

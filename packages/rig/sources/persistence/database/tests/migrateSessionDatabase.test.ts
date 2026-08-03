@@ -12,6 +12,7 @@ import {
 } from "../migrateSessionDatabase.js";
 import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
 import { projectComputeGeneration } from "../migrations/12-project-compute-generation.js";
+import { projectUserMutationVersion } from "../migrations/16-project-user-mutation-version.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import * as schema from "../schema.js";
 
@@ -66,7 +67,11 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("PRAGMA user_version = 9"));
         opened.database.run(sql.raw("CREATE TABLE unrelated_data (value TEXT NOT NULL)"));
         opened.database.run(sql.raw("INSERT INTO unrelated_data (value) VALUES ('keep me')"));
-        opened.database.run(sql.raw("CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY)"));
+        opened.database.run(
+            sql.raw(
+                "CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1)",
+            ),
+        );
         opened.database.run(
             sql.raw(`
                 CREATE TABLE slot_entries (
@@ -303,6 +308,37 @@ describe("migrateSessionDatabase", () => {
             { default_compute_generation: 1, id: "docker" },
             { default_compute_generation: 1, id: "local" },
             { default_compute_generation: 0, id: "unset" },
+        ]);
+        opened.client.close();
+    });
+
+    it("starts existing project user mutation versions at their current versions", () => {
+        const opened = openTestDatabase();
+        opened.database.run(
+            sql.raw(`
+                CREATE TABLE projects (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    version INTEGER NOT NULL
+                )
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO projects (id, version)
+                VALUES ('first', 4), ('second', 9)
+            `),
+        );
+
+        projectUserMutationVersion(opened.database);
+
+        expect(
+            opened.database.all<{
+                id: string;
+                user_mutation_version: number;
+            }>(sql.raw("SELECT id, user_mutation_version FROM projects ORDER BY id")),
+        ).toEqual([
+            { id: "first", user_mutation_version: 4 },
+            { id: "second", user_mutation_version: 9 },
         ]);
         opened.client.close();
     });

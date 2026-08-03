@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { projects } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
-import { projectVersion } from "./projectConditions.js";
+import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export function projectReorder(
     tx: TX,
@@ -16,9 +16,10 @@ export function projectReorder(
             .set({
                 orderKey,
                 updatedAtMs: now,
+                userMutationVersion: sql`${projects.version} + 1`,
                 version: sql`${projects.version} + 1`,
             })
-            .where(and(eq(projects.id, id), projectVersion(version)))
+            .where(and(eq(projects.id, id), projectNotUserMutatedSince(version)))
             .run().changes,
     );
 }

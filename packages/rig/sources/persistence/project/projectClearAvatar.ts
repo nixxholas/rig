@@ -20,6 +20,7 @@ export function projectClearAvatar(tx: TX, projectId: string, now: number): numb
                 initializationError: sql`CASE WHEN ${projects.kind} = 'regular' THEN NULL ELSE ${projects.initializationError} END`,
                 initializationStatus: sql`CASE WHEN ${projects.kind} = 'regular' THEN 'initializing' ELSE ${projects.initializationStatus} END`,
                 updatedAtMs: now,
+                userMutationVersion: sql`${projects.version} + 1`,
                 version: sql`${projects.version} + 1`,
             })
             .where(eq(projects.id, projectId))

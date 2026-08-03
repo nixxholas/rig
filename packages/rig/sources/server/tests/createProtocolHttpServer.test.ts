@@ -566,6 +566,82 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("saves project settings when initialization alone advances the project version", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-project-settings-initialization-"));
+        const projectDirectory = join(root, "project");
+        const stateDirectory = join(root, "state");
+        await Promise.all([mkdir(projectDirectory), mkdir(stateDirectory)]);
+        const firstProbeStarted = deferred<void>();
+        const releaseFirstProbe = deferred<void>();
+        const initializationContinued = deferred<void>();
+        const releaseInitialization = deferred<void>();
+        let topLevelReads = 0;
+        const store = new PersistentSessionStore({
+            databasePath: join(stateDirectory, "sessions.sqlite"),
+            homeDirectory: root,
+            projectGit: async (cwd, args) => {
+                if (args.join(" ") === "rev-parse --show-toplevel") {
+                    topLevelReads += 1;
+                    if (topLevelReads === 1) {
+                        firstProbeStarted.resolve();
+                        await releaseFirstProbe.promise;
+                    } else if (topLevelReads === 2) {
+                        initializationContinued.resolve();
+                        await releaseInitialization.promise;
+                    }
+                    return cwd;
+                }
+                if (args.join(" ") === "rev-parse --verify HEAD") return "commit-1";
+                if (args.join(" ") === "symbolic-ref --quiet --short HEAD") return "main";
+                throw new Error("Git fact unavailable.");
+            },
+            stateDirectory,
+        });
+        const { client, close } = await startServer({ store });
+        try {
+            const session = await client.createSession({ cwd: projectDirectory });
+            await firstProbeStarted.promise;
+            const project = (await client.getProject(session.session.projectId)).project;
+
+            releaseFirstProbe.resolve();
+            await initializationContinued.promise;
+            expect(store.getProject(project.id)).toMatchObject({
+                initializationStatus: "initializing",
+                version: project.version + 1,
+            });
+
+            await expect(
+                client.updateProjectSettings(
+                    project.id,
+                    {
+                        defaultWorkspaceCompute: {
+                            image: "workspace-dev:latest",
+                            type: "docker",
+                        },
+                        mutationId: "settings-during-initialization",
+                    },
+                    project.version,
+                ),
+            ).resolves.toMatchObject({
+                project: {
+                    settings: {
+                        defaultWorkspaceCompute: {
+                            generation: 1,
+                            image: "workspace-dev:latest",
+                            type: "docker",
+                        },
+                    },
+                },
+            });
+        } finally {
+            releaseFirstProbe.resolve();
+            releaseInitialization.resolve();
+            await close();
+            store.close();
+            await rm(root, removeFixtureOptions);
+        }
+    });
+
     it("archives a project with its chats and restores it when the folder is used again", async () => {
         const store = new InMemorySessionStore();
         const { client, close } = await startServer({ store });
@@ -3196,6 +3272,17 @@ async function startServer(
             await rm(directory, { recursive: true, force: true });
         },
     };
+}
+
+function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+} {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((resolvePromise) => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
 }
 
 /** Reads the first frame of a session event stream and stops there. */

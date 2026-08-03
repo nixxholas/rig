@@ -41,6 +41,7 @@ import { queryProject } from "../persistence/project/queryProject.js";
 import { queryProjectAvatarAsset } from "../persistence/project/queryProjectAvatarAsset.js";
 import { queryProjectAvatarGarbageCandidates } from "../persistence/project/queryProjectAvatarGarbageCandidates.js";
 import { queryProjectByPath } from "../persistence/project/queryProjectByPath.js";
+import { queryProjectUserMutationVersion } from "../persistence/project/queryProjectUserMutationVersion.js";
 import { queryProjects } from "../persistence/project/queryProjects.js";
 import { queryWorkspace } from "../persistence/project/queryWorkspace.js";
 import { queryOwnedWorkspace } from "../persistence/project/queryOwnedWorkspace.js";
@@ -497,8 +498,12 @@ export class ProjectRepository {
     ): Project | undefined {
         const current = this.getProject(projectId);
         if (current === undefined) return undefined;
-        if (expectedVersion !== undefined && expectedVersion !== current.version) {
-            throw new Error("The project changed before it could be renamed.");
+        if (expectedVersion !== undefined) {
+            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            if (userMutationVersion === undefined) return undefined;
+            if (expectedVersion > current.version || userMutationVersion > expectedVersion) {
+                throw new Error("The project changed before it could be renamed.");
+            }
         }
         const name = validateProjectName(requestedName);
         return this.#mutate((tx) => {
@@ -521,7 +526,7 @@ export class ProjectRepository {
     ): Project | undefined {
         const current = this.getProject(projectId);
         if (current === undefined) return undefined;
-        if (expectedVersion !== undefined && expectedVersion !== current.version) {
+        if (expectedVersion !== undefined && expectedVersion > current.version) {
             throw new Error("The project changed before its settings could be saved.");
         }
         return this.#mutate((tx) => {
@@ -568,8 +573,12 @@ export class ProjectRepository {
     ): Project | undefined {
         const current = this.getProject(projectId);
         if (current === undefined) return undefined;
-        if (expectedVersion !== undefined && expectedVersion !== current.version) {
-            throw new Error("The project changed before it could be reordered.");
+        if (expectedVersion !== undefined) {
+            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            if (userMutationVersion === undefined) return undefined;
+            if (expectedVersion > current.version || userMutationVersion > expectedVersion) {
+                throw new Error("The project changed before it could be reordered.");
+            }
         }
         const orderKey = orderKeyAfter(this.listProjects(), projectId, request.afterId);
         if (orderKey === current.orderKey) return current;
@@ -628,8 +637,12 @@ export class ProjectRepository {
     ): Promise<Project | undefined> {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
-        if (expectedVersion !== undefined && expectedVersion !== project.version) {
-            throw new Error("The project changed before the avatar could be saved.");
+        if (expectedVersion !== undefined) {
+            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            if (userMutationVersion === undefined) return undefined;
+            if (expectedVersion > project.version || userMutationVersion > expectedVersion) {
+                throw new Error("The project changed before the avatar could be saved.");
+            }
         }
         if (bytes.byteLength > MAX_AVATAR_BYTES) {
             throw new Error("The project avatar is larger than the allowed limit.");
@@ -898,8 +911,12 @@ export class ProjectRepository {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
         if (project.archivedAt !== undefined) return project;
-        if (expectedVersion !== undefined && expectedVersion !== project.version) {
-            throw new Error("The project changed before it could be archived.");
+        if (expectedVersion !== undefined) {
+            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            if (userMutationVersion === undefined) return undefined;
+            if (expectedVersion > project.version || userMutationVersion > expectedVersion) {
+                throw new Error("The project changed before it could be archived.");
+            }
         }
         const now = this.#now();
         return this.#mutate((tx) => {

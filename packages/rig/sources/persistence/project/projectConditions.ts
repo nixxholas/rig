@@ -1,4 +1,4 @@
-import { eq, sql, type SQL } from "drizzle-orm";
+import { eq, lte, sql, type SQL } from "drizzle-orm";
 
 import { projects, projectWorkspaces } from "../database/schema.js";
 
@@ -11,8 +11,10 @@ export type GitValues = {
     gitUpstream: string | null;
 };
 
-export function projectVersion(expectedVersion?: number): SQL {
-    return expectedVersion === undefined ? sql`1` : eq(projects.version, expectedVersion);
+export function projectNotUserMutatedSince(expectedVersion?: number): SQL {
+    return expectedVersion === undefined
+        ? sql`1`
+        : lte(projects.userMutationVersion, expectedVersion);
 }
 
 export function workspaceVersion(expectedVersion?: number): SQL {

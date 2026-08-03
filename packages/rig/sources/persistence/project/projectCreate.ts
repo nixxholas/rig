@@ -61,6 +61,7 @@ export function projectCreate(tx: TX, input: ProjectCreateInput): void {
                 presence: "present",
                 storageKey,
                 updatedAtMs: input.now,
+                userMutationVersion: 1,
                 version: 1,
                 worktreeSupport: "unknown",
             })

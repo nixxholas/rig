@@ -9,6 +9,7 @@ export function projectRestore(tx: TX, id: string, now: number): number {
             .set({
                 archivedAtMs: null,
                 updatedAtMs: now,
+                userMutationVersion: sql`${projects.version} + 1`,
                 version: sql`${projects.version} + 1`,
             })
             .where(and(eq(projects.id, id), isNotNull(projects.archivedAtMs)))

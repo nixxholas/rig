@@ -3,7 +3,7 @@ import { projects } from "../database/schema.js";
 import { projectNameKey } from "../../project/projectIdentity.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
-import { projectVersion } from "./projectConditions.js";
+import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export function projectRename(
     tx: TX,
@@ -32,9 +32,10 @@ export function projectRename(
                     nameKey: projectNameKey(reservedName),
                     nameSource: "user",
                     updatedAtMs: now,
+                    userMutationVersion: sql`${projects.version} + 1`,
                     version: sql`${projects.version} + 1`,
                 })
-                .where(and(eq(projects.id, id), projectVersion(version)))
+                .where(and(eq(projects.id, id), projectNotUserMutatedSince(version)))
                 .run().changes,
         );
     });

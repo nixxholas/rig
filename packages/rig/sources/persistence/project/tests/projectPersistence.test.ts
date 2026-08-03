@@ -1,10 +1,11 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
 import { projectAvatarAssets, projects, projectWorkspaces } from "../../database/schema.js";
 import { inTx } from "../../inTx.js";
+import { projectRefresh } from "../projectRefresh.js";
 import { projectSetAvatar } from "../projectSetAvatar.js";
 import { projectSetSettings } from "../projectSetSettings.js";
 import { queryProject } from "../queryProject.js";
@@ -129,6 +130,52 @@ describe("project persistence", () => {
                 4,
             ),
         ).toThrow("must not contain whitespace");
+        opened.client.close();
+    });
+
+    it("guards settings with the last user mutation rather than enrichment", () => {
+        const opened = databaseWithProject();
+        opened.database
+            .update(projects)
+            .set({ version: sql`${projects.version} + 1` })
+            .where(eq(projects.id, "project-1"))
+            .run();
+
+        expect(
+            projectSetSettings(
+                opened.database,
+                "project-1",
+                { defaultWorkspaceCompute: { type: "local" } },
+                2,
+                1,
+            ),
+        ).toBe(1);
+        expect(
+            projectSetSettings(
+                opened.database,
+                "project-1",
+                { defaultWorkspaceCompute: { type: "docker", image: "rig-dev:latest" } },
+                3,
+                2,
+            ),
+        ).toBe(0);
+        opened.client.close();
+    });
+
+    it("keeps refresh out of the user mutation watermark", () => {
+        const opened = databaseWithProject();
+
+        expect(projectRefresh(opened.database, "project-1", 2)).toBe(1);
+        expect(
+            opened.database
+                .select({
+                    userMutationVersion: projects.userMutationVersion,
+                    version: projects.version,
+                })
+                .from(projects)
+                .where(eq(projects.id, "project-1"))
+                .get(),
+        ).toEqual({ userMutationVersion: 1, version: 2 });
         opened.client.close();
     });
 });

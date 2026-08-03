@@ -4,7 +4,7 @@ import type { ProjectSettingsUpdate } from "../../protocol/index.js";
 import { projects } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
-import { projectVersion } from "./projectConditions.js";
+import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export function projectSetSettings(
     tx: TX,
@@ -41,9 +41,10 @@ export function projectSetSettings(
                         : current.generation,
                     defaultDockerImage: dockerImage,
                     updatedAtMs: now,
+                    userMutationVersion: sql`${projects.version} + 1`,
                     version: sql`${projects.version} + 1`,
                 })
-                .where(and(eq(projects.id, id), projectVersion(version)))
+                .where(and(eq(projects.id, id), projectNotUserMutatedSince(version)))
                 .run().changes,
         );
     });
