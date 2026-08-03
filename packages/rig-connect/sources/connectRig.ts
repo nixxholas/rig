@@ -707,6 +707,7 @@ interface PendingMutation {
     id: MutationId;
     matchesAuthoritative?: (data: unknown) => boolean;
     prepare: () => MutationRequest;
+    reconcileEchoInPlace?: boolean;
     replacesTranscript?: boolean;
     retryOnConflict?: boolean;
     sessionId?: string;
@@ -865,7 +866,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         authoritative: () => ReconcileOutput,
     ): void => {
         const keys = new Set(entityKeys);
-        const relevant = pendingOverlays.filter((mutation) => keys.has(mutation.entityKey));
+        const relevant = pendingOverlays.filter(
+            (mutation) =>
+                keys.has(mutation.entityKey) &&
+                !(mutation.id === mutationId && mutation.reconcileEchoInPlace === true),
+        );
         if (relevant.length === 0) {
             acknowledge(mutationId);
             applyOutput(authoritative());
@@ -3027,6 +3032,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             action: "send_context_message",
             entityKey: key,
             id,
+            reconcileEchoInPlace: true,
             sessionId,
             undo: () => undefined,
             applyOptimistic: (publish) => {

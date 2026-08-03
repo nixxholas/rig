@@ -3078,6 +3078,12 @@ describe("CodingAssistantApp", () => {
         expect(rendered).not.toContain("GPT Test Off •");
         expect(rendered).not.toContain("/quit");
 
+        app.handleInput("t");
+        const taskCommands = stripAnsi(app.render(80).join("\n"));
+        expect(taskCommands).toContain("/tasks");
+        expect(taskCommands).toContain("Show the current session task list.");
+        app.handleInput("\x7f");
+
         app.handleInput("\r");
         const modelPicker = stripAnsi(app.render(80).join("\n"));
         expect(modelPicker).toContain("Choose Model");

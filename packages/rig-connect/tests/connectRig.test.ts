@@ -647,8 +647,9 @@ describe("connectRig mutations", () => {
             await settle();
             const sessionBefore = connection.session();
             const mutationId = rig.sendContextMessage("session-1", "Use the blue database.");
+            const optimisticElement = connection.elements().at(-1);
 
-            expect(connection.elements().at(-1)).toMatchObject({
+            expect(optimisticElement).toMatchObject({
                 contextOnly: true,
                 kind: "user_message",
                 messageId: mutationId,
@@ -662,6 +663,31 @@ describe("connectRig mutations", () => {
                 mutationId,
                 text: "Use the blue database.",
             });
+
+            stream.write(
+                event(
+                    "message_submitted",
+                    {
+                        delivery: "context",
+                        displayText: "Use the blue database.",
+                        message: {
+                            blocks: [{ text: "Use the blue database.", type: "text" }],
+                            contextOnly: true,
+                            id: mutationId,
+                            role: "user",
+                        },
+                        mutationId,
+                        runId: `context:${mutationId}`,
+                    },
+                    "01900000-0000-7000-8000-000000000003",
+                ),
+            );
+            await settle();
+            expect(connection.elements()).toHaveLength(1);
+            expect(connection.elements()[0]).toBe(optimisticElement);
+            expect(connection.elements()[0]?.groupId).toBe(`group:context:${mutationId}`);
+            expect(connection.session().activity).toBe(sessionBefore.activity);
+            expect(connection.session().activeTurn).toBe(sessionBefore.activeTurn);
         } finally {
             connection.close();
             rig.close();

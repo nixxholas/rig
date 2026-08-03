@@ -85,6 +85,8 @@ export class ChatStore {
     #groupStartedAt: number | undefined;
     /** Elements already shown that belong to the group that has not started yet. */
     #pendingNextGroupElementIds: string[] = [];
+    /** Stable identity a context note gives to the actionable group that will consume it. */
+    #pendingNextGroupId: string | undefined;
     #turnStartedAt = new Map<string, number>();
     /** Runs that have opened at least one group, so their ending has a footer. */
     #runsWithGroups = new Set<string>();
@@ -370,7 +372,29 @@ export class ChatStore {
             ...(page.permissionReviews ?? []).map((review) => [review.toolCallId, review] as const),
         ]);
         older.#resetTranscript(page.messages, [], page);
-        const additions = older.#elements.filter((element) => !this.#byId.has(element.id));
+        const olderPending = new Set(older.#pendingNextGroupElementIds);
+        const boundaryGroupId = this.#elements.find(
+            (element) =>
+                element.groupId.startsWith("group:") &&
+                !(element.kind === "user_message" && element.contextOnly === true),
+        )?.groupId;
+        const existingPendingGroupId = this.#pendingNextGroupElementIds
+            .map((elementId) => this.#byId.get(elementId)?.groupId)
+            .find((groupId) => groupId !== undefined);
+        const targetGroupId =
+            boundaryGroupId ??
+            existingPendingGroupId ??
+            this.#pendingNextGroupId ??
+            older.#pendingNextGroupId;
+        const additions = older.#elements
+            .filter((element) => !this.#byId.has(element.id))
+            .map((element) =>
+                olderPending.has(element.id) &&
+                targetGroupId !== undefined &&
+                element.groupId !== targetGroupId
+                    ? { ...element, groupId: targetGroupId }
+                    : element,
+            );
         if (additions.length === 0) return;
 
         for (const element of additions) this.#byId.set(element.id, element);
@@ -387,6 +411,17 @@ export class ChatStore {
         this.#elements = [...additions, ...this.#elements];
         this.#reindex();
         this.#revision += 1;
+        if (boundaryGroupId === undefined) {
+            this.#pendingNextGroupElementIds = [
+                ...older.#pendingNextGroupElementIds.filter((elementId) =>
+                    this.#byId.has(elementId),
+                ),
+                ...this.#pendingNextGroupElementIds.filter(
+                    (elementId) => !olderPending.has(elementId),
+                ),
+            ];
+            this.#pendingNextGroupId = targetGroupId;
+        }
         if (additions.some((element) => element.kind === "tool_call")) {
             this.#groupingDirty = true;
         }
@@ -502,14 +537,19 @@ export class ChatStore {
             },
             createdAt,
             `context:${mutationId}`,
+            "sent",
+            undefined,
+            undefined,
+            this.#ensurePendingNextGroupId(mutationId),
         );
-        this.#pendingNextGroupElementIds.push(elementId);
+        this.#rememberPendingNextGroupElement(elementId);
         const deltas = this.#finish([], revisionBefore, sessionBefore);
         return {
             deltas,
             undo: () => {
                 this.#remove(elementId);
                 this.#appliedMessageIds.delete(mutationId);
+                this.#forgetPendingNextGroupElement(elementId);
             },
         };
     }
@@ -1438,6 +1478,7 @@ export class ChatStore {
         this.#groupRunId = undefined;
         this.#groupStartedAt = undefined;
         this.#pendingNextGroupElementIds = [];
+        this.#pendingNextGroupId = undefined;
         this.#runsWithGroups.clear();
         this.#turnStartedAt.clear();
         this.#lastBoundaryAt.clear();
@@ -1461,7 +1502,7 @@ export class ChatStore {
             for (const message of messages) {
                 if (message.internal === true) continue;
                 this.#turnId = `history:${message.id}`;
-                if (message.role === "user") {
+                if (message.role === "user" && message.contextOnly !== true) {
                     this.#pendingNextGroupElementIds.push(`message:${message.id}`);
                 }
                 this.#applyMessage(
@@ -1714,7 +1755,7 @@ export class ChatStore {
                 const steeredAt = transcript.messageSteeredAt?.[item.message.id];
                 if (steeredAt !== undefined) {
                     this.#endGroup("steering", "success", steeredAt, deltas);
-                } else if (item.message.role === "user") {
+                } else if (item.message.role === "user" && item.message.contextOnly !== true) {
                     this.#pendingNextGroupElementIds.push(`message:${item.message.id}`);
                 }
                 this.#applyMessage(
@@ -1864,16 +1905,18 @@ export class ChatStore {
             if (this.#groupRunId === runId) return;
             this.#endGroup("completed", "success", at, deltas);
         }
-        const groupId = `group:${messageId}`;
+        const groupId = this.#pendingNextGroupId ?? `group:${messageId}`;
         this.#runsWithGroups.add(runId);
         this.#groupId = groupId;
         this.#groupRunId = runId;
         this.#groupStartedAt = at;
         this.#groupPlaceholderId = `group-start:${messageId}`;
         for (const pendingElementId of this.#pendingNextGroupElementIds) {
-            this.#update(pendingElementId, { groupId });
+            const pending = this.#byId.get(pendingElementId);
+            if (pending?.groupId !== groupId) this.#update(pendingElementId, { groupId });
         }
         this.#pendingNextGroupElementIds = [];
+        this.#pendingNextGroupId = undefined;
         this.#session = {
             ...this.#session,
             activeGroup: { groupId, runId, startedAt: at },
@@ -2093,11 +2136,6 @@ export class ChatStore {
             runId: string;
             source?: "notification";
         };
-        if (data.delivery === "context") {
-            if (!this.#pendingNextGroupElementIds.includes(`message:${data.message.id}`)) {
-                this.#pendingNextGroupElementIds.push(`message:${data.message.id}`);
-            }
-        }
         if (data.delivery === "run") {
             this.#rememberTurn(data.runId, event.createdAt);
             if (this.#session.activeTurn === undefined) {
@@ -2300,7 +2338,17 @@ export class ChatStore {
         }
         this.#appliedMessageIds.add(message.id);
         if (message.role === "user") {
-            this.#appendUserMessage(message, at, turnId, delivery, source, steering);
+            const elementId = `message:${message.id}`;
+            const futureGroupId =
+                message.contextOnly === true
+                    ? this.#ensurePendingNextGroupId(message.id)
+                    : this.#pendingNextGroupElementIds.includes(elementId)
+                      ? this.#pendingNextGroupId
+                      : undefined;
+            this.#appendUserMessage(message, at, turnId, delivery, source, steering, futureGroupId);
+            if (message.contextOnly === true) {
+                this.#rememberPendingNextGroupElement(elementId);
+            }
             return;
         }
         if (message.role === "compaction") {
@@ -2423,6 +2471,7 @@ export class ChatStore {
         delivery: UserMessageElement["delivery"] = "sent",
         source?: "notification",
         steering?: Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs">,
+        futureGroupId?: string,
     ): void {
         const attachments = message.blocks
             .filter((block): block is Extract<ContentBlock, { type: "image" }> =>
@@ -2439,7 +2488,12 @@ export class ChatStore {
             ...(source === undefined ? {} : { source }),
             ...(steering === undefined ? {} : steering),
             text: textOf(message.blocks),
-            ...this.#elementIdentity(turnId ?? `history:${message.id}`),
+            ...(futureGroupId === undefined
+                ? this.#elementIdentity(turnId ?? `history:${message.id}`)
+                : {
+                      groupId: futureGroupId,
+                      runId: turnId ?? `history:${message.id}`,
+                  }),
             ...(attachments.length === 0 ? {} : { attachments }),
         };
         this.#append(element);
@@ -3238,6 +3292,26 @@ export class ChatStore {
 
     #elementIdentity(runId: string): { groupId: string; runId: string } {
         return { groupId: this.#groupId ?? `run:${runId}`, runId };
+    }
+
+    #ensurePendingNextGroupId(messageId: string): string {
+        this.#pendingNextGroupId ??= `group:context:${messageId}`;
+        return this.#pendingNextGroupId;
+    }
+
+    #rememberPendingNextGroupElement(elementId: string): void {
+        if (!this.#pendingNextGroupElementIds.includes(elementId)) {
+            this.#pendingNextGroupElementIds.push(elementId);
+        }
+    }
+
+    #forgetPendingNextGroupElement(elementId: string): void {
+        this.#pendingNextGroupElementIds = this.#pendingNextGroupElementIds.filter(
+            (pendingElementId) => pendingElementId !== elementId,
+        );
+        if (this.#pendingNextGroupElementIds.length === 0) {
+            this.#pendingNextGroupId = undefined;
+        }
     }
 
     #setGit(git: GitChangeSnapshot): void {

@@ -139,11 +139,12 @@ describe("ChatStore", () => {
         const store = new ChatStore("session-1");
         store.applyHello(opening);
         const contextElement = store.elements()[0];
+        const futureGroupId = "group:context:context-1";
 
         expect(store.session().activeTurn).toBeUndefined();
         expect(contextElement).toMatchObject({
             contextOnly: true,
-            groupId: "run:context:context-1",
+            groupId: futureGroupId,
             kind: "user_message",
             runId: "context:context-1",
         });
@@ -170,7 +171,239 @@ describe("ChatStore", () => {
                 type: "inference_iteration_start",
             }),
         );
-        expect(store.elements()[0]?.groupId).toBe("group:answer-1");
+        expect(store.elements()[0]).toBe(contextElement);
+        expect(store.elements()[0]?.groupId).toBe(futureGroupId);
+        expect(store.session().activeGroup?.groupId).toBe(futureGroupId);
+    });
+
+    it("keeps a context note submitted during work anchored to the next group", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Start the first request.",
+                message: {
+                    blocks: [{ text: "Start the first request.", type: "text" }],
+                    id: "request-1",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({
+                iteration: 1,
+                messageId: "answer-1",
+                type: "inference_iteration_start",
+            }),
+        );
+        const activeTurn = store.session().activeTurn;
+        const currentGroupId = store.session().activeGroup?.groupId;
+
+        store.apply(
+            event("message_submitted", {
+                delivery: "context",
+                displayText: "Use the blue database.",
+                message: {
+                    blocks: [{ text: "Use the blue database.", type: "text" }],
+                    contextOnly: true,
+                    id: "context-1",
+                    role: "user",
+                },
+                runId: "context:context-1",
+            }),
+        );
+        const contextElement = store
+            .elements()
+            .find((element) => element.kind === "user_message" && element.contextOnly === true);
+        expect(contextElement?.groupId).toBe("group:context:context-1");
+        expect(contextElement?.groupId).not.toBe(currentGroupId);
+        expect(store.session().activeTurn).toBe(activeTurn);
+        expect(store.session().activeTurn?.startedAt).toBe(activeTurn?.startedAt);
+
+        store.apply(event("run_finished", { runId: "run-1", stopReason: "stop" }));
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Run the follow-up.",
+                message: {
+                    blocks: [{ text: "Run the follow-up.", type: "text" }],
+                    id: "request-2",
+                    role: "user",
+                },
+                runId: "run-2",
+            }),
+        );
+        const followUpElement = store
+            .elements()
+            .find(
+                (element) => element.kind === "user_message" && element.messageId === "request-2",
+            );
+        store.apply(event("run_started", { runId: "run-2" }));
+        store.apply(
+            event("agent_event", {
+                event: {
+                    iteration: 1,
+                    messageId: "answer-2",
+                    type: "inference_iteration_start",
+                },
+                runId: "run-2",
+            }),
+        );
+
+        expect(
+            store
+                .elements()
+                .find((element) => element.kind === "user_message" && element.contextOnly === true),
+        ).toBe(contextElement);
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "user_message" && element.messageId === "request-2",
+                ),
+        ).toBe(followUpElement);
+        expect(store.session().activeGroup?.groupId).toBe("group:context:context-1");
+    });
+
+    it("does not requeue a replayed context note after its group has started", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const submitted = event("message_submitted", {
+            delivery: "context",
+            displayText: "Use the blue database.",
+            message: {
+                blocks: [{ text: "Use the blue database.", type: "text" }],
+                contextOnly: true,
+                id: "context-1",
+                role: "user",
+            },
+            runId: "context:context-1",
+        });
+        store.apply(submitted);
+        const contextElement = store.elements()[0];
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "First action.",
+                message: {
+                    blocks: [{ text: "First action.", type: "text" }],
+                    id: "request-1",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({
+                iteration: 1,
+                messageId: "answer-1",
+                type: "inference_iteration_start",
+            }),
+        );
+        store.apply(submitted);
+        store.apply(event("run_finished", { runId: "run-1", stopReason: "stop" }));
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Second action.",
+                message: {
+                    blocks: [{ text: "Second action.", type: "text" }],
+                    id: "request-2",
+                    role: "user",
+                },
+                runId: "run-2",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-2" }));
+        store.apply(
+            event("agent_event", {
+                event: {
+                    iteration: 1,
+                    messageId: "answer-2",
+                    type: "inference_iteration_start",
+                },
+                runId: "run-2",
+            }),
+        );
+
+        expect(store.elements().filter((element) => element.id === "message:context-1")).toEqual([
+            contextElement,
+        ]);
+        expect(store.elements().find((element) => element.id === "message:context-1")).toBe(
+            contextElement,
+        );
+        expect(contextElement?.groupId).toBe("group:context:context-1");
+        expect(store.session().activeGroup?.groupId).not.toBe(contextElement?.groupId);
+    });
+
+    it("binds an older-page context note to the first existing actionable group", () => {
+        const request = {
+            blocks: [{ text: "Check the migration.", type: "text" as const }],
+            id: "request-1",
+            role: "user" as const,
+        };
+        const answer = {
+            blocks: [{ text: "Done.", type: "text" as const }],
+            id: "answer-1",
+            role: "agent" as const,
+        };
+        const store = new ChatStore("session-1");
+        store.applyHello({
+            ...hello(),
+            transcript: {
+                complete: false,
+                messageCreatedAt: { "answer-1": 30, "request-1": 20 },
+                messages: [request, answer],
+                turns: [
+                    {
+                        endedAt: 40,
+                        groups: [{ endedAt: 40, id: "answer-1", startedAt: 30 }],
+                        messageIds: ["request-1", "answer-1"],
+                        outcome: "success",
+                        runId: "run-1",
+                        startedAt: 20,
+                    },
+                ],
+            },
+        });
+        const existingElements = [...store.elements()];
+        const boundaryGroupId = existingElements[0]?.groupId;
+
+        store.prependEarlier({
+            complete: true,
+            messageCreatedAt: { "context-1": 10 },
+            messages: [
+                {
+                    blocks: [{ text: "Use the blue database.", type: "text" }],
+                    contextOnly: true,
+                    id: "context-1",
+                    role: "user",
+                },
+            ],
+            turns: [
+                {
+                    messageIds: ["context-1"],
+                    runId: "context:context-1",
+                    startedAt: 10,
+                },
+            ],
+        });
+
+        expect(
+            store.elements().find((element) => element.id === "message:context-1"),
+        ).toMatchObject({
+            contextOnly: true,
+            groupId: boundaryGroupId,
+        });
+        expect(store.elements().slice(1)).toEqual(existingElements);
+        for (const [index, element] of existingElements.entries()) {
+            expect(store.elements()[index + 1]).toBe(element);
+        }
     });
 
     it("attaches context forward without activating or patching the session", () => {
