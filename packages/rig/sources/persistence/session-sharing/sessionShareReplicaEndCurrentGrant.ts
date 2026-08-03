@@ -9,6 +9,9 @@ export function sessionShareReplicaEndCurrentGrant(
     input: {
         grantEpoch: number;
         now: number;
+        /** Whether the replicated entries go too. A removal retires them; a local read
+         * failure does not, since the member legitimately received and verified them. */
+        pruneEntries: boolean;
         reason: string;
         shareId: string;
         shareMemberId: string;
@@ -33,6 +36,7 @@ export function sessionShareReplicaEndCurrentGrant(
             )
             .run();
         if (ended.changes === 0) return false;
+        if (!input.pruneEntries) return true;
         tx.delete(sessionShareReplicaEntries)
             .where(
                 and(

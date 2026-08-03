@@ -141,11 +141,19 @@ export type PostSessionShareFriendMessageResponse = Static<
     typeof postSessionShareFriendMessageResponseSchema
 >;
 
+/** Why a replica stopped: the owner retired it, or this daemon could not read it. */
+export const sessionShareReplicaEndedReasonSchema = Type.Union([
+    Type.Literal("revoked"),
+    Type.Literal("stopped"),
+    Type.Literal("unreadable"),
+]);
+export type SessionShareReplicaEndedReason = Static<typeof sessionShareReplicaEndedReasonSchema>;
+
 export const sessionShareReplicaSchema = Type.Object(
     {
         createdAt: timestampSchema,
         endedAt: Type.Optional(timestampSchema),
-        endedReason: Type.Optional(Type.String({ maxLength: 2_048, minLength: 1 })),
+        endedReason: Type.Optional(sessionShareReplicaEndedReasonSchema),
         grant: sessionShareGrantSchema,
         memberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
         ownerPeerId: identifierSchema,

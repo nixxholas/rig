@@ -372,7 +372,10 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
             return false;
         }
         await this.#emitOwner(shareId, { shareId, type: "transport_recovered" });
-        return reports.some((report) => report.historyPages > 0 || report.published > 0);
+        // Only history counts. A member's own outgoing posts also land in `published`, so
+        // counting them would let a replica that is stalled on a gap but still posting
+        // reset its backoff on every pass and poll at the floor delay forever.
+        return reports.some((report) => report.historyPages > 0);
     }
 
     /**

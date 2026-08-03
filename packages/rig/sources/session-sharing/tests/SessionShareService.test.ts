@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { UserMessage } from "../../agent/types.js";
+import type { SessionShareReplicaEndedReason } from "../../persistence/session-sharing/types.js";
 import { FakeSessionShareTransport } from "../FakeSessionShareTransport.js";
 import {
     SessionShareService,
@@ -296,9 +297,15 @@ describe("SessionShareService", () => {
             },
         ]);
         await transport.flushAll();
+        // The runtime's event router flushes once Murmur's transaction has committed; a
+        // replica end is deliberately not applied inside it.
+        service.flushReplicaEnds();
 
         expect(store.replica?.state).toBe("ended");
         expect(store.endedReplicaReasons).toContain("unreadable");
+        // A local read failure is not a removal, so the member keeps the transcript it
+        // legitimately received and hash-verified up to where it stopped.
+        expect(store.replicaEntries.length).toBeGreaterThan(0);
     });
 
     it("stops a share terminally when its owner session is archived", async () => {
@@ -557,7 +564,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
 
     endReplica(
         grant: SessionShareTransportGrant,
-        reason: "revoked" | "stopped" | "unreadable",
+        reason: SessionShareReplicaEndedReason,
     ): "ended" | "stale" {
         if (
             this.replica?.grant.grantEpoch !== grant.grantEpoch ||
@@ -567,7 +574,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
         }
         this.endedReplicaReasons.push(reason);
         this.replica = { ...this.replica, state: "ended" };
-        this.replicaEntries.length = 0;
+        if (reason !== "unreadable") this.replicaEntries.length = 0;
         return "ended";
     }
 

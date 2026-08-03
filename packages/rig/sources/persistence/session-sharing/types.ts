@@ -3,6 +3,8 @@ export type SessionShareMemberState = "active" | "revoked" | "stopped";
 export type SessionShareGrantState = "active" | "revoked" | "stopped";
 export type SessionShareMessageDisposition = "pending" | "included" | "overflow";
 export type SessionShareReplicaState = "active" | "ended";
+/** Why a replica stopped: the owner retired it, or this daemon could not read it. */
+export type SessionShareReplicaEndedReason = "revoked" | "stopped" | "unreadable";
 
 export interface SessionShareRecord {
     shareId: string;
@@ -54,7 +56,7 @@ export interface SessionShareReplicaRecord {
     title: string;
     memberCount: number;
     state: SessionShareReplicaState;
-    endedReason?: string;
+    endedReason?: SessionShareReplicaEndedReason;
     endedAt?: number;
     createdAt: number;
     updatedAt: number;

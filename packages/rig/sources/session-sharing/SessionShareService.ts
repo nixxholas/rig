@@ -4,6 +4,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { UserMessage } from "../agent/types.js";
 import { asyncQueue, type AsyncQueue } from "../concurrency/index.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
+import type { SessionShareReplicaEndedReason } from "../persistence/session-sharing/types.js";
 import type { FriendAuthor } from "./FriendAuthor.js";
 import type {
     SessionShareOpaqueEntry,
@@ -129,7 +130,7 @@ export interface SessionShareCoreStore {
     ): void;
     endReplica(
         grant: SessionShareTransportGrant,
-        reason: "revoked" | "stopped" | "unreadable",
+        reason: SessionShareReplicaEndedReason,
     ): "ended" | "stale";
 }
 
@@ -159,6 +160,7 @@ export class SessionShareService {
     readonly #idFactory: () => string;
     readonly #ownerSubscriptions = new Map<string, () => void>();
     readonly #memberSubscriptions = new Map<string, () => void>();
+    readonly #pendingEnds: SessionShareTransportGrant[] = [];
     readonly #publishQueues = new Map<string, AsyncQueue>();
     readonly #publishRequested = new Set<string>();
     readonly #store: SessionShareCoreStore;
@@ -286,9 +288,9 @@ export class SessionShareService {
             while (this.#publishRequested.delete(shareId)) {
                 try {
                     // A revocation Rig recorded but the transport never accepted leaves the
-                    // member decrypting. Repairing it here rather than only on restart makes
-                    // the window one entry: nothing is published past a removal that has not
-                    // actually happened.
+                    // member decrypting, so it is repaired before anything more is published
+                    // — and again before each page, since one drain round is unbounded on a
+                    // busy session. A share with nothing to repair pays one indexed read.
                     await this.#repairRevocations(shareId);
                     for (;;) {
                         const tailed = this.#store.tailOutbox(shareId);
@@ -301,6 +303,7 @@ export class SessionShareService {
                             break;
                         }
                         assertPageBounds(page);
+                        await this.#repairRevocations(shareId);
                         await this.#transport.appendOwnerEntries(shareId, page);
                         this.#store.acknowledgeOutbox(shareId, page.at(-1)!.shareSequence);
                     }
@@ -364,6 +367,7 @@ export class SessionShareService {
         this.#ownerSubscriptions.clear();
         this.#memberSubscriptions.clear();
         this.#publishRequested.clear();
+        this.#pendingEnds.length = 0;
     }
 
     /**
@@ -378,7 +382,9 @@ export class SessionShareService {
         const ended = this.#store.queryEndedGrants(shareId);
         if (ended.length === 0) return;
         const share = this.#store.queryShare(shareId);
-        const active = new Set(share === undefined ? [] : activeGrants(share).map(peerOf));
+        const active = new Set(
+            share === undefined ? [] : activeGrants(share).map((grant) => grant.murmurPeerId),
+        );
         for (const grant of ended) {
             if (!active.has(grant.murmurPeerId)) await this.#transport.revoke(grant);
         }
@@ -402,7 +408,6 @@ export class SessionShareService {
                     shareId: share.shareId,
                 });
             }
-            await this.#repairRevocations(share.shareId);
             const grants = activeGrants(share);
             if (grants.length > 0) await this.#transport.inviteMany(grants);
             await this.#transport.retry(share.shareId);
@@ -507,18 +512,30 @@ export class SessionShareService {
                 // The owner sent an entry this replica cannot apply — a sequence already
                 // held with different content, or a grant that is not the live one. The
                 // replica's visible transcript stops at its first gap, so continuing would
-                // silently freeze it while still reporting active. Ending it says so.
-                this.#endReplica(event.grant, "unreadable");
+                // silently freeze it while still reporting active. Ending it says so — but
+                // this handler runs inside Murmur's own transaction, and retiring a replica
+                // over an entry Murmur then rolls back would end it for something that
+                // never landed. So the end is held until the caller commits.
+                this.#pendingEnds.push(event.grant);
             }
             return;
         }
         this.#endReplica(event.grant, event.reason);
     }
 
-    #endReplica(
-        grant: SessionShareTransportGrant,
-        reason: "revoked" | "stopped" | "unreadable",
-    ): void {
+    /**
+     * Retire the replicas that failed to apply an entry in the transaction just committed.
+     *
+     * Called by the event router once the transport returns, which is the first moment
+     * Murmur's transaction — the one the failure was observed inside — is durable.
+     */
+    flushReplicaEnds(): void {
+        for (const grant of this.#pendingEnds.splice(0)) {
+            this.#endReplica(grant, "unreadable");
+        }
+    }
+
+    #endReplica(grant: SessionShareTransportGrant, reason: SessionShareReplicaEndedReason): void {
         // The subscription goes either way: an end for a grant this replica has already
         // moved past is stale for the store but still retires that epoch's handler, and
         // keeping it would leak one handler per epoch for the daemon's lifetime.
@@ -534,10 +551,6 @@ export class SessionShareService {
 
 function activeGrants(share: SessionShareRecord): SessionShareTransportGrant[] {
     return share.members.filter((member) => member.state === "active").map(memberGrant);
-}
-
-function peerOf(grant: SessionShareTransportGrant): string {
-    return grant.murmurPeerId;
 }
 
 function memberGrant(member: SessionShareMemberRecord): SessionShareTransportGrant {

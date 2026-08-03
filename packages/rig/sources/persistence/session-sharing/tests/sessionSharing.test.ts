@@ -738,6 +738,7 @@ describe("session sharing persistence", () => {
                 sessionShareReplicaEndCurrentGrant(opened.database, {
                     grantEpoch: 2,
                     now: 3,
+                    pruneEntries: true,
                     reason: "revoked",
                     shareId: "remote-share",
                     shareMemberId: "remote-member",
@@ -753,6 +754,7 @@ describe("session sharing persistence", () => {
                 sessionShareReplicaEndCurrentGrant(opened.database, {
                     grantEpoch: 3,
                     now: 4,
+                    pruneEntries: true,
                     reason: "revoked",
                     shareId: "remote-share",
                     shareMemberId: "remote-member",

@@ -148,16 +148,26 @@ export function createSessionShareRuntime(
 
     // A member that is waiting on history defers every event that arrives, and Murmur
     // re-reads a deferred event every 50ms. Backfilling on each of those would be a
-    // permanent 20Hz round of relay traffic, so each share gets its own timer that spaces
-    // unproductive attempts further apart, up to a ceiling it then holds. It never stops
-    // asking: the gap usually closes when the owner comes back, and a replica that gave up
-    // would sit silently broken until the daemon restarted.
+    // permanent 20Hz round of relay traffic, so each share spaces its unproductive attempts
+    // further apart, up to a ceiling it then holds. It never stops asking: the gap usually
+    // closes when the owner comes back, and a replica that gave up would sit silently
+    // broken until the daemon restarted.
+    //
+    // `concurrency/backoff` is deliberately not used. It retries until the work succeeds,
+    // whereas each attempt here is driven by a fresh deferral — so a replica that ends
+    // while stalled simply stops being signalled, instead of spinning at the ceiling for
+    // the life of the daemon against a share that no longer exists.
+    //
     // Closing the runtime aborts every pending wait, so a 30-second timer cannot hold the
     // process open or fire a retry into a transport that is already shut down.
     const backfillAbort = new AbortController();
     const backfillSignal = backfillAbort.signal;
     const backfills = new Map<string, { attempt: number; pending: boolean }>();
     const scheduleBackfill = (shareId: string): void => {
+        // A router callback already in flight when the runtime closed would otherwise reach
+        // a destroyed transport, whose loader would rebuild the very session close() tore
+        // down and leak it.
+        if (backfillSignal.aborted) return;
         const state = backfills.get(shareId) ?? { attempt: 0, pending: false };
         backfills.set(shareId, state);
         if (state.pending) return;
@@ -192,6 +202,9 @@ export function createSessionShareRuntime(
         // stalls every topic — friendships included — silently and permanently.
         try {
             const outcome = await transport.handleReceivedEvent(received);
+            // Murmur's transaction is durable once the transport returns, so anything the
+            // handlers had to hold until then is applied here.
+            service.flushReplicaEnds();
             if (outcome === "retained") drainDeferred();
             if (outcome !== "unowned") return outcome;
             return (await directory.handleReceivedEvent(received)) ? "applied" : "unowned";

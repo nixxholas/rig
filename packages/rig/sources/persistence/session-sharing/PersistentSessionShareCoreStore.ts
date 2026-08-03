@@ -13,6 +13,7 @@ import type {
     SessionShareTransportMemberPost,
 } from "../../session-sharing/SessionShareTransport.js";
 import { inTx } from "../inTx.js";
+import type { SessionShareReplicaEndedReason } from "./types.js";
 import type { TX } from "../Transaction.js";
 import { querySessionShare, querySessionShareMembers } from "./querySessionShare.js";
 import { querySessionShareForOwnerSession } from "./querySessionShareForOwnerSession.js";
@@ -238,11 +239,15 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
 
     endReplica(
         grant: SessionShareTransportGrant,
-        reason: "revoked" | "stopped" | "unreadable",
+        reason: SessionShareReplicaEndedReason,
     ): "ended" | "stale" {
         return sessionShareReplicaEndCurrentGrant(this.#tx(), {
             grantEpoch: grant.grantEpoch,
             now: this.#now(),
+            // An owner's removal retires the replica's entries with it. A frame this
+            // replica simply cannot apply is a local failure, so the transcript it already
+            // received and hash-verified stays readable up to where it stopped.
+            pruneEntries: reason !== "unreadable",
             reason,
             shareId: grant.shareId,
             shareMemberId: grant.shareMemberId,

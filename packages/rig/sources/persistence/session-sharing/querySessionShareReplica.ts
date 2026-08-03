@@ -2,7 +2,7 @@ import { and, asc, eq, gt, lte } from "drizzle-orm";
 
 import { sessionShareReplicaEntries, sessionShareReplicas } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
-import type { SessionShareReplicaRecord } from "./types.js";
+import type { SessionShareReplicaEndedReason, SessionShareReplicaRecord } from "./types.js";
 
 export function querySessionShareReplica(
     tx: TX,
@@ -18,7 +18,9 @@ export function querySessionShareReplica(
         : {
               createdAt: row.createdAtMs,
               ...(row.endedAtMs === null ? {} : { endedAt: row.endedAtMs }),
-              ...(row.endedReason === null ? {} : { endedReason: row.endedReason }),
+              ...(row.endedReason === null
+                  ? {}
+                  : { endedReason: row.endedReason as SessionShareReplicaEndedReason }),
               appliedThroughSequence: row.appliedThroughSequence,
               grantEpoch: row.grantEpoch,
               memberCount: row.memberCount,
