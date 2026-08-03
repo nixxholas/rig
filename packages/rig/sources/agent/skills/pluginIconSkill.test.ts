@@ -33,7 +33,7 @@ describe("bundled local plugin icon skill", () => {
         const body = await readFile(icon!.filePath, "utf8");
         expect(body).toContain("Jobs-era iPhone icons");
         expect(body).toContain("original");
-        expect(body).toContain("PNG signature");
+        expect(body).toContain("fully decodable PNG");
         expect(body).toContain("Prefer the available image-generation tool");
         expect(body).toContain("Only when image generation is unavailable");
         expect(body).toContain("create the icon another way");
