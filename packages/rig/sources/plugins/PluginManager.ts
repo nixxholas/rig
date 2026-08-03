@@ -16,6 +16,7 @@ import type {
     PluginLogSnapshot,
     PluginSummary,
 } from "../protocol/index.js";
+import type { InMemorySession } from "../session/InMemorySession.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
@@ -127,7 +128,12 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #computeRegistry: PluginComputeRegistry;
     readonly #computeSessionPreparation = new Map<
         string,
-        { phase: string; state: ComputePreparationEvent["data"]["state"] }
+        {
+            delivered: WeakSet<InMemorySession>;
+            phase: string;
+            sessions: WeakSet<InMemorySession>;
+            state: ComputePreparationEvent["data"]["state"];
+        }
     >();
     readonly #daemonLog: DaemonLog;
     readonly #defaultDocker: DockerExecutionConfig | undefined;
@@ -1148,7 +1154,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
         };
         try {
             const entry = this.#store.globalEventQueue.append(event);
-            if (entry !== undefined) this.#store.globalEventQueue.publish(entry);
+            if (entry === undefined) return;
+            this.#store.globalEventQueue.publish(entry);
         } catch (error) {
             this.#daemonLog.record(
                 "warning",
@@ -1161,9 +1168,30 @@ export class PluginManager implements ManagedNetworkInterceptor {
                     provider: progress.provider,
                 },
             );
+            return;
         }
         this.#store.liveEvents.publish(event);
-        this.#publishComputePreparationToSessions(progress, event);
+        const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
+        try {
+            this.#publishComputePreparationToSessions(progress, event);
+        } catch (error) {
+            if (previous === undefined) {
+                this.#computeSessionPreparation.delete(event.computeInstanceId);
+            } else {
+                this.#computeSessionPreparation.set(event.computeInstanceId, previous);
+            }
+            this.#daemonLog.record(
+                "warning",
+                "compute_preparation_projection_failed",
+                "Rig could not project a compute preparation event into session history.",
+                {
+                    error: errorToMessage(error),
+                    instanceId: event.computeInstanceId,
+                    phase: event.data.phase,
+                    provider: event.data.provider,
+                },
+            );
+        }
     }
 
     #publishComputePreparationToSessions(
@@ -1172,8 +1200,21 @@ export class PluginManager implements ManagedNetworkInterceptor {
     ): void {
         if (progress.workspaceSource.type !== "local_directory") return;
         const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
-        if (previous?.phase === event.data.phase && previous.state === event.data.state) return;
-        if (event.data.state === "provisioning") {
+        const samePhase =
+            previous?.phase === event.data.phase && previous.state === event.data.state;
+        const closesLifecycle = closesComputePreparationLifecycle(event);
+        const settlesArchived = settlesArchivedComputePreparation(event, previous?.state);
+        const payload = formatComputePreparationNotice(event);
+        const current =
+            samePhase && previous !== undefined
+                ? previous
+                : {
+                      delivered: new WeakSet<InMemorySession>(),
+                      phase: event.data.phase,
+                      sessions: previous?.sessions ?? new WeakSet<InMemorySession>(),
+                      state: event.data.state,
+                  };
+        if (!closesLifecycle) {
             if (
                 !this.#computeSessionPreparation.has(event.computeInstanceId) &&
                 this.#computeSessionPreparation.size >= MAX_COMPUTE_SESSION_PREPARATIONS
@@ -1181,35 +1222,30 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 const oldest = this.#computeSessionPreparation.keys().next().value;
                 if (oldest !== undefined) this.#computeSessionPreparation.delete(oldest);
             }
-            this.#computeSessionPreparation.set(event.computeInstanceId, {
-                phase: event.data.phase,
-                state: event.data.state,
-            });
-        } else {
-            // Terminal transitions are unique at the registry and need no retained projection state.
-            this.#computeSessionPreparation.delete(event.computeInstanceId);
+            this.#computeSessionPreparation.set(event.computeInstanceId, current);
         }
 
         const sourcePath = resolve(progress.workspaceSource.path);
         /*
-         * Attribution rule: a local-directory compute transition belongs to every active,
-         * user-visible session already resident in memory whose normalized cwd is that exact source
-         * directory. Cold sessions are never hydrated merely to receive progress. Sessions in
-         * another workspace or project never receive it. Compute has no agent-execution owner yet,
-         * so the retained workspace source is the one explicit association used here. `resolve`
-         * normalizes path syntax but does not resolve symlinks, so aliases such as `/tmp` and
-         * `/private/tmp` intentionally do not match. Phase coalescing is process-local and bounded;
-         * a daemon restart or extreme concurrent-preparation eviction may append the current phase
-         * once more.
+         * Attribution follows the matching loaded session, including subagents. An archived
+         * session cannot begin or resume a lifecycle, but a weakly retained recipient gets the
+         * terminal row that settles work it observed before archival. Cold sessions are never
+         * hydrated merely to receive progress. `resolve` normalizes path syntax but does not
+         * resolve symlinks, so aliases such as `/tmp` and `/private/tmp` intentionally do not
+         * match. Phase coalescing is process-local and bounded; a daemon restart or extreme
+         * concurrent-preparation eviction may append the current phase once more.
          */
-        const payload = formatComputePreparationNotice(event);
         for (const session of this.#store.loadedSessions()) {
-            if (session.isSubagent()) continue;
             const summary = session.summary();
-            if (summary.archived) continue;
             if (resolve(summary.cwd) !== sourcePath) continue;
+            const settleArchived =
+                summary.archived && settlesArchived && previous?.sessions.has(session) === true;
+            if (summary.archived && !settleArchived) continue;
+            if (!summary.archived && current.delivered.has(session)) continue;
             try {
-                session.recordSystemNotice(payload);
+                session.recordSystemNotice(payload, settleArchived ? { settleArchived: true } : {});
+                current.delivered.add(session);
+                if (!summary.archived) current.sessions.add(session);
             } catch (error) {
                 this.#daemonLog.record(
                     "warning",
@@ -1225,7 +1261,33 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 );
             }
         }
+        if (closesLifecycle) this.#computeSessionPreparation.delete(event.computeInstanceId);
     }
+}
+
+function closesComputePreparationLifecycle(event: ComputePreparationEvent): boolean {
+    return (
+        event.data.phase === "failed" ||
+        event.data.phase === "stopped" ||
+        event.data.phase === "ready" ||
+        event.data.state === "failed" ||
+        event.data.state === "stopped" ||
+        event.data.state === "ready"
+    );
+}
+
+function settlesArchivedComputePreparation(
+    event: ComputePreparationEvent,
+    previousState: ComputePreparationEvent["data"]["state"] | undefined,
+): boolean {
+    return (
+        event.data.phase === "failed" ||
+        event.data.phase === "stopped" ||
+        event.data.state === "failed" ||
+        event.data.state === "stopped" ||
+        ((event.data.phase === "ready" || event.data.state === "ready") &&
+            previousState === "provisioning")
+    );
 }
 
 async function waitForPluginStartup(

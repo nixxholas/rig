@@ -44,15 +44,18 @@ describe("persistent standalone system notices", () => {
                 expect(
                     transcript.notices?.map((entry) => ({
                         eventId: entry.eventId,
+                        structured: entry.message.structured,
                         text: entry.message.blocks[0],
                     })),
                 ).toEqual([
                     {
                         eventId: firstNotice!.id,
+                        structured: notice("Preparing compute.", "preparing_compute").structured,
                         text: { text: "Preparing compute.", type: "text" },
                     },
                     {
                         eventId: expect.any(String),
+                        structured: notice("Compute is ready.", "ready").structured,
                         text: { text: "Compute is ready.", type: "text" },
                     },
                 ]);
@@ -66,6 +69,52 @@ describe("persistent standalone system notices", () => {
                 ]);
             } finally {
                 restoredStore.close();
+            }
+        } finally {
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
+    it("durably retains only an explicit settling notice after session archival", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-system-notice-archived-"));
+        const databasePath = join(directory, "sessions.sqlite");
+        try {
+            const initial = new PersistentSessionStore({ databasePath });
+            const session = initial.create({ cwd: "/tmp/rig-system-notice-archived" });
+            session.setArchived(true);
+            session.recordSystemNotice(notice("Ignored progress.", "preparing_compute"));
+            const terminal: SystemNoticePayload = {
+                structured: {
+                    computeInstanceId: "compute-1",
+                    error: {
+                        code: "instance_failed",
+                        message: "The compute provider disconnected.",
+                        retryable: false,
+                        state: "failed",
+                    },
+                    kind: "compute_preparation",
+                    message: "The compute provider disconnected.",
+                    phase: "failed",
+                    provider: "cloud",
+                    state: "failed",
+                },
+                text: "Compute preparation failed: The compute provider disconnected.",
+            };
+            session.recordSystemNotice(terminal, { settleArchived: true });
+            const sessionId = session.id;
+            initial.close();
+
+            const restored = new PersistentSessionStore({ databasePath });
+            try {
+                expect(restored.get(sessionId)?.transcriptWindow().notices).toMatchObject([
+                    {
+                        message: {
+                            structured: terminal.structured,
+                        },
+                    },
+                ]);
+            } finally {
+                restored.close();
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
@@ -244,14 +293,31 @@ describe("persistent standalone system notices", () => {
 });
 
 function notice(text: string, phase: "preparing_compute" | "ready"): SystemNoticePayload {
+    const preparing = phase === "preparing_compute";
     return {
         structured: {
             computeInstanceId: "compute-1",
+            ...(preparing
+                ? {
+                      elapsedMs: 40_000,
+                      error: {
+                          code: "preparing_compute" as const,
+                          elapsedMs: 40_000,
+                          lastProgressAt: 20_000,
+                          message: text,
+                          retryable: true as const,
+                          startedAt: 10_000,
+                          state: "unavailable" as const,
+                      },
+                      lastProgressAt: 20_000,
+                      startedAt: 10_000,
+                  }
+                : {}),
             kind: "compute_preparation",
             message: text,
             phase,
             provider: "cloud",
-            state: phase === "ready" ? "ready" : "provisioning",
+            state: phase === "ready" ? "ready" : "unavailable",
         },
         text,
     };

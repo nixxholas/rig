@@ -498,6 +498,7 @@ export const happyComputePreparationEventSchema = Type.Object(
             Type.Literal("provisioning"),
             Type.Literal("ready"),
             Type.Literal("unprovisioned"),
+            Type.Literal("unavailable"),
             Type.Literal("failed"),
             Type.Literal("stopped"),
         ]),

@@ -104,11 +104,17 @@ describe("happy plugin manifest", () => {
         expect(
             Value.Check(happyComputePreparationEventSchema, {
                 createdAt: 30,
+                error: {
+                    code: "preparing_compute",
+                    message: "The compute provider is recovering.",
+                    retryable: true,
+                    state: "unavailable",
+                },
                 instanceId: "instance-1",
-                message: "Compute preparation stopped.",
-                phase: "stopped",
+                message: "The compute provider is recovering.",
+                phase: "preparing_compute",
                 provider: "test-compute",
-                state: "stopped",
+                state: "unavailable",
                 type: "compute_preparation",
             }),
         ).toBe(true);

@@ -1424,8 +1424,11 @@ export class InMemorySession {
      * Notices have their own durable event and message position. They deliberately have no run
      * lifecycle, so they cannot disturb activity, unread state, or an in-flight agent group.
      */
-    recordSystemNotice(payload: SystemNoticePayload): void {
-        if (this.#archived || this.#workspaceArchived) return;
+    recordSystemNotice(
+        payload: SystemNoticePayload,
+        options: { settleArchived?: true } = {},
+    ): void {
+        if ((this.#archived && options.settleArchived !== true) || this.#workspaceArchived) return;
         const message: SystemMessage = {
             blocks: [{ text: payload.text, type: "text" }],
             context: "excluded",

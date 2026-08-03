@@ -220,6 +220,7 @@ describe("PluginComputeRegistry", () => {
     it("probes an unavailable instance and restores it before retrying the operation", async () => {
         const harness = createHarness();
         const instance = await harness.start();
+        const eventsBeforeFailure = harness.registryEvents.length;
         harness.respondWithProviderError();
 
         await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
@@ -242,6 +243,42 @@ describe("PluginComputeRegistry", () => {
         await expect(harness.read(instance.instanceId)).resolves.toMatchObject({
             contentBase64: "",
         });
+        expect(
+            harness.registryEvents
+                .slice(eventsBeforeFailure)
+                .filter((event) => event.type === "preparation")
+                .map((event) => event),
+        ).toEqual([
+            expect.objectContaining({
+                elapsedMs: expect.any(Number),
+                error: expect.objectContaining({
+                    code: "preparing_compute",
+                    elapsedMs: expect.any(Number),
+                    lastProgressAt: expect.any(Number),
+                    percent: 40,
+                    phase: "verifying_compute",
+                    retryable: true,
+                    startedAt: expect.any(Number),
+                    state: "unavailable",
+                }),
+                lastProgressAt: expect.any(Number),
+                percent: 40,
+                startedAt: expect.any(Number),
+                state: "unavailable",
+            }),
+            expect.objectContaining({
+                elapsedMs: expect.any(Number),
+                lastProgressAt: expect.any(Number),
+                percent: 40,
+                startedAt: expect.any(Number),
+                state: "ready",
+            }),
+        ]);
+        const lifecycle = harness.registryEvents
+            .slice(eventsBeforeFailure)
+            .filter((event) => event.type === "preparation");
+        expect(lifecycle[1]?.startedAt).toBe(lifecycle[0]?.startedAt);
+        expect(lifecycle[1]?.lastProgressAt).toBe(lifecycle[0]?.lastProgressAt);
         expect(harness.registry.list()[0]?.health).toBe("healthy");
         expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
             expect.objectContaining({ state: "ready" }),
@@ -912,6 +949,12 @@ describe("PluginComputeRegistry", () => {
             message: expect.stringContaining("maximum lifetime"),
             state: "failed",
         });
+        expect(
+            harness.registryEvents.filter((event) => event.type === "preparation").at(-1),
+        ).toMatchObject({
+            message: expect.stringMatching(/^Compute instance failed\./),
+            state: "failed",
+        });
         expect(log).toHaveBeenCalledWith(
             "info",
             "plugin_compute_instance_reaped",
@@ -1049,6 +1092,7 @@ function createHarness(
                 });
                 provider.progress(registrationId, event.callId, {
                     message: "Copying files to compute.",
+                    percent: 40,
                     phase: "Copying files to compute",
                 });
                 completeStart(event);

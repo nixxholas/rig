@@ -9,6 +9,7 @@ import type {
     SessionEvent,
     SessionStreamHello,
 } from "@/protocol.js";
+import { SERVICE_NOTICE_TEXT_MAX_LENGTH } from "@/protocol.js";
 
 let clock = 0;
 
@@ -2644,12 +2645,25 @@ describe("ChatStore", () => {
             structured: {
                 computeInstanceId: "compute-1",
                 elapsedMs: 45_000,
+                error: {
+                    code: "preparing_compute" as const,
+                    elapsedMs: 45_000,
+                    lastProgressAt: 30_000,
+                    message: "waiting for the sandbox to start",
+                    percent: 40,
+                    phase: "waiting_for_sandbox",
+                    retryable: true as const,
+                    startedAt: 10_000,
+                    state: "unavailable" as const,
+                },
                 kind: "compute_preparation" as const,
+                lastProgressAt: 30_000,
                 message: "waiting for the sandbox to start",
                 percent: 40,
                 phase: "waiting_for_sandbox",
                 provider: "daytona",
-                state: "provisioning" as const,
+                startedAt: 10_000,
+                state: "unavailable" as const,
             },
         };
         const toolMessage = {
@@ -2763,6 +2777,88 @@ describe("ChatStore", () => {
         expect(
             rebuilt.elements().filter((element) => element.kind === "system_notice"),
         ).toHaveLength(1);
+    });
+
+    it("retains validated fallback text when a future structured notice kind is unknown", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+
+        store.apply(
+            event("system_notice", {
+                message: {
+                    blocks: [{ text: "A newer Rig service changed state.", type: "text" }],
+                    context: "excluded",
+                    id: "future-notice-1",
+                    role: "system",
+                    structured: {
+                        kind: "future_service_notice",
+                        machineOnly: true,
+                    } as never,
+                },
+            }),
+        );
+
+        expect(store.elements()).toMatchObject([
+            {
+                kind: "system_notice",
+                text: "A newer Rig service changed state.",
+            },
+        ]);
+        expect(store.elements()[0]).not.toHaveProperty("structured");
+
+        store.apply(
+            event("system_notice", {
+                message: {
+                    blocks: [
+                        {
+                            text: "x".repeat(SERVICE_NOTICE_TEXT_MAX_LENGTH + 100),
+                            type: "text",
+                        },
+                    ],
+                    context: "excluded",
+                    id: "future-notice-2",
+                    role: "system",
+                    structured: { kind: "future_service_notice" } as never,
+                },
+            }),
+        );
+        store.apply(
+            event("system_notice", {
+                message: {
+                    blocks: [{ text: "A duplicate replay.", type: "text" }],
+                    context: "excluded",
+                    id: "future-notice-2",
+                    role: "system",
+                },
+            }),
+        );
+        store.apply(
+            event("system_notice", {
+                message: {
+                    blocks: [],
+                    context: "excluded",
+                    id: "future-notice-empty",
+                    role: "system",
+                },
+            }),
+        );
+        store.apply(
+            event("system_notice", {
+                message: {
+                    blocks: [{ text: "A late replay.", type: "text" }],
+                    context: "excluded",
+                    id: "future-notice-empty",
+                    role: "system",
+                },
+            }),
+        );
+
+        expect(store.elements()).toHaveLength(2);
+        expect(store.elements()[1]).toMatchObject({
+            kind: "system_notice",
+            text: "x".repeat(SERVICE_NOTICE_TEXT_MAX_LENGTH),
+        });
+        expect(store.elements()[1]).not.toHaveProperty("structured");
     });
 
     it("tracks live session facts without a follow-up request", () => {

@@ -116,6 +116,13 @@ type ComputeInstanceBase = {
     workspaceSource: HappyComputeWorkspaceSource;
 };
 
+type ComputePreparationTelemetry = {
+    lastProgressAt: number;
+    percent?: number;
+    phase: HappyComputePreparationPhase;
+    startedAt: number;
+};
+
 type ComputeInstance =
     | (ComputeInstanceBase & {
           reason?: string;
@@ -135,6 +142,7 @@ type ComputeInstance =
     | (ComputeInstanceBase & {
           activatedAt: number;
           lastTouchedAt: number;
+          preparation: ComputePreparationTelemetry;
           providerInstanceId: string;
           registration: ComputeRegistration;
           state: "ready";
@@ -142,6 +150,7 @@ type ComputeInstance =
     | (ComputeInstanceBase & {
           activatedAt: number;
           lastTouchedAt: number;
+          preparation: ComputePreparationTelemetry;
           providerInstanceId: string;
           registration: ComputeRegistration;
           reason: string;
@@ -175,7 +184,7 @@ export type PluginComputeRegistryEvent =
           phase: PluginComputePreparationPhase;
           provider: string;
           startedAt?: number;
-          state: "failed" | "provisioning" | "ready" | "stopped" | "unprovisioned";
+          state: "failed" | "provisioning" | "ready" | "stopped" | "unavailable" | "unprovisioned";
           type: "preparation";
           workspaceSource: HappyComputeWorkspaceSource;
       };
@@ -1097,9 +1106,8 @@ export class PluginComputeRegistry {
         percent?: number,
     ): void {
         if (this.#instances.get(instance.id) !== instance) return;
-        const { percent: _previousPercent, ...withoutPercent } = instance;
         const next = {
-            ...withoutPercent,
+            ...instance,
             lastProgressAt: this.#now(),
             message,
             ...(percent === undefined ? {} : { percent }),
@@ -1143,7 +1151,8 @@ export class PluginComputeRegistry {
         };
         for (const instance of this.#instances.values()) {
             if (instance.state === "unavailable" && instance.registration === registration) {
-                this.#transitionInstanceReady(instance);
+                const ready = this.#transitionInstanceReady(instance);
+                this.#emitPreparation(ready, "ready", "Compute is ready.", "ready");
             }
         }
         if (recovered) this.#notifyCatalog();
@@ -1465,12 +1474,22 @@ export class PluginComputeRegistry {
             throw new Error("The compute provider did not materialize the instance.");
         }
         const now = this.#now();
+        const preparation =
+            current.state === "provisioning"
+                ? {
+                      lastProgressAt: current.lastProgressAt,
+                      ...(current.percent === undefined ? {} : { percent: current.percent }),
+                      phase: current.phase,
+                      startedAt: current.startedAt,
+                  }
+                : current.preparation;
         const ready: Extract<ComputeInstance, { state: "ready" }> = {
             activatedAt: current.state === "unavailable" ? current.activatedAt : now,
             consumerGeneration: current.consumerGeneration,
             createdAt: current.createdAt,
             id: current.id,
             lastTouchedAt: now,
+            preparation,
             provider: current.provider,
             providerInstanceId: current.providerInstanceId,
             registration: current.registration,
@@ -1503,6 +1522,12 @@ export class PluginComputeRegistry {
             state: "unavailable",
         };
         this.#instances.set(instanceId, unavailable);
+        this.#emitPreparation(unavailable, "preparing_compute", reason, "unavailable", {
+            code: "preparing_compute",
+            message: reason,
+            retryable: true,
+            state: "unavailable",
+        });
         return unavailable;
     }
 
@@ -1543,26 +1568,28 @@ export class PluginComputeRegistry {
             if (oldest === undefined) break;
             this.#tombstones.delete(oldest);
         }
-        if (instance.state === "provisioning" || instance.state === "unprovisioned") {
-            const message =
-                state === "failed"
-                    ? `Compute preparation failed. ${reason}`
-                    : `Compute preparation stopped. ${reason}`;
-            this.#emitPreparation(
-                instance,
-                state === "failed" ? "failed" : "stopped",
-                message,
-                state,
-                state === "failed"
-                    ? {
-                          code: "instance_failed",
-                          message,
-                          retryable: false,
-                          state: "failed",
-                      }
-                    : undefined,
-            );
-        }
+        const lifecycle =
+            instance.state === "unprovisioned" || instance.state === "provisioning"
+                ? "preparation"
+                : "instance";
+        const message =
+            state === "failed"
+                ? `Compute ${lifecycle} failed. ${reason}`
+                : `Compute ${lifecycle} stopped. ${reason}`;
+        this.#emitPreparation(
+            instance,
+            state === "failed" ? "failed" : "stopped",
+            message,
+            state,
+            state === "failed"
+                ? {
+                      code: "instance_failed",
+                      message,
+                      retryable: false,
+                      state: "failed",
+                  }
+                : undefined,
+        );
         return tombstone;
     }
 
@@ -1628,23 +1655,42 @@ export class PluginComputeRegistry {
         instance: ComputeInstance | ComputeTombstone,
         phase: PluginComputePreparationPhase,
         message: string,
-        state: "failed" | "provisioning" | "ready" | "stopped" | "unprovisioned",
+        state: "failed" | "provisioning" | "ready" | "stopped" | "unavailable" | "unprovisioned",
         error?: HappyComputeError,
     ): void {
-        const preparation =
+        const telemetry =
             instance.state === "provisioning"
                 ? {
-                      elapsedMs: Math.max(0, this.#now() - instance.startedAt),
                       lastProgressAt: instance.lastProgressAt,
                       ...(instance.percent === undefined ? {} : { percent: instance.percent }),
+                      phase: instance.phase,
                       startedAt: instance.startedAt,
                   }
-                : {};
+                : instance.state === "ready" || instance.state === "unavailable"
+                  ? instance.preparation
+                  : undefined;
+        const preparation =
+            telemetry === undefined
+                ? {}
+                : {
+                      elapsedMs: Math.max(0, this.#now() - telemetry.startedAt),
+                      lastProgressAt: telemetry.lastProgressAt,
+                      ...(telemetry.percent === undefined ? {} : { percent: telemetry.percent }),
+                      startedAt: telemetry.startedAt,
+                  };
+        const classifiedError =
+            error?.code === "preparing_compute" && telemetry !== undefined
+                ? {
+                      ...error,
+                      ...preparation,
+                      phase: telemetry.phase,
+                  }
+                : error;
         this.#emit({
             consumerGeneration: instance.consumerGeneration,
             createdAt: this.#now(),
             ...preparation,
-            ...(error === undefined ? {} : { error }),
+            ...(classifiedError === undefined ? {} : { error: classifiedError }),
             instanceId: instance.id,
             message,
             phase,

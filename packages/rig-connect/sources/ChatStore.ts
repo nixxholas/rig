@@ -1,3 +1,5 @@
+import { Value } from "@sinclair/typebox/value";
+
 import { projectToolPresentation, type ToolPresentation } from "./ToolPresentation.js";
 import type {
     AgentBlock,
@@ -28,6 +30,7 @@ import type {
     ShellCommandState,
     SubagentSummary,
     SystemMessage,
+    SystemNoticePayload,
     ToolCallBlock,
     ToolCallPresentation,
     ToolResultBlock,
@@ -38,6 +41,7 @@ import type {
     WorkflowRun,
     WorkflowRunUpdate,
 } from "./protocol.js";
+import { SERVICE_NOTICE_TEXT_MAX_LENGTH, systemNoticePayloadSchema } from "./protocol.js";
 import type {
     ActiveTurn,
     AgentAttachmentsElement,
@@ -2382,13 +2386,15 @@ export class ChatStore {
     #applySystemNotice(message: SystemMessage, at: number, turnId?: string): void {
         if (this.#appliedMessageIds.has(message.id)) return;
         this.#appliedMessageIds.add(message.id);
+        const payload = decodeSystemNoticePayload(message);
+        if (payload === undefined) return;
         const noticeId = `notice:${message.id}`;
         const element: SystemNoticeElement = {
             createdAt: at,
             id: `message:${message.id}`,
             kind: "system_notice",
-            ...(message.structured === undefined ? {} : { structured: message.structured }),
-            text: textOf(message.blocks),
+            ...(payload.structured === undefined ? {} : { structured: payload.structured }),
+            text: payload.text,
             ...(turnId === undefined
                 ? { groupId: noticeId, runId: noticeId }
                 : this.#elementIdentity(turnId)),
@@ -3396,6 +3402,23 @@ function textOf(blocks: readonly ContentBlock[]): string {
         .filter(isTextBlock)
         .map((block) => block.text)
         .join("");
+}
+
+function decodeSystemNoticePayload(message: SystemMessage): SystemNoticePayload | undefined {
+    const text = textOf(message.blocks).slice(0, SERVICE_NOTICE_TEXT_MAX_LENGTH);
+    if (text.length === 0) return undefined;
+    try {
+        return Value.Decode(systemNoticePayloadSchema, {
+            ...(message.structured === undefined ? {} : { structured: message.structured }),
+            text,
+        });
+    } catch {
+        try {
+            return Value.Decode(systemNoticePayloadSchema, { text });
+        } catch {
+            return undefined;
+        }
+    }
 }
 
 function isTextBlock(

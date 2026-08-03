@@ -1,5 +1,6 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
+import { happyComputeErrorSchema } from "../../happy-plugins/sources/computeTypes.js";
 
 // The daemon's own declarations, read from source so this check needs no build
 // step and no published type surface. It is a type-only import in a test, so
@@ -17,6 +18,8 @@ import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
 import {
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
+    SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
+    computeServiceErrorSchema,
     createSessionShareRequestSchema,
     projectWorkspaceSchema,
     sessionShareOwnerResponseSchema,
@@ -66,6 +69,8 @@ type _SessionShareOwnerResponse = Assignable<
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
 type _ServiceNotice = Assignable<local.ServiceNotice, daemon.ServiceNotice>;
 type _SystemNoticePayload = Assignable<local.SystemNoticePayload, daemon.SystemNoticePayload>;
+type _DaemonServiceNotice = Assignable<daemon.ServiceNotice, local.ServiceNotice>;
+type _DaemonSystemNoticePayload = Assignable<daemon.SystemNoticePayload, local.SystemNoticePayload>;
 type _SystemMessage = Assignable<local.SystemMessage, daemonAgent.SystemMessage>;
 type _TranscriptNotice = Assignable<local.SessionTranscriptNotice, daemon.SessionTranscriptNotice>;
 type ApplicationReadEventType =
@@ -201,6 +206,10 @@ type _ExplorationOperation = Assignable<
 >;
 
 describe("protocol conformance", () => {
+    it("keeps the browser-safe compute error schema structurally identical to the daemon source", () => {
+        expect(computeServiceErrorSchema).toEqual(happyComputeErrorSchema);
+    });
+
     it("keeps the embedded protocol types assignable from the daemon's own types", () => {
         // The assertions above are compile-time. This case documents that a
         // failure shows up as a type error rather than as a failing expectation.
@@ -212,12 +221,25 @@ describe("protocol conformance", () => {
             structured: {
                 computeInstanceId: "compute-1",
                 elapsedMs: 45_000,
+                error: {
+                    code: "preparing_compute",
+                    elapsedMs: 45_000,
+                    lastProgressAt: 30_000,
+                    message: "The compute provider is recovering.",
+                    percent: 40,
+                    phase: "waiting_for_sandbox",
+                    retryable: true,
+                    startedAt: 10_000,
+                    state: "unavailable",
+                },
                 kind: "compute_preparation",
+                lastProgressAt: 30_000,
                 message: "Waiting for the sandbox to start.",
                 percent: 40,
                 phase: "waiting_for_sandbox",
                 provider: "daytona",
-                state: "provisioning",
+                startedAt: 10_000,
+                state: "unavailable",
             },
             text: "Preparing compute: Waiting for the sandbox to start. (45s)",
         };
@@ -300,5 +322,28 @@ describe("protocol conformance", () => {
         expect(Value.Decode(daemonCreateSessionShareRequestSchema, request)).toEqual(request);
         expect(Value.Decode(sessionShareOwnerResponseSchema, response)).toEqual(response);
         expect(Value.Decode(daemonSessionShareOwnerResponseSchema, response)).toEqual(response);
+    });
+
+    it("rejects compute error detail beyond the daemon's canonical bound", () => {
+        const payload = {
+            structured: {
+                computeInstanceId: "compute-1",
+                error: {
+                    code: "instance_failed",
+                    message: "x".repeat(SERVICE_NOTICE_MESSAGE_MAX_LENGTH + 1),
+                    retryable: false,
+                    state: "failed",
+                },
+                kind: "compute_preparation",
+                message: "Compute failed.",
+                phase: "failed",
+                provider: "daytona",
+                state: "failed",
+            },
+            text: "Compute preparation failed.",
+        };
+
+        expect(() => Value.Decode(systemNoticePayloadSchema, payload)).toThrow();
+        expect(() => Value.Decode(daemonSystemNoticePayloadSchema, payload)).toThrow();
     });
 });

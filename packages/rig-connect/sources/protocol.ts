@@ -227,23 +227,95 @@ const serviceNoticeExact = { additionalProperties: false } as const;
 const serviceNoticeText = Type.String({ minLength: 1 });
 export const SERVICE_NOTICE_MESSAGE_MAX_LENGTH = 4_096;
 export const SERVICE_NOTICE_TEXT_MAX_LENGTH = 8_192;
+const computeErrorMessage = Type.String({
+    maxLength: SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
+    minLength: 1,
+});
+
+const computeInstanceStateSchema = Type.Union([
+    Type.Literal("unprovisioned"),
+    Type.Literal("provisioning"),
+    Type.Literal("ready"),
+    Type.Literal("unavailable"),
+    Type.Literal("failed"),
+    Type.Literal("stopped"),
+]);
+const computeErrorState = {
+    state: Type.Optional(computeInstanceStateSchema),
+};
+const computePreparationDetails = {
+    elapsedMs: Type.Optional(Type.Integer({ minimum: 0 })),
+    lastProgressAt: Type.Optional(Type.Integer({ minimum: 0 })),
+    percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
+    phase: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+    startedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+};
+export const computeServiceErrorSchema = Type.Union([
+    Type.Object(
+        {
+            ...computeErrorState,
+            code: Type.Literal("capacity_exhausted"),
+            message: computeErrorMessage,
+            retryable: Type.Literal(true),
+        },
+        serviceNoticeExact,
+    ),
+    Type.Object(
+        {
+            ...computeErrorState,
+            code: Type.Literal("deadline_exceeded"),
+            message: computeErrorMessage,
+            retryable: Type.Literal(true),
+        },
+        serviceNoticeExact,
+    ),
+    Type.Object(
+        {
+            ...computePreparationDetails,
+            code: Type.Literal("preparing_compute"),
+            message: computeErrorMessage,
+            retryable: Type.Literal(true),
+            state: Type.Union([
+                Type.Literal("unprovisioned"),
+                Type.Literal("provisioning"),
+                Type.Literal("unavailable"),
+            ]),
+        },
+        serviceNoticeExact,
+    ),
+    Type.Object(
+        {
+            ...computeErrorState,
+            code: Type.Union([
+                Type.Literal("invalid_request"),
+                Type.Literal("invalid_response"),
+                Type.Literal("instance_failed"),
+                Type.Literal("instance_not_found"),
+                Type.Literal("provider_lost"),
+                Type.Literal("provider_not_found"),
+                Type.Literal("provider_unhealthy"),
+            ]),
+            message: computeErrorMessage,
+            retryable: Type.Literal(false),
+        },
+        serviceNoticeExact,
+    ),
+]);
+export type ComputeServiceError = Static<typeof computeServiceErrorSchema>;
 
 export const computePreparationNoticeSchema = Type.Object(
     {
         computeInstanceId: serviceNoticeText,
         elapsedMs: Type.Optional(Type.Integer({ minimum: 0 })),
+        error: Type.Optional(computeServiceErrorSchema),
         kind: Type.Literal("compute_preparation"),
+        lastProgressAt: Type.Optional(Type.Integer({ minimum: 0 })),
         message: Type.String({ maxLength: SERVICE_NOTICE_MESSAGE_MAX_LENGTH, minLength: 1 }),
         percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
         phase: Type.String({ maxLength: 128, minLength: 1 }),
         provider: serviceNoticeText,
-        state: Type.Union([
-            Type.Literal("failed"),
-            Type.Literal("provisioning"),
-            Type.Literal("ready"),
-            Type.Literal("stopped"),
-            Type.Literal("unprovisioned"),
-        ]),
+        startedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+        state: computeInstanceStateSchema,
     },
     serviceNoticeExact,
 );
