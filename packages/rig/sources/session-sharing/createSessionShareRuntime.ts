@@ -128,7 +128,7 @@ export function createSessionShareRuntime(
             return;
         }
         await directory.retireInvitation(invitation);
-        await backfillReplica(transport, invitation.shareId);
+        await backfillReplica(transport, service, invitation.shareId);
     };
 
     /** Resume a replica this daemon already joined in an earlier run. */
@@ -143,7 +143,7 @@ export function createSessionShareRuntime(
         // member session at all, so nothing replicates and nothing can be retried.
         if ((await transport.loadMember(grant)) === undefined) return;
         service.observeReplica(grant);
-        await backfillReplica(transport, replica.shareId);
+        await backfillReplica(transport, service, replica.shareId);
     };
 
     // A member that is waiting on history defers every event that arrives, and Murmur
@@ -185,7 +185,7 @@ export function createSessionShareRuntime(
                 }
                 state.attempt += 1;
                 // A pass that moves history is progress, so the next stall starts over.
-                if (await backfillReplica(transport, shareId)) state.attempt = 0;
+                if (await backfillReplica(transport, service, shareId)) state.attempt = 0;
             } catch {
                 // The runtime is closing; the next start resumes this replica from its rows.
             } finally {
@@ -202,9 +202,6 @@ export function createSessionShareRuntime(
         // stalls every topic — friendships included — silently and permanently.
         try {
             const outcome = await transport.handleReceivedEvent(received);
-            // Murmur's transaction is durable once the transport returns, so anything the
-            // handlers had to hold until then is applied here.
-            service.flushReplicaEnds();
             if (outcome === "retained") drainDeferred();
             if (outcome !== "unowned") return outcome;
             return (await directory.handleReceivedEvent(received)) ? "applied" : "unowned";
@@ -218,6 +215,11 @@ export function createSessionShareRuntime(
             // friend message, a directory envelope that will be re-sent — is either
             // already stale or replayed by its own sender.
             return "unowned";
+        } finally {
+            // Murmur's transaction is durable once the transport returns, so anything the
+            // handlers had to hold until then is applied here — including on the failure
+            // path, where the entry that could not be applied is exactly what queued it.
+            service.flushReplicaEnds();
         }
     });
     // A friend's fresh key package is exactly what a deferred invitation was waiting for.
@@ -273,6 +275,7 @@ export function createSessionShareRuntime(
  */
 async function backfillReplica(
     transport: MurmurSessionShareTransport,
+    service: SessionShareService,
     shareId: string,
 ): Promise<boolean> {
     try {
@@ -280,6 +283,12 @@ async function backfillReplica(
     } catch {
         // Backfill is resumable: the next start, or the next entry that arrives, asks again.
         return false;
+    } finally {
+        // Murmur applies history entries through `retry` as well as through the event loop,
+        // so this is the other moment its transaction becomes durable. Without flushing
+        // here, a replica that could not read a backfilled entry would keep reporting
+        // active until some unrelated event happened to reach the router.
+        service.flushReplicaEnds();
     }
 }
 

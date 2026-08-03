@@ -4,6 +4,19 @@ import { sessionShareReplicaEntries, sessionShareReplicas } from "../database/sc
 import type { TX } from "../Transaction.js";
 import type { SessionShareReplicaEndedReason, SessionShareReplicaRecord } from "./types.js";
 
+const ENDED_REASONS = new Set<string>(["revoked", "stopped", "unreadable"]);
+
+/**
+ * Whether a stored reason is one this build knows.
+ *
+ * The column is plain text, so a row written by a newer build could carry a reason this
+ * one has never heard of. Dropping it costs a label; passing it through would fail the
+ * response schema and take the whole replica list with it.
+ */
+function isEndedReason(value: string | null): value is SessionShareReplicaEndedReason {
+    return value !== null && ENDED_REASONS.has(value);
+}
+
 export function querySessionShareReplica(
     tx: TX,
     shareId: string,
@@ -18,9 +31,7 @@ export function querySessionShareReplica(
         : {
               createdAt: row.createdAtMs,
               ...(row.endedAtMs === null ? {} : { endedAt: row.endedAtMs }),
-              ...(row.endedReason === null
-                  ? {}
-                  : { endedReason: row.endedReason as SessionShareReplicaEndedReason }),
+              ...(isEndedReason(row.endedReason) ? { endedReason: row.endedReason } : {}),
               appliedThroughSequence: row.appliedThroughSequence,
               grantEpoch: row.grantEpoch,
               memberCount: row.memberCount,

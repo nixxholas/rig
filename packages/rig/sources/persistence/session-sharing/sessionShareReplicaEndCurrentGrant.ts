@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { sessionShareReplicaEntries, sessionShareReplicas } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import type { SessionShareReplicaEndedReason } from "./types.js";
 
 export function sessionShareReplicaEndCurrentGrant(
     tx: TX,
@@ -12,7 +13,7 @@ export function sessionShareReplicaEndCurrentGrant(
         /** Whether the replicated entries go too. A removal retires them; a local read
          * failure does not, since the member legitimately received and verified them. */
         pruneEntries: boolean;
-        reason: string;
+        reason: SessionShareReplicaEndedReason;
         shareId: string;
         shareMemberId: string;
     },
