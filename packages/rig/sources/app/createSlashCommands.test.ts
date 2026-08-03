@@ -15,6 +15,7 @@ describe("createSlashCommands", () => {
         });
         expect(commands.slice(0, pluginIndex).map((command) => command.value)).toEqual([
             "model",
+            "context",
             "effort",
             "fast",
             "configure",
