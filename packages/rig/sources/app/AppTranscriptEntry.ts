@@ -24,6 +24,7 @@ export interface AppTranscriptEntry {
     backgroundTerminalInteraction?: BackgroundTerminalInteractionPresentation;
     childText?: boolean;
     completedTurn?: CompletedTurn;
+    contextOnly?: true;
     execCommand?: ExecCommandPresentation;
     exploration?: ExplorationToolCallPresentation;
     fileDiffs?: readonly FileDiff[];

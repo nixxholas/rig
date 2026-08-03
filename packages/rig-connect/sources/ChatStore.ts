@@ -482,6 +482,38 @@ export class ChatStore {
         };
     }
 
+    /** Adds a background-context bubble without changing live session activity. */
+    applyOptimisticContextMessage(
+        mutationId: string,
+        text: string,
+        createdAt: number,
+    ): { deltas: readonly ChatDelta[]; undo: () => void } {
+        const elementId = `message:${mutationId}`;
+        if (this.#byId.has(elementId)) return { deltas: [], undo: () => undefined };
+        const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
+        this.#appliedMessageIds.add(mutationId);
+        this.#appendUserMessage(
+            {
+                blocks: [{ text, type: "text" }],
+                contextOnly: true,
+                id: mutationId,
+                role: "user",
+            },
+            createdAt,
+            `context:${mutationId}`,
+        );
+        this.#pendingNextGroupElementIds.push(elementId);
+        const deltas = this.#finish([], revisionBefore, sessionBefore);
+        return {
+            deltas,
+            undo: () => {
+                this.#remove(elementId);
+                this.#appliedMessageIds.delete(mutationId);
+            },
+        };
+    }
+
     /** Merges an authoritative mutation response without rebuilding the transcript. */
     applySessionSnapshot(session: ProtocolSession): readonly ChatDelta[] {
         const revisionBefore = this.#revision;
@@ -1518,12 +1550,21 @@ export class ChatStore {
          * millisecond; `groupIndex` carries the order the timestamps cannot.
          */
         type OrderedItem = TimelineItem & { groupIndex: number };
+        const messageById = new Map(messages.map((message) => [message.id, message] as const));
         const turnByMessageId = new Map<string, SessionTranscriptWindow["turns"][number]>();
         const groupIndexByMessageId = new Map<string, number>();
         const groupEndings: number[] = [];
         let groupCount = 0;
         for (const turn of transcript.turns) {
-            this.#rememberTurn(turn.runId, turn.startedAt, turn.kind);
+            const contextOnlyAnchor =
+                turn.kind === undefined &&
+                (turn.groups?.length ?? 0) === 0 &&
+                turn.messageIds.length > 0 &&
+                turn.messageIds.every((messageId) => {
+                    const message = messageById.get(messageId);
+                    return message?.role === "user" && message.contextOnly === true;
+                });
+            if (!contextOnlyAnchor) this.#rememberTurn(turn.runId, turn.startedAt, turn.kind);
             for (const messageId of turn.messageIds) turnByMessageId.set(messageId, turn);
             for (const group of turn.groups ?? []) {
                 groupIndexByMessageId.set(group.id, groupCount);
@@ -2046,12 +2087,17 @@ export class ChatStore {
 
     #applySubmittedMessage(event: SessionEvent, deltas: ChatDelta[]): void {
         const data = event.data as {
-            delivery?: "run" | "steer";
+            delivery?: "context" | "run" | "steer";
             displayText: string;
             message: Message;
             runId: string;
             source?: "notification";
         };
+        if (data.delivery === "context") {
+            if (!this.#pendingNextGroupElementIds.includes(`message:${data.message.id}`)) {
+                this.#pendingNextGroupElementIds.push(`message:${data.message.id}`);
+            }
+        }
         if (data.delivery === "run") {
             this.#rememberTurn(data.runId, event.createdAt);
             if (this.#session.activeTurn === undefined) {
@@ -2073,7 +2119,7 @@ export class ChatStore {
 
     #trackPendingSteering(event: SessionEvent): void {
         const data = event.data as {
-            delivery?: "run" | "steer";
+            delivery?: "context" | "run" | "steer";
             message: UserMessage;
             runId: string;
         };
@@ -2386,6 +2432,7 @@ export class ChatStore {
         const element: UserMessageElement = {
             createdAt: at,
             delivery,
+            ...(message.contextOnly === true ? { contextOnly: true } : {}),
             id: `message:${message.id}`,
             kind: "user_message",
             messageId: message.id,

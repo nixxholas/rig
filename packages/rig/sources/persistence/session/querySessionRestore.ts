@@ -37,6 +37,7 @@ import { queryDurableUserInputs } from "./queryDurableUserInputs.js";
 import { queryExternalToolCallsForSession } from "./queryExternalToolCallsForSession.js";
 import { querySessionHasEarlierStoredMessage } from "./querySessionHasEarlierStoredMessage.js";
 import { querySessionPartialMessages } from "./querySessionPartialMessages.js";
+import { queryPendingContextMessages } from "./queryPendingContextMessages.js";
 import { querySessionTranscriptPage } from "./querySessionTranscriptPage.js";
 import { queryDurableWaits } from "../scheduling/queryDurableWaits.js";
 import { queryScheduledMessages } from "../scheduling/queryScheduledMessages.js";
@@ -155,6 +156,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         orderKey: readString(row, "order_key"),
         providerId: readString(row, "provider_id"),
         permissionMode,
+        pendingContextMessages: queryPendingContextMessages(tx, sessionId),
         projectId,
         ...(workspaceId === undefined ? {} : { workspaceId }),
         workspaceTransfer,

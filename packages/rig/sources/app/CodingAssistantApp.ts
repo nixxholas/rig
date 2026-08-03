@@ -775,6 +775,15 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
         if (event.type === "message_submitted") {
+            if (event.data.delivery === "context") {
+                this.#appendEntry({
+                    contextOnly: true,
+                    id: event.data.message.id,
+                    role: "user",
+                    text: event.data.displayText,
+                });
+                return;
+            }
             this.#modelLocked = true;
             if (event.data.delivery === "run") {
                 this.#latestSessionRunId = event.data.runId;
@@ -1772,6 +1781,26 @@ export class CodingAssistantApp implements Component, Focusable {
 
         if (prompt === "/compact") {
             await this.#compactSession();
+            this.#requestRender();
+            return;
+        }
+
+        if (prompt === "/context" || prompt.startsWith("/context ")) {
+            this.#editor.addToHistory(prompt);
+            const text = prompt.slice("/context".length).trim();
+            if (text.length === 0) {
+                this.#appendEntry({
+                    role: "error",
+                    text: "Add the background context after /context.",
+                });
+            } else if (this.#agent.sendContext === undefined) {
+                this.#appendEntry({
+                    role: "error",
+                    text: "Context notes are unavailable for this session.",
+                });
+            } else {
+                await this.#agent.sendContext(text);
+            }
             this.#requestRender();
             return;
         }
@@ -4186,6 +4215,9 @@ export class CodingAssistantApp implements Component, Focusable {
         if (entry.childText !== undefined) {
             completeEntry.childText = entry.childText;
         }
+        if (entry.contextOnly !== undefined) {
+            completeEntry.contextOnly = entry.contextOnly;
+        }
         if (entry.execCommand !== undefined) {
             completeEntry.execCommand = entry.execCommand;
         }
@@ -5718,7 +5750,10 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     #renderUserEntry(entry: AppTranscriptEntry, width: number): string[] {
-        const prefix = `${BOLD}›${NOT_BOLD_OR_DIM} `;
+        const prefix =
+            entry.contextOnly === true
+                ? `${BOLD}›${NOT_BOLD_OR_DIM} ${DIM}context ·${RESET} `
+                : `${BOLD}›${NOT_BOLD_OR_DIM} `;
         const prefixWidth = visibleWidth(prefix);
         const contentWidth = Math.max(1, width - prefixWidth);
         const text = this.#styleImagePlaceholders(entry.text.length === 0 ? " " : entry.text);

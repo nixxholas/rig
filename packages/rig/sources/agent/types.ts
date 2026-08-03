@@ -110,6 +110,8 @@ export interface UserMessage {
     role: "user";
     id: string;
     blocks: readonly ContentBlock[];
+    /** Background context that waits for the next actionable user message. */
+    contextOnly?: true;
     /** Durable origin for non-human messages that use a user-role provider input shape. */
     provenance?: "agent";
     /** Durable sender identity for rendering and navigating agent-authored messages. */

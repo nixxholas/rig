@@ -38,6 +38,7 @@ import {
     type InMemorySessionOptions,
     type InMemorySessionPersistence,
     type PersistedQueuedRun,
+    type PersistedPendingContextMessage,
     type PersistedSessionMessage,
     type PersistedSessionState,
     type WorkspaceFeatures,
@@ -103,6 +104,8 @@ import { sessionRewind } from "../persistence/session/sessionRewind.js";
 import { sessionSave } from "../persistence/session/sessionSave.js";
 import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js";
 import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRun.js";
+import { sessionSavePendingContextMessage } from "../persistence/session/sessionSavePendingContextMessage.js";
+import { sessionDrainPendingContextMessages } from "../persistence/session/sessionDrainPendingContextMessages.js";
 import { sessionTransferWorkspace } from "../persistence/session/sessionTransferWorkspace.js";
 import { sessionSetWorkspaceTransferState } from "../persistence/session/sessionSetWorkspaceTransferState.js";
 import { queryWorkspaceHasAttachedSessions } from "../persistence/session/queryWorkspaceHasAttachedSessions.js";
@@ -729,6 +732,17 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     insertQueuedRun(sessionId: string, run: PersistedQueuedRun): void {
         sessionSaveQueuedRun(this.#tx(), sessionId, run, this.#now());
+    }
+
+    insertPendingContextMessage(sessionId: string, pending: PersistedPendingContextMessage): void {
+        sessionSavePendingContextMessage(this.#tx(), sessionId, pending, this.#now());
+    }
+
+    drainPendingContextMessages(
+        sessionId: string,
+        messageIds?: readonly string[],
+    ): readonly PersistedPendingContextMessage[] {
+        return sessionDrainPendingContextMessages(this.#tx(), sessionId, messageIds);
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {

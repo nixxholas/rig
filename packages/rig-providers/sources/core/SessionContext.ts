@@ -14,6 +14,8 @@ export type SessionInputContent = readonly (SessionTextContent | SessionImageCon
 export interface SessionUserMessage {
     readonly role: "user";
     readonly content: string;
+    /** Background context that does not establish a provider turn boundary. */
+    readonly contextOnly?: true;
     /** Ordered multimodal content. When present, providers use this instead of content. */
     readonly input?: SessionInputContent;
 }

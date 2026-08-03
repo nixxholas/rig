@@ -606,6 +606,68 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("shows context optimistically without changing session activity", async () => {
+        const stream = streamResponse();
+        const calls: { init?: RequestInit; url: URL }[] = [];
+        const fetch = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+            const url = new URL(String(input));
+            calls.push({ ...(init === undefined ? {} : { init }), url });
+            if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+            if (url.pathname.endsWith("/state")) {
+                return Promise.resolve(
+                    new Response(JSON.stringify(sessionState()), { status: 200 }),
+                );
+            }
+            return Promise.resolve(
+                new Response(
+                    JSON.stringify({
+                        delivery: "context",
+                        eventId: "event-context",
+                        messageId: "context-message",
+                        sessionId: "session-1",
+                    }),
+                    { status: 202 },
+                ),
+            );
+        });
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch,
+            now: () => 1_700_000_000_000,
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: "session-1",
+        });
+
+        try {
+            stream.write(liveHello());
+            await settle();
+            const sessionBefore = connection.session();
+            const mutationId = rig.sendContextMessage("session-1", "Use the blue database.");
+
+            expect(connection.elements().at(-1)).toMatchObject({
+                contextOnly: true,
+                kind: "user_message",
+                messageId: mutationId,
+                text: "Use the blue database.",
+            });
+            expect(connection.session().activity).toBe(sessionBefore.activity);
+            expect(connection.session().status).toBe(sessionBefore.status);
+            const sent = calls.find((call) => call.url.pathname.endsWith("/context"));
+            expect(JSON.parse(String(sent?.init?.body))).toEqual({
+                clientSubmissionId: mutationId,
+                mutationId,
+                text: "Use the blue database.",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("steers the active run when sending a message during work", async () => {
         const stream = streamResponse();
         const calls: { init?: RequestInit; url: URL }[] = [];

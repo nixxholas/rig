@@ -17,6 +17,7 @@ import type {
     ReadBackgroundProcessResponse,
     RunShellCommandResponse,
     SteerMessageResponse,
+    SubmitContextMessageResponse,
     StopBackgroundProcessResponse,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
@@ -74,6 +75,7 @@ export interface CodingAssistantAgentBackend {
         content: string | readonly ContentBlock[],
         options?: AgentRunOptions,
     ): Promise<AgentRunResult>;
+    sendContext?(text: string): Promise<SubmitContextMessageResponse>;
     steer(
         content: string | readonly ContentBlock[],
         options?: SteeringRunOptions,

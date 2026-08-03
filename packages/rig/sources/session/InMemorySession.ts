@@ -80,6 +80,8 @@ import type {
     SetSessionDraftRequest,
     SubmitMessageRequest,
     SubmitMessageResponse,
+    SubmitContextMessageRequest,
+    SubmitContextMessageResponse,
     SteerMessageRequest,
     SteerMessageResponse,
     UpdateSessionRequest,
@@ -215,6 +217,13 @@ export interface PersistedSessionMessage {
     runId?: string;
 }
 
+export interface PersistedPendingContextMessage {
+    anchorRunId: string;
+    createdAt: number;
+    message: UserMessage;
+    position: number;
+}
+
 export interface PersistedQueuedRun {
     debug?: boolean;
     debugDirectory?: string;
@@ -277,6 +286,7 @@ export interface PersistedSessionState {
     providerId: string;
     permissionMode: PermissionMode;
     permissionReviews?: readonly SessionPermissionReview[];
+    pendingContextMessages?: readonly PersistedPendingContextMessage[];
     projectId?: string;
     workspaceId?: string;
     secretIds?: readonly string[];
@@ -328,6 +338,11 @@ export interface InMemorySessionPersistence {
         permissionCall: DurableUserInputCall,
     ): void;
     insertQueuedRun(sessionId: string, run: PersistedQueuedRun): void;
+    insertPendingContextMessage?(sessionId: string, pending: PersistedPendingContextMessage): void;
+    drainPendingContextMessages?(
+        sessionId: string,
+        messageIds?: readonly string[],
+    ): readonly PersistedPendingContextMessage[];
     loadTranscriptPage?(
         sessionId: string,
         turnLimit: number,
@@ -474,6 +489,7 @@ interface PendingSteeringMessage {
 
 interface PendingSteeringContinuation {
     cancelled: boolean;
+    contextMessageIds: string[];
     messageIds: string[];
     ready: Promise<void>;
     resolveReady: () => void;
@@ -593,6 +609,8 @@ export class InMemorySession {
     #onInitialTitle: InMemorySessionOptions["onInitialTitle"];
     #orderKey: string;
     #partialPositions = new Set<number>();
+    #pendingContextMessages = new Map<string, PersistedPendingContextMessage>();
+    #pendingContextSteering = new Map<string, Set<string>>();
     #pendingSteeringMessages = new Map<string, PendingSteeringMessage>();
     #pendingSteeringContinuations = new Map<string, PendingSteeringContinuation>();
     #pendingUserInputs = new Map<string, PendingUserInput>();
@@ -797,6 +815,12 @@ export class InMemorySession {
         this.#tools = options.restore?.tools ?? [];
         this.#interruption = options.restore?.interruption;
         this.#queue = [...(options.restore?.queuedRuns ?? [])];
+        for (const pending of options.restore?.pendingContextMessages ?? []) {
+            this.#pendingContextMessages.set(pending.message.id, {
+                ...pending,
+                message: structuredClone(pending.message),
+            });
+        }
         this.#messages = [...(options.restore?.messages ?? [])].sort(
             (left, right) => left.position - right.position,
         );
@@ -1028,6 +1052,7 @@ export class InMemorySession {
                 });
                 continuation = {
                     cancelled: false,
+                    contextMessageIds: [],
                     messageIds: continuationMessageIds.filter(
                         (messageId) =>
                             this.#pendingSteeringMessages.get(messageId)?.runId === runId,
@@ -3347,18 +3372,24 @@ export class InMemorySession {
         this.#contextMessages = undefined;
         this.#partialPositions.clear();
         this.#activePartial = undefined;
+        this.#pendingContextMessages.clear();
+        this.#pendingContextSteering.clear();
         this.#pendingSteeringMessages.clear();
         this.#suspendedRunIds.clear();
         const hadTasks = this.#taskList.reset();
         const hadGoal = this.#goal !== undefined;
         this.#goal = undefined;
-        this.#persistence?.clearMessages(this.id);
-        if (hadTasks) this.#recordTasksChanged();
-        if (hadGoal) this.#append("goal_changed", { goal: null });
-        this.#append("session_reset", {
-            snapshot: this.#agentSnapshot(),
-            transcript: this.transcriptWindow(),
-        });
+        const commitReset = () => {
+            this.#persistence?.clearMessages(this.id);
+            if (hadTasks) this.#recordTasksChanged();
+            if (hadGoal) this.#append("goal_changed", { goal: null });
+            this.#append("session_reset", {
+                snapshot: this.#agentSnapshot(),
+                transcript: this.transcriptWindow(),
+            });
+        };
+        if (this.#persistence?.transaction === undefined) commitReset();
+        else this.#persistence.transaction(commitReset);
         return this.snapshot();
     }
 
@@ -3389,6 +3420,12 @@ export class InMemorySession {
         this.#mcpToolNames.clear();
         this.#tools = [];
         this.#messages = this.#messages.filter((entry) => entry.position < target.position);
+        this.#pendingContextMessages = new Map(
+            [...this.#pendingContextMessages].filter(
+                ([, pending]) => pending.position < target.position,
+            ),
+        );
+        this.#pendingContextSteering.clear();
         this.#rebuildMessagePositionIndex();
         this.#rebuildTranscriptIndex();
         this.#retainPermissionReviewsForMessages(this.#messages.map((entry) => entry.message));
@@ -3411,12 +3448,16 @@ export class InMemorySession {
         this.#status = "idle";
         this.#totalTokens = 0;
         this.#lastMessageAt = this.#now();
-        this.#persistence?.deleteMessagesFrom(this.id, target.position);
-        this.#append("session_rewound", {
-            messageId,
-            snapshot: this.#agentSnapshot(),
-            transcript: this.transcriptWindow(),
-        });
+        const commitRewind = () => {
+            this.#persistence?.deleteMessagesFrom(this.id, target.position);
+            this.#append("session_rewound", {
+                messageId,
+                snapshot: this.#agentSnapshot(),
+                transcript: this.transcriptWindow(),
+            });
+        };
+        if (this.#persistence?.transaction === undefined) commitRewind();
+        else this.#persistence.transaction(commitRewind);
         this.#restartMetadataSettlement();
         return { message: target.message, session: this.snapshot() };
     }
@@ -3969,7 +4010,8 @@ export class InMemorySession {
     state(): PersistedSessionState {
         const activeRunId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
         const runtimeSnapshot = this.#runtime?.agent.snapshot();
-        const contextMessages =
+        const pendingContextIds = new Set(this.#pendingContextMessages.keys());
+        const contextMessages = (
             runtimeSnapshot === undefined
                 ? (this.#contextMessages ?? this.#committedMessages()).filter(
                       (message) => !isExcludedFromModelContext(message),
@@ -3979,7 +4021,8 @@ export class InMemorySession {
                           (message) => !isExcludedFromModelContext(message),
                       ),
                       ...runtimeSnapshot.queue.map((queued) => queued.message),
-                  ];
+                  ]
+        ).filter((message) => !pendingContextIds.has(message.id));
         const usageSummary = structuredClone(this.usage());
         const usageSummaryEventId = this.events.lastEventId();
         const state: PersistedSessionState = {
@@ -4021,6 +4064,10 @@ export class InMemorySession {
             workspaceTransfer: structuredClone(this.#workspaceTransfer),
             secretIds: this.#secrets.sessionIds(),
             queuedRuns: [...this.#queue],
+            pendingContextMessages: [...this.#pendingContextMessages.values()].map((pending) => ({
+                ...pending,
+                message: structuredClone(pending.message),
+            })),
             ...(this.#recap !== undefined ? { recap: this.#recap } : {}),
             nextTaskId: this.#taskList.nextId,
             status: this.#status,
@@ -4067,6 +4114,62 @@ export class InMemorySession {
         return state;
     }
 
+    submitContext(request: SubmitContextMessageRequest): SubmitContextMessageResponse {
+        this.#assertAcceptingWork();
+        if (request.clientSubmissionId !== undefined) {
+            const existing = this.events.messageSubmission(request.clientSubmissionId);
+            if (existing?.data.delivery === "context") {
+                return {
+                    delivery: "context",
+                    eventId: existing.id,
+                    messageId: existing.data.message.id,
+                    sessionId: this.id,
+                };
+            }
+        }
+
+        const apply = (): SubmitContextMessageResponse => {
+            this.setArchived(false);
+            const messageId = request.clientSubmissionId ?? createId();
+            const anchorRunId = `context:${messageId}`;
+            const createdAt = this.#now();
+            const position = this.#nextMessagePosition();
+            const message: UserMessage = {
+                blocks: [{ text: request.text, type: "text" }],
+                contextOnly: true,
+                id: messageId,
+                role: "user",
+            };
+            const pending: PersistedPendingContextMessage = {
+                anchorRunId,
+                createdAt,
+                message,
+                position,
+            };
+            this.#separateModelContextFromVisibleTranscript();
+            this.#storeMessage(position, message, false, anchorRunId);
+            this.#persistence?.insertPendingContextMessage?.(this.id, pending);
+            this.#pendingContextMessages.set(messageId, pending);
+            this.#lastMessageAt = createdAt;
+            const event = this.#append("message_submitted", {
+                delivery: "context",
+                displayText: request.text,
+                message,
+                ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
+                runId: anchorRunId,
+            });
+            return {
+                delivery: "context",
+                eventId: event.id,
+                messageId,
+                sessionId: this.id,
+            };
+        };
+        return this.#persistence?.transaction === undefined
+            ? apply()
+            : this.#persistence.transaction(apply);
+    }
+
     submit(
         request: SessionSubmitMessageRequest,
         options: { source?: "notification" } = {},
@@ -4075,7 +4178,7 @@ export class InMemorySession {
         this.#assertConfigurationCanApply(request);
         if (request.clientSubmissionId !== undefined) {
             const existingEvent = this.events.messageSubmission(request.clientSubmissionId);
-            if (existingEvent !== undefined) {
+            if (existingEvent !== undefined && existingEvent.data.delivery !== "context") {
                 return {
                     eventId: existingEvent.id,
                     runId: existingEvent.data.runId,
@@ -4227,7 +4330,7 @@ export class InMemorySession {
         this.#assertAcceptingWork();
         if (request.clientSubmissionId !== undefined) {
             const existingEvent = this.events.messageSubmission(request.clientSubmissionId);
-            if (existingEvent !== undefined) {
+            if (existingEvent !== undefined && existingEvent.data.delivery !== "context") {
                 return {
                     delivery: existingEvent.data.delivery ?? "run",
                     eventId: existingEvent.id,
@@ -4273,6 +4376,13 @@ export class InMemorySession {
         const agent = this.#ensureRuntime().agent;
         const continuation = this.#pendingSteeringContinuations.get(activeRun.runId);
         if (continuation !== undefined && !continuation.cancelled) {
+            const pendingContext = this.#reservePendingContextForSteering(activeRun.runId);
+            for (const pending of pendingContext) {
+                agent.enqueueMessage(pending.message);
+                if (!continuation.contextMessageIds.includes(pending.message.id)) {
+                    continuation.contextMessageIds.push(pending.message.id);
+                }
+            }
             agent.enqueueMessage(userMessage);
             this.#storeMessage(this.#nextMessagePosition(), userMessage, false, activeRun.runId);
             this.#interruption = undefined;
@@ -4296,6 +4406,9 @@ export class InMemorySession {
         }
         const pending = agent.status === "running";
         if (pending) {
+            for (const context of this.#reservePendingContextForSteering(activeRun.runId)) {
+                agent.steerMessage(context.message);
+            }
             this.#pendingSteeringMessages.set(userMessage.id, {
                 createdAt: this.#now(),
                 message: userMessage,
@@ -4303,6 +4416,10 @@ export class InMemorySession {
             });
             agent.steerMessage(userMessage);
         } else {
+            const context = this.#drainPendingContextMessages();
+            for (const pendingContext of context) {
+                agent.enqueueMessage(pendingContext.message);
+            }
             agent.enqueueMessage(userMessage);
             this.#storeMessage(this.#nextMessagePosition(), userMessage, false, activeRun.runId);
         }
@@ -5792,24 +5909,39 @@ export class InMemorySession {
         }
 
         if (event.type === "steering_applied") {
-            const visibleMessageIds: string[] = [];
-            for (const messageId of event.messageIds) {
-                const pending = this.#pendingSteeringMessages.get(messageId);
-                if (pending === undefined || pending.runId !== runId) continue;
-                this.#storeMessage(this.#nextMessagePosition(), pending.message, false, runId);
-                this.#pendingSteeringMessages.delete(messageId);
-                visibleMessageIds.push(messageId);
-            }
-            if (visibleMessageIds.length > 0) {
-                const continuation = this.#pendingSteeringContinuations.get(runId);
-                if (continuation === undefined) {
-                    this.#append("steering_applied", { messageIds: visibleMessageIds, runId });
-                } else if (!continuation.cancelled) {
-                    for (const messageId of visibleMessageIds) {
-                        this.#rememberSteeringContinuationMessage(continuation, messageId);
+            let drainedContext: readonly PersistedPendingContextMessage[] = [];
+            const persist = () => {
+                const reservedContext = this.#pendingContextSteering.get(runId);
+                const contextMessageIds = event.messageIds.filter(
+                    (messageId) => reservedContext?.has(messageId) === true,
+                );
+
+                const visibleMessageIds: string[] = [];
+                for (const messageId of event.messageIds) {
+                    const pending = this.#pendingSteeringMessages.get(messageId);
+                    if (pending === undefined || pending.runId !== runId) continue;
+                    this.#storeMessage(this.#nextMessagePosition(), pending.message, false, runId);
+                    this.#pendingSteeringMessages.delete(messageId);
+                    visibleMessageIds.push(messageId);
+                }
+                if (visibleMessageIds.length > 0) {
+                    const continuation = this.#pendingSteeringContinuations.get(runId);
+                    if (continuation === undefined) {
+                        this.#append("steering_applied", { messageIds: visibleMessageIds, runId });
+                    } else if (!continuation.cancelled) {
+                        for (const messageId of visibleMessageIds) {
+                            this.#rememberSteeringContinuationMessage(continuation, messageId);
+                        }
                     }
                 }
-            }
+                drainedContext = this.#persistPendingContextDrain(contextMessageIds);
+            };
+            if (this.#persistence?.transaction === undefined) persist();
+            else this.#persistence.transaction(persist);
+            this.#applyPendingContextDrain(drainedContext);
+            const reservedContext = this.#pendingContextSteering.get(runId);
+            for (const pending of drainedContext) reservedContext?.delete(pending.message.id);
+            if (reservedContext?.size === 0) this.#pendingContextSteering.delete(runId);
             return;
         }
 
@@ -6516,9 +6648,45 @@ export class InMemorySession {
         ]);
     }
 
+    #drainPendingContextMessages(
+        messageIds?: readonly string[],
+    ): readonly PersistedPendingContextMessage[] {
+        const persist = () => this.#persistPendingContextDrain(messageIds);
+        const selected =
+            this.#persistence?.transaction === undefined
+                ? persist()
+                : this.#persistence.transaction(persist);
+        this.#applyPendingContextDrain(selected);
+        return selected;
+    }
+
+    #persistPendingContextDrain(
+        messageIds?: readonly string[],
+    ): readonly PersistedPendingContextMessage[] {
+        return (
+            this.#persistence?.drainPendingContextMessages?.(this.id, messageIds) ??
+            [...this.#pendingContextMessages.values()].filter(
+                (pending) => messageIds === undefined || messageIds.includes(pending.message.id),
+            )
+        );
+    }
+
+    #applyPendingContextDrain(selected: readonly PersistedPendingContextMessage[]): void {
+        if (selected.length === 0) return;
+        this.#separateModelContextFromVisibleTranscript();
+        const known = new Set(this.#contextMessages?.map((message) => message.id) ?? []);
+        for (const pending of selected) {
+            this.#pendingContextMessages.delete(pending.message.id);
+            if (!known.has(pending.message.id)) {
+                this.#contextMessages?.push(pending.message);
+                known.add(pending.message.id);
+            }
+        }
+    }
+
     async #drainQueue(): Promise<void> {
         for (;;) {
-            const queued = this.#queue.shift();
+            const queued = this.#queue[0];
             if (queued === undefined) {
                 if (this.#status === "queued" || this.#status === "running") {
                     this.#status = "idle";
@@ -6527,8 +6695,17 @@ export class InMemorySession {
                 return;
             }
 
-            this.#persistence?.deleteQueuedRun(this.id, queued.runId);
-            await this.#runQueued(queued);
+            const begin = () => {
+                this.#persistence?.deleteQueuedRun(this.id, queued.runId);
+                return this.#persistPendingContextDrain();
+            };
+            const contextMessages =
+                this.#persistence?.transaction === undefined
+                    ? begin()
+                    : this.#persistence.transaction(begin);
+            this.#applyPendingContextDrain(contextMessages);
+            this.#queue.shift();
+            await this.#runQueued(queued, contextMessages);
         }
     }
 
@@ -6772,7 +6949,10 @@ export class InMemorySession {
         }
     }
 
-    async #runQueued(queued: PersistedQueuedRun): Promise<void> {
+    async #runQueued(
+        queued: PersistedQueuedRun,
+        pendingContext: readonly PersistedPendingContextMessage[] = [],
+    ): Promise<void> {
         let controller = new AbortController();
         const debugLog = this.#debugLogFor(queued);
         this.#activeRun = {
@@ -6821,6 +7001,18 @@ export class InMemorySession {
             });
             runtime = this.#ensureRuntime();
             await this.#ensureMcpTools(runtime, controller.signal, queued.interactive !== false);
+            const runtimeSnapshot = runtime.agent.snapshot();
+            const runtimeMessageIds = new Set(
+                [
+                    ...(runtimeSnapshot.contextMessages ?? runtimeSnapshot.messages),
+                    ...runtimeSnapshot.queue.map((entry) => entry.message),
+                ].map((message) => message.id),
+            );
+            for (const pending of pendingContext) {
+                if (!runtimeMessageIds.has(pending.message.id)) {
+                    runtime.agent.enqueueMessage(pending.message);
+                }
+            }
             runtime.agent.enqueueMessage(queued.userMessage);
             if (this.#contextMessages !== undefined) {
                 this.#contextMessages = [...this.#contextMessages, queued.userMessage];
@@ -6856,13 +7048,22 @@ export class InMemorySession {
                         this.#pendingSteeringContinuations.get(queued.runId) === continuation &&
                         this.#activeRun?.runId === queued.runId
                     ) {
-                        if (continuation.messageIds.length > 0) {
-                            this.#append("steering_applied", {
-                                messageIds: [...continuation.messageIds],
-                                runId: queued.runId,
-                            });
-                        }
+                        const persistContinuation = () => {
+                            if (continuation.messageIds.length > 0) {
+                                this.#append("steering_applied", {
+                                    messageIds: [...continuation.messageIds],
+                                    runId: queued.runId,
+                                });
+                            }
+                            return this.#persistPendingContextDrain(continuation.contextMessageIds);
+                        };
+                        const drainedContext =
+                            this.#persistence?.transaction === undefined
+                                ? persistContinuation()
+                                : this.#persistence.transaction(persistContinuation);
+                        this.#applyPendingContextDrain(drainedContext);
                         this.#pendingSteeringContinuations.delete(queued.runId);
+                        this.#pendingContextSteering.delete(queued.runId);
                         controller = new AbortController();
                         this.#activeRun = {
                             controller,
@@ -6914,6 +7115,7 @@ export class InMemorySession {
             if (this.isSubagent()) this.#agentManager?.recordChanged(this);
         } finally {
             this.#pendingSteeringContinuations.delete(queued.runId);
+            this.#pendingContextSteering.delete(queued.runId);
             if (this.#activeRun?.runId === queued.runId) {
                 this.#activeRun = undefined;
             }
@@ -6931,6 +7133,16 @@ export class InMemorySession {
             this.#saveSession();
             await this.#closeDebugLog(queued);
         }
+    }
+
+    #reservePendingContextForSteering(runId: string): readonly PersistedPendingContextMessage[] {
+        const reserved = this.#pendingContextSteering.get(runId) ?? new Set<string>();
+        this.#pendingContextSteering.set(runId, reserved);
+        const selected = [...this.#pendingContextMessages.values()].filter(
+            (pending) => !reserved.has(pending.message.id),
+        );
+        for (const pending of selected) reserved.add(pending.message.id);
+        return selected;
     }
 
     #rememberSteeringContinuationMessage(

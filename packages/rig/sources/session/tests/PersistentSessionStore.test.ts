@@ -22,6 +22,35 @@ import { PersistentSessionStore } from "../PersistentSessionStore.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
+    it("restores pending context and rewinds or resets it atomically", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            let store = new PersistentSessionStore({ databasePath });
+            const session = store.create({ cwd: "/tmp/rig-pending-context-restore" });
+            const sessionId = session.id;
+            session.submitContext({ clientSubmissionId: "note-1", text: "First note." });
+            session.submitContext({ clientSubmissionId: "note-2", text: "Second note." });
+            session.rewind("note-2");
+            store.close();
+
+            store = new PersistentSessionStore({ databasePath });
+            const restored = store.get(sessionId);
+            expect(restored?.state().pendingContextMessages).toMatchObject([
+                { message: { id: "note-1" } },
+            ]);
+            expect(restored?.state().contextMessages).toEqual([]);
+            await restored?.reset();
+            store.close();
+
+            store = new PersistentSessionStore({ databasePath });
+            expect(store.get(sessionId)?.state().pendingContextMessages).toEqual([]);
+            expect(store.get(sessionId)?.state().messages).toEqual([]);
+            store.close();
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("does not swallow database failures from post-commit observers", () => {
         const failure = Object.assign(new Error("observer database failed"), {
             code: "SQLITE_IOERR",

@@ -846,6 +846,17 @@ export interface SubmitMessageRequest {
     mutationId?: string;
 }
 
+export const submitContextMessageRequestSchema = Type.Object(
+    {
+        clientSubmissionId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        text: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+);
+
+export type SubmitContextMessageRequest = Static<typeof submitContextMessageRequestSchema>;
+
 export interface BroadcastMessageRequest extends SubmitMessageRequest {
     all?: boolean;
     sessionIds?: readonly string[];
@@ -862,6 +873,13 @@ export interface SubmitMessageResponse {
     debugDirectory?: string;
     eventId: EventId;
     runId: string;
+    sessionId: string;
+}
+
+export interface SubmitContextMessageResponse {
+    delivery: "context";
+    eventId: EventId;
+    messageId: string;
     sessionId: string;
 }
 
@@ -1042,7 +1060,7 @@ export type MessageSubmittedEvent = BaseSessionEvent<
     "message_submitted",
     {
         displayText: string;
-        delivery?: "run" | "steer";
+        delivery?: "context" | "run" | "steer";
         message: UserMessage;
         mutationId?: string;
         runId: string;

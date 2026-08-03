@@ -94,6 +94,8 @@ import type {
     SignupMurmurAccountResponse,
     SubmitMessageRequest,
     SubmitMessageResponse,
+    SubmitContextMessageRequest,
+    SubmitContextMessageResponse,
     TrimGlobalEventsResponse,
     TransferSessionRequest,
     TransferSessionResponse,
@@ -1026,6 +1028,17 @@ export class ProtocolHttpClient {
         return this.#requestJson(
             "POST",
             `/sessions/${encodeURIComponent(sessionId)}/messages`,
+            request,
+        );
+    }
+
+    submitContextMessage(
+        sessionId: string,
+        request: SubmitContextMessageRequest,
+    ): Promise<SubmitContextMessageResponse> {
+        return this.#requestJson(
+            "POST",
+            `/sessions/${encodeURIComponent(sessionId)}/context`,
             request,
         );
     }

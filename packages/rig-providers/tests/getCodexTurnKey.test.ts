@@ -35,4 +35,17 @@ describe("getCodexTurnKey", () => {
 
         expect(getCodexTurnKey([human, queued])).toBe(getCodexTurnKey([human]));
     });
+
+    it("pins the turn key to the later actionable user message", () => {
+        const first: SessionMessage = { role: "user", content: "Original task" };
+        const note: SessionMessage = {
+            role: "user",
+            content: "Background context",
+            contextOnly: true,
+        };
+        const actionable: SessionMessage = { role: "user", content: "Continue now" };
+
+        expect(getCodexTurnKey([first, note])).toBe(getCodexTurnKey([first]));
+        expect(getCodexTurnKey([first, note, actionable])).not.toBe(getCodexTurnKey([first]));
+    });
 });

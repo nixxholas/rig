@@ -21,6 +21,7 @@ import type {
     ReadBackgroundProcessResponse,
     StopBackgroundProcessResponse,
     SteerMessageResponse,
+    SubmitContextMessageResponse,
 } from "../protocol/index.js";
 import {
     defineProvider,
@@ -110,7 +111,10 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                             event.type === "message_submitted" &&
                             event.data.message.id === options.clientSubmissionId,
                     );
-                    if (submitted?.type === "message_submitted") {
+                    if (
+                        submitted?.type === "message_submitted" &&
+                        submitted.data.delivery !== "context"
+                    ) {
                         return {
                             delivery: submitted.data.delivery ?? "run",
                             eventId: submitted.id,
@@ -416,6 +420,10 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         };
     }
 
+    sendContext(text: string): Promise<SubmitContextMessageResponse> {
+        return this.#client.submitContextMessage(this.#session.id, { text });
+    }
+
     setEffort(effort: string | undefined): void {
         this.#session = {
             ...this.#session,
@@ -587,6 +595,19 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         }
 
         if (event.type === "message_submitted") {
+            if (event.data.delivery === "context") {
+                this.#session = {
+                    ...this.#session,
+                    snapshot: {
+                        ...this.#session.snapshot,
+                        messages: appendUniqueMessage(
+                            this.#session.snapshot.messages,
+                            event.data.message,
+                        ),
+                    },
+                };
+                return;
+            }
             if (event.data.delivery === "steer") {
                 this.#pendingSteeringMessages.set(event.data.message.id, {
                     message: event.data.message,

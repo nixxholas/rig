@@ -47,6 +47,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
                               .filter((content) => content.type === "text")
                               .map((content) => content.text)
                               .join(""),
+                ...(message.contextOnly === true ? { contextOnly: true as const } : {}),
                 ...(input === undefined ? {} : { input }),
             };
         }

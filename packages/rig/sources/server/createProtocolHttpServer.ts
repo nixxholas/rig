@@ -95,6 +95,7 @@ import type {
     SignupMurmurAccountResponse,
     SubagentSummary,
     SubmitMessageResponse,
+    SubmitContextMessageResponse,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
     TransferSessionRequest,
@@ -122,6 +123,7 @@ import {
     SESSION_DRAFT_MAX_LENGTH,
     signupMurmurAccountRequestSchema,
     startMurmurServiceRequestSchema,
+    submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
@@ -2661,7 +2663,11 @@ async function handleRequest(
         return;
     }
 
-    if (session.isSubagent() && isSessionMutation(route.name, request.method)) {
+    if (
+        session.isSubagent() &&
+        route.name !== "context" &&
+        isSessionMutation(route.name, request.method)
+    ) {
         sendJson(response, 409, {
             error: "Subagent histories are read-only and cannot be resumed.",
         });
@@ -2692,6 +2698,39 @@ async function handleRequest(
             response,
             202,
             session.submit({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        );
+        return;
+    }
+
+    if (request.method === "POST" && route.name === "context") {
+        const body = await readJson<unknown>(request);
+        if (!Value.Check(submitContextMessageRequestSchema, body)) {
+            sendJson(response, 400, {
+                error: "A context note accepts only message text and optional submission identities; run settings are not allowed.",
+            });
+            return;
+        }
+        if (body.clientSubmissionId !== undefined) {
+            const submitted = session.events.messageSubmission(body.clientSubmissionId);
+            if (submitted?.data.delivery === "context") {
+                sendJson<SubmitContextMessageResponse>(response, 202, {
+                    delivery: "context",
+                    eventId: submitted.id,
+                    messageId: submitted.data.message.id,
+                    sessionId: session.id,
+                });
+                return;
+            }
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        sendJson<SubmitContextMessageResponse>(
+            response,
+            202,
+            session.submitContext({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -3517,6 +3556,7 @@ function matchRoute(pathname: string):
               | "archive"
               | "background-processes-stop"
               | "compact"
+              | "context"
               | "current-provider-quota"
               | "draft"
               | "effort"
@@ -3881,6 +3921,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "activity") return { name: "activity", sessionId };
     if (parts[2] === "archive") return { name: "archive", sessionId };
     if (parts[2] === "compact") return { name: "compact", sessionId };
+    if (parts[2] === "context") return { name: "context", sessionId };
     if (parts[2] === "current-provider-quota") {
         return { name: "current-provider-quota", sessionId };
     }
@@ -4116,6 +4157,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "archive",
                 "background-processes-stop",
                 "compact",
+                "context",
                 "external-tool-call",
                 "fork",
                 "messages",

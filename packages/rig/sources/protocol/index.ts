@@ -273,6 +273,8 @@ export type {
     StartInspectorResponse,
     SubmitMessageRequest,
     SubmitMessageResponse,
+    SubmitContextMessageRequest,
+    SubmitContextMessageResponse,
     SteerMessageRequest,
     SteerMessageResponse,
     TasksChangedEvent,
@@ -347,6 +349,7 @@ export {
     SESSION_DRAFT_MAX_LENGTH,
     SESSION_TRANSCRIPT_NOTICE_LIMIT,
     SESSION_STREAM_TURN_LIMIT,
+    submitContextMessageRequestSchema,
     transferSessionRequestSchema,
 } from "./SessionProtocol.js";
 export {

@@ -6,6 +6,41 @@ import { InMemorySession } from "../InMemorySession.js";
 import { InMemorySessionStore } from "../InMemorySessionStore.js";
 
 describe("InMemorySession", () => {
+    it("stores idempotent context without starting or queuing a run", () => {
+        const session = new InMemorySessionStore().create({ cwd: "/tmp/rig-context-only" });
+
+        const first = session.submitContext({
+            clientSubmissionId: "context-note-1",
+            text: "The deployment region is eu-west-1.",
+        });
+        const repeated = session.submitContext({
+            clientSubmissionId: "context-note-1",
+            text: "The deployment region is eu-west-1.",
+        });
+
+        expect(repeated).toEqual(first);
+        expect(session.summary().status).toBe("idle");
+        expect(session.activity().kind).toBe("idle");
+        expect(session.state().queuedRuns).toEqual([]);
+        expect(session.state().contextMessages).toEqual([]);
+        expect(session.state().messages).toMatchObject([
+            {
+                message: {
+                    contextOnly: true,
+                    id: "context-note-1",
+                    role: "user",
+                },
+                runId: "context:context-note-1",
+            },
+        ]);
+        expect(
+            session.events.since(undefined)?.filter((event) => event.type === "message_submitted"),
+        ).toHaveLength(1);
+        expect(
+            session.events.since(undefined)?.filter((event) => event.type === "run_started"),
+        ).toEqual([]);
+    });
+
     it("keeps visible-only restored errors out of persisted model context", () => {
         const model = defineModel({
             defaultThinkingLevel: "off",

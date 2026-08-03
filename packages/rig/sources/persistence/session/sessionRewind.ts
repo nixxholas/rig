@@ -1,11 +1,19 @@
 import { and, eq, gte, sql } from "drizzle-orm";
 
-import { sessionMessages, sessionTurns } from "../database/schema.js";
+import { pendingContextMessages, sessionMessages, sessionTurns } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 
 export function sessionRewind(tx: TX, sessionId: string, position: number): void {
     inTx(tx, (tx) => {
+        tx.delete(pendingContextMessages)
+            .where(
+                and(
+                    eq(pendingContextMessages.sessionId, sessionId),
+                    gte(pendingContextMessages.position, position),
+                ),
+            )
+            .run();
         tx.delete(sessionMessages)
             .where(
                 and(

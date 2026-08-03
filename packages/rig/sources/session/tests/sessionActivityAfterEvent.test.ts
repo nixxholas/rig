@@ -33,6 +33,33 @@ function toolCall(id: string, name: string) {
 }
 
 describe("sessionActivityAfterEvent", () => {
+    it("leaves activity unchanged for background context", () => {
+        const previous: SessionActivity = {
+            kind: "waiting",
+            label: "Waiting",
+            runId: "run-1",
+            since: 10,
+        };
+        const message = {
+            blocks: [{ text: "Background note", type: "text" }],
+            contextOnly: true,
+            id: "note-1",
+            role: "user",
+        } as const;
+
+        expect(
+            sessionActivityAfterEvent(
+                previous,
+                event("message_submitted", {
+                    delivery: "context",
+                    displayText: "Background note",
+                    message,
+                    runId: "context:note-1",
+                }),
+            ),
+        ).toBe(previous);
+    });
+
     it("reports thinking once a run starts", () => {
         const activity = apply([event("run_started", { runId: "run-1" })]);
 

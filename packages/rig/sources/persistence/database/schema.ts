@@ -278,6 +278,24 @@ export const queuedRuns = sqliteTable(
     (table) => [primaryKey({ columns: [table.sessionId, table.runId] })],
 );
 
+export const pendingContextMessages = sqliteTable(
+    "pending_context_messages",
+    {
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        messageId: text("message_id").notNull(),
+        position: integer("position").notNull(),
+        anchorRunId: text("anchor_run_id").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.sessionId, table.messageId] }),
+        unique().on(table.sessionId, table.position),
+        index("pending_context_messages_session_fifo").on(table.sessionId, table.position),
+    ],
+);
+
 export const externalToolCalls = sqliteTable(
     "external_tool_calls",
     {

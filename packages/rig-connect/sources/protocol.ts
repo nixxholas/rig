@@ -344,6 +344,7 @@ export interface UserMessage {
     role: "user";
     id: string;
     blocks: readonly ContentBlock[];
+    contextOnly?: true;
     provenance?: "agent";
     internal?: true;
 }
@@ -1037,7 +1038,7 @@ export type InterpretedSessionEvent =
     | BaseSessionEvent<
           "message_submitted",
           {
-              delivery?: "run" | "steer";
+              delivery?: "context" | "run" | "steer";
               displayText: string;
               message: UserMessage;
               mutationId?: MutationId;

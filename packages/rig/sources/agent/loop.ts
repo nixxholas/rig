@@ -1307,9 +1307,18 @@ function toProviderSystemMessage(message: SystemMessage, now: () => number): Pro
 }
 
 function toProviderUserMessage(message: UserMessage, now: () => number): ProviderMessage {
+    const backgroundContextHeading =
+        "Background context only. This is not a request. Use it when answering the next actionable message.";
     return {
         role: "user",
-        content: message.blocks.map(toProviderUserContent),
+        content:
+            message.contextOnly === true
+                ? [
+                      { type: "text", text: backgroundContextHeading } as const,
+                      ...message.blocks.map(toProviderUserContent),
+                  ]
+                : message.blocks.map(toProviderUserContent),
+        ...(message.contextOnly === true ? { contextOnly: true as const } : {}),
         sourceMessageId: message.id,
         ...(message.encryptedAgentMessage === undefined
             ? {}

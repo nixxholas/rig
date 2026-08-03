@@ -3065,6 +3065,8 @@ describe("CodingAssistantApp", () => {
         expect(commandLine).not.toContain("\x1b[1m");
         expect(rendered).toContain("/model");
         expect(rendered).toContain("Choose the model and reasoning level.");
+        expect(rendered).toContain("/context");
+        expect(rendered).toContain("Add background context for the next request.");
         expect(rendered).toContain("/effort");
         expect(rendered).toContain("Change reasoning for this session.");
         expect(rendered).toContain("/configure");
@@ -3073,8 +3075,6 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("Choose filesystem, shell, and network access.");
         expect(rendered).toContain("/mcp");
         expect(rendered).toContain("Show configured MCP server connections.");
-        expect(rendered).toContain("/tasks");
-        expect(rendered).toContain("Show the current session task list.");
         expect(rendered).not.toContain("GPT Test Off •");
         expect(rendered).not.toContain("/quit");
 

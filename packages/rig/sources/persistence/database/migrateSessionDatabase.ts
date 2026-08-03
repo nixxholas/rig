@@ -17,6 +17,7 @@ import { webappAllowedScopes } from "./migrations/13-webapp-allowed-scopes.js";
 import { slotEntryAuthors } from "./migrations/14-slot-entry-authors.js";
 import { sessionWorkspaceTransfer } from "./migrations/15-session-workspace-transfer.js";
 import { projectUserMutationVersion } from "./migrations/16-project-user-mutation-version.js";
+import { pendingContextMessages } from "./migrations/17-pending-context-messages.js";
 
 const migrations = [
     init,
@@ -35,6 +36,7 @@ const migrations = [
     slotEntryAuthors,
     sessionWorkspaceTransfer,
     projectUserMutationVersion,
+    pendingContextMessages,
 ] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 

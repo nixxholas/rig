@@ -105,6 +105,8 @@ export interface SystemMessage {
 export interface UserMessage {
     role: "user";
     content: string | readonly UserContent[];
+    /** Background context that does not establish an inference turn by itself. */
+    contextOnly?: true;
     /** Caller-owned identity used only while restoring provider-selected replacement context. */
     sourceMessageId?: string;
     encryptedAgentMessage?: {

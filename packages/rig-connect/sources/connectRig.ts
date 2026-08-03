@@ -514,6 +514,7 @@ export interface RigConnection {
     /** Clears a chat's unread state, the way focusing a terminal on it does. */
     markSessionRead: (sessionId: string) => MutationId;
     sendMessage: (sessionId: string, message: string | SendMessageInput) => MutationId;
+    sendContextMessage: (sessionId: string, text: string) => MutationId;
     stopRun: (sessionId: string) => MutationId;
     switchModel: (sessionId: string, selection: string | ModelSelection) => MutationId;
     setEffort: (sessionId: string, effort?: string) => MutationId;
@@ -3017,6 +3018,54 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return enqueue(mutation);
     };
 
+    const sendContextMessage = (sessionId: string, text: string): MutationId => {
+        const id = nextMutationId();
+        const key = sessionKey(sessionId);
+        let expectedEventId: string | undefined;
+        const mutation: PendingMutation = {
+            acknowledged: false,
+            action: "send_context_message",
+            entityKey: key,
+            id,
+            sessionId,
+            undo: () => undefined,
+            applyOptimistic: (publish) => {
+                const undos: (() => void)[] = [];
+                const entry = sessionEntries.get(sessionId);
+                if (entry !== undefined) {
+                    const changed = entry.store.applyOptimisticContextMessage(id, text, now());
+                    undos.push(changed.undo);
+                    if (publish) publishSession(entry, changed.deltas);
+                }
+                if (groupsEntry !== undefined) {
+                    const changed = groupsEntry.store.applyOptimisticSessionPatch(sessionId, {
+                        lastMessageAt: now(),
+                    });
+                    undos.push(changed.undo);
+                    if (publish) publishGroups(groupsEntry, changed.deltas);
+                }
+                return composeUndo(undos);
+            },
+            prepare: () => {
+                expectedEventId ??= currentSessionCursor(sessionId);
+                return {
+                    body: {
+                        clientSubmissionId: id,
+                        mutationId: id,
+                        text,
+                    },
+                    headers: ifMatchHeader(expectedEventId),
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `sessions/${encodeURIComponent(sessionId)}/context`,
+                    ),
+                };
+            },
+        };
+        return enqueue(mutation);
+    };
+
     const stopRun = (sessionId: string): MutationId => {
         const id = nextMutationId();
         const key = sessionKey(sessionId);
@@ -3851,6 +3900,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         runShellCommand,
         sendMurmurFriendRequest,
         sendMessage,
+        sendContextMessage,
         setDraft,
         setAppendSystemPrompt,
         setEffort,

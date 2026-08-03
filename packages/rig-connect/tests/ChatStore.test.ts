@@ -114,6 +114,120 @@ function runOneTurn(store: ChatStore): ChatDelta[] {
 }
 
 describe("ChatStore", () => {
+    it("rebuilds a tail context anchor without restoring a live turn", () => {
+        const message = {
+            blocks: [{ text: "Use the blue database.", type: "text" as const }],
+            contextOnly: true as const,
+            id: "context-1",
+            role: "user" as const,
+        };
+        const opening = {
+            ...hello(),
+            transcript: {
+                complete: true,
+                messageCreatedAt: { "context-1": 10 },
+                messages: [message],
+                turns: [
+                    {
+                        messageIds: ["context-1"],
+                        runId: "context:context-1",
+                        startedAt: 10,
+                    },
+                ],
+            },
+        };
+        const store = new ChatStore("session-1");
+        store.applyHello(opening);
+        const contextElement = store.elements()[0];
+
+        expect(store.session().activeTurn).toBeUndefined();
+        expect(contextElement).toMatchObject({
+            contextOnly: true,
+            groupId: "run:context:context-1",
+            kind: "user_message",
+            runId: "context:context-1",
+        });
+
+        store.applyHello(opening);
+        expect(store.elements()[0]).toBe(contextElement);
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Check the migration.",
+                message: {
+                    blocks: [{ text: "Check the migration.", type: "text" }],
+                    id: "request-1",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({
+                iteration: 1,
+                messageId: "answer-1",
+                type: "inference_iteration_start",
+            }),
+        );
+        expect(store.elements()[0]?.groupId).toBe("group:answer-1");
+    });
+
+    it("attaches context forward without activating or patching the session", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const sessionBefore = store.session();
+        store.apply(
+            event("message_submitted", {
+                delivery: "context",
+                displayText: "Use the blue database.",
+                message: {
+                    blocks: [{ text: "Use the blue database.", type: "text" }],
+                    contextOnly: true,
+                    id: "context-1",
+                    role: "user",
+                },
+                runId: "context:context-1",
+            }),
+        );
+
+        expect(store.session().activity).toBe(sessionBefore.activity);
+        expect(store.session().status).toBe(sessionBefore.status);
+        expect(store.elements()).toMatchObject([
+            {
+                contextOnly: true,
+                kind: "user_message",
+                messageId: "context-1",
+                runId: "context:context-1",
+            },
+        ]);
+
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Check the migration.",
+                message: {
+                    blocks: [{ text: "Check the migration.", type: "text" }],
+                    id: "request-1",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({
+                iteration: 1,
+                messageId: "answer-1",
+                type: "inference_iteration_start",
+            }),
+        );
+
+        const messages = store.elements().filter((element) => element.kind === "user_message");
+        expect(messages[0]?.groupId).toBe(messages[1]?.groupId);
+        expect(store.session().activeTurn?.runId).toBe("run-1");
+    });
+
     it("commits final-message attachments before closing the live turn", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());

@@ -15,6 +15,12 @@ export function createSlashCommands(
             aliases: [],
         },
         {
+            value: "context",
+            label: "/context",
+            description: "Add background context for the next request.",
+            aliases: [],
+        },
+        {
             value: "effort",
             label: "/effort",
             description: "Change reasoning for this session.",

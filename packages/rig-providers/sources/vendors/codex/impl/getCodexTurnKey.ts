@@ -3,7 +3,7 @@ import type { SessionMessage } from "@/core/SessionContext.js";
 export function getCodexTurnKey(messages: readonly SessionMessage[]): string {
     const lastTurnBoundaryIndex = messages.findLastIndex(
         (message) =>
-            message.role === "user" ||
+            (message.role === "user" && message.contextOnly !== true) ||
             (message.role === "agent" && message.agentMessageTriggerTurn === true),
     );
     return JSON.stringify(

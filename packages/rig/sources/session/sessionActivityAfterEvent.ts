@@ -29,6 +29,7 @@ export function sessionActivityAfterEvent(
 ): SessionActivity {
     switch (event.type) {
         case "message_submitted":
+            if (event.data.delivery === "context") return previous;
             return previous.runId === undefined
                 ? { kind: "queued", label: "Queued", since: event.createdAt }
                 : previous;

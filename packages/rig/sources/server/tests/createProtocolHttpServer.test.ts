@@ -2183,6 +2183,48 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("validates and idempotently stores context without a run lifecycle", async () => {
+        const { client, close, socketPath, store } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-context-route" });
+            const first = await client.submitContextMessage(created.session.id, {
+                clientSubmissionId: "context-route-note",
+                text: "Use the blue database.",
+            });
+            const repeated = await client.submitContextMessage(created.session.id, {
+                clientSubmissionId: "context-route-note",
+                text: "Use the blue database.",
+            });
+
+            expect(repeated).toEqual(first);
+            expect(first).toMatchObject({
+                delivery: "context",
+                messageId: "context-route-note",
+            });
+            expect(
+                store
+                    .get(created.session.id)
+                    ?.events.since(undefined)
+                    ?.filter((event) => event.type === "run_started"),
+            ).toEqual([]);
+            const rejected = await requestRawJson(
+                socketPath,
+                `/sessions/${created.session.id}/context`,
+                {
+                    body: JSON.stringify({
+                        modelId: "openai/another-model",
+                        text: "Do not apply settings.",
+                    }),
+                    method: "POST",
+                },
+            );
+            expect(rejected.statusCode).toBe(400);
+            expect(rejected.body).toContain("run settings are not allowed");
+        } finally {
+            await close();
+        }
+    });
+
     it("queues steering as a new run when the session has no active run", async () => {
         const { client, close, store } = await startServer();
         try {

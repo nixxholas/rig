@@ -70,6 +70,8 @@ export interface UserMessageElement extends BaseChatElement {
     messageId: string;
     /** Whether this bubble is still queued to steer the active run. */
     delivery: "pending_steering" | "sent";
+    /** This message is background context for the next actionable group. */
+    contextOnly?: true;
     /** When this message was actually applied as steering, not when it was queued. */
     steeredAt?: number;
     /** Time since the preceding steering or compaction, or since the turn began. */
@@ -339,6 +341,7 @@ export type MutationAction =
     | "create_session"
     | "fork_session"
     | "send_message"
+    | "send_context_message"
     | "stop_run"
     | "switch_model"
     | "set_effort"
