@@ -2012,14 +2012,17 @@ function decodeNetworkCompletion(
 async function readBody(request: IncomingMessage, maximumBytes: number): Promise<unknown> {
     const chunks: Buffer[] = [];
     let bytes = 0;
+    let tooLarge = false;
     for await (const chunk of request) {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         bytes += buffer.length;
         if (bytes > maximumBytes) {
-            throw new PluginApiRequestTooLargeError("The plugin request is too large.");
+            tooLarge = true;
+            continue;
         }
-        chunks.push(buffer);
+        if (!tooLarge) chunks.push(buffer);
     }
+    if (tooLarge) throw new PluginApiRequestTooLargeError("The plugin request is too large.");
     const text = Buffer.concat(chunks).toString("utf8");
     try {
         return JSON.parse(text) as unknown;

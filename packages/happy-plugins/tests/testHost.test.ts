@@ -423,6 +423,8 @@ describe("Happy plugin test host", () => {
                 host,
                 "/sessions",
                 JSON.stringify({ cwd: "x".repeat(1024 * 1024) }),
+                "POST",
+                64 * 1024,
             ),
         ).resolves.toBe(413);
     });
@@ -645,6 +647,7 @@ function rawHostRequestStatus(
     path: string,
     body: string,
     method = "POST",
+    chunkBytes?: number,
 ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
         const request = requestHttp(
@@ -664,6 +667,26 @@ function rawHostRequestStatus(
             },
         );
         request.once("error", reject);
-        request.end(body);
+        if (chunkBytes === undefined) {
+            request.end(body);
+            return;
+        }
+        const buffer = Buffer.from(body);
+        let offset = 0;
+        const writeNext = (): void => {
+            if (offset >= buffer.length) {
+                request.end();
+                return;
+            }
+            const nextOffset = Math.min(buffer.length, offset + chunkBytes);
+            const canContinue = request.write(buffer.subarray(offset, nextOffset));
+            offset = nextOffset;
+            if (canContinue) {
+                setImmediate(writeNext);
+            } else {
+                request.once("drain", writeNext);
+            }
+        };
+        writeNext();
     });
 }
