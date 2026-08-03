@@ -287,12 +287,16 @@ service notices to every matching, already-loaded session whose normalized `cwd`
 the retained local-directory `workspaceSource.path`, including subagents. Sessions in other
 workspaces receive nothing, and cold sessions are not hydrated merely to receive progress.
 Archived sessions cannot begin or resume a lifecycle, but one that observed a lifecycle before
-archival receives its terminal settling row. Each row keeps a required text fallback and optional
-structured compute detail: the classified error and canonical retryability, lifecycle state,
-`startedAt`, `lastProgressAt`, elapsed time, phase, and the last reported percent survive
-unchanged. Same-phase percent updates remain global-stream events but do not add chat history;
-ready and failure always add final rows. Session-side phase coalescing is bounded and process-local, so restarting Rig
-during preparation—or evicting state under extreme concurrency—may repeat the current phase once.
+archival receives its terminal settling row. A ready row settles archived preparation, while
+recovery from unavailable is delivered only to active sessions so archival never appears to
+resume an instance. Each row keeps a required text fallback and optional structured compute detail:
+the classified error and canonical retryability, lifecycle state,
+`startedAt`, `lastProgressAt`, elapsed time, phase, and any percent reported for the current phase
+survive unchanged. Elapsed time freezes when preparation completes, and percent is omitted when a
+new phase does not report one. Same-phase percent updates remain global-stream events but do not
+add chat history; ready and failure always add final rows. Session-side phase coalescing is bounded
+and process-local, so restarting Rig during preparation—or evicting state under extreme
+concurrency—may repeat the current phase once.
 Notices use a dedicated durable service lane: they are ordered at their append position without
 changing agent activity, unread state, or conversational turn budgets. A failed attempt emits a
 typed `preparing_compute` error in its failure event, resets the handle to `unprovisioned`, and

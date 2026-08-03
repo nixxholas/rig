@@ -7,6 +7,7 @@ import {
     type ComputePreparationEvent,
     type SystemNoticePayload,
 } from "../protocol/index.js";
+import { formatComputeDuration } from "./formatComputeDuration.js";
 
 /** Builds the structured service notice and its required plain-text fallback together. */
 export function formatComputePreparationNotice(
@@ -14,7 +15,9 @@ export function formatComputePreparationNotice(
 ): SystemNoticePayload {
     const { data } = event;
     const elapsed =
-        data.elapsedMs === undefined ? "" : ` (${String(Math.round(data.elapsedMs / 1_000))}s)`;
+        data.elapsedMs === undefined || data.elapsedMs < 1_000
+            ? ""
+            : ` (${formatComputeDuration(data.elapsedMs)})`;
     if (data.phase === "failed" || data.state === "failed") {
         const instanceLifecycle = /^Compute instance failed[.:]?\s*/iu.test(data.message);
         const detail = data.message

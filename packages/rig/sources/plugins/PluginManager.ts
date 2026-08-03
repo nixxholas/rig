@@ -1154,7 +1154,20 @@ export class PluginManager implements ManagedNetworkInterceptor {
         };
         try {
             const entry = this.#store.globalEventQueue.append(event);
-            if (entry === undefined) return;
+            if (entry === undefined) {
+                this.#daemonLog.record(
+                    "warning",
+                    "compute_preparation_event_unstored",
+                    "Rig could not retain a compute preparation event.",
+                    {
+                        error: "The durable event queue did not append the event.",
+                        instanceId: progress.instanceId,
+                        phase: progress.phase,
+                        provider: progress.provider,
+                    },
+                );
+                return;
+            }
             this.#store.globalEventQueue.publish(entry);
         } catch (error) {
             this.#daemonLog.record(
@@ -1214,6 +1227,17 @@ export class PluginManager implements ManagedNetworkInterceptor {
                       sessions: previous?.sessions ?? new WeakSet<InMemorySession>(),
                       state: event.data.state,
                   };
+        const sourcePath = resolve(progress.workspaceSource.path);
+        const recipients: { session: InMemorySession; settleArchived: boolean }[] = [];
+        for (const session of this.#store.loadedSessions()) {
+            const summary = session.summary();
+            if (resolve(summary.cwd) !== sourcePath) continue;
+            const settleArchived =
+                summary.archived && settlesArchived && previous?.sessions.has(session) === true;
+            if (summary.archived && !settleArchived) continue;
+            if (!summary.archived && current.delivered.has(session)) continue;
+            recipients.push({ session, settleArchived });
+        }
         if (!closesLifecycle) {
             if (
                 !this.#computeSessionPreparation.has(event.computeInstanceId) &&
@@ -1225,7 +1249,6 @@ export class PluginManager implements ManagedNetworkInterceptor {
             this.#computeSessionPreparation.set(event.computeInstanceId, current);
         }
 
-        const sourcePath = resolve(progress.workspaceSource.path);
         /*
          * Attribution follows the matching loaded session, including subagents. An archived
          * session cannot begin or resume a lifecycle, but a weakly retained recipient gets the
@@ -1234,18 +1257,17 @@ export class PluginManager implements ManagedNetworkInterceptor {
          * resolve symlinks, so aliases such as `/tmp` and `/private/tmp` intentionally do not
          * match. Phase coalescing is process-local and bounded; a daemon restart or extreme
          * concurrent-preparation eviction may append the current phase once more.
+         *
+         * Formatting, session enumeration, and summary reads finish before the lifecycle map is
+         * changed or a notice is written. From that point onward each durable write is caught
+         * independently, and weak recipient state changes only after that write succeeds. The
+         * outer rollback therefore never has to clone or undo a WeakSet after partial delivery.
          */
-        for (const session of this.#store.loadedSessions()) {
-            const summary = session.summary();
-            if (resolve(summary.cwd) !== sourcePath) continue;
-            const settleArchived =
-                summary.archived && settlesArchived && previous?.sessions.has(session) === true;
-            if (summary.archived && !settleArchived) continue;
-            if (!summary.archived && current.delivered.has(session)) continue;
+        for (const { session, settleArchived } of recipients) {
             try {
                 session.recordSystemNotice(payload, settleArchived ? { settleArchived: true } : {});
                 current.delivered.add(session);
-                if (!summary.archived) current.sessions.add(session);
+                if (!settleArchived) current.sessions.add(session);
             } catch (error) {
                 this.#daemonLog.record(
                     "warning",

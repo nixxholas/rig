@@ -53,7 +53,7 @@ describe("formatComputePreparationNotice", () => {
             state: "unavailable",
         });
         expect(payload.text).toBe(
-            "Compute instance unavailable: The compute provider is recovering. (40s)",
+            "Compute instance unavailable: The compute provider is recovering. (40 seconds)",
         );
     });
 

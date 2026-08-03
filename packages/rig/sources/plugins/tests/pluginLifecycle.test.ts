@@ -293,7 +293,7 @@ describe("plugin registration", () => {
         consumer.close();
     });
 
-    it("appends ordered compute preparation notices only to sessions in the source workspace", async () => {
+    it("appends ordered compute notices and retries only recipients whose partial delivery failed", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
         await harness.manager.start();
@@ -430,8 +430,8 @@ describe("plugin registration", () => {
             ["waiting_for_sandbox", 20],
             ["waiting_for_sandbox", 30],
             ["copying_workspace", 60],
-            ["verifying_compute", 60],
-            ["ready", 60],
+            ["verifying_compute", undefined],
+            ["ready", undefined],
         ]);
         expect(
             harness.store.globalEventQueue
@@ -454,8 +454,8 @@ describe("plugin registration", () => {
             ["preparing_compute", undefined],
             ["waiting_for_sandbox", 30],
             ["copying_workspace", 60],
-            ["verifying_compute", 60],
-            ["ready", 60],
+            ["verifying_compute", undefined],
+            ["ready", undefined],
         ]);
         expect(
             harness.daemonLogs.some((line) =>
@@ -481,7 +481,7 @@ describe("plugin registration", () => {
             },
         });
         expect(notices(attributed).at(-1)?.blocks).toEqual([
-            { text: "Compute is ready. (0s)", type: "text" },
+            { text: "Compute is ready.", type: "text" },
         ]);
         expect(notices(unrelated)).toEqual([]);
 
@@ -576,7 +576,12 @@ describe("plugin registration", () => {
             harness.daemonLogs.filter((line) =>
                 line.includes("compute_preparation_event_unstored"),
             ),
-        ).toHaveLength(1);
+        ).toHaveLength(2);
+        expect(
+            harness.daemonLogs.some((line) =>
+                line.includes("The durable event queue did not append the event."),
+            ),
+        ).toBe(true);
         append.mockRestore();
     });
 

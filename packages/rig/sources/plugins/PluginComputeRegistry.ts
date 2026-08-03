@@ -29,6 +29,7 @@ import {
     type HappyComputeCallCompletion,
     type HappyComputeEvent,
 } from "happy-plugins/internal";
+import { formatComputeDuration } from "./formatComputeDuration.js";
 
 const DEFAULT_OPERATION_DEADLINE_MS = 10_000;
 const EXEC_DEADLINE_GRACE_MS = 2_000;
@@ -117,6 +118,7 @@ type ComputeInstanceBase = {
 };
 
 type ComputePreparationTelemetry = {
+    elapsedMs: number;
     lastProgressAt: number;
     percent?: number;
     phase: HappyComputePreparationPhase;
@@ -648,11 +650,7 @@ export class PluginComputeRegistry {
         const existing = this.#stopTasks.get(instanceId);
         if (existing !== undefined) return existing;
         const instance = this.#requireLiveInstance(instanceId, consumerGeneration);
-        return this.#beginStop(
-            instance,
-            "The compute instance was stopped at its consumer's request.",
-            "stopped",
-        );
+        return this.#beginStop(instance, "The consumer requested it.", "stopped");
     }
 
     close(): Promise<void> {
@@ -664,11 +662,7 @@ export class PluginComputeRegistry {
         this.#closed = true;
         clearInterval(this.#reaper);
         const stopTasks = [...this.#instances.values()].map((instance) =>
-            this.#beginStop(
-                instance,
-                "The compute instance stopped because Rig shut down.",
-                "stopped",
-            ),
+            this.#beginStop(instance, "Rig shut down.", "stopped"),
         );
         await Promise.all(stopTasks);
         for (const registration of this.#registrations.values()) {
@@ -791,8 +785,8 @@ export class PluginComputeRegistry {
             deadlineTimer = setTimeout(() => {
                 const message =
                     options.deadlineAttribution === "provisioning"
-                        ? `Compute provisioning exceeded its ${String(deadlineMs)}ms overall budget while running ${event.operation}.`
-                        : `The compute provider missed its ${event.operation} deadline after ${String(deadlineMs)}ms.`;
+                        ? `Compute provisioning exceeded its ${formatComputeDuration(deadlineMs)} overall budget while running ${event.operation}.`
+                        : `The compute provider missed its ${event.operation} deadline after ${formatComputeDuration(deadlineMs)}.`;
                 const state = registration.state;
                 if (state.status === "healthy" || state.status === "degraded") {
                     try {
@@ -807,9 +801,10 @@ export class PluginComputeRegistry {
                 fail(computeError("deadline_exceeded", message));
             }, deadlineMs);
             deadlineTimer.unref();
-            if (options.acknowledgmentDeadlineMs !== undefined) {
+            const acknowledgmentDeadlineMs = options.acknowledgmentDeadlineMs;
+            if (acknowledgmentDeadlineMs !== undefined) {
                 acknowledgmentTimer = setTimeout(() => {
-                    const message = `The compute provider did not acknowledge provisioning within ${String(options.acknowledgmentDeadlineMs)}ms.`;
+                    const message = `The compute provider did not acknowledge provisioning within ${formatComputeDuration(acknowledgmentDeadlineMs)}.`;
                     const state = registration.state;
                     if (state.status === "healthy" || state.status === "degraded") {
                         try {
@@ -820,7 +815,7 @@ export class PluginComputeRegistry {
                     }
                     this.#recordProviderFailure(registration, message);
                     fail(computeError("deadline_exceeded", message));
-                }, options.acknowledgmentDeadlineMs);
+                }, acknowledgmentDeadlineMs);
                 acknowledgmentTimer.unref();
             }
             registration.pendingCalls.set(callId, call);
@@ -1106,8 +1101,9 @@ export class PluginComputeRegistry {
         percent?: number,
     ): void {
         if (this.#instances.get(instance.id) !== instance) return;
+        const { percent: _previousPercent, ...withoutPercent } = instance;
         const next = {
-            ...instance,
+            ...withoutPercent,
             lastProgressAt: this.#now(),
             message,
             ...(percent === undefined ? {} : { percent }),
@@ -1291,11 +1287,7 @@ export class PluginComputeRegistry {
     #releaseConsumerInstances(consumerGeneration: string): void {
         for (const instance of this.#instances.values()) {
             if (instance.consumerGeneration !== consumerGeneration) continue;
-            void this.#beginStop(
-                instance,
-                "The compute instance stopped because its consumer plugin stopped.",
-                "stopped",
-            );
+            void this.#beginStop(instance, "Its consumer plugin stopped.", "stopped");
         }
     }
 
@@ -1416,7 +1408,7 @@ export class PluginComputeRegistry {
             if (instance.state === "unprovisioned") {
                 const lifetime = now - instance.createdAt;
                 if (lifetime < this.#maxLifetimeMs) continue;
-                const reason = `maximum unprovisioned lifetime of ${String(this.#maxLifetimeMs)}ms expired`;
+                const reason = `maximum unprovisioned lifetime of ${formatComputeDuration(this.#maxLifetimeMs)} expired`;
                 this.#log(
                     "info",
                     "plugin_compute_instance_reaped",
@@ -1428,20 +1420,16 @@ export class PluginComputeRegistry {
                         reason,
                     },
                 );
-                void this.#beginStop(
-                    instance,
-                    `The compute instance died because its ${reason}.`,
-                    "failed",
-                );
+                void this.#beginStop(instance, `Its ${reason}.`, "failed");
                 continue;
             }
             const lifetime = now - instance.activatedAt;
             const idle = now - instance.lastTouchedAt;
             const reason =
                 lifetime >= this.#maxLifetimeMs
-                    ? `maximum lifetime of ${String(this.#maxLifetimeMs)}ms expired`
+                    ? `maximum lifetime of ${formatComputeDuration(this.#maxLifetimeMs)} expired`
                     : idle >= this.#idleTimeoutMs
-                      ? `idle timeout of ${String(this.#idleTimeoutMs)}ms expired`
+                      ? `idle timeout of ${formatComputeDuration(this.#idleTimeoutMs)} expired`
                       : undefined;
             if (reason === undefined) continue;
             this.#log(
@@ -1456,11 +1444,7 @@ export class PluginComputeRegistry {
                     reason,
                 },
             );
-            void this.#beginStop(
-                instance,
-                `The compute instance died because its ${reason}.`,
-                "failed",
-            );
+            void this.#beginStop(instance, `Its ${reason}.`, "failed");
         }
     }
 
@@ -1477,8 +1461,8 @@ export class PluginComputeRegistry {
         const preparation =
             current.state === "provisioning"
                 ? {
+                      elapsedMs: Math.max(0, now - current.startedAt),
                       lastProgressAt: current.lastProgressAt,
-                      ...(current.percent === undefined ? {} : { percent: current.percent }),
                       phase: current.phase,
                       startedAt: current.startedAt,
                   }
@@ -1661,6 +1645,7 @@ export class PluginComputeRegistry {
         const telemetry =
             instance.state === "provisioning"
                 ? {
+                      elapsedMs: Math.max(0, this.#now() - instance.startedAt),
                       lastProgressAt: instance.lastProgressAt,
                       ...(instance.percent === undefined ? {} : { percent: instance.percent }),
                       phase: instance.phase,
@@ -1673,9 +1658,11 @@ export class PluginComputeRegistry {
             telemetry === undefined
                 ? {}
                 : {
-                      elapsedMs: Math.max(0, this.#now() - telemetry.startedAt),
+                      elapsedMs: telemetry.elapsedMs,
                       lastProgressAt: telemetry.lastProgressAt,
-                      ...(telemetry.percent === undefined ? {} : { percent: telemetry.percent }),
+                      ...(state !== "provisioning" || telemetry.percent === undefined
+                          ? {}
+                          : { percent: telemetry.percent }),
                       startedAt: telemetry.startedAt,
                   };
         const classifiedError =

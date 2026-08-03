@@ -166,10 +166,12 @@ Every `system_notice` has complete human-readable `text`. Notices Rig understand
 also carry optional `structured` detail so an application can customize the row while an older or
 simpler client keeps rendering the text. Compute preparation uses
 `structured.kind: "compute_preparation"` with its instance, provider, phase, state, message, and
-optional last-reported percent, elapsed time, `startedAt`, `lastProgressAt`, and classified error
-with canonical retryability. `unavailable` remains distinct from failed, stopped, and ready. Each
-phase is a separate append-only element, and replaying the same session event after reconnect does
-not duplicate it. When a newer Rig sends a structured notice kind this version does not know,
+optional current-phase percent, elapsed time, `startedAt`, `lastProgressAt`, and classified error
+with canonical retryability. Elapsed time freezes when preparation completes, while percent is
+omitted from later phases unless explicitly reported. `unavailable` remains distinct from failed,
+stopped, and ready. Each phase is a separate append-only element, and replaying the same session
+event after reconnect does not duplicate it. When a newer Rig sends a structured notice kind this
+version does not know,
 `rig-connect` discards only that structured payload, bounds its text fallback to the protocol
 limit, and retains the resulting validated notice.
 Service notices are ordered alongside the transcript but do not open or close inference groups,
