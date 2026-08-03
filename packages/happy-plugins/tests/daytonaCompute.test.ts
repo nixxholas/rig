@@ -19,6 +19,7 @@ const observedCommandBodySchema = Type.Object(
 );
 
 afterEach(async () => {
+    vi.useRealTimers();
     await Promise.all(
         directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
     );
@@ -26,8 +27,14 @@ afterEach(async () => {
 
 describe("Daytona compute example", () => {
     it("maps sandbox creation, source upload, exec, files, and deletion", async () => {
+        vi.useFakeTimers();
         const source = await createSource();
         const phases: string[] = [];
+        let completeFirstPoll: () => void = () => undefined;
+        const firstPoll = new Promise<void>((resolve) => {
+            completeFirstPoll = resolve;
+        });
+        let sandboxPolls = 0;
         const requests: {
             authorization: string | null;
             body: unknown;
@@ -46,6 +53,13 @@ describe("Daytona compute example", () => {
                 return Response.json({
                     id: "sandbox-1",
                     toolboxProxyUrl: "https://proxy.app.daytona.io/toolbox",
+                });
+            }
+            if (url.endsWith("/sandbox/sandbox-1") && (init.method ?? "GET") === "GET") {
+                sandboxPolls += 1;
+                completeFirstPoll();
+                return Response.json({
+                    state: sandboxPolls === 1 ? "starting" : "started",
                 });
             }
             if (url.endsWith("/process/execute")) {
@@ -75,7 +89,7 @@ describe("Daytona compute example", () => {
             fetch: fetcher,
         });
 
-        const instanceId = await provider.handlers.start(
+        const start = provider.handlers.start(
             { workspaceSource: { path: source, type: "local_directory" } },
             {
                 reportProgress: async (progress) => {
@@ -84,6 +98,9 @@ describe("Daytona compute example", () => {
                 signal: context.signal,
             },
         );
+        await firstPoll;
+        await vi.advanceTimersByTimeAsync(2_000);
+        const instanceId = await start;
         await expect(
             provider.handlers.exec(
                 { command: "printf hello", instanceId, timeoutMs: 1_500 },
@@ -106,7 +123,13 @@ describe("Daytona compute example", () => {
         ).resolves.toEqual(Buffer.from("saved"));
         await provider.handlers.stop({ instanceId }, context);
 
-        expect(phases).toEqual(["Creating Daytona sandbox", "Uploading source files"]);
+        expect(phases).toEqual([
+            "Creating Daytona sandbox",
+            "Waiting for sandbox to start",
+            "Daytona sandbox is started",
+            "Uploading source files",
+        ]);
+        expect(sandboxPolls).toBe(2);
         expect(requests[0]).toMatchObject({
             body: {
                 autoDeleteInterval: 0,
@@ -123,6 +146,16 @@ describe("Daytona compute example", () => {
                     request.url.includes(encodeURIComponent("/home/daytona/workspace/message.txt")),
             ),
         ).toBe(true);
+        const firstUploadIndex = requests.findIndex((request) =>
+            request.url.includes("/files/upload-v2"),
+        );
+        const lastPollIndex = requests.findLastIndex(
+            (request) =>
+                request.method === "GET" &&
+                request.url === "https://app.daytona.io/api/sandbox/sandbox-1",
+        );
+        expect(lastPollIndex).toBeGreaterThan(0);
+        expect(firstUploadIndex).toBeGreaterThan(lastPollIndex);
         expect(
             requests.find((request) => request.url.endsWith("/process/execute"))?.body,
         ).toMatchObject({
@@ -189,6 +222,9 @@ describe("Daytona compute example", () => {
                     toolboxProxyUrl: "https://proxy.app.daytona.io/toolbox",
                 });
             }
+            if (url.endsWith("/sandbox/sandbox-1")) {
+                return Response.json({ state: "started" });
+            }
             if (url.includes("/files/download")) {
                 return new Response("not found", {
                     status: url.includes("provider-outage.txt") ? 500 : 404,
@@ -245,6 +281,52 @@ describe("Daytona compute example", () => {
             message: expect.stringContaining("DAYTONA_API_KEY is missing"),
         });
         expect(fetcher).not.toHaveBeenCalled();
+    });
+
+    it("fails and cleans up when a sandbox enters an error state", async () => {
+        const source = await createSource();
+        const apiKey = "secret-daytona-key";
+        const requests: { authorization: string | null; method: string; url: string }[] = [];
+        const fetcher = vi.fn<typeof fetch>(async (input, init = {}) => {
+            const url = String(input);
+            requests.push({
+                authorization: new Headers(init.headers).get("authorization"),
+                method: init.method ?? "GET",
+                url,
+            });
+            if (url.endsWith("/sandbox")) {
+                return Response.json({
+                    id: "sandbox-1",
+                    toolboxProxyUrl: "https://proxy.app.daytona.io/toolbox",
+                });
+            }
+            if (url.endsWith("/sandbox/sandbox-1") && init.method === "GET") {
+                return Response.json({
+                    errorReason: `runner failed while using ${apiKey}`,
+                    state: "error",
+                });
+            }
+            return Response.json({});
+        });
+        const provider = createDaytonaComputeProvider({
+            apiKey,
+            fetch: fetcher,
+        });
+
+        const error = await Promise.resolve(
+            provider.handlers.start(
+                { workspaceSource: { path: source, type: "local_directory" } },
+                context,
+            ),
+        ).catch((caught: unknown) => caught);
+
+        expect(String(error)).toContain("runner failed while using [redacted]");
+        expect(String(error)).not.toContain(apiKey);
+        expect(requests.at(-1)).toMatchObject({
+            authorization: `Bearer ${apiKey}`,
+            method: "DELETE",
+            url: "https://app.daytona.io/api/sandbox/sandbox-1",
+        });
     });
 
     it("reports a stale sandbox ID as instance_not_found", async () => {
@@ -334,6 +416,9 @@ function daytonaFetchMock(
                 id: "sandbox-1",
                 toolboxProxyUrl: "https://proxy.app.daytona.io/toolbox",
             });
+        }
+        if (url.endsWith("/sandbox/sandbox-1") && init.method !== "DELETE") {
+            return Response.json({ state: "started" });
         }
         if (url.endsWith("/process/execute")) return execute();
         if (init.method === "DELETE") {

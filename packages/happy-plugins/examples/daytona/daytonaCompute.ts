@@ -14,6 +14,7 @@ import {
 
 const DAYTONA_API_URL = "https://app.daytona.io/api";
 const DAYTONA_DEFAULT_IMAGE = "ubuntu:24.04";
+const DAYTONA_SANDBOX_POLL_INTERVAL_MS = 2_000;
 const DAYTONA_WORKSPACE = "/home/daytona/workspace";
 const MAX_SOURCE_UPLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_DAYTONA_JSON_BYTES = 4 * 1024 * 1024;
@@ -33,6 +34,14 @@ const sandboxSchema = Type.Object({
     id: Type.String({ minLength: 1 }),
     toolboxProxyUrl: Type.String({ minLength: 1 }),
 });
+
+const sandboxInfoSchema = Type.Object({
+    error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    errorReason: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    message: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    state: Type.String({ minLength: 1 }),
+});
+type SandboxInfo = Static<typeof sandboxInfoSchema>;
 
 const executeResponseSchema = Type.Object({
     exitCode: Type.Optional(Type.Integer()),
@@ -153,6 +162,7 @@ export function createDaytonaComputeProvider(
                 });
                 instances.set(instance.id, instance);
                 try {
+                    await waitForSandboxStarted(apiBaseUrl, instance.id, request, context, apiKey);
                     await context.reportProgress({
                         message: "Uploading source files to the Daytona sandbox.",
                         phase: "Uploading source files",
@@ -275,6 +285,86 @@ export function createDaytonaComputeProvider(
             );
         },
     };
+}
+
+async function waitForSandboxStarted(
+    apiBaseUrl: string,
+    id: string,
+    request: (
+        url: string,
+        init: RequestInit,
+        acceptedStatuses?: readonly number[],
+    ) => Promise<Response>,
+    context: HappyComputeStartHandlerContext,
+    apiKey: string | undefined,
+): Promise<void> {
+    context.signal.throwIfAborted();
+    await context.reportProgress({
+        message: "Waiting for the Daytona sandbox to start.",
+        phase: "Waiting for sandbox to start",
+    });
+    let previousState: string | undefined;
+    for (;;) {
+        context.signal.throwIfAborted();
+        const response = await request(`${apiBaseUrl}/sandbox/${encodeURIComponent(id)}`, {
+            method: "GET",
+            signal: context.signal,
+        });
+        const payload = await readJsonResponse(response, MAX_DAYTONA_JSON_BYTES);
+        if (!Value.Check(sandboxInfoSchema, payload)) {
+            const failure = Value.Errors(sandboxInfoSchema, payload).First();
+            throw new Error(
+                `Daytona returned invalid sandbox status data${failure === undefined ? "." : ` at ${failure.path || "value"}: ${failure.message}`}`,
+            );
+        }
+        const info = Value.Decode(sandboxInfoSchema, payload);
+        const state = info.state.trim().toLowerCase();
+        if (previousState !== undefined && state !== previousState) {
+            const readableState = state.replaceAll("_", " ").slice(0, 96);
+            await context.reportProgress({
+                message: `Daytona reports the sandbox is ${readableState}.`,
+                phase: `Daytona sandbox is ${readableState}`,
+            });
+        }
+        previousState = state;
+        if (state === "started") return;
+        if (isFailedSandboxState(state)) {
+            const detail = sandboxFailureDetail(info);
+            throw new Error(
+                sanitize(
+                    `Daytona sandbox ${JSON.stringify(id)} entered the ${JSON.stringify(info.state)} state while starting${detail === undefined ? "." : `: ${detail}`}`,
+                    apiKey,
+                ),
+            );
+        }
+        await waitForPoll(DAYTONA_SANDBOX_POLL_INTERVAL_MS, context.signal);
+    }
+}
+
+function isFailedSandboxState(state: string): boolean {
+    return state === "error" || state === "failed" || state.endsWith("_failed");
+}
+
+function sandboxFailureDetail(info: SandboxInfo): string | undefined {
+    return [info.errorReason, info.error, info.message].find(
+        (candidate): candidate is string =>
+            typeof candidate === "string" && candidate.trim() !== "",
+    );
+}
+
+function waitForPoll(milliseconds: number, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signal.removeEventListener("abort", abort);
+            resolve();
+        }, milliseconds);
+        const abort = () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+        };
+        signal.addEventListener("abort", abort, { once: true });
+    });
 }
 
 async function uploadSource(
