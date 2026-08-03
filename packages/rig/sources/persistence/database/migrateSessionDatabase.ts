@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { createId } from "@paralleldrive/cuid2";
 
 import type { SessionDatabase } from "./openSessionDatabase.js";
 import { init } from "./migrations/01-init.js";
@@ -20,6 +21,7 @@ import { projectUserMutationVersion } from "./migrations/16-project-user-mutatio
 import { pendingContextMessages } from "./migrations/17-pending-context-messages.js";
 import { agentSessionSharing } from "./migrations/18-agent-session-sharing.js";
 import { sessionShareEntryLog } from "./migrations/19-session-share-entry-log.js";
+import { rigDataIdentity } from "./migrations/20-rig-data-identity.js";
 
 const migrations = [
     init,
@@ -42,11 +44,16 @@ const migrations = [
     agentSessionSharing,
     sessionShareEntryLog,
 ] as const;
-const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
+const RIG_DATA_IDENTITY_MIGRATION_INDEX = migrations.length;
+export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 
-export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;
+export const CURRENT_SESSION_DATABASE_VERSION = migrations.length + 1;
 
-export function migrateSessionDatabase(database: SessionDatabase): void {
+export function migrateSessionDatabase(
+    database: SessionDatabase,
+    options: { createDataEpoch?: () => string } = {},
+): void {
+    const createDataEpoch = options.createDataEpoch ?? createId;
     database.run(sql.raw("PRAGMA journal_mode = WAL"));
     database.run(sql.raw("PRAGMA synchronous = FULL"));
     database.run(sql.raw("PRAGMA busy_timeout = 5000"));
@@ -68,8 +75,16 @@ export function migrateSessionDatabase(database: SessionDatabase): void {
                         `The session database uses schema version ${String(currentVersion)}, but this Rig version supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}.`,
                     );
                 }
-                for (let version = currentVersion; version < migrations.length; version += 1) {
-                    migrations[version]!(transaction);
+                for (
+                    let version = currentVersion;
+                    version < CURRENT_SESSION_DATABASE_VERSION;
+                    version += 1
+                ) {
+                    if (version === RIG_DATA_IDENTITY_MIGRATION_INDEX) {
+                        rigDataIdentity(transaction, createDataEpoch());
+                    } else {
+                        migrations[version]!(transaction);
+                    }
                     transaction.run(sql.raw(`PRAGMA user_version = ${String(version + 1)}`));
                 }
                 transaction.run(

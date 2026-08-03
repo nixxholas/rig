@@ -7,6 +7,7 @@ import { runDesktop } from "./runDesktop.js";
 import { runExec } from "./runExec.js";
 import { runLocalProtocolServer } from "../server/index.js";
 import { runHappyAuthCommand } from "../happy/index.js";
+import { runRigInspection } from "./runRigInspection.js";
 
 vi.mock("./runApp.js", () => ({ runApp: vi.fn() }));
 vi.mock("./runDesktop.js", () => ({ runDesktop: vi.fn() }));
@@ -14,6 +15,7 @@ vi.mock("./runExec.js", () => ({ runExec: vi.fn() }));
 vi.mock("../readPackageVersion.js", () => ({ readPackageVersion: vi.fn(() => "1.2.3") }));
 vi.mock("../server/index.js", () => ({ runLocalProtocolServer: vi.fn() }));
 vi.mock("../happy/index.js", () => ({ runHappyAuthCommand: vi.fn() }));
+vi.mock("./runRigInspection.js", () => ({ runRigInspection: vi.fn() }));
 
 describe("main command dispatch", () => {
     beforeEach(() => {
@@ -24,6 +26,7 @@ describe("main command dispatch", () => {
         vi.mocked(runLocalProtocolServer).mockReset();
         vi.mocked(readPackageVersion).mockClear();
         vi.mocked(runHappyAuthCommand).mockReset();
+        vi.mocked(runRigInspection).mockReset();
     });
 
     it("starts the internal server only for its exact private invocation", async () => {
@@ -81,6 +84,14 @@ describe("main command dispatch", () => {
         expect(readPackageVersion).toHaveBeenCalledOnce();
         expect(runApp).not.toHaveBeenCalled();
         log.mockRestore();
+    });
+
+    it("inspects machine-readable installation state without starting a session or daemon", async () => {
+        await main(["inspect", "--json"]);
+
+        expect(runRigInspection).toHaveBeenCalledWith({ json: true });
+        expect(runApp).not.toHaveBeenCalled();
+        expect(runLocalProtocolServer).not.toHaveBeenCalled();
     });
 
     it("starts Happy QR authentication without opening a session", async () => {

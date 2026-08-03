@@ -41,6 +41,7 @@ import type {
     ListExternalToolCallsResponse,
     ListSecretsResponse,
     HealthResponse,
+    RigInstallationInspection,
     InstallPluginRequest,
     InstallPluginResponse,
     GitStateResponse,
@@ -523,6 +524,16 @@ async function handleRequest(
             200,
             healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue.durable),
         );
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "installation") {
+        sendJson<RigInstallationInspection>(response, 200, {
+            data: { epoch: store.dataEpoch, status: "initialized" },
+            formatVersion: 1,
+            protocolVersion: RIG_PROTOCOL_VERSION,
+            rigVersion: identity.version,
+        });
         return;
     }
 
@@ -3854,6 +3865,7 @@ function matchRoute(pathname: string):
               | "global-security-policy"
               | "debug-inspector"
               | "health"
+              | "installation"
               | "happy-reload"
               | "messages"
               | "models"
@@ -4037,6 +4049,7 @@ function matchRoute(pathname: string):
     | { name: "workflow-stop"; sessionId: string; workflowRunId: string }
     | undefined {
     if (pathname === "/health") return { name: "health" };
+    if (pathname === "/installation") return { name: "installation" };
     if (pathname === "/happy/reload") return { name: "happy-reload" };
     if (pathname === "/config") return { name: "config" };
     if (pathname === "/config/instructions") return { name: "global-instructions" };

@@ -1994,6 +1994,32 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("serves authenticated installation identity without opening a stream", async () => {
+        const { close, socketPath, store } = await startServer();
+        try {
+            const response = await requestRawJson(socketPath, "/installation", {
+                body: "",
+                method: "GET",
+            });
+            expect(response.statusCode).toBe(200);
+            expect(JSON.parse(response.body)).toEqual({
+                data: { epoch: store.dataEpoch, status: "initialized" },
+                formatVersion: 1,
+                protocolVersion: expect.any(Number),
+                rigVersion: expect.any(String),
+            });
+
+            const unauthorized = await requestRawJson(socketPath, "/installation", {
+                body: "",
+                headers: { authorization: "Bearer wrong" },
+                method: "GET",
+            });
+            expect(unauthorized.statusCode).toBe(401);
+        } finally {
+            await close();
+        }
+    });
+
     it("changes session effort through a dedicated endpoint", async () => {
         const { client, close } = await startServer();
         try {

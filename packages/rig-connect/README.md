@@ -18,6 +18,28 @@ the same build runs in Node, in a browser, and in any runtime that provides them
 validation uses TypeBox. The package has no runtime dependency on `rig`, and a browser bundle
 carries no daemon code.
 
+## Discovering an installation
+
+Onboarding can inspect a daemon once without opening the live event stream or allocating stores:
+
+```ts
+import { discoverRigInstallation, rigInstallationCompatibility } from "@slopus/rig-connect";
+
+const installation = await discoverRigInstallation({ endpoint, token });
+const compatibility = rigInstallationCompatibility(installation);
+```
+
+The response has a stable format version, the installed Rig version, the daemon protocol version,
+and one authoritative data state:
+
+- `absent`: the Rig database file does not exist.
+- `uninitialized`: a file exists, but the current Rig data-identity migration has not committed.
+- `initialized`: the database contains a stable `epoch` for this data generation.
+
+The epoch remains the same across inspection, daemon restart, and ordinary schema migrations. It
+changes when Rig atomically resets or recreates its data generation. Local launchers can obtain the
+same shape with `rig inspect --json`; that command does not start or contact the daemon.
+
 Local plugin interfaces read the complete plugin and application catalog through one live
 subscription:
 

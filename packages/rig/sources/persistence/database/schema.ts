@@ -11,6 +11,11 @@ import {
     uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+export const rigDataIdentity = sqliteTable("rig_data_identity", {
+    singleton: integer("singleton").primaryKey(),
+    epoch: text("epoch").notNull(),
+});
+
 export const projectAvatarAssets = sqliteTable("project_avatar_assets", {
     hash: text("hash").primaryKey(),
     mediaType: text("media_type").notNull(),

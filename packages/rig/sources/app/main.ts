@@ -11,6 +11,7 @@ import { parseSessionEnvironmentOptions } from "./parseSessionEnvironmentOptions
 import { formatCliHelp, formatDesktopCliHelp } from "./formatCliHelp.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { RigUserError } from "../RigUserError.js";
+import { runRigInspection } from "./runRigInspection.js";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
     if (argv.length === 1 && argv[0] === "--server") {
@@ -35,6 +36,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     }
     if (command === "--version" || command === "-v") {
         console.log(`Rig ${readPackageVersion()}`);
+        return;
+    }
+    if (command === "inspect") {
+        if (commandArgs.length > 1 || (commandArgs.length === 1 && commandArgs[0] !== "--json")) {
+            throw new RigUserError("Rig does not recognize that inspection option.", {
+                hint: "Usage: rig inspect [--json]",
+            });
+        }
+        runRigInspection({ json: commandArgs[0] === "--json" });
         return;
     }
     const options: RunAppOptions = {

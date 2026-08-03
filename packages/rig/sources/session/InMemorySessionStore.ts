@@ -37,6 +37,7 @@ import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import { queryRigDataEpoch } from "../persistence/database/queryRigDataEpoch.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import {
@@ -100,6 +101,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     readonly #projects: ProjectRepository;
+    readonly dataEpoch: string;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
     readonly liveEvents = new LiveGlobalEventQueue();
     readonly presence: PresenceStore;
@@ -117,6 +119,7 @@ export class InMemorySessionStore implements SessionStore {
         this.#client = opened.client;
         this.#database = opened.database;
         migrateSessionDatabase(this.#database);
+        this.dataEpoch = queryRigDataEpoch(this.#database);
         this.webapps = new WebappStore({
             publish: (event) => this.#publishGlobalEvent(event),
             tx: () => this.#activeTransaction ?? this.#database,

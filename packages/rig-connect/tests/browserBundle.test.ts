@@ -19,5 +19,6 @@ describe("rig-connect browser bundle", () => {
         expect(bundle).not.toContain("node:");
         expect(bundle).not.toContain("happy-plugins");
         expect(bundle).not.toContain("HAPPY_PLUGIN_SOCKET_PATH");
+        expect(bundle).toContain("discoverRigInstallation");
     });
 });

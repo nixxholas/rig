@@ -135,7 +135,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
             since: 0,
         },
         identity: { version: "test" },
-        protocolVersion: 5,
+        protocolVersion: 6,
         projects: [
             {
                 createdAt: 1,
@@ -208,7 +208,7 @@ function liveHello(
     return `event: hello\ndata: ${JSON.stringify({
         cursor,
         gap: options.gap ?? false,
-        protocolVersion: 5,
+        protocolVersion: 6,
         resumed: options.resumed ?? false,
     })}\n\n`;
 }
@@ -2232,7 +2232,7 @@ describe("connectRig mutations", () => {
             expect(error).toEqual(
                 expect.objectContaining({
                     message:
-                        "The Rig server protocol is version 999, but this rig-connect build supports at most version 5.",
+                        "The Rig server protocol is version 999, but this rig-connect build supports at most version 6.",
                 }),
             );
         } finally {

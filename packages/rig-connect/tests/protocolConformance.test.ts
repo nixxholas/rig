@@ -16,6 +16,7 @@ import {
 // it travels on the wire all the same, so it is checked the same way.
 import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
+import type * as localInstallation from "@/RigInstallationInspection.js";
 import {
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
@@ -211,6 +212,14 @@ type _ProviderUsageList = Assignable<
 type _ExplorationOperation = Assignable<
     local.ExplorationOperation,
     daemonAgent.ExplorationOperation
+>;
+type _RigInstallationInspection = Assignable<
+    localInstallation.RigInstallationInspection,
+    daemon.RigInstallationInspection
+>;
+type _DaemonRigInstallationInspection = Assignable<
+    daemon.RigInstallationInspection,
+    localInstallation.RigInstallationInspection
 >;
 
 describe("protocol conformance", () => {

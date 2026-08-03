@@ -34,6 +34,8 @@ import type { SlotEntryStore } from "../slots/index.js";
 import type { WebappStore } from "../webapps/index.js";
 
 export interface SessionStore {
+    /** Stable identity for this initialized Rig data generation. */
+    readonly dataEpoch: string;
     readonly globalEventQueue: GlobalEventQueue;
     /** The ephemeral stream every local client follows. Never persisted. */
     readonly liveEvents: LiveGlobalEventQueue;

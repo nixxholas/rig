@@ -3,6 +3,13 @@ export {
     ProjectRegistrationError,
     ProjectRegistrationProtocolError,
 } from "./connectRig.js";
+export {
+    discoverRigInstallation,
+    rigInstallationCompatibility,
+} from "./discoverRigInstallation.js";
+export type { DiscoverRigInstallationOptions } from "./discoverRigInstallation.js";
+export { rigInstallationInspectionSchema } from "./RigInstallationInspection.js";
+export type { RigInstallationInspection } from "./RigInstallationInspection.js";
 export type {
     ConnectRigOptions,
     CreateSessionInput,

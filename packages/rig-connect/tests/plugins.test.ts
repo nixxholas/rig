@@ -503,7 +503,7 @@ function plugin(generation: string, withLargeResource = false): PluginSummary {
 }
 
 function hello(cursor: string, gap: boolean, resumed: boolean): string {
-    return sse("hello", { cursor, gap, protocolVersion: 5, resumed });
+    return sse("hello", { cursor, gap, protocolVersion: 6, resumed });
 }
 
 function pluginsChanged(cursor: string, plugins: readonly PluginSummary[]): string {

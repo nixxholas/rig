@@ -85,6 +85,7 @@ import {
     type SessionDatabase,
 } from "../persistence/database/openSessionDatabase.js";
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import { queryRigDataEpoch } from "../persistence/database/queryRigDataEpoch.js";
 import { durablePermissionHandoff } from "../persistence/session/durablePermissionHandoff.js";
 import { durableUserInputPrune } from "../persistence/session/durableUserInputPrune.js";
 import { durableUserInputSave } from "../persistence/session/durableUserInputSave.js";
@@ -191,6 +192,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     #database: SessionDatabase;
+    readonly dataEpoch: string;
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #now: () => number;
@@ -257,6 +259,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#database = opened.database;
         if (options.databasePath !== ":memory:") chmodSync(options.databasePath, 0o600);
         migrateSessionDatabase(this.#database);
+        this.dataEpoch = queryRigDataEpoch(this.#database);
         this.#loadSecretRegistrations();
         for (const secret of options.secrets ?? []) this.registerSecret(secret);
         this.#globalEventQueue =

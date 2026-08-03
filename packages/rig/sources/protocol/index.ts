@@ -43,6 +43,13 @@ export {
     type StopSessionShareRequest,
 } from "./SessionShareProtocol.js";
 export {
+    rigDataEpochSchema,
+    rigInstallationDataSchema,
+    rigInstallationInspectionSchema,
+    type RigInstallationData,
+    type RigInstallationInspection,
+} from "./InstallationProtocol.js";
+export {
     computePreparationNoticeSchema,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     SERVICE_NOTICE_TEXT_MAX_LENGTH,
