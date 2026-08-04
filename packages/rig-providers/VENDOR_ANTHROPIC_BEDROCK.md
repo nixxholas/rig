@@ -17,6 +17,11 @@ The provider follows Claude Code's foreground inference shape:
 - the caller's complete rebuilt transcript, including signed thinking, tool calls, tool results,
   and images.
 
+An inference request that replays a native compaction checkpoint additionally enables the
+`compact-2026-01-12` beta required by its compaction block, but never sends `context_management`.
+Only `compact()` sends the `compact_20260112` edit that asks the provider to create a new
+checkpoint.
+
 On Mantle, the SDK sends the normal Anthropic request to `/v1/messages`, retains the direct model
 ID, and puts betas in the `anthropic-beta` header. On Runtime, it adds
 `anthropic_version: "bedrock-2023-05-31"`, moves betas to `anthropic_beta`, removes `model` and

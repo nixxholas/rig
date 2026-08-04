@@ -245,7 +245,13 @@ export class AnthropicBedrockSession extends BaseSession {
                         request,
                         ...(options.signal === undefined ? [] : ([options.signal] as const)),
                     );
-                    for await (const event of mapAnthropicStream(response, { tools })) {
+                    for await (const event of mapAnthropicStream(response, {
+                        onOutputStarted: () => {
+                            responseContentStarted = true;
+                        },
+                        ...(options.signal === undefined ? {} : { signal: options.signal }),
+                        tools,
+                    })) {
                         if (event.type === "block_start") blockStarted = true;
                         if (isAnthropicResponseContentEvent(event)) {
                             responseContentStarted = true;

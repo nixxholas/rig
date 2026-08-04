@@ -23,13 +23,14 @@ export function createAnthropicRequest(options: {
     const system = toAnthropicSystem(options);
     const tools = toAnthropicTools(options.tools);
     const hasCompaction = options.context.messages.some((message) => message.role === "compaction");
-    const usesCompaction = options.compaction !== undefined || hasCompaction;
+    const requestsCompaction = options.compaction !== undefined;
+    const usesCompaction = requestsCompaction || hasCompaction;
     const betas = ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"];
     if (usesCompaction) betas.push("compact-2026-01-12");
     if (options.structuredOutput !== undefined) betas.push("structured-outputs-2025-12-15");
     return {
         betas,
-        ...(!usesCompaction
+        ...(!requestsCompaction
             ? {}
             : {
                   context_management: {

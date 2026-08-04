@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 
-import { APIError } from "@anthropic-ai/sdk/error";
+import { APIConnectionError, APIError } from "@anthropic-ai/sdk/error";
 import type { BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { describe, expect, it } from "vitest";
 
@@ -294,6 +294,8 @@ describe("AnthropicBedrockProvider", () => {
                 ],
             },
         ]);
+        expect(capturedRequests[1]?.betas).toEqual(expect.arrayContaining(["compact-2026-01-12"]));
+        expect(capturedRequests[1]).not.toHaveProperty("context_management");
 
         await session.compact({
             context: {
@@ -325,6 +327,8 @@ describe("AnthropicBedrockProvider", () => {
                 ],
             },
         ]);
+        expect(capturedRequests[2]?.betas).toEqual(expect.arrayContaining(["compact-2026-01-12"]));
+        expect(capturedRequests[2]).toHaveProperty("context_management");
     });
 
     it("uses native compaction below the server trigger and round-trips null content", async () => {
@@ -956,6 +960,195 @@ describe("AnthropicBedrockProvider", () => {
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
     });
 
+    it("does not retry a stream that closes after an unexpected compaction block", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-truncated-compaction-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        return streamEvents([
+                            {
+                                type: "message_start",
+                                message: {
+                                    usage: {
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        cache_read_input_tokens: 50_480,
+                                    },
+                                },
+                            },
+                            {
+                                type: "content_block_start",
+                                index: 0,
+                                content_block: {
+                                    type: "compaction",
+                                    content: null,
+                                    encrypted_content: null,
+                                },
+                            },
+                        ]);
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "continue after compaction" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(1);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
+        expect(events.at(-1)).toEqual({
+            type: "done",
+            state: "error",
+            kind: "unknown",
+            message: "Anthropic returned an unexpected compaction response during inference.",
+            providerError: { type: "unclassified" },
+        });
+    });
+
+    it("does not retry a stream that throws after an unexpected compaction block", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-thrown-compaction-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        return truncatedCompactionStream();
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "continue after compaction" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(1);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
+        expect(events.at(-1)).toEqual({
+            type: "done",
+            state: "error",
+            kind: "unknown",
+            message: "stream truncated after compaction",
+        });
+    });
+
+    it("does not retry a stream that throws after a compaction stop reason", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-thrown-compaction-stop-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        return truncatedCompactionStopStream();
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "continue after compaction" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(1);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
+        expect(events.at(-1)).toEqual({
+            type: "done",
+            state: "error",
+            kind: "unknown",
+            message: "stream truncated after compaction stop",
+        });
+    });
+
+    it("reports cancellation when an aborted stream closes after a compaction block", async () => {
+        let attempts = 0;
+        const controller = new AbortController();
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-aborted-compaction-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        return abortedCompactionStream(controller);
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            abort: controller.signal,
+            context: { messages: [{ role: "user", content: "cancel after compaction" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(1);
+        expect(events.at(-1)).toEqual({ type: "done", state: "cancelled" });
+    });
+
     it("preserves interleaved response blocks and treats truncated tools as length", async () => {
         const events: SessionEvent[] = [];
         for await (const event of mapAnthropicStream(
@@ -1267,4 +1460,53 @@ function toSse(events: readonly unknown[]): string {
 
 async function* streamEvents(events: readonly unknown[]) {
     for (const event of events) yield event as never;
+}
+
+async function* truncatedCompactionStream() {
+    yield* streamEvents(compactionStartEvents());
+    throw new APIConnectionError({ message: "stream truncated after compaction" });
+}
+
+async function* truncatedCompactionStopStream() {
+    yield* streamEvents([
+        {
+            type: "message_start",
+            message: { usage: { input_tokens: 0, output_tokens: 0 } },
+        },
+        {
+            type: "message_delta",
+            delta: { stop_reason: "compaction", stop_sequence: null },
+            usage: { output_tokens: 0 },
+        },
+    ]);
+    throw new APIConnectionError({ message: "stream truncated after compaction stop" });
+}
+
+async function* abortedCompactionStream(controller: AbortController) {
+    yield* streamEvents(compactionStartEvents());
+    controller.abort();
+}
+
+function compactionStartEvents(): readonly unknown[] {
+    return [
+        {
+            type: "message_start",
+            message: {
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 50_480,
+                },
+            },
+        },
+        {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+                type: "compaction",
+                content: null,
+                encrypted_content: null,
+            },
+        },
+    ];
 }
