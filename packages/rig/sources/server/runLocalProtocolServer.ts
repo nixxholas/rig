@@ -64,6 +64,7 @@ import {
 } from "../session-sharing/peer-access/index.js";
 import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
+import { P2pNetwork } from "../p2p/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -135,6 +136,7 @@ async function runOwnedLocalProtocolServer(
 
     let startupState: DaemonStartupState = { status: "starting" };
     let mcpToolProvider: McpToolProvider | undefined;
+    let p2pNetwork: P2pNetwork | undefined;
     let murmurService: MurmurService | undefined;
     let shareRuntime: RigShareRuntime | undefined;
     let happySyncService: HappySyncService | undefined;
@@ -543,6 +545,46 @@ async function runOwnedLocalProtocolServer(
             taskDrain,
         });
         const activeStore = store;
+        const createP2pStatusEventId = createEventIdFactory();
+        p2pNetwork = await P2pNetwork.create({
+            config: loadedConfig.config.p2p,
+            irohSecretKeyPath: paths.irohSecretKeyPath,
+            onStatusChange: (status) => {
+                const event: GlobalLiveEvent = {
+                    createdAt: Date.now(),
+                    data: { status },
+                    id: createP2pStatusEventId(),
+                    type: "p2p_status_changed",
+                };
+                activeStore.globalEventQueue.publishLive(event);
+                activeStore.liveEvents.publish(event);
+            },
+            onTransportUnavailable: (transport, error) => {
+                daemonLog.record(
+                    "warning",
+                    "p2p_transport_unavailable",
+                    "A P2P transport is unavailable.",
+                    { error: errorToMessage(error), transport },
+                );
+            },
+        });
+        const irohStatus = p2pNetwork
+            .status()
+            .transports.find(
+                (transport) => transport.transport === "iroh" && transport.state === "ready",
+            );
+        if (irohStatus?.state === "ready") {
+            daemonLog.record("info", "iroh_started", "Rig P2P networking is ready.", {
+                endpointId: irohStatus.localId,
+                peers: loadedConfig.config.p2p.iroh.trustedEndpointIds.length,
+                ...(loadedConfig.config.p2p.iroh.relayUrl === undefined
+                    ? {}
+                    : { relayUrl: loadedConfig.config.p2p.iroh.relayUrl }),
+            });
+        }
+        shutdown.register("p2p", async () => {
+            await p2pNetwork?.close();
+        });
         murmurService = new MurmurService({
             publishGlobalEvent: (event) => {
                 const entry = activeStore.globalEventQueue.appendReplaySafe(event);
@@ -794,6 +836,7 @@ async function runOwnedLocalProtocolServer(
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
                 happyCloud: store.happyCloud,
+                p2pStatus: () => p2pNetwork?.status() ?? { transports: [] },
                 murmur: murmurService,
                 ...(shareRuntime === undefined
                     ? {}

@@ -158,12 +158,30 @@ export interface ConfigNetwork {
     deniedDomains?: readonly string[];
 }
 
+export interface ConfigIrohTransport {
+    relayUrl?: string;
+    trustedEndpointIds: readonly string[];
+}
+
+export type PartialConfigIrohTransport = Partial<ConfigIrohTransport>;
+
+export interface ConfigP2p {
+    enableIroh: boolean;
+    iroh: ConfigIrohTransport;
+}
+
+export interface PartialConfigP2p {
+    enableIroh?: boolean;
+    iroh?: PartialConfigIrohTransport;
+}
+
 export interface RigConfig {
     docker?: DockerExecutionConfig;
     defaults: ConfigDefaults;
     features: ConfigFeatures;
     mcpServers: Readonly<Record<string, McpServerConfig>>;
     network?: ConfigNetwork;
+    p2p: ConfigP2p;
     presence: ConfigPresence;
     providerDefaultEnable: boolean;
     providers: ConfigProviders;
@@ -178,6 +196,7 @@ export interface PartialRigConfig {
     features?: PartialConfigFeatures;
     mcpServers?: Readonly<Record<string, McpServerConfig>>;
     network?: ConfigNetwork;
+    p2p?: PartialConfigP2p;
     presence?: PartialConfigPresence;
     providerDefaultEnable?: boolean;
     providers?: PartialConfigProviders;

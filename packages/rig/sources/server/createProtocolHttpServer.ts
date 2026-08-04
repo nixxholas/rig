@@ -49,6 +49,7 @@ import type {
     RigDaemonInstallationDiscovery,
     InstallPluginRequest,
     InstallPluginResponse,
+    P2pStatus,
     GitStateResponse,
     GitWatchResponse,
     GoalSessionResponse,
@@ -319,6 +320,7 @@ export interface ProtocolHttpServerOptions {
     happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
+    p2pStatus?: () => P2pStatus;
     murmur?: MurmurServiceContract;
     /** Workspace and project sharing over Murmur. The daemon always supplies it. */
     scopeShares?: ScopeShareServiceContract;
@@ -381,6 +383,7 @@ export function createProtocolHttpServer(
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
+        p2pStatus: options.p2pStatus,
         murmur: options.murmur,
         scopeShares: options.scopeShares,
         sessionShares: options.sessionShares,
@@ -461,6 +464,7 @@ interface ProtocolServerRuntimeConfig {
     globalInstructionsPath: string;
     globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
+    p2pStatus: (() => P2pStatus) | undefined;
     murmur: MurmurServiceContract | undefined;
     scopeShares: ScopeShareServiceContract | undefined;
     sessionShares: SessionShareServiceContract | undefined;
@@ -564,6 +568,11 @@ async function handleRequest(
             200,
             healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue.durable),
         );
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "p2p-status") {
+        sendJson<P2pStatus>(response, 200, runtimeConfig.p2pStatus?.() ?? { transports: [] });
         return;
     }
 
@@ -4246,6 +4255,7 @@ function matchRoute(pathname: string):
               | "debug-inspector"
               | "health"
               | "installation"
+              | "p2p-status"
               | "happy-cloud-commands"
               | "happy-cloud-profile"
               | "happy-cloud-status"
@@ -4472,6 +4482,7 @@ function matchRoute(pathname: string):
     | undefined {
     if (pathname === "/health") return { name: "health" };
     if (pathname === "/installation") return { name: "installation" };
+    if (pathname === "/p2p/status") return { name: "p2p-status" };
     if (pathname === "/happy-cloud/commands") return { name: "happy-cloud-commands" };
     if (pathname === "/happy-cloud/profile") return { name: "happy-cloud-profile" };
     if (pathname === "/happy-cloud/status") return { name: "happy-cloud-status" };

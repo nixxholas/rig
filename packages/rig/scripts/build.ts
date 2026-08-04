@@ -21,6 +21,7 @@ const externalPackages = [
     "@mariozechner/clipboard",
     "@modelcontextprotocol/sdk",
     "@mongodb-js/zstd",
+    "@number0/iroh",
     "@pydantic/monty",
     "@slopus/ghostty-wasm",
     "@vscode/ripgrep",

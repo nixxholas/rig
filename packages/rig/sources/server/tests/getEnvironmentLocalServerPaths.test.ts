@@ -20,6 +20,7 @@ describe("getEnvironmentLocalServerPaths", () => {
             databasePath: `${directory}/sessions.sqlite`,
             diagnosticsPath: `${directory}/diagnostics`,
             directory,
+            irohSecretKeyPath: `${directory}/iroh-secret-key`,
             logPath: `${directory}/server.log`,
             registryPath: `${directory}/server.json`,
             socketPath: `${directory}/server.sock`,

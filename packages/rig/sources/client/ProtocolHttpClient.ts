@@ -38,6 +38,7 @@ import type {
     ListProviderUsageResponse,
     GlobalStreamHello,
     HealthResponse,
+    P2pStatus,
     HappyCloudCommand,
     HappyCloudCommandResponse,
     HappyCloudProfileCiphertextResponse,
@@ -185,6 +186,10 @@ export class ProtocolHttpClient {
 
     getHappyCloudStatus(): Promise<HappyCloudStatus> {
         return this.#requestJson("GET", "/happy-cloud/status");
+    }
+
+    getP2pStatus(): Promise<P2pStatus> {
+        return this.#requestJson("GET", "/p2p/status");
     }
 
     applyHappyCloudCommand(command: HappyCloudCommand): Promise<HappyCloudCommandResponse> {

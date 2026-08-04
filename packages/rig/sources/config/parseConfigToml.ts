@@ -1,4 +1,6 @@
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { MAX_CODEX_STREAM_MAX_RETRIES } from "./codexStreamRetrySettings.js";
 
 import type {
@@ -20,6 +22,11 @@ import type {
 } from "../executor/bedrock-model-overrides.js";
 import type { DockerExecutionConfig, DockerMountConfig } from "../execution/index.js";
 
+const irohEndpointIdsSchema = Type.Array(Type.String({ pattern: "^[0-9a-f]{64}$" }), {
+    uniqueItems: true,
+});
+const irohRelayUrlSchema = Type.String({ pattern: "^https?://" });
+
 export function parseConfigToml(source: string): PartialRigConfig {
     const defaults: PartialConfigDefaults = {};
     const features: PartialConfigFeatures = {};
@@ -32,6 +39,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         "features",
         "mcp_servers",
         "network",
+        "p2p",
         "presence",
         "providers",
         "settings",
@@ -40,6 +48,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     ]);
     const docker = readDockerConfig(table.docker);
     const network = readNetworkConfig(table.network);
+    const p2p = readP2pConfig(table.p2p);
     const presence = readPresenceConfig(table.presence);
     const defaultsTable = readTable(table.defaults, "defaults");
 
@@ -215,6 +224,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(features).length > 0 ? { features } : {}),
         ...(mcpServers !== undefined ? { mcpServers } : {}),
         ...(network !== undefined ? { network } : {}),
+        ...(p2p !== undefined ? { p2p } : {}),
         ...(presence !== undefined ? { presence } : {}),
         ...(providerSettings?.defaultEnable === undefined
             ? {}
@@ -225,6 +235,47 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(Object.keys(theme).length > 0 ? { theme } : {}),
         ...(workspace !== undefined && Object.keys(workspace).length > 0 ? { workspace } : {}),
+    };
+}
+
+function readP2pConfig(
+    value: TomlValue | undefined,
+): import("./types.js").PartialConfigP2p | undefined {
+    if (value === undefined) return undefined;
+    if (!isTomlTable(value)) throw new Error("p2p must be a TOML table.");
+    assertKnownKeys(value, "p2p", ["enable_iroh", "iroh"]);
+    const irohTable = readTable(value.iroh, "p2p.iroh");
+    const iroh = {
+        ...(irohTable === undefined
+            ? {}
+            : readOptionalStringArray(
+                  irohTable,
+                  "trusted_endpoint_ids",
+                  "trustedEndpointIds",
+                  "p2p.iroh.trusted_endpoint_ids",
+              )),
+        ...(irohTable === undefined
+            ? {}
+            : readOptionalString(irohTable, "relay_url", "relayUrl", "p2p.iroh.relay_url")),
+    };
+    if (irohTable !== undefined) {
+        assertKnownKeys(irohTable, "p2p.iroh", ["relay_url", "trusted_endpoint_ids"]);
+    }
+    if (
+        iroh.trustedEndpointIds !== undefined &&
+        !Value.Check(irohEndpointIdsSchema, iroh.trustedEndpointIds)
+    ) {
+        throw new Error(
+            "p2p.iroh.trusted_endpoint_ids must contain unique 64-character endpoint IDs.",
+        );
+    }
+    if (iroh.relayUrl !== undefined && !Value.Check(irohRelayUrlSchema, iroh.relayUrl)) {
+        throw new Error("p2p.iroh.relay_url must be an HTTP or HTTPS URL.");
+    }
+    const enableIroh = readBoolean(value, "enable_iroh", "p2p.enable_iroh");
+    return {
+        ...(enableIroh === undefined ? {} : { enableIroh }),
+        ...(Object.keys(iroh).length === 0 ? {} : { iroh }),
     };
 }
 

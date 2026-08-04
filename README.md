@@ -580,6 +580,35 @@ In restricted Docker sessions, `allowed_loopback_ports` refers to loopback on
 the machine running Rig, not an arbitrary container port. Full access remains
 unrestricted and can bypass the managed proxy by design.
 
+### P2P networking
+
+Iroh P2P networking is opt-in and machine-wide. Enable it in the user
+`happy.toml`, restart the daemon, then run `rig daemon status` to copy this
+machine's endpoint ID:
+
+```toml
+[p2p]
+enable_iroh = true
+
+[p2p.iroh]
+trusted_endpoint_ids = [
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+]
+# relay_url = "https://relay.example.com"
+```
+
+Put each daemon's endpoint ID in the other daemon's `trusted_endpoint_ids` list. Iroh
+authenticates the Ed25519 endpoint identity during its QUIC handshake, and Rig
+refuses an incoming connection unless that identity is allowlisted. The daemon
+keeps pinging every configured peer and reports Connected, Connecting, or
+Unreachable status through `rig daemon status` and `rig-connect`.
+
+When `relay_url` is absent, Iroh uses its default discovery and relay services.
+The endpoint identity is stored beside Rig's durable database with owner-only
+permissions. Project configuration cannot enable P2P networking. Upstream Iroh
+does not currently publish a native binding for Intel macOS; on that platform
+Rig reports P2P as unavailable and continues running normally.
+
 Provider availability is machine-wide because the local daemon owns the model
 catalog and authentication paths. Configure it in the user `happy.toml`:
 

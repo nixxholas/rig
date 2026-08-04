@@ -12,6 +12,12 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         workspaces: true,
     },
     mcpServers: {},
+    p2p: {
+        enableIroh: false,
+        iroh: {
+            trustedEndpointIds: [],
+        },
+    },
     presence: { states: {} },
     providerDefaultEnable: true,
     providers: {

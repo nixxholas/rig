@@ -44,6 +44,13 @@
 # allowed_loopback_ports = [3000]
 # allow_local_binding = false
 
+# [p2p]
+# enable_iroh = true
+#
+# [p2p.iroh]
+# trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+# relay_url = "https://relay.example.com"
+
 # [presence]
 # current = "available"
 # fallback = "away"

@@ -1,5 +1,5 @@
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { getDefaultSessionDatabasePath } from "./getDefaultSessionDatabasePath.js";
 
@@ -7,6 +7,7 @@ export interface LocalServerPaths {
     databasePath: string;
     diagnosticsPath: string;
     directory: string;
+    irohSecretKeyPath: string;
     logPath: string;
     registryPath: string;
     socketPath: string;
@@ -23,10 +24,12 @@ export function getLocalServerPaths(
     options: GetLocalServerPathsOptions = {},
 ): LocalServerPaths {
     const directory = options.directory ?? join(tmpdir(), `rig-${uid}`);
+    const databasePath = options.databasePath ?? getDefaultSessionDatabasePath();
     return {
-        databasePath: options.databasePath ?? getDefaultSessionDatabasePath(),
+        databasePath,
         diagnosticsPath: join(directory, "diagnostics"),
         directory,
+        irohSecretKeyPath: join(dirname(databasePath), "iroh-secret-key"),
         logPath: join(directory, "server.log"),
         registryPath: join(directory, "server.json"),
         socketPath: join(directory, "server.sock"),
