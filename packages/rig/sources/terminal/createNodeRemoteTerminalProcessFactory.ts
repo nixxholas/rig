@@ -11,6 +11,8 @@ export function createNodeRemoteTerminalProcessFactory(
     environment: NodeJS.ProcessEnv = process.env,
 ): RemoteTerminalProcessFactory {
     return {
+        // A PTY on this machine, with this machine's environment and filesystem.
+        confinement: "host",
         async start(options) {
             const shell = options.shell ?? defaultShell(environment);
             const args =

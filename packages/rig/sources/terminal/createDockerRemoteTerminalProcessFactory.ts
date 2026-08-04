@@ -14,6 +14,7 @@ export function createDockerRemoteTerminalProcessFactory(
     environment: DockerEnvironment,
 ): RemoteTerminalProcessFactory {
     return {
+        confinement: "container",
         async start(options) {
             const container = await environment.container();
             const shell = options.shell ?? "/bin/sh";

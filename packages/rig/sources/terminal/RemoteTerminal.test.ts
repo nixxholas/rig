@@ -12,7 +12,7 @@ describe("RemoteTerminal", () => {
         const terminal = await RemoteTerminal.create({
             cols: 20,
             maxScrollback: 100,
-            processFactory: { start: () => Promise.resolve(process) },
+            processFactory: { confinement: "host" as const, start: () => Promise.resolve(process) },
             processOptions: { cols: 20, cwd: globalThis.process.cwd(), rows: 4 },
             rows: 4,
         });
@@ -54,7 +54,7 @@ describe("RemoteTerminal", () => {
         const terminal = await RemoteTerminal.create({
             cols: 20,
             maxScrollback: 100,
-            processFactory: { start: () => Promise.resolve(process) },
+            processFactory: { confinement: "host" as const, start: () => Promise.resolve(process) },
             processOptions: { cols: 20, cwd: globalThis.process.cwd(), rows: 4 },
             rows: 4,
         });

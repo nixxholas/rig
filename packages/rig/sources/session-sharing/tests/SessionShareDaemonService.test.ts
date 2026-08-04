@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { DockerExecutionConfig } from "../../execution/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { canonicalShareJson, shareContentHash } from "../../sharing/canonicalShareJson.js";
 import { FakeShareTransport } from "../../sharing/FakeShareTransport.js";
@@ -9,13 +10,21 @@ import { SessionShareService } from "../SessionShareService.js";
 
 /** No project in these tests has a Docker execution config, so nothing is offerable. */
 const noOfferableCapabilities = () => resolveOfferablePeerCapabilities(undefined);
+/** A project with a container environment, so `terminal_view` is actually grantable. */
+const containerOfferableCapabilities = () =>
+    resolveOfferablePeerCapabilities({} as DockerExecutionConfig);
 
 /**
  * Wires the real durable stores (via a real, in-memory-database `PersistentSessionStore`) to the
  * deterministic transport, exactly the way `createShareRuntime` wires the real Murmur
  * transport in production.
  */
-function makeContext(options: { localPeerId?: () => Promise<string | undefined> } = {}): {
+function makeContext(
+    options: {
+        localPeerId?: () => Promise<string | undefined>;
+        offerableCapabilities?: () => ReturnType<typeof resolveOfferablePeerCapabilities>;
+    } = {},
+): {
     daemon: SessionShareDaemonService;
     deliverFriendMessage: ReturnType<typeof vi.fn>;
     service: SessionShareService;
@@ -32,7 +41,7 @@ function makeContext(options: { localPeerId?: () => Promise<string | undefined> 
     });
     const daemon = new SessionShareDaemonService({
         localPeerId: options.localPeerId ?? (async () => "peer-owner"),
-        offerableCapabilities: noOfferableCapabilities,
+        offerableCapabilities: options.offerableCapabilities ?? noOfferableCapabilities,
         service,
         store: store.sessionShareDaemonStore,
     });
@@ -343,6 +352,40 @@ describe("SessionShareDaemonService with a real database and the deterministic t
                     text: "Still here?",
                 }),
             ).rejects.toThrow("This shared session is no longer active.");
+        } finally {
+            store.close();
+        }
+    });
+
+    it("describes what a member actually holds in the session summary, not what the project could merely offer", async () => {
+        const { daemon, store } = makeContext({
+            offerableCapabilities: containerOfferableCapabilities,
+        });
+        try {
+            const sessionId = store.create({ cwd: "/tmp/session-share-owner-10" }).id;
+            const created = await daemon.create(sessionId, {
+                friends: [{ displayName: "Casey", peerId: "peer-casey" }],
+                includeFriendMessagesInModel: true,
+                mutationId: "mutation-1",
+            });
+            const member = created.members[0]!;
+
+            const beforeGrant = store.list().find((summary) => summary.id === sessionId);
+            expect(beforeGrant?.shared).toMatchObject({
+                activeCapabilitiesDescription: "do nothing beyond reading this session",
+                capabilityMemberCount: 0,
+            });
+
+            await daemon.setMemberCapabilities(sessionId, member.shareMemberId, {
+                capabilities: ["terminal_view"],
+                mutationId: "mutation-2",
+            });
+
+            const afterGrant = store.list().find((summary) => summary.id === sessionId);
+            expect(afterGrant?.shared).toMatchObject({
+                activeCapabilitiesDescription: "watch a terminal",
+                capabilityMemberCount: 1,
+            });
         } finally {
             store.close();
         }

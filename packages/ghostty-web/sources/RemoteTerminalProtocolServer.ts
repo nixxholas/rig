@@ -359,6 +359,11 @@ export class RemoteTerminalProtocolServer {
     }
 
     setFlowPaused(connection: ServerConnection, paused: boolean): void {
+        // A viewer holds no lease that may write, so it must never veto the owner's real
+        // process just by falling behind on output it only watches. Its own falling-behind
+        // is instead bounded by the same buffered-bytes cap that disconnects any client
+        // that cannot keep up (see #queueVt), so a slow viewer is dropped, not backpressured.
+        if (!connection.mayWrite) return;
         const wasPaused = this.#pausedConnections.size > 0;
         if (paused) this.#pausedConnections.add(connection);
         else this.#pausedConnections.delete(connection);
@@ -555,6 +560,11 @@ class ServerConnection {
         stream.on("drain", () => this.#drain());
         stream.on("error", () => this.close());
         stream.on("close", () => this.close());
+    }
+
+    /** Whether this connection was attached with a lease that may write, as opposed to a viewer. */
+    get mayWrite(): boolean {
+        return this.#input;
     }
 
     close(): void {

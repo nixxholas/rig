@@ -229,7 +229,8 @@ describe("peer terminal_view capability requires a container environment", () =>
             `/sessions/{session}/share/members/${shareMemberId}/capabilities`,
             { capabilities: ["terminal_view"], mutationId: "mutation-grant-1" },
         );
-        expect(granted.status).toBe(500);
+        // A deliberate, permanent refusal is a 4xx a client must not retry, not a 500.
+        expect(granted.status).toBe(422);
         expect(String(granted.body.error)).toContain("container environment");
         expect(String(granted.body.error)).toContain("read your credentials");
 

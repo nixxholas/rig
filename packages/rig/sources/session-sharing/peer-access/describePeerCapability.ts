@@ -1,17 +1,42 @@
 import type { PeerActivityEntry, PeerCapability } from "./types.js";
 
-/** Short label for one capability, as a person would name it in a list. */
+/**
+ * Short label for one capability, as a person would name it in a list.
+ *
+ * The switch is exhaustive rather than merely covering the one literal that
+ * exists today: widening `PeerCapability` without adding a case here fails to
+ * compile, so this can never fall through to a raw capability code a person
+ * would have to decode.
+ */
 export function describePeerCapability(capability: PeerCapability): string {
-    if (capability === "terminal_view") return "Watch a terminal";
-    return capability;
+    switch (capability) {
+        case "terminal_view":
+            return "Watch a terminal";
+        default:
+            capability satisfies never;
+            throw new Error(
+                `No English label is defined for peer capability "${String(capability)}".`,
+            );
+    }
 }
 
-/** One sentence saying exactly what the capability lets the other person do. */
+/**
+ * One sentence saying exactly what the capability lets the other person do.
+ *
+ * Exhaustive for the same reason as `describePeerCapability`: a capability
+ * with nothing to say here is a promise the product cannot take back, not a
+ * silently empty string.
+ */
 export function describePeerCapabilityDetail(capability: PeerCapability): string {
-    if (capability === "terminal_view") {
-        return "They can watch a container terminal in this session as you use it. They cannot type into it, resize it, or run anything.";
+    switch (capability) {
+        case "terminal_view":
+            return "They can watch a container terminal in this session as you use it. They cannot type into it, resize it, or run anything.";
+        default:
+            capability satisfies never;
+            throw new Error(
+                `No detail sentence is defined for peer capability "${String(capability)}".`,
+            );
     }
-    return "";
 }
 
 /** The list of capabilities a member holds, written for a person to read. */
@@ -20,6 +45,28 @@ export function describePeerCapabilities(capabilities: readonly PeerCapability[]
     const labels = capabilities.map(describePeerCapability);
     if (labels.length === 1) return labels[0]!;
     return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)!.toLowerCase()}`;
+}
+
+/**
+ * What holding these capabilities lets a person do, as a phrase that reads
+ * naturally right after "can" — "watch a terminal", not "Watch a terminal".
+ *
+ * This describes what is actually held, not what a project could merely
+ * offer, so it stays a correct sentence even after an offer disappears out
+ * from under a grant that predates it (the project loses its container, an
+ * existing grant does not vanish with it). Grammatical for every input,
+ * including holding nothing at all.
+ */
+export function describePeerCapabilitiesActivePhrase(
+    capabilities: readonly PeerCapability[],
+): string {
+    if (capabilities.length === 0) return "do nothing beyond reading this session";
+    const labels = capabilities.map((capability) => {
+        const label = describePeerCapability(capability);
+        return label.charAt(0).toLowerCase() + label.slice(1);
+    });
+    if (labels.length === 1) return labels[0]!;
+    return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)!}`;
 }
 
 /**

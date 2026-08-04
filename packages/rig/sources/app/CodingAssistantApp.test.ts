@@ -9661,6 +9661,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const sessionShare: SessionSharedMetadata = {
+            activeCapabilitiesDescription: "watch a terminal",
             capabilityMemberCount: 2,
             includeFriendMessagesInModel: false,
             memberCount: 2,
@@ -9669,6 +9670,8 @@ describe("CodingAssistantApp", () => {
                     capability: "terminal_view",
                     description:
                         "They can watch a container terminal in this session as you use it.",
+                    grantWarning:
+                        "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
                     label: "Watch a terminal",
                     offerable: true,
                 },
@@ -9716,11 +9719,14 @@ describe("CodingAssistantApp", () => {
             {
                 capability: "terminal_view",
                 description: "They can watch a container terminal in this session as you use it.",
+                grantWarning:
+                    "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
                 label: "Watch a terminal",
                 offerable: true,
             },
         ];
         const sessionShare: SessionSharedMetadata = {
+            activeCapabilitiesDescription: "watch a terminal",
             capabilityMemberCount: 1,
             includeFriendMessagesInModel: false,
             memberCount: 1,

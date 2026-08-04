@@ -8,16 +8,14 @@ const DIM = "\x1b[2m";
 /**
  * What any member with an active capability may currently do, in one English phrase.
  *
- * Built from the share's own `offerableCapabilities` labels rather than a capability code, so
- * nothing here can ever print an enum literal such as `terminal_view`.
+ * Read from `activeCapabilitiesDescription`, which the daemon computes from what members
+ * actually hold right now, never from `offerableCapabilities` (what the project could merely
+ * offer). The two can legitimately disagree — a grant survives the project later losing its
+ * container — so building this from the offer would print a sentence that describes nobody's
+ * actual access, or an empty one for a grant that is still very much live.
  */
 export function describeActivePeerCapabilities(share: SessionSharedMetadata): string {
-    const labels = share.offerableCapabilities
-        .filter((capability) => capability.offerable)
-        .map((capability) => capability.label.charAt(0).toLowerCase() + capability.label.slice(1));
-    if (labels.length === 0) return "a capability";
-    if (labels.length === 1) return labels[0]!;
-    return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)!}`;
+    return share.activeCapabilitiesDescription;
 }
 
 /**

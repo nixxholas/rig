@@ -78,6 +78,14 @@ export const sessionShareOfferableCapabilitySchema = Type.Object(
         capability: sessionSharePeerCapabilitySchema,
         /** What it lets the other person do, in one sentence. */
         description: Type.String({ maxLength: 512, minLength: 1 }),
+        /**
+         * What granting this alone costs that no later action can undo.
+         *
+         * Shown at grant time, before the owner confirms, not only in a settings
+         * page they may never open: anything already seen cannot be recalled, and
+         * a credential that crossed a shared terminal has to be rotated.
+         */
+        grantWarning: Type.String({ maxLength: 1_024, minLength: 1 }),
         label: Type.String({ maxLength: 128, minLength: 1 }),
         offerable: Type.Boolean(),
         /** Present only when `offerable` is false, and always readable English. */
@@ -174,6 +182,14 @@ export function describeSessionShareToolOutput(toolOutput: SessionShareToolOutpu
 
 export const sessionSharedMetadataSchema = Type.Object(
     {
+        /**
+         * What members who currently hold a capability may actually do, as a
+         * phrase ready to follow "can" — computed from what is granted right
+         * now, never from `offerableCapabilities`, so it stays a correct
+         * sentence even after the project's own offer disappears out from
+         * under an existing grant.
+         */
+        activeCapabilitiesDescription: Type.String({ maxLength: 512, minLength: 1 }),
         /** How many members hold at least one capability right now. */
         capabilityMemberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
         includeFriendMessagesInModel: Type.Boolean(),

@@ -8,6 +8,7 @@ import {
 
 function share(overrides: Partial<SessionSharedMetadata> = {}): SessionSharedMetadata {
     return {
+        activeCapabilitiesDescription: "watch a terminal",
         capabilityMemberCount: 1,
         includeFriendMessagesInModel: false,
         memberCount: 1,
@@ -15,6 +16,8 @@ function share(overrides: Partial<SessionSharedMetadata> = {}): SessionSharedMet
             {
                 capability: "terminal_view",
                 description: "They can watch a container terminal in this session as you use it.",
+                grantWarning:
+                    "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
                 label: "Watch a terminal",
                 offerable: true,
             },
@@ -44,29 +47,28 @@ describe("renderPeerCapabilityIndicator", () => {
         );
     });
 
-    it("joins several offerable capabilities the way a person reads a list", () => {
+    it("reads what members actually hold from activeCapabilitiesDescription, joined the way a person reads a list", () => {
         const twoCapabilities = share({
-            offerableCapabilities: [
-                ...share().offerableCapabilities,
-                {
-                    capability: "terminal_view",
-                    description: "A second capability for this test only.",
-                    label: "Do a second thing",
-                    offerable: true,
-                },
-            ],
+            activeCapabilitiesDescription: "watch a terminal and do a second thing",
         });
         expect(describeActivePeerCapabilities(twoCapabilities)).toBe(
             "watch a terminal and do a second thing",
         );
     });
 
-    it("excludes capabilities that are not offerable here", () => {
-        const unavailable = share({
+    it("stays correct and grammatical even after the project's offerable list empties out from under a live grant", () => {
+        // A grant can outlive the project's own offer: the container that confined it can be
+        // removed without touching the grant that predates it. `offerableCapabilities` reflects
+        // only what the project could offer a *new* grant, so it going empty here must not
+        // change what this sentence says about members who already hold something.
+        const offerGoneButGrantLive = share({
+            activeCapabilitiesDescription: "watch a terminal",
+            capabilityMemberCount: 1,
             offerableCapabilities: [
                 {
                     capability: "terminal_view",
                     description: "Needs a container.",
+                    grantWarning: "This capability can no longer be granted to anybody new.",
                     label: "Watch a terminal",
                     offerable: false,
                     unavailableReason:
@@ -74,8 +76,11 @@ describe("renderPeerCapabilityIndicator", () => {
                 },
             ],
         });
-        expect(describeActivePeerCapabilities(unavailable)).toBe("a capability");
-        expect(renderPeerCapabilityIndicator(unavailable, 80)).not.toContain("terminal_view");
+        expect(describeActivePeerCapabilities(offerGoneButGrantLive)).toBe("watch a terminal");
+        const rendered = renderPeerCapabilityIndicator(offerGoneButGrantLive, 80);
+        expect(rendered).toContain("1 member can watch a terminal in this session");
+        expect(rendered).not.toContain("terminal_view");
+        expect(rendered).not.toContain("can a capability");
     });
 
     it("truncates to the available width without dropping the count", () => {

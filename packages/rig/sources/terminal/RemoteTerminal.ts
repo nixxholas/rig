@@ -13,6 +13,7 @@ import {
 
 import { GhosttyWebTerminal } from "./GhosttyWebTerminal.js";
 import type {
+    RemoteTerminalConfinement,
     RemoteTerminalProcess,
     RemoteTerminalProcessFactory,
     RemoteTerminalProcessOptions,
@@ -21,6 +22,17 @@ import type { RemoteTerminalSummary } from "./types.js";
 
 export class RemoteTerminal {
     readonly id = randomUUID();
+
+    /**
+     * Where this terminal's process actually runs.
+     *
+     * Recorded at creation from the factory that started it, so anything asking
+     * whether this terminal may be shown to another person gets the truth about
+     * this terminal rather than a fresh reading of a project setting that may
+     * have changed since. A project that gains a container configuration does
+     * not retroactively confine the host terminals already running in it.
+     */
+    readonly confinement: RemoteTerminalConfinement;
 
     readonly #driver: GhosttyRemoteTerminalServerDriver;
     #exitCode: number | null = null;
@@ -37,7 +49,9 @@ export class RemoteTerminal {
         process: RemoteTerminalProcess,
         created: ReturnType<typeof createGhosttyRemoteTerminalServer>,
         onChange: (summary: RemoteTerminalSummary) => void,
+        confinement: RemoteTerminalConfinement,
     ) {
+        this.confinement = confinement;
         this.#state = state;
         this.#process = process;
         this.#driver = created.driver;
@@ -97,6 +111,7 @@ export class RemoteTerminal {
                 process,
                 created,
                 options.onChange ?? (() => undefined),
+                options.processFactory.confinement,
             );
             return terminal;
         } catch (error) {

@@ -1,11 +1,20 @@
 import type { DockerExecutionConfig } from "../../execution/index.js";
-import { describePeerCapability, describePeerCapabilityDetail } from "./describePeerCapability.js";
-import { resolvePeerTerminalConfinement } from "./impl/peerTerminalConfinement.js";
+import {
+    describePeerCapability,
+    describePeerCapabilityDetail,
+    describePeerCapabilityGrantWarning,
+} from "./describePeerCapability.js";
+import {
+    canProjectOfferPeerTerminals,
+    PEER_TERMINAL_NEEDS_CONTAINER,
+} from "./impl/peerTerminalConfinement.js";
 import { PEER_CAPABILITIES, type PeerCapability } from "./types.js";
 
 export interface OfferablePeerCapability {
     readonly capability: PeerCapability;
     readonly description: string;
+    /** What granting this alone costs that no later action can undo, shown at grant time. */
+    readonly grantWarning: string;
     readonly label: string;
     readonly offerable: boolean;
     readonly unavailableReason?: string;
@@ -27,11 +36,14 @@ export function resolveOfferablePeerCapabilities(
         const base = {
             capability,
             description: describePeerCapabilityDetail(capability),
+            grantWarning: describePeerCapabilityGrantWarning([capability]),
             label: describePeerCapability(capability),
         };
-        const confinement = resolvePeerTerminalConfinement(docker);
-        return "reason" in confinement
-            ? { ...base, offerable: false, unavailableReason: confinement.reason }
-            : { ...base, offerable: true };
+        // Whether the option is worth showing at all. A project answering yes here
+        // grants nothing: the attach path re-asks the real terminal, which is the
+        // check that actually confines anybody.
+        return canProjectOfferPeerTerminals(docker)
+            ? { ...base, offerable: true }
+            : { ...base, offerable: false, unavailableReason: PEER_TERMINAL_NEEDS_CONTAINER };
     });
 }

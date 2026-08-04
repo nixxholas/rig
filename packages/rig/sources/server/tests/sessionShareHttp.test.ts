@@ -37,6 +37,8 @@ const offerableCapabilities = [
         capability: "terminal_view" as const,
         description:
             "They can watch a container terminal in this session as you use it. They cannot type into it, resize it, or run anything.",
+        grantWarning:
+            "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
         label: "Watch a terminal",
         offerable: true,
     },
@@ -44,6 +46,7 @@ const offerableCapabilities = [
 const owner = {
     members: [member],
     share: {
+        activeCapabilitiesDescription: "do nothing beyond reading this session",
         capabilityMemberCount: 0,
         includeFriendMessagesInModel: true,
         memberCount: 1,

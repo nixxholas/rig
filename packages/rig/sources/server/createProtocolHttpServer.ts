@@ -181,6 +181,7 @@ import type {
     ScopeShareTarget,
 } from "../scope-sharing/ScopeShareServiceContract.js";
 import type { SessionShareServiceContract } from "../session-sharing/index.js";
+import { SessionShareCapabilityRefusalError } from "../session-sharing/SessionShareCapabilityRefusalError.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { ProjectRegistrationError } from "../project/ProjectRepository.js";
@@ -999,15 +1000,27 @@ async function handleRequest(
                 sendJson(response, 400, { error: "The capability request is invalid." });
                 return;
             }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                200,
-                await sessionShares.setMemberCapabilities(
-                    route.sessionId,
-                    route.shareMemberId,
-                    body,
-                ),
-            );
+            try {
+                sendJson<SessionShareOwnerResponse>(
+                    response,
+                    200,
+                    await sessionShares.setMemberCapabilities(
+                        route.sessionId,
+                        route.shareMemberId,
+                        body,
+                    ),
+                );
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                // A refusal to offer a capability is deliberate and permanent, not a
+                // fault of this request, so it is a 4xx a client must not retry rather
+                // than a 500 that invites one.
+                if (error instanceof SessionShareCapabilityRefusalError) {
+                    sendJson(response, 422, { error: error.message });
+                    return;
+                }
+                throw error;
+            }
             return;
         }
         if (request.method === "POST" && route.name === "session-share-stop") {

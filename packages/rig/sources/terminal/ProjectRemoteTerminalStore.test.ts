@@ -15,7 +15,7 @@ describe("ProjectRemoteTerminalStore", () => {
         });
         const start = vi.fn(() => startGate);
         const store = new ProjectRemoteTerminalStore({
-            createManager: ({ cwd }) => createManager(cwd, { start }),
+            createManager: ({ cwd }) => createManager(cwd, { confinement: "host", start }),
             resolveContext: () => ({ cwd: "/project" }),
         });
         const scope = { projectId: "project-1" };

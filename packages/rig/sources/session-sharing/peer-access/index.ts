@@ -8,6 +8,7 @@ export type {
 export { resolvePeerCapabilityCeiling } from "./resolvePeerCapabilityCeiling.js";
 export {
     describePeerActivityEntry,
+    describePeerCapabilitiesActivePhrase,
     describePeerCapabilities,
     describePeerCapability,
     describePeerCapabilityDetail,
@@ -36,10 +37,11 @@ export type {
     PeerTerminalViewerOptions,
 } from "./PeerTerminalViewerService.js";
 export {
+    canProjectOfferPeerTerminals,
+    isPeerTerminalConfined,
     PEER_TERMINAL_NEEDS_CONTAINER,
-    resolvePeerTerminalConfinement,
+    PEER_TERMINAL_NEEDS_SOLE_MEMBER,
 } from "./impl/peerTerminalConfinement.js";
-export type { PeerTerminalConfinement } from "./impl/peerTerminalConfinement.js";
 export { createPeerChannelSocket } from "./impl/createPeerChannelSocket.js";
 export type { PeerChannelSocketOptions } from "./impl/createPeerChannelSocket.js";
 export {

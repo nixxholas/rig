@@ -8,7 +8,11 @@ import type {
     SessionUnreadReason,
 } from "../../protocol/index.js";
 import { parsePermissionMode } from "../../permissions/index.js";
-import { resolveOfferablePeerCapabilities } from "../../session-sharing/peer-access/index.js";
+import {
+    describePeerCapabilitiesActivePhrase,
+    resolveOfferablePeerCapabilities,
+    type PeerCapability,
+} from "../../session-sharing/peer-access/index.js";
 import {
     describeSharedToolOutput,
     toSharedToolOutput,
@@ -51,7 +55,19 @@ export function querySessionSummaries(
                 WHERE session_share_members.share_id = session_shares.share_id
                   AND session_share_members.state = 'active'
                   AND session_share_capabilities.state = 'active'
-            ) AS share_capability_member_count
+            ) AS share_capability_member_count,
+            (
+                SELECT GROUP_CONCAT(DISTINCT session_share_capabilities.capability)
+                FROM session_share_capabilities
+                JOIN session_share_members
+                    ON session_share_members.share_member_id
+                        = session_share_capabilities.share_member_id
+                    AND session_share_members.current_grant_epoch
+                        = session_share_capabilities.grant_epoch
+                WHERE session_share_members.share_id = session_shares.share_id
+                  AND session_share_members.state = 'active'
+                  AND session_share_capabilities.state = 'active'
+            ) AS share_active_capabilities
         FROM (
             SELECT
                 id, project_id, workspace_id, order_key, archived, track_unread,
@@ -115,6 +131,11 @@ export function querySessionSummaries(
         // An unshared session has no joined share row, so this column is absent
         // rather than empty; anything unreadable is read as the private setting.
         const toolOutput = toSharedToolOutput(readOptionalString(row, "share_tool_output"));
+        // NULL (no active capability row at all) reads the same as an empty list;
+        // GROUP_CONCAT never produces an empty string for a row that exists.
+        const activeCapabilities = (readOptionalString(row, "share_active_capabilities")?.split(
+            ",",
+        ) ?? []) as PeerCapability[];
         return {
             id: readString(row, "id"),
             archived: readNumber(row, "archived") !== 0,
@@ -125,6 +146,8 @@ export function querySessionSummaries(
                 ? {}
                 : {
                       shared: {
+                          activeCapabilitiesDescription:
+                              describePeerCapabilitiesActivePhrase(activeCapabilities),
                           capabilityMemberCount: readNumber(row, "share_capability_member_count"),
                           includeFriendMessagesInModel:
                               readNumber(row, "share_include_friend_messages") !== 0,

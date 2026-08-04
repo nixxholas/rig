@@ -305,6 +305,7 @@ describe("connectRig mutations", () => {
                     createAttempts += 1;
                     if (createAttempts === 1) return Promise.reject(new TypeError("disconnected"));
                     authoritative = {
+                        activeCapabilitiesDescription: "do nothing beyond reading this session",
                         capabilityMemberCount: 0,
                         includeFriendMessagesInModel: false,
                         memberCount: 1,
@@ -394,6 +395,7 @@ describe("connectRig mutations", () => {
         const streams: ReturnType<typeof streamResponse>[] = [];
         const calls: { body: unknown; method: string | undefined; url: URL }[] = [];
         const shared: SessionSharedMetadata = {
+            activeCapabilitiesDescription: "watch a terminal",
             capabilityMemberCount: 1,
             includeFriendMessagesInModel: false,
             memberCount: 1,

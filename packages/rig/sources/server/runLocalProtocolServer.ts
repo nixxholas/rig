@@ -603,20 +603,11 @@ async function runOwnedLocalProtocolServer(
             },
         });
         const peerTerminalViewer = new PeerTerminalViewerService({
+            activeMemberCount: (shareId) =>
+                activeStore.sessionShareDaemonStore
+                    .queryMembers(shareId)
+                    .filter((member) => member.state === "active").length,
             capabilities: peerCapabilities,
-            docker: (shareId) => {
-                const owner = peerShareSession(shareId);
-                if (owner === undefined) return undefined;
-                // The very same resolver the terminal itself was built from, so the
-                // confinement answer can never drift from the container the terminal
-                // actually got.
-                return activeStore.remoteTerminalDocker({
-                    projectId: owner.snapshot.projectId,
-                    ...(owner.snapshot.workspaceId === undefined
-                        ? {}
-                        : { workspaceId: owner.snapshot.workspaceId }),
-                });
-            },
             terminal: (shareId, terminalId) => {
                 const owner = peerShareSession(shareId);
                 if (owner === undefined) return undefined;

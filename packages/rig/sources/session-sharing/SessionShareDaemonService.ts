@@ -27,9 +27,11 @@ import type {
 import {
     describePeerActivityEntry,
     describePeerCapabilities,
+    describePeerCapabilitiesActivePhrase,
     PEER_TERMINAL_ATTACH_CONTROL_ID,
     type PeerCapability,
 } from "./peer-access/index.js";
+import { SessionShareCapabilityRefusalError } from "./SessionShareCapabilityRefusalError.js";
 import type { SessionShareServiceContract } from "./SessionShareServiceContract.js";
 import type { SessionShareRecord, SessionShareService } from "./SessionShareService.js";
 import { describeSharedToolOutput, DEFAULT_SHARED_TOOL_OUTPUT } from "./SharedToolOutput.js";
@@ -201,7 +203,7 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
         for (const capability of request.capabilities) {
             const entry = offerable.get(capability);
             if (entry === undefined || !entry.offerable) {
-                throw new Error(
+                throw new SessionShareCapabilityRefusalError(
                     entry?.unavailableReason ??
                         "This session cannot offer that permission to anybody.",
                 );
@@ -365,19 +367,27 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
     #ownerResponse(shareId: string): SessionShareOwnerResponse {
         const share = this.#store.queryShare(shareId);
         if (share === undefined) throw new Error("This session share no longer exists.");
-        const members = this.#store.queryMembers(shareId);
+        const storedMembers = this.#store.queryMembers(shareId);
         const byMember = new Map<string, PeerCapability[]>();
         for (const row of this.#store.queryMemberCapabilities(shareId)) {
             const list = byMember.get(row.shareMemberId) ?? [];
             list.push(row.capability);
             byMember.set(row.shareMemberId, list);
         }
+        const members = storedMembers.map((member) =>
+            toProtocolMember(member, byMember.get(member.shareMemberId) ?? []),
+        );
+        // What members actually hold right now, not what the project could merely offer:
+        // an offer can disappear (the project loses its container) without touching a grant
+        // that predates it, and this must stay a correct sentence either way.
+        const heldCapabilities = [...new Set(members.flatMap((member) => member.capabilities))];
         return {
-            members: members.map((member) =>
-                toProtocolMember(member, byMember.get(member.shareMemberId) ?? []),
-            ),
+            members,
             share: {
-                capabilityMemberCount: [...byMember.values()].filter((list) => list.length > 0)
+                activeCapabilitiesDescription: describePeerCapabilitiesActivePhrase(
+                    heldCapabilities.sort(),
+                ),
+                capabilityMemberCount: members.filter((member) => member.capabilities.length > 0)
                     .length,
                 includeFriendMessagesInModel: share.includeFriendMessagesInModel,
                 memberCount: members.filter((member) => member.state === "active").length,

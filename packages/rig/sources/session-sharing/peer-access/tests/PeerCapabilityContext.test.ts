@@ -111,7 +111,8 @@ describe("PeerCapabilityContext", () => {
             resolveGrant: () => undefined,
         });
         const closed: string[] = [];
-        const revisionAtRegistration = context.revision;
+        const scope = { shareId: "share-1", shareMemberId: "member-1" };
+        const revisionAtRegistration = context.revision(scope);
         context.register({
             capability: "terminal_view",
             close: () => closed.push("handle-1"),
@@ -133,9 +134,74 @@ describe("PeerCapabilityContext", () => {
         // asynchronous stands between the revocation and the resource actually closing.
         expect(closedCount).toBe(2);
         expect(closed.sort()).toEqual(["handle-1", "handle-2"]);
-        expect(context.revision).toBe(revisionAtRegistration + 1);
-        expect(context.isCurrent(revisionAtRegistration)).toBe(false);
-        expect(context.isCurrent(context.revision)).toBe(true);
+        expect(context.revision(scope)).toBe(revisionAtRegistration + 1);
+        expect(context.isCurrent(scope, revisionAtRegistration)).toBe(false);
+        expect(context.isCurrent(scope, context.revision(scope))).toBe(true);
+    });
+
+    it("invalidating one member never bumps another unrelated member's revision, so their live handle is not mistaken for stale", () => {
+        const context = new PeerCapabilityContext({
+            recordAction: () => undefined,
+            resolveGrant: () => undefined,
+        });
+        const closed: string[] = [];
+        const memberA = { shareId: "share-1", shareMemberId: "member-a" };
+        const memberB = { shareId: "share-1", shareMemberId: "member-b" };
+        context.register({
+            capability: "terminal_view",
+            close: () => closed.push("a"),
+            grantEpoch: 1,
+            shareId: memberA.shareId,
+            shareMemberId: memberA.shareMemberId,
+        });
+        context.register({
+            capability: "terminal_view",
+            close: () => closed.push("b"),
+            grantEpoch: 1,
+            shareId: memberB.shareId,
+            shareMemberId: memberB.shareMemberId,
+        });
+        const revisionBBeforeInvalidate = context.revision(memberB);
+
+        const closedCount = context.invalidate(memberA);
+
+        expect(closedCount).toBe(1);
+        expect(closed).toEqual(["a"]);
+        // Member B's handle was never closed, and its revision never moved either:
+        // the revoked member and the unrelated member never share one counter.
+        expect(context.revision(memberB)).toBe(revisionBBeforeInvalidate);
+        expect(context.isCurrent(memberB, revisionBBeforeInvalidate)).toBe(true);
+    });
+
+    it("invalidating a whole share (no shareMemberId) bumps every member currently holding a handle on it", () => {
+        const context = new PeerCapabilityContext({
+            recordAction: () => undefined,
+            resolveGrant: () => undefined,
+        });
+        const memberA = { shareId: "share-1", shareMemberId: "member-a" };
+        const memberB = { shareId: "share-1", shareMemberId: "member-b" };
+        context.register({
+            capability: "terminal_view",
+            close: () => undefined,
+            grantEpoch: 1,
+            shareId: memberA.shareId,
+            shareMemberId: memberA.shareMemberId,
+        });
+        context.register({
+            capability: "terminal_view",
+            close: () => undefined,
+            grantEpoch: 1,
+            shareId: memberB.shareId,
+            shareMemberId: memberB.shareMemberId,
+        });
+        const revisionA = context.revision(memberA);
+        const revisionB = context.revision(memberB);
+
+        const closedCount = context.invalidate({ shareId: "share-1" });
+
+        expect(closedCount).toBe(2);
+        expect(context.isCurrent(memberA, revisionA)).toBe(false);
+        expect(context.isCurrent(memberB, revisionB)).toBe(false);
     });
 
     it("keeps closing the remaining handles when one handle's close() throws", () => {

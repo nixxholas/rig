@@ -487,6 +487,7 @@ describe("protocol conformance", () => {
                 },
             ],
             share: {
+                activeCapabilitiesDescription: "watch the live terminal",
                 capabilityMemberCount: 1,
                 includeFriendMessagesInModel: true,
                 memberCount: 1,
@@ -494,6 +495,8 @@ describe("protocol conformance", () => {
                     {
                         capability: "terminal_view",
                         description: "Watch the live terminal as it runs.",
+                        grantWarning:
+                            "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
                         label: "Terminal view",
                         offerable: true,
                     },

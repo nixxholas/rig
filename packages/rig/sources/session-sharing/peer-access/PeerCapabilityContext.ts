@@ -24,6 +24,18 @@ export interface ResolvedPeerGrant {
     readonly sessionMode: PermissionMode;
 }
 
+/**
+ * The one member a revision, a handle, or a decision belongs to.
+ *
+ * Every long-lived thing this context tracks is scoped to exactly one member,
+ * so invalidating one member's grant can never be mistaken for invalidating
+ * another's.
+ */
+export interface PeerCapabilityScope {
+    readonly shareId: string;
+    readonly shareMemberId: string;
+}
+
 export interface PeerCapabilityContextOptions {
     /**
      * The one durable answer to gate one.
@@ -72,19 +84,22 @@ export interface PeerCapabilityHandle {
  * Like `PermissionContext` it carries a revision. Every long-lived thing a
  * capability opened captures the revision it was authorized under and checks it
  * again before it acts, so a decision made a minute ago cannot outlive the
- * grant it rested on.
+ * grant it rested on. The revision is scoped to one `(shareId, shareMemberId)`
+ * pair rather than shared across the whole context: revoking one member must
+ * never invalidate a handle a different, unrelated member is still holding.
  */
 export class PeerCapabilityContext {
     readonly #handles = new Set<PeerCapabilityHandle>();
     readonly #options: PeerCapabilityContextOptions;
-    #revision = 0;
+    readonly #revisions = new Map<string, number>();
 
     constructor(options: PeerCapabilityContextOptions) {
         this.#options = options;
     }
 
-    get revision(): number {
-        return this.#revision;
+    /** The revision one member's grant is at right now. */
+    revision(scope: PeerCapabilityScope): number {
+        return this.#revisions.get(scopeKey(scope)) ?? 0;
     }
 
     /**
@@ -125,7 +140,10 @@ export class PeerCapabilityContext {
             effectiveMode,
             grantEpoch: grant.grantEpoch,
             outcome: "allowed",
-            revision: this.#revision,
+            revision: this.revision({
+                shareId: request.shareId,
+                shareMemberId: request.shareMemberId,
+            }),
             shareId: request.shareId,
             shareMemberId: request.shareMemberId,
         };
@@ -136,9 +154,9 @@ export class PeerCapabilityContext {
         return this.#deny(request, request.grantEpoch, reason);
     }
 
-    /** Whether the decision this handle was opened under still holds. */
-    isCurrent(revision: number): boolean {
-        return this.#revision === revision;
+    /** Whether the decision one member's handle was opened under still holds. */
+    isCurrent(scope: PeerCapabilityScope, revision: number): boolean {
+        return this.revision(scope) === revision;
     }
 
     /**
@@ -160,9 +178,28 @@ export class PeerCapabilityContext {
      * daemon, so nothing a friend holds survives the moment the owner decided
      * — the transport revoke and the capability broadcast that follow are only
      * how the friend's screen catches up with a channel that is already dead.
+     *
+     * Only the member (or, with no `shareMemberId`, every member of the share)
+     * named by `scope` is affected. Each affected member's own revision is
+     * bumped; an unrelated member sharing the same `shareId` keeps the revision
+     * their still-live handle was authorized under, so their attachment is
+     * never mistaken for stale and starved of the close it never received.
      */
     invalidate(scope: { readonly shareId: string; readonly shareMemberId?: string }): number {
-        this.#revision += 1;
+        const affectedMemberIds =
+            scope.shareMemberId !== undefined
+                ? [scope.shareMemberId]
+                : [
+                      ...new Set(
+                          [...this.#handles]
+                              .filter((handle) => handle.shareId === scope.shareId)
+                              .map((handle) => handle.shareMemberId),
+                      ),
+                  ];
+        for (const shareMemberId of affectedMemberIds) {
+            this.#bump({ shareId: scope.shareId, shareMemberId });
+        }
+
         let closed = 0;
         for (const handle of [...this.#handles]) {
             if (handle.shareId !== scope.shareId) continue;
@@ -209,4 +246,13 @@ export class PeerCapabilityContext {
         });
         return { outcome: "denied", reason };
     }
+
+    #bump(scope: PeerCapabilityScope): void {
+        const key = scopeKey(scope);
+        this.#revisions.set(key, (this.#revisions.get(key) ?? 0) + 1);
+    }
+}
+
+function scopeKey(scope: PeerCapabilityScope): string {
+    return `${scope.shareId}\u0000${scope.shareMemberId}`;
 }
