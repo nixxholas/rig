@@ -16,6 +16,8 @@ import type {
     SessionGoal,
     SessionInterruption,
     SessionSharedMetadata,
+    SessionSharePeerCapability,
+    SessionShareMemberState,
     ScheduledMessage,
     SessionStatus,
     SessionTask,
@@ -387,6 +389,7 @@ export type MutationAction =
     | "stop_session_share"
     | "set_session_share_friend_messages"
     | "set_session_share_tool_output"
+    | "set_session_share_member_capabilities"
     | "apply_happy_cloud_command";
 
 export interface MutationRejectedDelta {
@@ -426,4 +429,13 @@ export type ChatDelta =
     | { type: "retry_started"; attempt: number; reason: string }
     | { type: "retry_finished" }
     | { type: "connection_changed"; connection: ConnectionState }
+    | {
+          type: "session_share_member_capabilities_changed";
+          capabilities: readonly SessionSharePeerCapability[];
+          /** Ready-to-show English, never the raw capability identifiers. */
+          capabilitiesDescription: string;
+          memberState: SessionShareMemberState;
+          shareId: string;
+          shareMemberId: string;
+      }
     | MutationRejectedDelta;

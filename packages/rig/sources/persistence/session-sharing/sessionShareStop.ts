@@ -4,6 +4,7 @@ import { sessionShareGrants, sessionShareMembers, sessionShares } from "../datab
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import { sessionShareEntryLogPrune } from "./sessionShareEntryLogPrune.js";
+import { sessionShareRevokeMemberCapabilities } from "./sessionShareRevokeMemberCapabilities.js";
 
 export function sessionShareStop(tx: TX, shareId: string, now: number): boolean {
     return inTx(tx, (tx) => {
@@ -29,6 +30,11 @@ export function sessionShareStop(tx: TX, shareId: string, now: number): boolean 
             .set({ state: "stopped", stoppedAtMs: now, updatedAtMs: now })
             .where(eq(sessionShares.shareId, shareId))
             .run();
+        // A capability must never survive the grant it rested on. Stopping flips
+        // states rather than deleting rows, so the FK `ON DELETE CASCADE` never
+        // fires; revoke every member's capabilities here so no peer keeps access
+        // to a stopped share.
+        sessionShareRevokeMemberCapabilities(tx, { now, shareId });
         // A stopped share admits no new member, so its entry log can never be
         // offered as history again. Prune it in the same transaction so a stopped
         // share leaves no permanent transcript duplicate behind.

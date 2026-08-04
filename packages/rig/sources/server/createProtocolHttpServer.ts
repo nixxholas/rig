@@ -124,10 +124,13 @@ import type {
     DeleteMurmurAccountResponse,
     GetMurmurAccountResponse,
     GetSessionShareHealthResponse,
+    GetSessionSharePeerActivityResponse,
     GetSessionShareReplicaHistoryResponse,
+    ListSessionShareReplicaCapabilitiesResponse,
     ListSessionShareReplicasResponse,
     PostSessionShareFriendMessageResponse,
     SessionShareOwnerResponse,
+    SessionSharedMetadata,
 } from "../protocol/index.js";
 import {
     addSessionShareMemberRequestSchema,
@@ -159,6 +162,7 @@ import {
     signupMurmurAccountRequestSchema,
     startMurmurServiceRequestSchema,
     setSessionShareFriendMessagesRequestSchema,
+    setSessionShareMemberCapabilitiesRequestSchema,
     setSessionShareToolOutputRequestSchema,
     stopSessionShareRequestSchema,
     submitContextMessageRequestSchema,
@@ -920,10 +924,12 @@ async function handleRequest(
         if (
             route.name === "session-share" ||
             route.name === "session-share-members" ||
+            route.name === "session-share-member-capabilities" ||
             route.name === "session-share-member-revoke" ||
             route.name === "session-share-stop" ||
             route.name === "session-share-friend-messages" ||
-            route.name === "session-share-tool-output"
+            route.name === "session-share-tool-output" ||
+            route.name === "session-share-peer-activity"
         ) {
             const ownerSession = store.get(route.sessionId);
             if (ownerSession === undefined) {
@@ -982,6 +988,26 @@ async function handleRequest(
             );
             return;
         }
+        if (request.method === "PUT" && route.name === "session-share-member-capabilities") {
+            const body = await readCheckedBody(
+                request,
+                setSessionShareMemberCapabilitiesRequestSchema,
+            );
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The capability request is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                200,
+                await sessionShares.setMemberCapabilities(
+                    route.sessionId,
+                    route.shareMemberId,
+                    body,
+                ),
+            );
+            return;
+        }
         if (request.method === "POST" && route.name === "session-share-stop") {
             const body = await readCheckedBody(request, stopSessionShareRequestSchema);
             if (body === undefined) {
@@ -1021,6 +1047,16 @@ async function handleRequest(
             );
             return;
         }
+        if (request.method === "GET" && route.name === "session-share-peer-activity") {
+            const activity = sessionShares.peerActivity(
+                route.sessionId,
+                url.searchParams.get("after") ?? undefined,
+            );
+            if (activity === undefined)
+                sendJson(response, 404, { error: "Session share not found." });
+            else sendJson<GetSessionSharePeerActivityResponse>(response, 200, activity);
+            return;
+        }
         if (request.method === "POST" && route.name === "session-share-post") {
             const body = await readCheckedBody(request, postSessionShareFriendMessageRequestSchema);
             if (body === undefined) {
@@ -1046,6 +1082,13 @@ async function handleRequest(
             if (history === undefined)
                 sendJson(response, 404, { error: "Shared session not found." });
             else sendJson<GetSessionShareReplicaHistoryResponse>(response, 200, history);
+            return;
+        }
+        if (request.method === "GET" && route.name === "session-share-replica-capabilities") {
+            const capabilities = sessionShares.replicaCapabilities(route.shareId);
+            if (capabilities === undefined)
+                sendJson(response, 404, { error: "Shared session not found." });
+            else sendJson<ListSessionShareReplicaCapabilitiesResponse>(response, 200, capabilities);
             return;
         }
         if (request.method === "GET" && route.name === "session-share-health") {
@@ -3977,6 +4020,10 @@ async function handleRequest(
             sessionEventStreamLeases,
             parseTurnLimit(url.searchParams.get("turns")),
             store.listSubagents(sessionId),
+            // Read per event rather than captured once: a stream outlives every
+            // change to who is watching, and a stale answer here is exactly the
+            // stale answer the disclosure exists to prevent.
+            () => runtimeConfig.sessionShares?.getOwner(sessionId)?.share,
         );
         return;
     }
@@ -4218,7 +4265,10 @@ function matchRoute(pathname: string):
           shareId: string;
       }
     | {
-          name: "session-share-health" | "session-share-replica-history";
+          name:
+              | "session-share-health"
+              | "session-share-replica-capabilities"
+              | "session-share-replica-history";
           sessionId?: undefined;
           shareId: string;
       }
@@ -4352,6 +4402,7 @@ function matchRoute(pathname: string):
               | "session-share"
               | "session-share-friend-messages"
               | "session-share-members"
+              | "session-share-peer-activity"
               | "session-share-stop"
               | "session-share-tool-output"
               | "session"
@@ -4366,7 +4417,7 @@ function matchRoute(pathname: string):
           sessionId: string;
       }
     | {
-          name: "session-share-member-revoke";
+          name: "session-share-member-capabilities" | "session-share-member-revoke";
           sessionId: string;
           shareMemberId: string;
       }
@@ -4510,6 +4561,16 @@ function matchRoute(pathname: string):
         return shareId === undefined
             ? undefined
             : { name: "session-share-replica-history", shareId };
+    }
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "session-share-replicas" &&
+        globalParts[2] === "capabilities"
+    ) {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        return shareId === undefined
+            ? undefined
+            : { name: "session-share-replica-capabilities", shareId };
     }
     if (
         globalParts.length === 3 &&
@@ -4727,6 +4788,9 @@ function matchRoute(pathname: string):
     if (parts.length === 4 && parts[2] === "share" && parts[3] === "tool-output") {
         return { name: "session-share-tool-output", sessionId };
     }
+    if (parts.length === 4 && parts[2] === "share" && parts[3] === "peer-activity") {
+        return { name: "session-share-peer-activity", sessionId };
+    }
     if (
         parts.length === 6 &&
         parts[2] === "share" &&
@@ -4736,6 +4800,19 @@ function matchRoute(pathname: string):
     ) {
         return {
             name: "session-share-member-revoke",
+            sessionId,
+            shareMemberId: decodeURIComponent(parts[4]),
+        };
+    }
+    if (
+        parts.length === 6 &&
+        parts[2] === "share" &&
+        parts[3] === "members" &&
+        parts[4] !== undefined &&
+        parts[5] === "capabilities"
+    ) {
+        return {
+            name: "session-share-member-capabilities",
             sessionId,
             shareMemberId: decodeURIComponent(parts[4]),
         };
@@ -5140,6 +5217,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
         (["DELETE", "PUT"].includes(method ?? "") && routeName === "terminal-connection") ||
+        (method === "PUT" && routeName === "session-share-member-capabilities") ||
         (method === "DELETE" && routeName === "background-process") ||
         (["DELETE", "PATCH", "POST"].includes(method ?? "") && routeName === "goal") ||
         (method === "POST" && routeName === "user-input") ||
@@ -5388,6 +5466,7 @@ function streamEvents(
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
+    ownerShare: () => SessionSharedMetadata | undefined,
 ): void {
     const cursor = request.headers["last-event-id"];
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
@@ -5416,7 +5495,8 @@ function streamEvents(
     // If the connection drops mid-catch-up, its cursor advances only through
     // events it actually received, so the next attempt cannot skip anything.
     if (resumed) {
-        for (const event of catchup) writeSseEvent(response, event);
+        for (const event of catchup)
+            writeSseEvent(response, decorateSessionEvent(event, ownerShare));
     }
     writeSseHello(response, hello);
 
@@ -5426,7 +5506,7 @@ function streamEvents(
     heartbeat.unref?.();
 
     const unsubscribe = session.events.subscribe((event) => {
-        writeSseEvent(response, event);
+        writeSseEvent(response, decorateSessionEvent(event, ownerShare));
     });
     const lease = { session };
     sessionEventStreamLeases.add(lease);
@@ -5455,6 +5535,28 @@ interface SessionEventStreamLease {
 function writeSseHello(response: ServerResponse, hello: SessionStreamHello): void {
     response.write("event: hello\n");
     response.write(`data: ${JSON.stringify(hello)}\n\n`);
+}
+
+/**
+ * Join the owner's share onto a session snapshot leaving the daemon.
+ *
+ * Sharing lives beside the session rather than inside it, so the snapshot never
+ * carries it and every boundary that hands a session to a client joins it here.
+ * The hello frames already do exactly this; a `session_updated` on the stream
+ * has to as well, otherwise an attached client's view of who can see it is
+ * frozen at the moment it attached.
+ */
+function decorateSessionEvent(
+    event: SessionEvent,
+    ownerShare: () => SessionSharedMetadata | undefined,
+): SessionEvent {
+    if (event.type !== "session_updated") return event;
+    const share = ownerShare();
+    if (share === undefined) return event;
+    return {
+        ...event,
+        data: { ...event.data, session: { ...event.data.session, shared: share } },
+    };
 }
 
 function writeSseEvent(response: ServerResponse, event: SessionEvent): void {

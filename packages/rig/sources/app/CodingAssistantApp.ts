@@ -49,7 +49,7 @@ import type {
     RunShellCommandResponse,
     SecretSummary,
     SessionEvent,
-    SessionShareState,
+    SessionSharedMetadata,
     SessionTokenCount,
     SessionTask,
     SteerMessageResponse,
@@ -126,6 +126,10 @@ import { renderNoticeWithChildren } from "./renderNoticeWithChildren.js";
 import { renderExecCommand } from "./renderExecCommand.js";
 import { renderExploration } from "./renderExploration.js";
 import { renderPendingSteeringMessages } from "./renderPendingSteeringMessages.js";
+import {
+    describeActivePeerCapabilities,
+    renderPeerCapabilityIndicator,
+} from "./renderPeerCapabilityIndicator.js";
 import { renderRigBanner } from "./renderRigBanner.js";
 import { renderServerToolCallSummary } from "./renderServerToolCallSummary.js";
 import { renderStartupStatusCard } from "./renderStartupStatusCard.js";
@@ -212,7 +216,7 @@ export interface CodingAssistantAppOptions {
     initialSessionSecretIds?: readonly string[];
     initialTasks?: readonly SessionTask[];
     /** Compact owner-share status only; Happy owns management controls. */
-    sessionShareState?: SessionShareState;
+    sessionShare?: SessionSharedMetadata;
     initialUsageEventId?: EventId;
     initialWorkflowEventId?: EventId;
     initialWorkflows?: readonly WorkflowRun[];
@@ -407,7 +411,7 @@ export class CodingAssistantApp implements Component, Focusable {
         | ((requestId: string, response: UserInputResponse) => void | Promise<void>)
         | undefined;
     readonly #processManager: NativeProcessManager;
-    readonly #sessionShareState: SessionShareState | undefined;
+    #sessionShare: SessionSharedMetadata | undefined;
     readonly #readClipboardImage: (
         options?: ReadClipboardImageOptions,
     ) => Promise<ClipboardImage | undefined>;
@@ -556,7 +560,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#onExit = options.onExit;
         this.#respondUserInput = options.respondUserInput;
         this.#processManager = options.processManager;
-        this.#sessionShareState = options.sessionShareState;
+        this.#sessionShare = options.sessionShare;
         this.#readClipboardImage = options.readClipboardImage ?? readClipboardImage;
         this.#sessionBacked = options.sessionBacked ?? false;
         this.#codexStreamMaxRetries =
@@ -779,6 +783,17 @@ export class CodingAssistantApp implements Component, Focusable {
         ) {
             return;
         }
+
+        if (event.type === "session_updated") {
+            // Absent means this update carries nothing about sharing, not that sharing ended;
+            // overwriting the indicator on every unrelated session update would make it flicker
+            // out from under an owner who never actually stopped being watched.
+            if (event.data.session.shared !== undefined) {
+                this.#applySessionShareUpdate(event.data.session.shared);
+            }
+            return;
+        }
+
         if (event.type === "message_submitted") {
             if (event.data.delivery === "context") {
                 this.#appendEntry({
@@ -4090,6 +4105,25 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     /**
+     * The above-composer indicator is the one place an owner is guaranteed to see that a
+     * capability is active, so its disappearance must never be silent: when the last member
+     * loses every capability, the same update that drops the live row also writes the history
+     * row that explains where it went, in the same render the terminal-layout-stability rule
+     * requires.
+     */
+    #applySessionShareUpdate(share: SessionSharedMetadata): void {
+        const wasActive = (this.#sessionShare?.capabilityMemberCount ?? 0) > 0;
+        if (wasActive && share.capabilityMemberCount === 0 && this.#sessionShare !== undefined) {
+            this.#appendEntry({
+                role: "event",
+                text: `No member can ${describeActivePeerCapabilities(this.#sessionShare)} in this session anymore.`,
+            });
+        }
+        this.#sessionShare = share;
+        this.#requestRender();
+    }
+
+    /**
      * A provider-run call cannot outlive the response that started it, so a stopped, failed, or
      * finished run leaves nothing to report even if its closing event never arrived.
      */
@@ -4612,11 +4646,11 @@ export class CodingAssistantApp implements Component, Focusable {
         if (this.#activeAgentLabel !== undefined) {
             parts.push(`${this.#theme.secondary}${this.#activeAgentLabel}${RESET}`);
         }
-        if (this.#sessionShareState !== undefined) {
+        if (this.#sessionShare !== undefined) {
             const label =
-                this.#sessionShareState === "active"
+                this.#sessionShare.state === "active"
                     ? "shared"
-                    : `shared ${this.#sessionShareState}`;
+                    : `shared ${this.#sessionShare.state}`;
             parts.push(`${this.#theme.secondary}${label}${RESET}`);
         }
         const queuedCount = this.#promptsShownAsQueued().length;
@@ -4702,6 +4736,7 @@ export class CodingAssistantApp implements Component, Focusable {
             renderServerToolCallSummary(this.#activeServerToolCallLabels(), width),
             renderWorkflowSummary(this.#activeWorkflowCount(), width),
             renderBackgroundTerminalSummary(this.#backgroundProcesses.length, width),
+            renderPeerCapabilityIndicator(this.#sessionShare, width),
         ];
         return rows.filter((row): row is string => row !== undefined);
     }

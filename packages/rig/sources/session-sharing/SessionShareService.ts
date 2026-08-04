@@ -8,10 +8,12 @@ import type { SessionShareReplicaEndedReason } from "../persistence/session-shar
 import { ShareUnauthorizedPostError } from "../sharing/ShareUnauthorizedPostError.js";
 import type { SharedToolOutput } from "./SharedToolOutput.js";
 import type { FriendAuthor } from "./FriendAuthor.js";
+import type { PeerCapability } from "./peer-access/index.js";
 import type {
     ShareOpaqueEntry,
     ShareTransport,
     ShareTransportGrant,
+    ShareTransportMemberControl,
     ShareTransportMemberPost,
 } from "../sharing/ShareTransport.js";
 import {
@@ -102,6 +104,12 @@ export interface SessionShareCoreStore {
     stopShare(shareId: string): SessionShareRecord;
     setIncludeFriendMessages(shareId: string, include: boolean): SessionShareRecord;
     setToolOutput(shareId: string, toolOutput: SharedToolOutput): SessionShareRecord;
+    /** Replace a member's capability set. A full set, never a delta. */
+    setMemberCapabilities(input: {
+        capabilities: readonly PeerCapability[];
+        shareId: string;
+        shareMemberId: string;
+    }): readonly PeerCapability[];
     setShareHealth(shareId: string, state: "active" | "degraded"): void;
     acceptFriendMessage(
         post: ShareTransportMemberPost,
@@ -139,13 +147,44 @@ export interface SessionShareServiceOptions {
         },
     ) => void | Promise<void>;
     readonly idFactory?: () => string;
+    /**
+     * Live peer channels, when this daemon has any.
+     *
+     * Optional because the capability model is additive: a build with no peer
+     * access at all still revokes correctly, it simply has nothing to close.
+     */
+    readonly peerAccess?: SessionSharePeerAccess;
+    /**
+     * Handles one authenticated structured request from a member.
+     *
+     * Optional, and its absence means this daemon accepts no peer requests at
+     * all: the frame is dropped rather than interpreted, which is the right
+     * default for a build with no peer access wired up.
+     */
+    readonly handleMemberControl?: (control: ShareTransportMemberControl) => void;
+    /** Told when a member's capability set changes, for the light stream event. */
+    readonly publishCapabilities?: (change: SessionShareCapabilityChange) => void;
     readonly store: SessionShareCoreStore;
     readonly transport: ShareTransport;
+}
+
+export interface SessionSharePeerAccess {
+    /** Close every peer channel for a member, or for a whole share. Synchronous. */
+    invalidate(input: { shareId: string; shareMemberId?: string }): number;
+}
+
+export interface SessionShareCapabilityChange {
+    readonly capabilities: readonly PeerCapability[];
+    readonly shareId: string;
+    readonly shareMemberId: string;
 }
 
 export class SessionShareService {
     readonly #deliverFriendMessage: SessionShareServiceOptions["deliverFriendMessage"];
     readonly #idFactory: () => string;
+    readonly #handleMemberControl: SessionShareServiceOptions["handleMemberControl"];
+    readonly #peerAccess: SessionSharePeerAccess | undefined;
+    readonly #publishCapabilities: SessionShareServiceOptions["publishCapabilities"];
     readonly #ownerSubscriptions = new Map<string, () => void>();
     readonly #memberSubscriptions = new Map<string, () => void>();
     readonly #pendingEnds: ShareTransportGrant[] = [];
@@ -158,6 +197,9 @@ export class SessionShareService {
     constructor(options: SessionShareServiceOptions) {
         this.#deliverFriendMessage = options.deliverFriendMessage;
         this.#idFactory = options.idFactory ?? createId;
+        this.#handleMemberControl = options.handleMemberControl;
+        this.#peerAccess = options.peerAccess;
+        this.#publishCapabilities = options.publishCapabilities;
         this.#store = options.store;
         this.#transport = options.transport;
     }
@@ -214,7 +256,20 @@ export class SessionShareService {
 
     async revoke(shareId: string, shareMemberId: string): Promise<SessionShareMemberRecord> {
         this.#assertOpen();
+        // Revocation is ordered, and the order is the security property:
+        //
+        // 1. `revokeMember` commits. It marks the member revoked, bumps the grant
+        //    epoch, and marks every capability row revoked in the same transaction,
+        //    so nothing durable can still resolve.
+        // 2. Synchronously after that commit, in memory, every peer channel this
+        //    member holds is closed and every pending request is refused. This step
+        //    is what actually ends the access, and it needs no network at all.
+        // 3. Only then, best effort, the transport is told and the change is
+        //    broadcast. If that fails the member's own UI keeps a stale label on a
+        //    channel that is already dead, which is the harmless failure.
         const member = this.#store.revokeMember(shareId, shareMemberId);
+        this.#peerAccess?.invalidate({ shareId, shareMemberId });
+        this.#broadcastCapabilities(shareId, shareMemberId, []);
         try {
             await this.#transport.revoke(memberGrant(member));
         } catch (error: unknown) {
@@ -226,7 +281,11 @@ export class SessionShareService {
 
     async stop(shareId: string): Promise<SessionShareRecord> {
         this.#assertOpen();
+        // Same three ordered steps as `revoke`, for every member at once:
+        // `stopShare` marks the share and its capability rows in one committed
+        // transaction, then the in-memory channels close before any network call.
         const share = this.#store.stopShare(shareId);
+        this.#peerAccess?.invalidate({ shareId });
         const queue = this.#publishQueues.get(shareId) ?? asyncQueue();
         this.#publishQueues.set(shareId, queue);
         try {
@@ -251,6 +310,30 @@ export class SessionShareService {
     setToolOutput(shareId: string, toolOutput: SharedToolOutput): SessionShareRecord {
         this.#assertOpen();
         return this.#store.setToolOutput(shareId, toolOutput);
+    }
+
+    /**
+     * Replace one member's capability set, then apply the change in memory.
+     *
+     * Same ordering as a revoke, for the same reason: the durable set is the
+     * only authority, so it commits first, and every channel authorized under
+     * the previous set is closed synchronously afterwards. A capability that was
+     * dropped is therefore dead before this returns, whether or not the network
+     * ever hears about it.
+     */
+    async setMemberCapabilities(input: {
+        capabilities: readonly PeerCapability[];
+        shareId: string;
+        shareMemberId: string;
+    }): Promise<readonly PeerCapability[]> {
+        this.#assertOpen();
+        const granted = this.#store.setMemberCapabilities(input);
+        this.#peerAccess?.invalidate({
+            shareId: input.shareId,
+            shareMemberId: input.shareMemberId,
+        });
+        this.#broadcastCapabilities(input.shareId, input.shareMemberId, granted);
+        return granted;
     }
 
     async recover(): Promise<void> {
@@ -450,6 +533,14 @@ export class SessionShareService {
             return;
         }
         if (event.type === "transport_recovered") return;
+        if (event.type === "member_control") {
+            // Control carries capability requests, which this service does not itself
+            // act on: a peer channel is opened by the peer-access layer, against the
+            // grant Murmur authenticated on the frame. Handing it to a callback keeps
+            // that decision out of the transcript path entirely.
+            this.#handleMemberControl?.(event.control);
+            return;
+        }
         const { post, senderPeerId } = event;
         if (senderPeerId !== post.grant.murmurPeerId) {
             throw new ShareUnauthorizedPostError(
@@ -536,6 +627,20 @@ export class SessionShareService {
         this.#store.endReplica(grant, reason);
         this.#memberSubscriptions.get(grantKey(grant))?.();
         this.#memberSubscriptions.delete(grantKey(grant));
+    }
+
+    #broadcastCapabilities(
+        shareId: string,
+        shareMemberId: string,
+        capabilities: readonly PeerCapability[],
+    ): void {
+        try {
+            this.#publishCapabilities?.({ capabilities, shareId, shareMemberId });
+        } catch {
+            // Step 3 of the revocation ordering, and deliberately unable to fail the
+            // revocation: the channels are already closed by the time this runs, so a
+            // broadcast that does not land costs a stale label and nothing else.
+        }
     }
 
     #assertOpen(): void {

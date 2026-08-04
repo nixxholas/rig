@@ -3,8 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { canonicalShareJson, shareContentHash } from "../../sharing/canonicalShareJson.js";
 import { FakeShareTransport } from "../../sharing/FakeShareTransport.js";
+import { resolveOfferablePeerCapabilities } from "../peer-access/index.js";
 import { SessionShareDaemonService } from "../SessionShareDaemonService.js";
 import { SessionShareService } from "../SessionShareService.js";
+
+/** No project in these tests has a Docker execution config, so nothing is offerable. */
+const noOfferableCapabilities = () => resolveOfferablePeerCapabilities(undefined);
 
 /**
  * Wires the real durable stores (via a real, in-memory-database `PersistentSessionStore`) to the
@@ -28,6 +32,7 @@ function makeContext(options: { localPeerId?: () => Promise<string | undefined> 
     });
     const daemon = new SessionShareDaemonService({
         localPeerId: options.localPeerId ?? (async () => "peer-owner"),
+        offerableCapabilities: noOfferableCapabilities,
         service,
         store: store.sessionShareDaemonStore,
     });
@@ -208,6 +213,7 @@ describe("SessionShareDaemonService with a real database and the deterministic t
             const sessionId = store.create({ cwd: "/tmp/session-share-owner-7" }).id;
             const daemonWithoutPeer = new SessionShareDaemonService({
                 localPeerId: async () => undefined,
+                offerableCapabilities: noOfferableCapabilities,
                 service,
                 store: store.sessionShareDaemonStore,
             });

@@ -29,14 +29,17 @@ export {
 export {
     SessionShareService,
     type SessionShareAcceptedFriendMessage,
+    type SessionShareCapabilityChange,
     type SessionShareCoreStore,
     type SessionShareDuplicateFriendMessage,
     type SessionShareFriendInput,
     type SessionShareMemberRecord,
     type SessionShareMemberState,
+    type SessionSharePeerAccess,
     type SessionShareRecord,
     type SessionShareReplicaRecord,
     type SessionShareServiceOptions,
     type SessionShareState,
 } from "./SessionShareService.js";
 export type { SessionShareServiceContract } from "./SessionShareServiceContract.js";
+export * from "./peer-access/index.js";

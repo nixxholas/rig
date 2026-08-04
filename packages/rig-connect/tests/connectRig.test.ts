@@ -305,8 +305,10 @@ describe("connectRig mutations", () => {
                     createAttempts += 1;
                     if (createAttempts === 1) return Promise.reject(new TypeError("disconnected"));
                     authoritative = {
+                        capabilityMemberCount: 0,
                         includeFriendMessagesInModel: false,
                         memberCount: 1,
+                        offerableCapabilities: [],
                         shareId: "share-1",
                         state: "active",
                         toolOutput: "summaries",
@@ -384,6 +386,131 @@ describe("connectRig mutations", () => {
         } finally {
             session.close();
             groups.close();
+            rig.close();
+        }
+    });
+
+    it("sends a PUT for member capabilities and applies a revoke from one event", async () => {
+        const streams: ReturnType<typeof streamResponse>[] = [];
+        const calls: { body: unknown; method: string | undefined; url: URL }[] = [];
+        const shared: SessionSharedMetadata = {
+            capabilityMemberCount: 1,
+            includeFriendMessagesInModel: false,
+            memberCount: 1,
+            offerableCapabilities: [],
+            shareId: "share-1",
+            state: "active",
+            toolOutput: "summaries",
+            toolOutputDescription:
+                "Friends see what each tool did, without the output it produced.",
+        };
+        const deltas: ChatDelta[] = [];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") {
+                    const stream = streamResponse();
+                    streams.push(stream);
+                    return Promise.resolve(stream.response);
+                }
+                if (url.pathname.endsWith("/state")) {
+                    const state = sessionState();
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...state,
+                                session: { ...state.session!, shared },
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                calls.push({
+                    body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+                    method: init?.method,
+                    url,
+                });
+                return Promise.resolve(
+                    new Response(JSON.stringify({ members: [], share: shared }), { status: 200 }),
+                );
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            onDelta: (delta) => deltas.push(delta),
+            sessionId: "session-1",
+        });
+        try {
+            await settle();
+            streams[0]?.write(liveHello());
+            await settle();
+
+            rig.setSessionShareMemberCapabilities("session-1", "member-1", ["terminal_view"]);
+            await settle();
+
+            expect(calls).toHaveLength(1);
+            expect(calls[0]?.method).toBe("PUT");
+            expect(calls[0]?.url.pathname).toBe(
+                "/sessions/session-1/share/members/member-1/capabilities",
+            );
+            expect(calls[0]?.body).toMatchObject({ capabilities: ["terminal_view"] });
+
+            // The revoke that matters most: both facts land from the one event
+            // rather than an access flash followed by a separate refetch.
+            streams[0]?.write(
+                globalEvent(
+                    "session_share_capabilities_changed",
+                    {
+                        capabilities: [],
+                        capabilitiesDescription: "No capabilities.",
+                        memberState: "revoked",
+                        shareId: "share-1",
+                        shareMemberId: "member-1",
+                    },
+                    {},
+                ),
+            );
+            await settle();
+
+            expect(deltas).toContainEqual({
+                capabilities: [],
+                capabilitiesDescription: "No capabilities.",
+                memberState: "revoked",
+                shareId: "share-1",
+                shareMemberId: "member-1",
+                type: "session_share_member_capabilities_changed",
+            });
+
+            // A different share entirely does not touch this session's row.
+            deltas.length = 0;
+            streams[0]?.write(
+                globalEvent(
+                    "session_share_capabilities_changed",
+                    {
+                        capabilities: ["terminal_view"],
+                        capabilitiesDescription: "Can watch the live terminal.",
+                        memberState: "active",
+                        shareId: "share-other",
+                        shareMemberId: "member-2",
+                    },
+                    {},
+                    "01900000-0000-7000-8000-000000000005",
+                ),
+            );
+            await settle();
+            expect(
+                deltas.some((delta) => delta.type === "session_share_member_capabilities_changed"),
+            ).toBe(false);
+        } finally {
+            connection.close();
             rig.close();
         }
     });

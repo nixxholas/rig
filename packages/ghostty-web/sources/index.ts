@@ -10,6 +10,7 @@ export {
 export { RemoteTerminalProtocolClient } from "./RemoteTerminalProtocolClient.js";
 export type { RemoteTerminalReconnectState } from "./RemoteTerminalProtocolClient.js";
 export { RemoteTerminalProtocolServer } from "./RemoteTerminalProtocolServer.js";
+export type { RemoteTerminalAttachOptions } from "./RemoteTerminalProtocolServer.js";
 export { WirePacketDecoder } from "./WirePacketDecoder.js";
 export { WirePacketType, type WirePacket } from "./WirePacket.js";
 export { ThrottledTcpProxy, type ThrottledTcpProxyOptions } from "./testing/ThrottledTcpProxy.js";

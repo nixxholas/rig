@@ -563,8 +563,10 @@ describe("GroupStore", () => {
     it("projects shared-session metadata without disturbing unchanged catalog references", () => {
         const store = new GroupStore();
         const shared = {
+            capabilityMemberCount: 0,
             includeFriendMessagesInModel: true,
             memberCount: 2,
+            offerableCapabilities: [],
             shareId: "share-1",
             state: "active" as const,
             toolOutput: "summaries" as const,

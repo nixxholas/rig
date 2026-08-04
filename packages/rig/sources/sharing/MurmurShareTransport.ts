@@ -12,6 +12,7 @@ import {
     type SessionEntrySource,
     type SharedSessionCallbacks,
     type SharedSessionEntry,
+    type SharedSessionEphemeralChannel,
     type SharedSessionInvitation,
     type SharedSessionPost,
     type SharedSessionState,
@@ -330,6 +331,33 @@ export class MurmurShareTransport implements ShareTransport {
         };
     }
 
+    async sendMemberControl(
+        grant: ShareTransportGrant,
+        controlId: string,
+        payload: unknown,
+    ): Promise<void> {
+        const member = this.#members.get(grantKey(grant));
+        if (member === undefined || member.terminated) {
+            throw new Error("This shared session is no longer active.");
+        }
+        await member.session.sendControl(controlId, payload as never);
+    }
+
+    openOwnerEphemeralChannel(shareId: string): SharedSessionEphemeralChannel | undefined {
+        // Only an already-loaded session, never a load: opening a channel must not
+        // be a way to reconstruct a session that this daemon has not otherwise
+        // decided to hold.
+        return this.#owners.get(shareId)?.session.openEphemeralChannel();
+    }
+
+    openMemberEphemeralChannel(
+        grant: ShareTransportGrant,
+    ): SharedSessionEphemeralChannel | undefined {
+        const member = this.#members.get(grantKey(grant));
+        if (member === undefined || member.terminated) return undefined;
+        return member.session.openEphemeralChannel();
+    }
+
     /** Retry a share's transport work, reporting whether it moved any history. */
     async retry(shareId: string): Promise<boolean> {
         const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
@@ -547,6 +575,24 @@ export class MurmurShareTransport implements ShareTransport {
         return {
             persistEntry: async () => {
                 // The owner authored every entry; nothing is replicated back to it.
+            },
+            persistControl: async (_transaction, control) => {
+                // Accepting the hook at all is the statement that this application takes
+                // control from friends. Without it Murmur quarantines an inbound control
+                // frame rather than folding it into posts, which is the correct default
+                // for an application that has no use for one.
+                await this.#emitOwner(shareId, {
+                    control: {
+                        authenticatedPeerId: control.authenticatedPeerId,
+                        controlId: control.controlId,
+                        grantEpoch: control.grantEpoch,
+                        payload: control.payload,
+                        shareId: control.shareId,
+                        shareMemberId: control.shareMemberId,
+                        timestamp: control.timestamp,
+                    },
+                    type: "member_control",
+                });
             },
             persistPost: async (_transaction, post) => {
                 await this.#emitOwnerPost(shareId, post);

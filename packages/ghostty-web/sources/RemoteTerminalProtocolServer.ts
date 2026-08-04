@@ -37,10 +37,26 @@ interface ClientHello {
 
 interface InputLease {
     active: ServerConnection | undefined;
+    /**
+     * Whether this lease may write to the terminal at all.
+     *
+     * A viewer holds a lease so that resume, output acknowledgement, and resize
+     * acknowledgement keep working exactly as they do for anyone else, and it is
+     * the one flag that says the lease grants none of the writing. Input and
+     * resize then fail on the same lease check that already rejects a packet
+     * with no lease behind it.
+     */
+    input: boolean;
     lastUsed: number;
     outputOffset: number;
     resizeRevision: number;
     sequence: number;
+}
+
+/** What one attachment is allowed to do with the terminal it attached to. */
+export interface RemoteTerminalAttachOptions {
+    /** False attaches a viewer: it sees everything and can change nothing. */
+    readonly input: boolean;
 }
 
 interface ExitState {
@@ -131,8 +147,13 @@ export class RemoteTerminalProtocolServer {
         this.epoch = options.epoch ?? randomUUID();
     }
 
-    attach(stream: Duplex): () => void {
-        const connection = new ServerConnection(this, stream, this.#maxFrameBytes);
+    attach(stream: Duplex, options?: RemoteTerminalAttachOptions): () => void {
+        const connection = new ServerConnection(
+            this,
+            stream,
+            this.#maxFrameBytes,
+            options?.input ?? true,
+        );
         this.#connections.add(connection);
         let removed = false;
         const cleanup = () => {
@@ -206,8 +227,11 @@ export class RemoteTerminalProtocolServer {
     claimInputLease(
         requested: string | undefined,
         connection: ServerConnection,
+        input = true,
     ): { outputOffset: number; resizeRevision: number; sequence: number; token: string } {
-        if (requested !== undefined) {
+        // A viewer never resumes somebody else's lease. Honouring a token it asked for
+        // would let an attachment that may not write take over one that may.
+        if (input && requested !== undefined) {
             validateString(requested, "input lease", 128);
             const lease = this.#inputLeases.get(requested);
             if (lease === undefined) throw new Error("Input lease is unavailable.");
@@ -230,12 +254,18 @@ export class RemoteTerminalProtocolServer {
         const token = randomUUID();
         this.#inputLeases.set(token, {
             active: connection,
+            input,
             lastUsed: Date.now(),
             outputOffset: 0,
             resizeRevision: 0,
             sequence: 0,
         });
         return { outputOffset: 0, resizeRevision: 0, sequence: 0, token };
+    }
+
+    /** Whether the lease behind a packet may change the terminal. */
+    leaseAllowsInput(token: string): boolean {
+        return this.#inputLeases.get(token)?.input === true;
     }
 
     releaseInputLease(connection: ServerConnection): void {
@@ -248,7 +278,9 @@ export class RemoteTerminalProtocolServer {
         if (this.#failure !== undefined) throw this.#failure;
         if (this.#exit !== undefined) throw new Error("Terminal has exited.");
         const lease = this.#inputLeases.get(token);
-        if (lease === undefined) throw new Error("Input lease is unavailable.");
+        // A viewer's lease is refused here, on the one check that already refuses a
+        // packet with no lease at all, so watching never becomes typing.
+        if (lease === undefined || !lease.input) throw new Error("Input lease is unavailable.");
         if (sequence <= lease.sequence) return;
         if (sequence !== lease.sequence + 1) throw new Error("Client input sequence has a gap.");
         await this.#options.onInput(data);
@@ -479,6 +511,7 @@ class ServerConnection {
     #gridInFlight: RemoteTerminalGridState | undefined;
     #initialized = false;
     #inputLease: string | undefined;
+    readonly #input: boolean;
     #lastResizeRequest = 0;
     #maxSentOutput = 0;
     #mode: RemoteTerminalMode = "vt";
@@ -490,9 +523,15 @@ class ServerConnection {
     readonly #server: RemoteTerminalProtocolServer;
     readonly #stream: Duplex;
 
-    constructor(server: RemoteTerminalProtocolServer, stream: Duplex, maxFrameBytes?: number) {
+    constructor(
+        server: RemoteTerminalProtocolServer,
+        stream: Duplex,
+        maxFrameBytes?: number,
+        input = true,
+    ) {
         this.#server = server;
         this.#stream = stream;
+        this.#input = input;
         this.#decoder = new WirePacketDecoder(maxFrameBytes);
         stream.on("data", (data: Buffer) => {
             try {
@@ -623,7 +662,7 @@ class ServerConnection {
         if (packet.payload.length > 4_096) throw new Error("Client hello is too large.");
         const hello = decodeJsonPayload<ClientHello>(packet.payload);
         validateHello(hello);
-        const lease = this.#server.claimInputLease(hello.inputLease, this);
+        const lease = this.#server.claimInputLease(hello.inputLease, this, this.#input);
         this.#inputLease = lease.token;
         this.#capabilities = hello.capabilities;
         this.#creditBytes = Math.min(hello.creditBytes, this.#server.maxUnacknowledgedBytes());
@@ -728,6 +767,10 @@ class ServerConnection {
             return;
         }
         if (packet.type === WirePacketType.Resize) {
+            // Resizing is writing: it changes the terminal every other attachment sees.
+            // A viewer is refused on the same lease check that refuses its input.
+            if (!this.#server.leaseAllowsInput(this.#inputLease!))
+                throw new Error("Input lease is unavailable.");
             if (packet.payload.length > 1_024 || packet.sequence !== this.#lastResizeRequest + 1)
                 throw new Error("Invalid resize sequence.");
             this.#lastResizeRequest = packet.sequence;

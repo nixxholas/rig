@@ -27,6 +27,7 @@ import { rigDataIdentityNamedChecks } from "./migrations/22-rig-data-identity-na
 import { happyCloudEnrollment as createHappyCloudEnrollmentTables } from "./migrations/23-happy-cloud-enrollment.js";
 import { scopeSharing } from "./migrations/24-scope-sharing.js";
 import { sessionShareToolOutput } from "./migrations/25-session-share-tool-output.js";
+import { sessionSharePeerCapabilities } from "./migrations/26-session-share-peer-capabilities.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -60,6 +61,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     createHappyCloudEnrollmentTables,
     scopeSharing,
     sessionShareToolOutput,
+    sessionSharePeerCapabilities,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

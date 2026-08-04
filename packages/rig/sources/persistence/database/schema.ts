@@ -601,6 +601,67 @@ export const sessionShareEntries = sqliteTable(
     ],
 );
 
+export const sessionShareCapabilities = sqliteTable(
+    "session_share_capabilities",
+    {
+        shareMemberId: text("share_member_id")
+            .notNull()
+            .references(() => sessionShareMembers.shareMemberId, { onDelete: "cascade" }),
+        capability: text("capability").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        state: text("state").notNull(),
+        grantedAtMs: integer("granted_at_ms").notNull(),
+        revokedAtMs: integer("revoked_at_ms"),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareMemberId, table.capability, table.grantEpoch] }),
+        index("session_share_capabilities_state").on(table.shareMemberId, table.state),
+        check(
+            "session_share_capabilities_capability_check",
+            sql`${table.capability} IN ('terminal_view')`,
+        ),
+        check("session_share_capabilities_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check(
+            "session_share_capabilities_state_check",
+            sql`${table.state} IN ('active', 'revoked')`,
+        ),
+    ],
+);
+
+export const sessionSharePeerActions = sqliteTable(
+    "session_share_peer_actions",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        // Deliberately no foreign key on share_member_id: an audit row must outlive
+        // the member it describes, because revoking or stopping a share deletes
+        // members but must not erase the record of what a peer did.
+        shareMemberId: text("share_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        seq: integer("seq").notNull(),
+        capability: text("capability").notNull(),
+        action: text("action").notNull(),
+        detail: text("detail"),
+        outcome: text("outcome").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.seq] }),
+        index("session_share_peer_actions_recent").on(table.shareId, desc(table.createdAtMs)),
+        check("session_share_peer_actions_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check("session_share_peer_actions_seq_check", sql`${table.seq} >= 1`),
+        check(
+            "session_share_peer_actions_capability_check",
+            sql`${table.capability} IN ('terminal_view')`,
+        ),
+        check(
+            "session_share_peer_actions_outcome_check",
+            sql`${table.outcome} IN ('allowed', 'denied')`,
+        ),
+    ],
+);
+
 export const scopeShares = sqliteTable(
     "scope_shares",
     {

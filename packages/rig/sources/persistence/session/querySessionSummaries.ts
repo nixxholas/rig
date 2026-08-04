@@ -8,6 +8,7 @@ import type {
     SessionUnreadReason,
 } from "../../protocol/index.js";
 import { parsePermissionMode } from "../../permissions/index.js";
+import { resolveOfferablePeerCapabilities } from "../../session-sharing/peer-access/index.js";
 import {
     describeSharedToolOutput,
     toSharedToolOutput,
@@ -38,7 +39,19 @@ export function querySessionSummaries(
                 FROM session_share_members
                 WHERE session_share_members.share_id = session_shares.share_id
                   AND session_share_members.state = 'active'
-            ) AS share_member_count
+            ) AS share_member_count,
+            (
+                SELECT COUNT(DISTINCT session_share_capabilities.share_member_id)
+                FROM session_share_capabilities
+                JOIN session_share_members
+                    ON session_share_members.share_member_id
+                        = session_share_capabilities.share_member_id
+                    AND session_share_members.current_grant_epoch
+                        = session_share_capabilities.grant_epoch
+                WHERE session_share_members.share_id = session_shares.share_id
+                  AND session_share_members.state = 'active'
+                  AND session_share_capabilities.state = 'active'
+            ) AS share_capability_member_count
         FROM (
             SELECT
                 id, project_id, workspace_id, order_key, archived, track_unread,
@@ -88,6 +101,10 @@ export function querySessionSummaries(
         const draft = readOptionalString(row, "draft");
         const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
         const dockerJson = readOptionalString(row, "docker_json");
+        const docker =
+            dockerJson === undefined
+                ? undefined
+                : (JSON.parse(dockerJson) as DockerExecutionConfig);
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
         const workspaceId = readOptionalString(row, "workspace_id");
@@ -108,9 +125,14 @@ export function querySessionSummaries(
                 ? {}
                 : {
                       shared: {
+                          capabilityMemberCount: readNumber(row, "share_capability_member_count"),
                           includeFriendMessagesInModel:
                               readNumber(row, "share_include_friend_messages") !== 0,
                           memberCount: readNumber(row, "share_member_count"),
+                          // What this project could offer, which is a property of the
+                          // project's execution environment rather than of the share:
+                          // a session on the host can offer nothing, and says why.
+                          offerableCapabilities: [...resolveOfferablePeerCapabilities(docker)],
                           shareId,
                           state: readString(row, "share_state") as
                               | "active"
@@ -130,11 +152,7 @@ export function querySessionSummaries(
             providerId: readString(row, "provider_id"),
             modelId: readString(row, "model_id"),
             permissionMode: parsePermissionMode(readString(row, "permission_mode")),
-            environment: summarizeDockerExecution(
-                dockerJson === undefined
-                    ? undefined
-                    : (JSON.parse(dockerJson) as DockerExecutionConfig),
-            ),
+            environment: summarizeDockerExecution(docker),
             ...(effort !== undefined ? { effort } : {}),
             ...(serviceTier === "fast" ? { serviceTier } : {}),
             status: readString(row, "status") as SessionSummary["status"],

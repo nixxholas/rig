@@ -2074,6 +2074,22 @@ export class InMemorySession {
         return this.snapshot();
     }
 
+    /**
+     * Republish this session because its share's capabilities changed.
+     *
+     * The snapshot itself carries no share state — sharing is joined in at the
+     * HTTP boundary, which is where the owner's share is known — so this exists
+     * to make the stream emit at all. The decorating layer attaches the current
+     * share to the event, and an attached client learns that somebody's access
+     * changed without polling for it.
+     *
+     * This is what keeps the "somebody is watching" disclosure honest while a
+     * session is running rather than only at the moment a client attaches.
+     */
+    noteShareCapabilitiesChanged(): void {
+        this.#append("session_updated", { session: this.snapshot() });
+    }
+
     setOrderKey(orderKey: string): ProtocolSession {
         if (this.isSubagent()) {
             throw new Error("Subagent histories cannot be reordered.");

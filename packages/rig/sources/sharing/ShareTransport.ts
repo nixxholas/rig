@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import type { SharedSessionEphemeralChannel } from "@slopus/murmur/sharedSession";
 
 const exact = { additionalProperties: false } as const;
 const identifierSchema = Type.String({ maxLength: 256, minLength: 1 });
@@ -54,6 +55,29 @@ export const shareTransportMemberPostSchema = Type.Object(
 );
 export type ShareTransportMemberPost = Static<typeof shareTransportMemberPostSchema>;
 
+/**
+ * One authenticated structured request from a member to the owner.
+ *
+ * Control is durable, ordered against the transcript, and separate from a post,
+ * so a friend asking to watch a terminal never has to travel as chat text and
+ * never has to be parsed back out of it. Every field but `payload` is asserted
+ * by Murmur from the frame's signature, so the owner is reading who actually
+ * sent it rather than who the payload claims sent it.
+ */
+export const shareTransportMemberControlSchema = Type.Object(
+    {
+        authenticatedPeerId: identifierSchema,
+        controlId: Type.String({ maxLength: 128, minLength: 1 }),
+        grantEpoch: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
+        payload: Type.Unknown(),
+        shareId: identifierSchema,
+        shareMemberId: identifierSchema,
+        timestamp: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+    },
+    exact,
+);
+export type ShareTransportMemberControl = Static<typeof shareTransportMemberControlSchema>;
+
 export const shareTransportOwnerEventSchema = Type.Union([
     Type.Object(
         {
@@ -70,6 +94,13 @@ export const shareTransportOwnerEventSchema = Type.Union([
             recoverable: Type.Boolean(),
             shareId: identifierSchema,
             type: Type.Literal("transport_failed"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            control: shareTransportMemberControlSchema,
+            type: Type.Literal("member_control"),
         },
         exact,
     ),
@@ -125,6 +156,31 @@ export interface ShareTransport {
         grant: ShareTransportGrant,
         callback: (event: ShareTransportMemberEvent) => void | Promise<void>,
     ): () => void;
+    /**
+     * The share's non-durable, epoch-keyed peer channel, when this daemon holds
+     * the session it belongs to.
+     *
+     * Frames are keyed from the MLS exporter of the current epoch: never
+     * durable, never replayed, ordered per sender only, signed per frame, and
+     * checked against the grant on both send and receive — so a revoked member
+     * can neither send nor read. Membership and revocation on this channel are
+     * exactly the transcript's, which is why peer traffic needs no authorization
+     * path of its own.
+     *
+     * `undefined` when this daemon does not hold that session, so a caller
+     * cannot mistake "no channel" for "an open one".
+     */
+    /** Send one structured request from a member to the owner of its share. */
+    sendMemberControl(
+        grant: ShareTransportGrant,
+        controlId: string,
+        payload: unknown,
+    ): Promise<void>;
+    openOwnerEphemeralChannel(shareId: string): SharedSessionEphemeralChannel | undefined;
+    /** The member side of the same channel. */
+    openMemberEphemeralChannel(
+        grant: ShareTransportGrant,
+    ): SharedSessionEphemeralChannel | undefined;
     /** Retry a share's transport work, reporting whether it moved any history. */
     retry(shareId: string): Promise<boolean>;
 }

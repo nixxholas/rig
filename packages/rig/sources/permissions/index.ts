@@ -3,6 +3,7 @@ export { assertPermissionRevision } from "./assertPermissionRevision.js";
 export { INVALID_PERMISSION_MODE_MESSAGE } from "./invalidPermissionModeMessage.js";
 export { isPermissionMode } from "./isPermissionMode.js";
 export { isPermissionReduction } from "./isPermissionReduction.js";
+export { minimumPermissionMode } from "./minimumPermissionMode.js";
 export { parsePermissionMode } from "./parsePermissionMode.js";
 export { reviewAutoPermission } from "./reviewAutoPermission.js";
 export { describeAutoPermissionDenial } from "./describeAutoPermissionDenial.js";

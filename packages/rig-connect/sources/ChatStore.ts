@@ -22,6 +22,8 @@ import type {
     SessionGoal,
     SessionStatus,
     SessionEvent,
+    SessionSharePeerCapability,
+    SessionShareMemberState,
     SessionTask,
     SessionStreamHello,
     SessionTokenCount,
@@ -496,6 +498,33 @@ export class ChatStore {
                 ? withoutKeys(this.#session, ["shared"])
                 : { ...this.#session, shared };
         return this.#finish([], this.#revision, sessionBefore);
+    }
+
+    /**
+     * Applies one member's capability change reported by the global
+     * `session_share_capabilities_changed` event, once its `shareId` matches
+     * the share this session currently has. The event carries the member's
+     * settled state and its capability list together, so a revoke lands in
+     * one frame instead of an access flash followed by a separate refetch.
+     */
+    applySessionShareMemberCapabilities(
+        shareId: string,
+        shareMemberId: string,
+        capabilities: readonly SessionSharePeerCapability[],
+        capabilitiesDescription: string,
+        memberState: SessionShareMemberState,
+    ): readonly ChatDelta[] {
+        if (this.#session.shared?.shareId !== shareId) return [];
+        return [
+            {
+                capabilities,
+                capabilitiesDescription,
+                memberState,
+                shareId,
+                shareMemberId,
+                type: "session_share_member_capabilities_changed",
+            },
+        ];
     }
 
     /** Adds one immediately visible user bubble for a queued send mutation. */
@@ -3552,6 +3581,7 @@ function sameSessionShare(left: SessionState["shared"], right: SessionState["sha
         left === right ||
         (left !== undefined &&
             right !== undefined &&
+            left.capabilityMemberCount === right.capabilityMemberCount &&
             left.includeFriendMessagesInModel === right.includeFriendMessagesInModel &&
             left.memberCount === right.memberCount &&
             left.shareId === right.shareId &&

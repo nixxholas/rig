@@ -21,6 +21,8 @@ const grant = {
     shareMemberId: "member-1",
 };
 const member = {
+    capabilities: [],
+    capabilitiesDescription: "Read the conversation only",
     createdAt: 1,
     currentGrantEpoch: 1,
     displayName: "Friend",
@@ -30,11 +32,22 @@ const member = {
     state: "active" as const,
     updatedAt: 1,
 };
+const offerableCapabilities = [
+    {
+        capability: "terminal_view" as const,
+        description:
+            "They can watch a container terminal in this session as you use it. They cannot type into it, resize it, or run anything.",
+        label: "Watch a terminal",
+        offerable: true,
+    },
+];
 const owner = {
     members: [member],
     share: {
+        capabilityMemberCount: 0,
         includeFriendMessagesInModel: true,
         memberCount: 1,
+        offerableCapabilities,
         shareId: "share-1",
         state: "active" as const,
         toolOutput: "summaries" as const,
@@ -100,6 +113,38 @@ describe("session share HTTP API", () => {
                 mutationId: "mutation-6",
             });
             expect(
+                await request(
+                    server.socketPath,
+                    "PUT",
+                    "/sessions/session-1/share/members/member%2F1/capabilities",
+                    { capabilities: ["terminal_view"], mutationId: "mutation-7" },
+                ),
+            ).toMatchObject({ body: owner, status: 200 });
+            expect(
+                await request(
+                    server.socketPath,
+                    "GET",
+                    "/sessions/session-1/share/peer-activity?after=42",
+                ),
+            ).toMatchObject({
+                body: expect.objectContaining({ complete: true }),
+                status: 200,
+            });
+            expect(
+                await request(
+                    server.socketPath,
+                    "GET",
+                    "/session-share-replicas/share-1/capabilities",
+                ),
+            ).toMatchObject({
+                body: {
+                    capabilities: ["terminal_view"],
+                    description: "Watch a terminal",
+                    shareId: "share-1",
+                },
+                status: 200,
+            });
+            expect(
                 await request(server.socketPath, "POST", "/session-shares/friend-messages", {
                     clientMessageId: "client-1",
                     grant,
@@ -141,6 +186,12 @@ describe("session share HTTP API", () => {
                 mutationId: "mutation-5",
                 toolOutput: "full",
             });
+            expect(service.setMemberCapabilities).toHaveBeenCalledWith("session-1", "member/1", {
+                capabilities: ["terminal_view"],
+                mutationId: "mutation-7",
+            });
+            expect(service.peerActivity).toHaveBeenCalledWith("session-1", "42");
+            expect(service.replicaCapabilities).toHaveBeenCalledWith("share-1");
         } finally {
             await server.close();
         }
@@ -287,6 +338,7 @@ describe("session share HTTP API", () => {
         const transport = new FakeShareTransport();
         const sessionShares = new SessionShareDaemonService({
             localPeerId: async () => "peer-owner",
+            offerableCapabilities: () => [],
             service: new SessionShareService({
                 deliverFriendMessage: () => undefined,
                 store: store.sessionShares,
@@ -337,16 +389,47 @@ describe("session share HTTP API", () => {
 
 function createStub(): SessionShareServiceContract & {
     create: ReturnType<typeof vi.fn<SessionShareServiceContract["create"]>>;
+    peerActivity: ReturnType<typeof vi.fn<SessionShareServiceContract["peerActivity"]>>;
+    replicaCapabilities: ReturnType<
+        typeof vi.fn<SessionShareServiceContract["replicaCapabilities"]>
+    >;
     replicaHistory: ReturnType<typeof vi.fn<SessionShareServiceContract["replicaHistory"]>>;
     revoke: ReturnType<typeof vi.fn<SessionShareServiceContract["revoke"]>>;
+    setMemberCapabilities: ReturnType<
+        typeof vi.fn<SessionShareServiceContract["setMemberCapabilities"]>
+    >;
 } {
     const create = vi.fn<SessionShareServiceContract["create"]>(async () => owner);
+    const peerActivity = vi.fn<SessionShareServiceContract["peerActivity"]>(() => ({
+        complete: true,
+        entries: [
+            {
+                action: "attach",
+                capability: "terminal_view" as const,
+                createdAt: 1,
+                description: "Friend started to watch a terminal.",
+                grantEpoch: 1,
+                outcome: "allowed" as const,
+                seq: 1,
+                shareId: "share-1",
+                shareMemberId: "member-1",
+            },
+        ],
+    }));
+    const replicaCapabilities = vi.fn<SessionShareServiceContract["replicaCapabilities"]>(() => ({
+        capabilities: ["terminal_view" as const],
+        description: "Watch a terminal",
+        shareId: "share-1",
+    }));
     const replicaHistory = vi.fn<SessionShareServiceContract["replicaHistory"]>(() => ({
         complete: true,
         entries: [],
         replica,
     }));
     const revoke = vi.fn<SessionShareServiceContract["revoke"]>(async () => owner);
+    const setMemberCapabilities = vi.fn<SessionShareServiceContract["setMemberCapabilities"]>(
+        async () => owner,
+    );
     return {
         add: vi.fn<SessionShareServiceContract["add"]>(async () => owner),
         create,
@@ -362,17 +445,20 @@ function createStub(): SessionShareServiceContract & {
         listReplicas: vi.fn<SessionShareServiceContract["listReplicas"]>(() => ({
             replicas: [replica],
         })),
+        peerActivity,
         postFriendMessage: vi.fn<SessionShareServiceContract["postFriendMessage"]>(
             async (post) => ({
                 accepted: true,
                 clientMessageId: post.clientMessageId,
             }),
         ),
+        replicaCapabilities,
         replicaHistory,
         revoke,
         setFriendMessages: vi.fn<SessionShareServiceContract["setFriendMessages"]>(
             async () => owner,
         ),
+        setMemberCapabilities,
         setToolOutput: vi.fn<SessionShareServiceContract["setToolOutput"]>(async () => owner),
         stop: vi.fn<SessionShareServiceContract["stop"]>(async () => ({
             ...owner,
@@ -420,7 +506,7 @@ async function startServer(
 
 async function request(
     socketPath: string,
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PUT",
     path: string,
     body?: unknown,
 ): Promise<{ body: unknown; status: number }> {

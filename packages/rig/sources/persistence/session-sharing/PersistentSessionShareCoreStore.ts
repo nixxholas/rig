@@ -7,6 +7,7 @@ import type {
     SessionShareRecord as CoreShare,
     SessionShareReplicaRecord as CoreReplica,
 } from "../../session-sharing/SessionShareService.js";
+import type { PeerCapability } from "../../session-sharing/peer-access/index.js";
 import type { SharedToolOutput } from "../../session-sharing/SharedToolOutput.js";
 import type {
     ShareOpaqueEntry,
@@ -33,6 +34,7 @@ import { sessionShareReplicaSave } from "./sessionShareReplicaSave.js";
 import { sessionShareRevoke } from "./sessionShareRevoke.js";
 import { sessionShareSetDegraded } from "./sessionShareSetDegraded.js";
 import { sessionShareSetIncludeFriendMessages } from "./sessionShareSetIncludeFriendMessages.js";
+import { sessionShareSetMemberCapabilities } from "./sessionShareSetMemberCapabilities.js";
 import { sessionShareSetToolOutput } from "./sessionShareSetToolOutput.js";
 import { sessionShareStop } from "./sessionShareStop.js";
 import { sessionShareTailEvents } from "./sessionShareTailEvents.js";
@@ -142,6 +144,17 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
     setToolOutput(shareId: string, toolOutput: SharedToolOutput): CoreShare {
         sessionShareSetToolOutput(this.#tx(), shareId, toolOutput, this.#now());
         return this.#shareWithMembers(shareId);
+    }
+
+    setMemberCapabilities(input: {
+        capabilities: readonly PeerCapability[];
+        shareId: string;
+        shareMemberId: string;
+    }): readonly PeerCapability[] {
+        return sessionShareSetMemberCapabilities(this.#tx(), {
+            ...input,
+            now: this.#now(),
+        }).map((row) => row.capability);
     }
 
     setShareHealth(shareId: string, state: "active" | "degraded"): void {

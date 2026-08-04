@@ -10,12 +10,16 @@ import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
     PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
     createSessionShareRequestSchema as daemonCreateSessionShareRequestSchema,
+    getSessionSharePeerActivityResponseSchema as daemonGetSessionSharePeerActivityResponseSchema,
+    listSessionShareReplicaCapabilitiesResponseSchema as daemonListSessionShareReplicaCapabilitiesResponseSchema,
     rigCliInstallationInspectionSchema as daemonRigCliInstallationInspectionSchema,
     rigDaemonInstallationDiscoverySchema as daemonRigDaemonInstallationDiscoverySchema,
     rigDataEpochSchema as daemonRigDataEpochSchema,
     rigInitializedDataSchema as daemonRigInitializedDataSchema,
     rigInstallationDataSchema as daemonRigInstallationDataSchema,
+    sessionShareCapabilitiesChangedEventSchema as daemonSessionShareCapabilitiesChangedEventSchema,
     sessionShareOwnerResponseSchema as daemonSessionShareOwnerResponseSchema,
+    setSessionShareMemberCapabilitiesRequestSchema as daemonSetSessionShareMemberCapabilitiesRequestSchema,
     setSessionShareToolOutputRequestSchema as daemonSetSessionShareToolOutputRequestSchema,
     systemNoticePayloadSchema as daemonSystemNoticePayloadSchema,
 } from "../../rig/sources/protocol/index.js";
@@ -30,9 +34,13 @@ import {
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     computeServiceErrorSchema,
     createSessionShareRequestSchema,
+    getSessionSharePeerActivityResponseSchema,
+    listSessionShareReplicaCapabilitiesResponseSchema,
     projectWorkspaceSchema,
     describeSessionShareToolOutput,
+    sessionShareCapabilitiesChangedEventSchema,
     sessionShareOwnerResponseSchema,
+    setSessionShareMemberCapabilitiesRequestSchema,
     setSessionShareToolOutputRequestSchema,
     systemNoticePayloadSchema,
 } from "@/protocol.js";
@@ -83,6 +91,35 @@ type _CreateSessionShareRequest = Assignable<
 type _SessionShareOwnerResponse = Assignable<
     local.SessionShareOwnerResponse,
     daemon.SessionShareOwnerResponse
+>;
+type _SessionSharePeerCapability = Assignable<
+    local.SessionSharePeerCapability,
+    daemon.SessionSharePeerCapability
+>;
+type _SessionShareMember = Assignable<local.SessionShareMember, daemon.SessionShareMember>;
+type _SessionShareOfferableCapability = Assignable<
+    local.SessionShareOfferableCapability,
+    daemon.SessionShareOfferableCapability
+>;
+type _SetSessionShareMemberCapabilitiesRequest = Assignable<
+    local.SetSessionShareMemberCapabilitiesRequest,
+    daemon.SetSessionShareMemberCapabilitiesRequest
+>;
+type _SessionSharePeerActivityEntry = Assignable<
+    local.SessionSharePeerActivityEntry,
+    daemon.SessionSharePeerActivityEntry
+>;
+type _GetSessionSharePeerActivityResponse = Assignable<
+    local.GetSessionSharePeerActivityResponse,
+    daemon.GetSessionSharePeerActivityResponse
+>;
+type _ListSessionShareReplicaCapabilitiesResponse = Assignable<
+    local.ListSessionShareReplicaCapabilitiesResponse,
+    daemon.ListSessionShareReplicaCapabilitiesResponse
+>;
+type _SessionShareCapabilitiesChangedEvent = Assignable<
+    local.SessionShareCapabilitiesChangedEvent,
+    daemon.SessionShareCapabilitiesChangedEvent
 >;
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
 type _ServiceNotice = Assignable<local.ServiceNotice, daemon.ServiceNotice>;
@@ -437,6 +474,8 @@ describe("protocol conformance", () => {
         const response = {
             members: [
                 {
+                    capabilities: ["terminal_view"],
+                    capabilitiesDescription: "Can watch the live terminal.",
                     createdAt: 1,
                     currentGrantEpoch: 1,
                     displayName: "Ada",
@@ -448,8 +487,17 @@ describe("protocol conformance", () => {
                 },
             ],
             share: {
+                capabilityMemberCount: 1,
                 includeFriendMessagesInModel: true,
                 memberCount: 1,
+                offerableCapabilities: [
+                    {
+                        capability: "terminal_view",
+                        description: "Watch the live terminal as it runs.",
+                        label: "Terminal view",
+                        offerable: true,
+                    },
+                ],
                 shareId: "share-1",
                 state: "active",
                 toolOutput: "summaries",
@@ -487,6 +535,86 @@ describe("protocol conformance", () => {
                 Value.Check(schema, { mutationId: "mutation-2", toolOutput: "everything" }),
             ).toBe(false);
         }
+    });
+
+    it("decodes the same bounded peer-capability requests, responses, and events", () => {
+        const setCapabilities = {
+            capabilities: ["terminal_view"],
+            mutationId: "mutation-3",
+        };
+        expect(
+            Value.Decode(setSessionShareMemberCapabilitiesRequestSchema, setCapabilities),
+        ).toEqual(setCapabilities);
+        expect(
+            Value.Decode(daemonSetSessionShareMemberCapabilitiesRequestSchema, setCapabilities),
+        ).toEqual(setCapabilities);
+        // Both sides agree on which capabilities exist, so a client cannot grant
+        // one the daemon would refuse to enforce.
+        for (const schema of [
+            setSessionShareMemberCapabilitiesRequestSchema,
+            daemonSetSessionShareMemberCapabilitiesRequestSchema,
+        ]) {
+            expect(
+                Value.Check(schema, { capabilities: ["full_control"], mutationId: "mutation-3" }),
+            ).toBe(false);
+        }
+
+        const peerActivity = {
+            complete: true,
+            entries: [
+                {
+                    action: "viewed",
+                    capability: "terminal_view",
+                    createdAt: 1,
+                    description: "Taylor watched the terminal.",
+                    grantEpoch: 1,
+                    outcome: "allowed",
+                    seq: 1,
+                    shareId: "share-1",
+                    shareMemberId: "member-1",
+                },
+            ],
+        };
+        expect(Value.Decode(getSessionSharePeerActivityResponseSchema, peerActivity)).toEqual(
+            peerActivity,
+        );
+        expect(Value.Decode(daemonGetSessionSharePeerActivityResponseSchema, peerActivity)).toEqual(
+            peerActivity,
+        );
+
+        const replicaCapabilities = {
+            capabilities: ["terminal_view"],
+            description: "You can watch the live terminal.",
+            shareId: "share-1",
+        };
+        expect(
+            Value.Decode(listSessionShareReplicaCapabilitiesResponseSchema, replicaCapabilities),
+        ).toEqual(replicaCapabilities);
+        expect(
+            Value.Decode(
+                daemonListSessionShareReplicaCapabilitiesResponseSchema,
+                replicaCapabilities,
+            ),
+        ).toEqual(replicaCapabilities);
+
+        // The revoke that matters most: a member's UI must update its access and
+        // its settled state from one frame, not a flash followed by a refetch.
+        const revoked = {
+            createdAt: 2,
+            data: {
+                capabilities: [],
+                capabilitiesDescription: "No capabilities.",
+                memberState: "revoked",
+                shareId: "share-1",
+                shareMemberId: "member-1",
+            },
+            id: "event-1",
+            type: "session_share_capabilities_changed",
+        };
+        expect(Value.Decode(sessionShareCapabilitiesChangedEventSchema, revoked)).toEqual(revoked);
+        expect(Value.Decode(daemonSessionShareCapabilitiesChangedEventSchema, revoked)).toEqual(
+            revoked,
+        );
     });
 
     it("rejects compute error detail beyond the daemon's canonical bound", () => {

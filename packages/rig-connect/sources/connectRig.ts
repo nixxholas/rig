@@ -96,21 +96,27 @@ import type {
     AddSessionShareMemberRequest,
     CreateSessionShareRequest,
     GetSessionShareHealthResponse,
+    GetSessionSharePeerActivityResponse,
     GetSessionShareReplicaHistoryResponse,
+    ListSessionShareReplicaCapabilitiesResponse,
     ListSessionShareReplicasResponse,
     PostSessionShareFriendMessageRequest,
     PostSessionShareFriendMessageResponse,
     SessionSharedMetadata,
     SessionShareFriendInput,
+    SessionSharePeerCapability,
     SessionShareOwnerResponse,
     SessionShareToolOutput,
 } from "./protocol.js";
 import {
     describeSessionShareToolOutput,
     getSessionShareHealthResponseSchema,
+    getSessionSharePeerActivityResponseSchema,
     getSessionShareReplicaHistoryResponseSchema,
+    listSessionShareReplicaCapabilitiesResponseSchema,
     listSessionShareReplicasResponseSchema,
     postSessionShareFriendMessageResponseSchema,
+    sessionShareCapabilitiesChangedEventSchema,
     HAPPY_CLOUD_CONTRACT_VERSION,
     answerMurmurFriendRequestResponseSchema,
     deleteMurmurAccountResponseSchema,
@@ -660,6 +666,12 @@ export interface RigConnection {
         sessionId: string,
         toolOutput: SessionShareToolOutput,
     ) => MutationId;
+    /** Replaces one member's whole capability set; it is not a delta. */
+    setSessionShareMemberCapabilities: (
+        sessionId: string,
+        shareMemberId: string,
+        capabilities: readonly SessionSharePeerCapability[],
+    ) => MutationId;
     /** Posts through an authenticated member grant; this is not an optimistic owner mutation. */
     postSessionShareFriendMessage: (
         request: PostSessionShareFriendMessageRequest,
@@ -676,6 +688,16 @@ export interface RigConnection {
         shareId: string,
         options?: SessionShareOperationOptions,
     ) => Promise<GetSessionShareHealthResponse>;
+    /** The owner's own read of what happened: who was allowed, and who was denied. */
+    getSessionSharePeerActivity: (
+        sessionId: string,
+        options?: SessionShareOperationOptions & { after?: string },
+    ) => Promise<GetSessionSharePeerActivityResponse>;
+    /** What a member's own replica of a shared session may currently do. */
+    listSessionShareReplicaCapabilities: (
+        shareId: string,
+        options?: SessionShareOperationOptions,
+    ) => Promise<ListSessionShareReplicaCapabilitiesResponse>;
     /** Entity-first project catalog actions. */
     projects: RigProjects;
     /** Reads enrollment, profile status, and every independently denied/granted capability. */
@@ -2239,6 +2261,31 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     }
                     return;
                 }
+                if (event.type === "session_share_capabilities_changed") {
+                    let changed: Static<typeof sessionShareCapabilitiesChangedEventSchema>;
+                    try {
+                        changed = Value.Decode(sessionShareCapabilitiesChangedEventSchema, event);
+                    } catch {
+                        return;
+                    }
+                    // Keyed by shareId, not sessionId: an owner session has at
+                    // most one current share, so every open session whose share
+                    // matches is the one this member row belongs to.
+                    for (const entry of sessionEntries.values()) {
+                        if (entry.pending !== undefined) continue;
+                        publishSession(
+                            entry,
+                            entry.store.applySessionShareMemberCapabilities(
+                                changed.data.shareId,
+                                changed.data.shareMemberId,
+                                changed.data.capabilities,
+                                changed.data.capabilitiesDescription,
+                                changed.data.memberState,
+                            ),
+                        );
+                    }
+                    return;
+                }
                 if (event.type === "plugins_changed") {
                     const entry = pluginsEntry;
                     if (entry === undefined || !entry.started) return;
@@ -3075,6 +3122,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             | "create_session_share"
             | "revoke_session_share_member"
             | "set_session_share_friend_messages"
+            | "set_session_share_member_capabilities"
             | "set_session_share_tool_output"
             | "stop_session_share"
         >,
@@ -3082,6 +3130,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         path: string,
         body: Readonly<Record<string, unknown>>,
         project?: (shared: SessionSharedMetadata) => SessionSharedMetadata,
+        method: "POST" | "PUT" = "POST",
     ): MutationId => {
         const id = nextMutationId();
         const key = sessionKey(sessionId);
@@ -3121,7 +3170,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         ...ifMatchHeader(expectedEventId),
                         "x-rig-mutation-id": id,
                     },
-                    method: "POST",
+                    method,
                     url: endpointUrl(
                         options.endpoint,
                         `sessions/${encodeURIComponent(sessionId)}/share${path}`,
@@ -3193,6 +3242,23 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             }),
         );
 
+    const setSessionShareMemberCapabilities: RigConnection["setSessionShareMemberCapabilities"] = (
+        sessionId,
+        shareMemberId,
+        capabilities,
+    ) =>
+        enqueueSessionShareMutation(
+            "set_session_share_member_capabilities",
+            sessionId,
+            `/members/${encodeURIComponent(shareMemberId)}/capabilities`,
+            { capabilities },
+            // capabilityMemberCount depends on this member's capabilities before
+            // the change, which this client does not track, so it waits for the
+            // authoritative response instead of predicting a count it cannot know.
+            undefined,
+            "PUT",
+        );
+
     const postSessionShareFriendMessage: RigConnection["postSessionShareFriendMessage"] = (
         post,
         operationOptions = {},
@@ -3249,6 +3315,37 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     : { signal: operationOptions.signal }),
             },
         );
+
+    const getSessionSharePeerActivity: RigConnection["getSessionSharePeerActivity"] = (
+        sessionId,
+        operationOptions = {},
+    ) => {
+        const after =
+            operationOptions.after === undefined
+                ? ""
+                : `?after=${encodeURIComponent(operationOptions.after)}`;
+        return requestSessionShare(
+            `sessions/${encodeURIComponent(sessionId)}/share/peer-activity${after}`,
+            getSessionSharePeerActivityResponseSchema,
+            {
+                ...(operationOptions.signal === undefined
+                    ? {}
+                    : { signal: operationOptions.signal }),
+            },
+        );
+    };
+
+    const listSessionShareReplicaCapabilities: RigConnection["listSessionShareReplicaCapabilities"] =
+        (shareId, operationOptions = {}) =>
+            requestSessionShare(
+                `session-share-replicas/${encodeURIComponent(shareId)}/capabilities`,
+                listSessionShareReplicaCapabilitiesResponseSchema,
+                {
+                    ...(operationOptions.signal === undefined
+                        ? {}
+                        : { signal: operationOptions.signal }),
+                },
+            );
 
     const projects: RigProjects = {
         add: async (path, addOptions = {}) => {
@@ -5003,6 +5100,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         forkSession,
         installPlugin,
         getMurmurAccount,
+        getSessionSharePeerActivity,
         getSessionShareHealth,
         getSessionShareReplicaHistory,
         getHappyCloudProfile,
@@ -5011,6 +5109,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         listMurmurContacts,
         listMurmurFriends,
         listMurmurFriendRequests,
+        listSessionShareReplicaCapabilities,
         listSessionShareReplicas,
         projects,
         readBackgroundProcess,
@@ -5035,6 +5134,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         setGoalStatus,
         setSessionArchived,
         setSessionShareFriendMessages,
+        setSessionShareMemberCapabilities,
         setSessionShareToolOutput,
         stopRun,
         startMurmurService,
@@ -5398,6 +5498,7 @@ function isSessionShareMutationAction(
     | "create_session_share"
     | "revoke_session_share_member"
     | "set_session_share_friend_messages"
+    | "set_session_share_member_capabilities"
     | "set_session_share_tool_output"
     | "stop_session_share"
 > {
@@ -5406,6 +5507,7 @@ function isSessionShareMutationAction(
         action === "create_session_share" ||
         action === "revoke_session_share_member" ||
         action === "set_session_share_friend_messages" ||
+        action === "set_session_share_member_capabilities" ||
         action === "set_session_share_tool_output" ||
         action === "stop_session_share"
     );

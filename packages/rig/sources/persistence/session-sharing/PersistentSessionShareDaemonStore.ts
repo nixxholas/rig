@@ -6,7 +6,14 @@ import { querySessionShare, querySessionShareMembers } from "./querySessionShare
 import { querySessionShareForOwnerSession } from "./querySessionShareForOwnerSession.js";
 import { querySessionShareReplica, querySessionShareReplicas } from "./querySessionShareReplica.js";
 import { querySessionShareReplicaEntries } from "./querySessionShareReplica.js";
-import type { SessionShareMemberRecord, SessionShareReplicaRecord } from "./types.js";
+import { querySessionShareMemberCapabilities } from "./querySessionShareMemberCapabilities.js";
+import { querySessionSharePeerActions } from "./querySessionSharePeerActions.js";
+import type {
+    SessionShareCapabilityRecord,
+    SessionShareMemberRecord,
+    SessionSharePeerActionRecord,
+    SessionShareReplicaRecord,
+} from "./types.js";
 
 const HISTORY_PAGE_LIMIT = 100;
 
@@ -74,6 +81,17 @@ export class PersistentSessionShareDaemonStore implements SessionShareDaemonStor
 
     queryMembers(shareId: string): readonly SessionShareMemberRecord[] {
         return querySessionShareMembers(this.#tx(), shareId);
+    }
+
+    queryMemberCapabilities(shareId: string): readonly SessionShareCapabilityRecord[] {
+        return querySessionShareMemberCapabilities(this.#tx(), shareId);
+    }
+
+    queryPeerActions(
+        shareId: string,
+        afterSeq: number,
+    ): { complete: boolean; entries: readonly SessionSharePeerActionRecord[] } {
+        return querySessionSharePeerActions(this.#tx(), { afterSeq, shareId });
     }
 
     #toServiceShare(share: SessionShareRecord): ServiceShare {

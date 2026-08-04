@@ -17,6 +17,7 @@ import type {
     SessionSummary,
 } from "./SessionProtocol.js";
 import type { RemoteTerminalSummary } from "../terminal/types.js";
+import type { SessionShareCapabilitiesChangedEvent } from "./SessionShareProtocol.js";
 import type { SlotsChangedEvent } from "./SlotProtocol.js";
 import type { WebappsChangedEvent } from "./WebappProtocol.js";
 import {
@@ -633,6 +634,7 @@ export type GlobalLiveEvent =
     | ProjectWorkspaceGitEvent
     | RemoteTerminalsChangedEvent
     | SessionCurrentEvent
+    | SessionShareCapabilitiesChangedEvent
     | Extract<SessionEvent, { type: "session_context_changed" | "session_draft_changed" }>;
 
 export type GlobalEvent =
@@ -671,7 +673,8 @@ export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent 
         event.type === "remote_terminals_changed" ||
         event.type === "session_current" ||
         event.type === "session_context_changed" ||
-        event.type === "session_draft_changed"
+        event.type === "session_draft_changed" ||
+        event.type === "session_share_capabilities_changed"
     );
 }
 

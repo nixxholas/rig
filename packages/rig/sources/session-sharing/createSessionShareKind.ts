@@ -3,14 +3,24 @@ import type { SessionEntrySource } from "@slopus/murmur/sharedSession";
 import type { UserMessage } from "../agent/types.js";
 import type { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
 import type { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
+import type { DockerExecutionConfig } from "../execution/index.js";
 import type { SessionEvent } from "../protocol/index.js";
 import {
     shareHistoryPageLimits,
     type ShareKindContext,
     type ShareKindRuntime,
 } from "../sharing/createShareRuntime.js";
+import {
+    handlePeerTerminalControl,
+    resolveOfferablePeerCapabilities,
+    type PeerTerminalViewerService,
+} from "./peer-access/index.js";
 import { SessionShareDaemonService } from "./SessionShareDaemonService.js";
-import { SessionShareService } from "./SessionShareService.js";
+import {
+    SessionShareService,
+    type SessionShareCapabilityChange,
+    type SessionSharePeerAccess,
+} from "./SessionShareService.js";
 import type { SessionShareServiceContract } from "./SessionShareServiceContract.js";
 
 export interface SessionShareKindOptions {
@@ -29,6 +39,25 @@ export interface SessionShareKindOptions {
             position: number;
         },
     ) => void;
+    /**
+     * The project's container environment for a shared session, when it has one.
+     *
+     * `undefined` means the session runs on the host, and every peer capability
+     * that would expose the host is refused with a readable reason rather than
+     * quietly hidden.
+     */
+    readonly docker?: (ownerSessionId: string) => DockerExecutionConfig | undefined;
+    /** Live peer channels, so a revoke closes them before it touches the network. */
+    readonly peerAccess?: SessionSharePeerAccess;
+    /**
+     * Mirrors container terminals to peers who hold `terminal_view`.
+     *
+     * Absent means this daemon accepts no peer terminal requests at all: a
+     * control frame asking for one is dropped rather than interpreted.
+     */
+    readonly peerTerminalViewer?: PeerTerminalViewerService;
+    /** Told when a member's capability set changes, for the light stream event. */
+    readonly publishCapabilities?: (change: SessionShareCapabilityChange) => void;
     readonly shareStore: PersistentSessionShareCoreStore;
 }
 
@@ -59,11 +88,31 @@ export function createSessionShareKind(
                     persisted,
                 );
             },
+            ...(options.peerTerminalViewer === undefined
+                ? {}
+                : {
+                      handleMemberControl: (control) => {
+                          // The channel comes from the transport, which knows only sessions
+                          // this daemon actually holds; the grant comes from the frame
+                          // Murmur authenticated. Neither is taken from the payload.
+                          handlePeerTerminalControl(control, {
+                              channel: (shareId) =>
+                                  context.transport.openOwnerEphemeralChannel(shareId),
+                              viewer: options.peerTerminalViewer!,
+                          });
+                      },
+                  }),
+            ...(options.peerAccess === undefined ? {} : { peerAccess: options.peerAccess }),
+            ...(options.publishCapabilities === undefined
+                ? {}
+                : { publishCapabilities: options.publishCapabilities }),
             store: options.shareStore,
             transport: context.transport,
         });
         const contract = new SessionShareDaemonService({
             localPeerId: context.localPeerId,
+            offerableCapabilities: (ownerSessionId) =>
+                resolveOfferablePeerCapabilities(options.docker?.(ownerSessionId)),
             service,
             store: options.daemonStore,
         });

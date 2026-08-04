@@ -324,7 +324,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             initialTasks: session.session.tasks,
             ...(session.session.shared === undefined
                 ? {}
-                : { sessionShareState: session.session.shared.state }),
+                : { sessionShare: session.session.shared }),
             ...(session.session.lastEventId === undefined
                 ? {}
                 : {

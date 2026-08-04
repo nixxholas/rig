@@ -2,22 +2,33 @@ import type {
     AddSessionShareMemberRequest,
     CreateSessionShareRequest,
     GetSessionShareHealthResponse,
+    GetSessionSharePeerActivityResponse,
     GetSessionShareReplicaHistoryResponse,
+    ListSessionShareReplicaCapabilitiesResponse,
     ListSessionShareReplicasResponse,
     PostSessionShareFriendMessageRequest,
     PostSessionShareFriendMessageResponse,
     RevokeSessionShareMemberRequest,
     SessionShareMember,
+    SessionShareOfferableCapability,
     SessionShareOwnerResponse,
     SessionShareReplica,
     SetSessionShareFriendMessagesRequest,
+    SetSessionShareMemberCapabilitiesRequest,
     SetSessionShareToolOutputRequest,
     StopSessionShareRequest,
 } from "../protocol/index.js";
 import type {
+    SessionShareCapabilityRecord,
     SessionShareMemberRecord as StoredSessionShareMember,
+    SessionSharePeerActionRecord,
     SessionShareReplicaRecord,
 } from "../persistence/session-sharing/types.js";
+import {
+    describePeerActivityEntry,
+    describePeerCapabilities,
+    type PeerCapability,
+} from "./peer-access/index.js";
 import type { SessionShareServiceContract } from "./SessionShareServiceContract.js";
 import type { SessionShareRecord, SessionShareService } from "./SessionShareService.js";
 import { describeSharedToolOutput, DEFAULT_SHARED_TOOL_OUTPUT } from "./SharedToolOutput.js";
@@ -47,12 +58,27 @@ export interface SessionShareDaemonStore {
         }[];
     };
     queryMembers(shareId: string): readonly StoredSessionShareMember[];
+    /** Active capability rows for a share, already filtered to current epochs. */
+    queryMemberCapabilities(shareId: string): readonly SessionShareCapabilityRecord[];
+    queryPeerActions(
+        shareId: string,
+        afterSeq: number,
+    ): { complete: boolean; entries: readonly SessionSharePeerActionRecord[] };
 }
 
 export interface SessionShareDaemonServiceOptions {
     /** Murmur peer ID of the local account, or `undefined` while it has none. */
     readonly localPeerId: () => Promise<string | undefined>;
     readonly now?: () => number;
+    /**
+     * What this session's project could offer a peer at all.
+     *
+     * Resolved per request rather than cached, because a project gaining or
+     * losing its container environment has to change the answer immediately.
+     */
+    readonly offerableCapabilities: (
+        ownerSessionId: string,
+    ) => readonly SessionShareOfferableCapability[];
     readonly service: SessionShareService;
     readonly store: SessionShareDaemonStore;
 }
@@ -66,12 +92,14 @@ export interface SessionShareDaemonServiceOptions {
 export class SessionShareDaemonService implements SessionShareServiceContract {
     readonly #localPeerId: SessionShareDaemonServiceOptions["localPeerId"];
     readonly #now: () => number;
+    readonly #offerableCapabilities: SessionShareDaemonServiceOptions["offerableCapabilities"];
     readonly #service: SessionShareService;
     readonly #store: SessionShareDaemonStore;
 
     constructor(options: SessionShareDaemonServiceOptions) {
         this.#localPeerId = options.localPeerId;
         this.#now = options.now ?? Date.now;
+        this.#offerableCapabilities = options.offerableCapabilities;
         this.#service = options.service;
         this.#store = options.store;
     }
@@ -157,6 +185,85 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
         return this.#ownerResponse(shareId);
     }
 
+    async setMemberCapabilities(
+        sessionId: string,
+        shareMemberId: string,
+        request: SetSessionShareMemberCapabilitiesRequest,
+    ): Promise<SessionShareOwnerResponse> {
+        const shareId = this.#requireShareId(sessionId);
+        // A capability the project cannot confine is refused here rather than
+        // stored and then quietly ignored at use time. Failing closed is only
+        // honest if the owner is told at the moment they ask.
+        const offerable = new Map(
+            this.#offerableCapabilities(sessionId).map((entry) => [entry.capability, entry]),
+        );
+        for (const capability of request.capabilities) {
+            const entry = offerable.get(capability);
+            if (entry === undefined || !entry.offerable) {
+                throw new Error(
+                    entry?.unavailableReason ??
+                        "This session cannot offer that permission to anybody.",
+                );
+            }
+        }
+        await this.#service.setMemberCapabilities({
+            capabilities: request.capabilities,
+            shareId,
+            shareMemberId,
+        });
+        return this.#ownerResponse(shareId);
+    }
+
+    peerActivity(
+        sessionId: string,
+        after?: string,
+    ): GetSessionSharePeerActivityResponse | undefined {
+        const share = this.#store.queryActiveShareForSession(sessionId);
+        if (share === undefined) return undefined;
+        const names = new Map(
+            this.#store
+                .queryMembers(share.shareId)
+                .map((member) => [member.shareMemberId, member.displayName]),
+        );
+        const page = this.#store.queryPeerActions(share.shareId, parseCursor(after));
+        const entries = page.entries.map((entry) => ({
+            action: entry.action,
+            capability: entry.capability,
+            createdAt: entry.createdAt,
+            description: describePeerActivityEntry(entry, names.get(entry.shareMemberId)),
+            ...(entry.detail === undefined ? {} : { detail: entry.detail }),
+            grantEpoch: entry.grantEpoch,
+            outcome: entry.outcome,
+            seq: entry.seq,
+            shareId: entry.shareId,
+            shareMemberId: entry.shareMemberId,
+        }));
+        const lastSeq = entries.at(-1)?.seq;
+        return {
+            complete: page.complete,
+            entries,
+            ...(page.complete || lastSeq === undefined ? {} : { nextCursor: String(lastSeq) }),
+        };
+    }
+
+    replicaCapabilities(shareId: string): ListSessionShareReplicaCapabilitiesResponse | undefined {
+        const replica = this.#store.queryReplica(shareId);
+        if (replica === undefined) return undefined;
+        // A member's own daemon enforces nothing: every gate runs on the owner's
+        // side, where the terminal actually is. What this reports is the set the
+        // owner has told this replica it holds, and absence is denial — so a
+        // replica that has been told nothing reads as the plain transcript.
+        const capabilities = this.#store
+            .queryMemberCapabilities(shareId)
+            .filter((row) => row.shareMemberId === replica.shareMemberId)
+            .map((row) => row.capability);
+        return {
+            capabilities,
+            description: describePeerCapabilities(capabilities),
+            shareId,
+        };
+    }
+
     health(shareId: string): GetSessionShareHealthResponse | undefined {
         const share = this.#store.queryShare(shareId);
         if (share === undefined) return undefined;
@@ -228,11 +335,22 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
         const share = this.#store.queryShare(shareId);
         if (share === undefined) throw new Error("This session share no longer exists.");
         const members = this.#store.queryMembers(shareId);
+        const byMember = new Map<string, PeerCapability[]>();
+        for (const row of this.#store.queryMemberCapabilities(shareId)) {
+            const list = byMember.get(row.shareMemberId) ?? [];
+            list.push(row.capability);
+            byMember.set(row.shareMemberId, list);
+        }
         return {
-            members: members.map(toProtocolMember),
+            members: members.map((member) =>
+                toProtocolMember(member, byMember.get(member.shareMemberId) ?? []),
+            ),
             share: {
+                capabilityMemberCount: [...byMember.values()].filter((list) => list.length > 0)
+                    .length,
                 includeFriendMessagesInModel: share.includeFriendMessagesInModel,
                 memberCount: members.filter((member) => member.state === "active").length,
+                offerableCapabilities: [...this.#offerableCapabilities(share.ownerSessionId)],
                 shareId,
                 state: share.state,
                 toolOutput: share.toolOutput,
@@ -242,8 +360,17 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
     }
 }
 
-function toProtocolMember(member: StoredSessionShareMember): SessionShareMember {
+function toProtocolMember(
+    member: StoredSessionShareMember,
+    capabilities: readonly PeerCapability[],
+): SessionShareMember {
+    // A revoked member holds nothing, whatever rows happen to survive. The
+    // durable query already filters to the current epoch, and this is the second
+    // place the same answer is reached, on purpose.
+    const held = member.state === "active" ? [...capabilities].sort() : [];
     return {
+        capabilities: held,
+        capabilitiesDescription: describePeerCapabilities(held),
         createdAt: member.createdAt,
         currentGrantEpoch: member.currentGrantEpoch,
         displayName: member.displayName,

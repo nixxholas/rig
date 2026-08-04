@@ -81,6 +81,11 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
         if (message.role === "user") {
             // Friend-authored content is not part of the permission-review conversation at all.
             // Rendering it as merely untrusted would still let its bytes spoof transcript framing.
+            //
+            // This line is the product's oldest statement that a friend is a separate
+            // principal rather than a quieter user: whatever a friend is allowed to do, it
+            // is never allowed to authorize the owner's agent. `session-sharing/peer-access`
+            // generalizes exactly this rule into capabilities, so do not relax it here.
             if (message.friendAuthor !== undefined) continue;
             if (isGeneratedConversationSummary(message.blocks)) continue;
             const text = renderContent(message.blocks, "[Image shared by user]");

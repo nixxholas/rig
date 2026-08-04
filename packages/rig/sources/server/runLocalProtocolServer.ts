@@ -54,8 +54,10 @@ import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { MurmurService } from "../murmur/index.js";
+import { createEventIdFactory, type GlobalLiveEvent } from "../protocol/index.js";
 import { createScopeShareKind } from "../scope-sharing/createScopeShareKind.js";
 import { createSessionShareKind } from "../session-sharing/createSessionShareKind.js";
+import { describePeerCapabilities } from "../session-sharing/peer-access/index.js";
 import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 
@@ -548,6 +550,7 @@ async function runOwnedLocalProtocolServer(
         });
         await murmurService.getAccount();
         const activeMurmur = murmurService;
+        const createSessionShareCapabilitiesEventId = createEventIdFactory();
         shareRuntime = createShareRuntime({
             kinds: {
                 scope: createScopeShareKind({
@@ -560,6 +563,41 @@ async function runOwnedLocalProtocolServer(
                         activeStore
                             .get(ownerSessionId)
                             ?.applyPersistedFriendMessage(message, persisted);
+                    },
+                    publishCapabilities: (change) => {
+                        // Cheap and authoritative: the durable member row this daemon just
+                        // wrote, rather than inferring state from the capability list alone.
+                        const memberState =
+                            activeStore.sessionShareDaemonStore
+                                .queryMembers(change.shareId)
+                                .find((member) => member.shareMemberId === change.shareMemberId)
+                                ?.state ?? "revoked";
+                        const event: GlobalLiveEvent = {
+                            createdAt: Date.now(),
+                            data: {
+                                capabilities: [...change.capabilities],
+                                capabilitiesDescription: describePeerCapabilities(
+                                    change.capabilities,
+                                ),
+                                memberState,
+                                shareId: change.shareId,
+                                shareMemberId: change.shareMemberId,
+                            },
+                            id: createSessionShareCapabilitiesEventId(),
+                            type: "session_share_capabilities_changed",
+                        };
+                        activeStore.liveEvents.publish(event);
+                        activeStore.globalEventQueue.publishLive(event);
+                        // The owner's own session stream has to say so too. The global
+                        // event reaches a client watching the machine; this reaches the
+                        // client watching the session being shared, which is the one whose
+                        // owner must never be able to forget somebody is attached.
+                        const ownerSessionId = activeStore.sessionShareDaemonStore.queryShare(
+                            change.shareId,
+                        )?.ownerSessionId;
+                        if (ownerSessionId !== undefined) {
+                            activeStore.get(ownerSessionId)?.noteShareCapabilitiesChanged();
+                        }
                     },
                     shareStore: activeStore.sessionShares,
                 }),

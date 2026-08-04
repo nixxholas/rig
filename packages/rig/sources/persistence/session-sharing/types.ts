@@ -50,6 +50,31 @@ export interface SessionShareOutboxRecord {
     createdAt: number;
 }
 
+export type SessionSharePeerCapability = "terminal_view";
+export type SessionSharePeerCapabilityState = "active" | "revoked";
+export type SessionSharePeerActionOutcome = "allowed" | "denied";
+
+export interface SessionShareCapabilityRecord {
+    shareMemberId: string;
+    capability: SessionSharePeerCapability;
+    grantEpoch: number;
+    state: SessionSharePeerCapabilityState;
+    grantedAt: number;
+    revokedAt?: number;
+}
+
+export interface SessionSharePeerActionRecord {
+    shareId: string;
+    shareMemberId: string;
+    grantEpoch: number;
+    seq: number;
+    capability: SessionSharePeerCapability;
+    action: string;
+    detail?: string;
+    outcome: SessionSharePeerActionOutcome;
+    createdAt: number;
+}
+
 export interface SessionShareReplicaRecord {
     shareId: string;
     ownerPeerId: string;

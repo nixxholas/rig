@@ -1,3 +1,5 @@
+import type { SharedSessionEphemeralChannel } from "@slopus/murmur/sharedSession";
+
 import type {
     ShareOpaqueEntry,
     ShareTransport,
@@ -37,6 +39,15 @@ function grantKey(grant: ShareTransportGrant): string {
 }
 
 export class FakeShareTransport implements ShareTransport {
+    /**
+     * Peer channels a test wired up, keyed `owner\u0000<shareId>` or
+     * `member\u0000<shareId>\u0000<shareMemberId>`.
+     *
+     * Public so a test supplies its own in-memory pair. A fake that invented a
+     * channel would let a test pass while the real transport had none, which is
+     * the one thing a fake here must never do.
+     */
+    readonly ephemeralChannels = new Map<string, SharedSessionEphemeralChannel>();
     readonly #failures = new Map<FailureOperation, Error[]>();
     readonly #memberHandlers = new Map<
         string,
@@ -261,6 +272,39 @@ export class FakeShareTransport implements ShareTransport {
             handlers.delete(callback);
             if (handlers.size === 0) this.#memberHandlers.delete(key);
         };
+    }
+
+    async sendMemberControl(
+        grant: ShareTransportGrant,
+        controlId: string,
+        payload: unknown,
+    ): Promise<void> {
+        this.#throwFailure("post");
+        this.#requireShare(grant.shareId);
+        await this.#enqueueOwner(grant.shareId, {
+            control: {
+                authenticatedPeerId: grant.murmurPeerId,
+                controlId,
+                grantEpoch: grant.grantEpoch,
+                payload,
+                shareId: grant.shareId,
+                shareMemberId: grant.shareMemberId,
+                timestamp: 0,
+            },
+            type: "member_control",
+        });
+    }
+
+    openOwnerEphemeralChannel(shareId: string): SharedSessionEphemeralChannel | undefined {
+        return this.ephemeralChannels.get(`owner\u0000${shareId}`);
+    }
+
+    openMemberEphemeralChannel(
+        grant: ShareTransportGrant,
+    ): SharedSessionEphemeralChannel | undefined {
+        return this.ephemeralChannels.get(
+            `member\u0000${grant.shareId}\u0000${grant.shareMemberId}`,
+        );
     }
 
     async retry(shareId: string): Promise<boolean> {

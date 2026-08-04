@@ -1,6 +1,7 @@
 import type { PermissionMode } from "./PermissionMode.js";
 
-const PERMISSION_RANK: Readonly<Record<PermissionMode, number>> = {
+/** The one ordering of how much each mode grants, weakest first. */
+export const PERMISSION_RANK: Readonly<Record<PermissionMode, number>> = {
     auto: 2,
     full_access: 3,
     read_only: 0,

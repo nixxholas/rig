@@ -5,6 +5,7 @@ import {
     createGhosttyRemoteTerminalServer,
     ghosttySnapshotToGrid,
     type GhosttyRemoteTerminalServerDriver,
+    type RemoteTerminalAttachOptions,
     type RemoteTerminalProtocolMetrics,
     type RemoteTerminalProtocolServer,
     type RemoteTerminalScrollbackPage,
@@ -105,8 +106,16 @@ export class RemoteTerminal {
         }
     }
 
-    attach(stream: Duplex): () => void {
-        return this.#protocol.attach(stream);
+    /**
+     * Add one attachment to this terminal.
+     *
+     * `input: false` attaches a viewer. It is the same call every other client
+     * makes, so snapshot-then-deltas, resize barriers, epoch invalidation, and
+     * credit-based flow control all apply to it unchanged; the only difference
+     * is that it is never issued a lease that may write.
+     */
+    attach(stream: Duplex, options?: RemoteTerminalAttachOptions): () => void {
+        return this.#protocol.attach(stream, options);
     }
 
     async dispose(): Promise<void> {

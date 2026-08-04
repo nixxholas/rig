@@ -44,8 +44,21 @@ export const sessionShareGrantSchema = Type.Object(
 );
 export type SessionShareGrant = Static<typeof sessionShareGrantSchema>;
 
+/**
+ * What one member may do beyond reading the transcript.
+ *
+ * Only capabilities Rig enforces appear here. Widening the union later is one
+ * line; a literal nothing enforces is a promise the product cannot take back.
+ */
+export const sessionSharePeerCapabilitySchema = Type.Union([Type.Literal("terminal_view")]);
+export type SessionSharePeerCapability = Static<typeof sessionSharePeerCapabilitySchema>;
+
 export const sessionShareMemberSchema = Type.Object(
     {
+        /** Capabilities this member holds right now, at their current grant epoch. */
+        capabilities: Type.Array(sessionSharePeerCapabilitySchema, { maxItems: 16 }),
+        /** The same list written for a person to read, ready to show as-is. */
+        capabilitiesDescription: Type.String({ maxLength: 512, minLength: 1 }),
         createdAt: sessionShareTimestampSchema,
         currentGrantEpoch: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
         displayName: Type.String({ maxLength: 512, minLength: 1 }),
@@ -58,6 +71,79 @@ export const sessionShareMemberSchema = Type.Object(
     sessionShareExact,
 );
 export type SessionShareMember = Static<typeof sessionShareMemberSchema>;
+
+/** One capability this project may offer, and why it cannot when it cannot. */
+export const sessionShareOfferableCapabilitySchema = Type.Object(
+    {
+        capability: sessionSharePeerCapabilitySchema,
+        /** What it lets the other person do, in one sentence. */
+        description: Type.String({ maxLength: 512, minLength: 1 }),
+        label: Type.String({ maxLength: 128, minLength: 1 }),
+        offerable: Type.Boolean(),
+        /** Present only when `offerable` is false, and always readable English. */
+        unavailableReason: Type.Optional(Type.String({ maxLength: 512, minLength: 1 })),
+    },
+    sessionShareExact,
+);
+export type SessionShareOfferableCapability = Static<typeof sessionShareOfferableCapabilitySchema>;
+
+export const setSessionShareMemberCapabilitiesRequestSchema = Type.Object(
+    {
+        /** The complete set this member should hold. Not a delta, on purpose. */
+        capabilities: Type.Array(sessionSharePeerCapabilitySchema, {
+            maxItems: 16,
+            uniqueItems: true,
+        }),
+        mutationId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type SetSessionShareMemberCapabilitiesRequest = Static<
+    typeof setSessionShareMemberCapabilitiesRequestSchema
+>;
+
+export const sessionSharePeerActivityEntrySchema = Type.Object(
+    {
+        action: Type.String({ maxLength: 128, minLength: 1 }),
+        capability: sessionSharePeerCapabilitySchema,
+        createdAt: sessionShareTimestampSchema,
+        /** The whole row as one English sentence, ready to show as-is. */
+        description: Type.String({ maxLength: 1_024, minLength: 1 }),
+        detail: Type.Optional(Type.String({ maxLength: 512, minLength: 1 })),
+        grantEpoch: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
+        outcome: Type.Union([Type.Literal("allowed"), Type.Literal("denied")]),
+        seq: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
+        shareId: sessionShareIdentifierSchema,
+        shareMemberId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type SessionSharePeerActivityEntry = Static<typeof sessionSharePeerActivityEntrySchema>;
+
+export const getSessionSharePeerActivityResponseSchema = Type.Object(
+    {
+        complete: Type.Boolean(),
+        entries: Type.Array(sessionSharePeerActivityEntrySchema, { maxItems: 100 }),
+        nextCursor: Type.Optional(sessionShareIdentifierSchema),
+    },
+    sessionShareExact,
+);
+export type GetSessionSharePeerActivityResponse = Static<
+    typeof getSessionSharePeerActivityResponseSchema
+>;
+
+export const listSessionShareReplicaCapabilitiesResponseSchema = Type.Object(
+    {
+        capabilities: Type.Array(sessionSharePeerCapabilitySchema, { maxItems: 16 }),
+        /** What this replica may do, in the words its own holder reads. */
+        description: Type.String({ maxLength: 512, minLength: 1 }),
+        shareId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type ListSessionShareReplicaCapabilitiesResponse = Static<
+    typeof listSessionShareReplicaCapabilitiesResponseSchema
+>;
 
 /**
  * How much of each tool's work a share replicates.
@@ -88,8 +174,12 @@ export function describeSessionShareToolOutput(toolOutput: SessionShareToolOutpu
 
 export const sessionSharedMetadataSchema = Type.Object(
     {
+        /** How many members hold at least one capability right now. */
+        capabilityMemberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
         includeFriendMessagesInModel: Type.Boolean(),
         memberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
+        /** Every capability this project could offer, and why when it cannot. */
+        offerableCapabilities: Type.Array(sessionShareOfferableCapabilitySchema, { maxItems: 16 }),
         shareId: sessionShareIdentifierSchema,
         state: sessionShareStateSchema,
         toolOutput: sessionShareToolOutputSchema,
@@ -2356,9 +2446,40 @@ export const murmurFriendshipChangedEventSchema = Type.Object(
 );
 export type MurmurFriendshipChangedEvent = Static<typeof murmurFriendshipChangedEventSchema>;
 
+/**
+ * One member's capabilities changed on a share this daemon owns or replicates.
+ *
+ * Light and live-only: capability metadata alone, never terminal bytes, so one
+ * frame is enough for a client to reconcile a revoke without a bulk payload.
+ * Keyed by `shareId`/`shareMemberId` inside `data`, the way every session-share
+ * entity is, not by session.
+ */
+export const sessionShareCapabilitiesChangedEventSchema = Type.Object(
+    {
+        createdAt: sessionShareTimestampSchema,
+        data: Type.Object(
+            {
+                capabilities: Type.Array(sessionSharePeerCapabilitySchema, { maxItems: 16 }),
+                capabilitiesDescription: Type.String({ maxLength: 512, minLength: 1 }),
+                memberState: sessionShareMemberStateSchema,
+                shareId: sessionShareIdentifierSchema,
+                shareMemberId: sessionShareIdentifierSchema,
+            },
+            sessionShareExact,
+        ),
+        id: sessionShareIdentifierSchema,
+        type: Type.Literal("session_share_capabilities_changed"),
+    },
+    sessionShareExact,
+);
+export type SessionShareCapabilitiesChangedEvent = Static<
+    typeof sessionShareCapabilitiesChangedEventSchema
+>;
+
 export type GlobalEvent =
     | ComputePreparationEvent
     | HappyCloudChangedEvent
+    | SessionShareCapabilitiesChangedEvent
     | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"project_updated", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"workspace_created", { mutationId?: MutationId; workspace: ProjectWorkspace }>

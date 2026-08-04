@@ -27,6 +27,19 @@ const SCOPE_SHARING_TABLES = [
     "scope_shares",
 ];
 
+/**
+ * Schema later migrations add, which the rewind above has to take with it.
+ *
+ * A real database at the scope-sharing version has none of this, so replaying
+ * forward from that version has to start from a database that has none of it
+ * either — otherwise a later `CREATE TABLE` meets its own output. Every
+ * migration that lands after this one adds its tables here.
+ */
+const TABLES_ADDED_AFTER_SCOPE_SHARING = [
+    "session_share_capabilities",
+    "session_share_peer_actions",
+];
+
 afterEach(() => {
     for (const directory of directories.splice(0)) {
         rmSync(directory, { force: true, recursive: true });
@@ -44,6 +57,9 @@ describe("scope sharing migration", () => {
             // feature's own schema version rather than to whatever happens to be
             // last, because migrations keep landing behind it.
             for (const table of SCOPE_SHARING_TABLES) {
+                opened.database.run(sql.raw(`DROP TABLE "${table}"`));
+            }
+            for (const table of TABLES_ADDED_AFTER_SCOPE_SHARING) {
                 opened.database.run(sql.raw(`DROP TABLE "${table}"`));
             }
             opened.database.run(sql.raw("ALTER TABLE session_shares DROP COLUMN tool_output"));

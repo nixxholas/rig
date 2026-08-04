@@ -187,6 +187,9 @@ function liveEventKey(event: GlobalLiveEvent): string {
     ) {
         return event.type;
     }
+    if (event.type === "session_share_capabilities_changed") {
+        return `${event.type}:member:${event.data.shareMemberId}`;
+    }
     if ("sessionId" in event) return `${event.type}:session:${event.sessionId}`;
     const scope =
         "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;
