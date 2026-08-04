@@ -8,7 +8,7 @@ import type {
 } from "../agent/index.js";
 import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
-import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
+import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import type {
     ProviderModelCompatibilityType,
     ProviderQuota,
@@ -1112,6 +1112,9 @@ export type RunFinishedEvent = BaseSessionEvent<
         attachments?: readonly Attachment[];
         /** Present whenever `stopReason` is `error`, so the failure stays readable in history. */
         errorMessage?: string;
+        providerError?: ProviderError;
+        providerId?: string;
+        requestedModelId?: string;
         modelLocked: boolean;
         runId: string;
         stopReason: StopReason;
@@ -1136,6 +1139,9 @@ export type RunErrorEvent = BaseSessionEvent<
     {
         errorMessage: string;
         modelLocked: boolean;
+        providerError?: ProviderError;
+        providerId?: string;
+        requestedModelId?: string;
         runId: string;
         startupInterruption?: true;
     }

@@ -1,6 +1,10 @@
 import type { Executor } from "@/Executor.js";
 import type { ExecutorEvent } from "@/ExecutorEvent.js";
-import type { SessionReasoningEffort, SessionTool } from "@slopus/rig-providers";
+import {
+    extractProviderErrorDiagnostics,
+    type SessionReasoningEffort,
+    type SessionTool,
+} from "@slopus/rig-providers";
 
 import { createInferenceStream } from "@/createInferenceStream.js";
 import { parseOpenAIToolArguments } from "@/parseOpenAIToolArguments.js";
@@ -309,10 +313,18 @@ async function* streamExecutorInference(options: {
             return partial;
         }
     } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const diagnostics = extractProviderErrorDiagnostics(error, {
+            attempts: 1,
+            upstreamMessage: errorMessage,
+        });
         partial = {
             ...partial,
-            errorMessage: error instanceof Error ? error.message : String(error),
-            providerError: { type: "unclassified" },
+            errorMessage,
+            providerError: {
+                type: "unclassified",
+                ...(diagnostics === undefined ? {} : { diagnostics }),
+            },
             stopReason: options.streamOptions?.signal?.aborted ? "aborted" : "error",
         };
         terminal = true;

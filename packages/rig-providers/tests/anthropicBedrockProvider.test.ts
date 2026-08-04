@@ -13,7 +13,10 @@ import {
     type AnthropicBedrockProviderOptions,
 } from "@/vendors/bedrock/AnthropicBedrockProvider.js";
 import { resolveAnthropicBedrockRetryDelay } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
-import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
+import {
+    classifyAnthropicBedrockError,
+    classifyAnthropicBedrockProviderError,
+} from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
 import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
 import {
@@ -24,6 +27,15 @@ import { resolveAnthropicBedrockModelId } from "@/vendors/bedrock/impl/resolveAn
 import { claude_tools } from "@/vendors/claude/tools/index.js";
 
 describe("AnthropicBedrockProvider", () => {
+    it("classifies a generic HTTP 500 as an internal server error", () => {
+        const error = Object.assign(new Error("request failed"), { status: 500 });
+
+        expect(classifyAnthropicBedrockProviderError(error, 1)).toMatchObject({
+            type: "internal_server_error",
+            diagnostics: { attempts: 1, status: 500 },
+        });
+    });
+
     it("uses the same regional inference profiles as Rig's Bedrock catalog", () => {
         expect(resolveAnthropicBedrockModelId("anthropic/opus-4-8", "us-east-1")).toBe(
             "us.anthropic.claude-opus-4-8",
@@ -804,6 +816,13 @@ describe("AnthropicBedrockProvider", () => {
                 state: "error",
                 kind: "unknown",
                 message: "request rejected",
+                providerError: {
+                    type: "unclassified",
+                    diagnostics: {
+                        attempts: 1,
+                        upstreamMessage: "request rejected",
+                    },
+                },
             },
         ]);
     });

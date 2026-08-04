@@ -12,7 +12,7 @@ import type { SessionTool } from "@/core/SessionTool.js";
 import type { GrokCredential } from "@/vendors/VendorCredential.js";
 import { GROK_INFERENCE_MAX_RETRIES } from "@/vendors/grok/impl/grokConstants.js";
 import { GrokConnection } from "@/vendors/grok/impl/GrokConnection.js";
-import { classifyGrokError } from "@/vendors/grok/errors/grokErrors.js";
+import { classifyGrokError, classifyGrokProviderError } from "@/vendors/grok/errors/grokErrors.js";
 import { countGrokUserQueries } from "@/vendors/grok/impl/grokMessages.js";
 import { createGrokCompactionContinuation } from "@/vendors/grok/impl/grokCompaction.js";
 import { createGrokCompactionPrompt } from "@/vendors/grok/impl/grokCompaction.js";
@@ -513,7 +513,7 @@ export class GrokSession extends BaseSession {
                     state: "error",
                     kind: classifyGrokError(message),
                     message,
-                    ...(authError ? { providerError: { type: "authentication" as const } } : {}),
+                    providerError: classifyGrokProviderError(error, message, attempt + 1),
                 };
                 return;
             }

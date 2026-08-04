@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
+import { recordProviderFailure } from "./recordProviderFailure.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import {
     createDaemonStartupRequestListener,
@@ -507,6 +508,7 @@ async function runOwnedLocalProtocolServer(
                 ? {}
                 : { onSessionAccess: (session) => happySyncService?.attach(session) }),
             onSessionEvent: (event, session) => {
+                recordProviderFailure(daemonLog, event);
                 if (happyModule !== undefined) happySyncService?.observe(event, session);
                 shareRuntime?.kinds.session.wake(event.sessionId);
                 const shared = session?.projectIdentity();

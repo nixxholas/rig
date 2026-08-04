@@ -13,14 +13,23 @@ import type {
     SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 
+import { extractProviderErrorDiagnostics } from "@/core/extractProviderErrorDiagnostics.js";
 import type { SessionProviderError } from "@/core/SessionEvent.js";
 
 export function classifyClaudeError(options: {
     assistantError?: SDKAssistantMessageError;
+    attempts?: number;
+    error?: unknown;
     message: string;
     rateLimitInfo?: SDKRateLimitInfo;
     requestId?: string;
 }): SessionProviderError {
+    const diagnostics = extractProviderErrorDiagnostics(options.error, {
+        attempts: options.attempts ?? 1,
+        ...(options.assistantError === undefined ? {} : { code: options.assistantError }),
+        ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+        upstreamMessage: options.message,
+    });
     const normalized = options.message.toLowerCase();
     const resetAt = earliestResetAt(options.rateLimitInfo);
     const outOfTokens =
@@ -33,6 +42,7 @@ export function classifyClaudeError(options: {
         return {
             type: "out_of_tokens",
             ...(resetAt === undefined ? {} : { resetAt }),
+            ...(diagnostics === undefined ? {} : { diagnostics }),
         };
     }
 
@@ -47,16 +57,24 @@ export function classifyClaudeError(options: {
         return {
             type: "rate_limit",
             ...(resetAt === undefined ? {} : { resetAt }),
+            ...(diagnostics === undefined ? {} : { diagnostics }),
         };
     }
-    if (options.assistantError === "overloaded") return { type: "server_overloaded" };
+    if (options.assistantError === "overloaded")
+        return {
+            type: "server_overloaded",
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+        };
     if (options.assistantError === "server_error") {
         return {
             type: "internal_server_error",
-            ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+            ...(diagnostics === undefined ? {} : { diagnostics }),
         };
     }
-    return { type: "unclassified" };
+    return {
+        type: "unclassified",
+        ...(diagnostics === undefined ? {} : { diagnostics }),
+    };
 }
 
 export function claudeResultErrorMessage(

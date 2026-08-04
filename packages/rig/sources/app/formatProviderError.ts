@@ -37,7 +37,8 @@ export function formatProviderError(
         return `${provider} servers are overloaded. Try again later.`;
     }
     if (error?.type === "internal_server_error") {
-        return `${provider} encountered an internal server error. Try again.${error.requestId === undefined ? "" : ` Request ID: ${error.requestId}.`}`;
+        const requestId = error.diagnostics?.requestId;
+        return `${provider} encountered an internal server error. Try again.${requestId === undefined ? "" : ` Request ID: ${requestId}.`}`;
     }
     return options.fallbackMessage?.trim() || `${provider} returned an error.`;
 }

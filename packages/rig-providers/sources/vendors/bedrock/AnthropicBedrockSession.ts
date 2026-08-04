@@ -13,7 +13,10 @@ import {
     shouldRetryAnthropicBedrock,
     waitForAnthropicBedrockRetry,
 } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
-import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
+import {
+    classifyAnthropicBedrockError,
+    classifyAnthropicBedrockProviderError,
+} from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { AnthropicBedrockConnection } from "@/vendors/bedrock/impl/AnthropicBedrockConnection.js";
 import type { AnthropicBedrockClient as CreatedAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
 import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
@@ -229,6 +232,7 @@ export class AnthropicBedrockSession extends BaseSession {
         tools?: readonly SessionTool[];
     }): AsyncGenerator<SessionEvent> {
         let blockStarted = false;
+        let attempts = 0;
         try {
             const tools = this.resolveTools(options.model, options.tools);
             const request = this.createRequest({ ...options, tools });
@@ -236,6 +240,7 @@ export class AnthropicBedrockSession extends BaseSession {
             while (true) {
                 let responseContentStarted = false;
                 try {
+                    attempts += 1;
                     const response = await this.connection.stream(
                         request,
                         ...(options.signal === undefined ? [] : ([options.signal] as const)),
@@ -278,6 +283,7 @@ export class AnthropicBedrockSession extends BaseSession {
                 state: "error",
                 kind: classifyAnthropicBedrockError(error),
                 message: error instanceof Error ? error.message : String(error),
+                providerError: classifyAnthropicBedrockProviderError(error, attempts),
             };
         }
     }

@@ -6291,7 +6291,11 @@ export class InMemorySession {
     #commitRunFinished(runId: string, result: AgentRunResult): SessionRunCompletion["status"] {
         const stopReason: StopReason = result.stopReason;
         if (result.stopReason === "error") {
-            this.#appendDurableError(runId, result.errorMessage, this.#runtime);
+            this.#appendDurableError(runId, result.errorMessage, this.#runtime, {
+                providerError: result.providerError,
+                providerId: result.providerId,
+                requestedModelId: result.requestedModelId,
+            });
         }
         const responseText = findLastAgentResponseText(
             this.#messages.filter((entry) => entry.runId === runId).map((entry) => entry.message),
@@ -6358,6 +6362,13 @@ export class InMemorySession {
                     ? (result.errorMessage ?? "The model response failed.")
                     : SUBAGENT_TOKEN_EXHAUSTED_ERROR,
                 modelLocked: this.#modelLocked(),
+                ...(result.stopReason !== "error"
+                    ? {}
+                    : {
+                          providerError: result.providerError,
+                          providerId: result.providerId,
+                          requestedModelId: result.requestedModelId,
+                      }),
                 runId,
             });
             this.#restartMetadataSettlement();
@@ -6369,6 +6380,13 @@ export class InMemorySession {
             agentRunId: result.runId,
             ...attachmentCompletion,
             ...(result.errorMessage === undefined ? {} : { errorMessage: result.errorMessage }),
+            ...(result.stopReason !== "error"
+                ? {}
+                : {
+                      providerError: result.providerError,
+                      providerId: result.providerId,
+                      requestedModelId: result.requestedModelId,
+                  }),
             modelLocked: this.#modelLocked(),
             runId,
             stopReason,
@@ -6390,6 +6408,7 @@ export class InMemorySession {
         runId: string,
         reason: string,
         runtime: CodingAssistantRuntime | undefined,
+        diagnostics?: Pick<ErrorMessage, "providerError" | "providerId" | "requestedModelId">,
     ): void {
         const exists = this.#messages.some(
             (entry) =>
@@ -6401,7 +6420,14 @@ export class InMemorySession {
                 ),
         );
         if (exists) return;
-        const message: ErrorMessage = createErrorMessage(createId(), reason, "failed");
+        const message: ErrorMessage = createErrorMessage(
+            createId(),
+            reason,
+            "failed",
+            undefined,
+            undefined,
+            diagnostics,
+        );
         if (runtime === undefined) this.#contextMessages?.push(message);
         else runtime.agent.recordMessage(message);
         this.#appendAgentMessage(runId, message);

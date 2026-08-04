@@ -1,4 +1,8 @@
-import type { SessionErrorKind } from "@/core/SessionEvent.js";
+import {
+    extractProviderErrorDiagnostics,
+    extractProviderRetryResetAt,
+} from "@/core/extractProviderErrorDiagnostics.js";
+import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
 
 /**
  * Recognition of the Codex rejections that change what the session does next.
@@ -21,6 +25,44 @@ export function classifyCodexError(message: string): SessionErrorKind {
     )
         return "internal_error";
     return "unknown";
+}
+
+export function classifyCodexProviderError(
+    error: unknown,
+    message: string,
+    attempts: number,
+): SessionProviderError {
+    const diagnostics = extractProviderErrorDiagnostics(error, {
+        attempts,
+        upstreamMessage: message,
+    });
+    const status = diagnostics?.status;
+    const normalized = message.toLowerCase();
+    const kind = classifyCodexError(message);
+    const type: SessionProviderError["type"] =
+        isCodexUnauthorizedError(error) || status === 403
+            ? "authentication"
+            : status === 402 || kind === "billing_error"
+              ? "out_of_tokens"
+              : status === 429
+                ? "rate_limit"
+                : status === 503 || normalized.includes("overloaded")
+                  ? "server_overloaded"
+                  : (status !== undefined && status >= 500) || kind === "internal_error"
+                    ? "internal_server_error"
+                    : "unclassified";
+    if (type === "rate_limit" || type === "out_of_tokens") {
+        const resetAt = extractProviderRetryResetAt(error);
+        return {
+            type,
+            ...(resetAt === undefined ? {} : { resetAt }),
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+        };
+    }
+    return {
+        type,
+        ...(diagnostics === undefined ? {} : { diagnostics }),
+    };
 }
 
 /** Detects a server rejection that can be retried with a smaller compaction input. */

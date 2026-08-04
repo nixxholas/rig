@@ -194,13 +194,21 @@ gives the typed detail callers act on:
 
 ```ts
 type SessionProviderError =
-    | { type: "authentication" }
-    | { type: "out_of_tokens"; resetAt?: number }
-    | { type: "rate_limit"; resetAt?: number }
-    | { type: "server_overloaded" }
-    | { type: "internal_server_error"; requestId?: string }
-    | { type: "unclassified" };
+    | { type: "authentication"; diagnostics?: SessionProviderErrorDiagnostics }
+    | {
+          type: "out_of_tokens";
+          resetAt?: number;
+          diagnostics?: SessionProviderErrorDiagnostics;
+      }
+    | { type: "rate_limit"; resetAt?: number; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "server_overloaded"; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "internal_server_error"; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "unclassified"; diagnostics?: SessionProviderErrorDiagnostics };
 ```
+
+Diagnostics retain only bounded, non-secret fields: status, provider code and type, request and
+response IDs, upstream message, total attempts, and the provider's retry directive. Raw response
+bodies and arbitrary headers are never retained.
 
 Retries happen inside the provider and are surfaced as `retrying` events. Callers must not
 re-issue a request themselves.

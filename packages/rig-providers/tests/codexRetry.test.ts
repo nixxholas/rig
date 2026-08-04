@@ -7,7 +7,10 @@ import { describe, expect, it } from "vitest";
 
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 import { formatCodexUserAgent } from "@/vendors/codex/impl/codexUserAgent.js";
-import { classifyCodexError } from "@/vendors/codex/errors/codexErrors.js";
+import {
+    classifyCodexError,
+    classifyCodexProviderError,
+} from "@/vendors/codex/errors/codexErrors.js";
 import { codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexContextWindowError } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
@@ -25,6 +28,15 @@ import {
 } from "@/vendors/codex/impl/codexRetry.js";
 
 describe("Codex stream retries", () => {
+    it("classifies a generic HTTP 500 as an internal server error", () => {
+        const error = Object.assign(new Error("request failed"), { status: 500 });
+
+        expect(classifyCodexProviderError(error, error.message, 1)).toMatchObject({
+            type: "internal_server_error",
+            diagnostics: { attempts: 1, status: 500 },
+        });
+    });
+
     it("recognizes the Bedrock prompt-token overflow returned during compaction", () => {
         expect(
             isCodexContextWindowError(

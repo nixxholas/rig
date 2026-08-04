@@ -54,9 +54,18 @@ export type {
     SessionErrorKind,
     SessionEvent,
     SessionProviderError,
+    SessionProviderErrorDiagnostics,
     SessionStream,
 } from "@/core/SessionEvent.js";
 export { isSessionDoneEvent, isSessionErrorDone } from "@/core/SessionEvent.js";
+export {
+    sessionProviderErrorDiagnosticsSchema,
+    sessionProviderErrorSchema,
+} from "@/core/SessionProviderError.js";
+export {
+    extractProviderErrorDiagnostics,
+    extractProviderRetryResetAt,
+} from "@/core/extractProviderErrorDiagnostics.js";
 export { committedSessionEvents } from "@/core/committedSessionEvents.js";
 export type {
     SessionReasoningEffort,

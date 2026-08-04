@@ -8,7 +8,7 @@ import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivac
 import { collectSessionEvents, textFromSessionEvents } from "./helpers/collectSessionEvents.js";
 
 describe("ClaudeSession", () => {
-    it("preserves weekly quota classification, reset time, and the native error", async () => {
+    it("preserves weekly quota classification, reset time, retries, and the native error", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("quota-session", {
@@ -17,6 +17,17 @@ describe("ClaudeSession", () => {
             model: "sonnet[1m]",
             query: (() => {
                 async function* messages() {
+                    yield {
+                        type: "system",
+                        subtype: "api_retry",
+                        attempt: 2,
+                        max_retries: 10,
+                        retry_delay_ms: 1_500,
+                        error_status: 429,
+                        error: "rate_limit",
+                        uuid: "quota-retry-id",
+                        session_id: "quota-session",
+                    };
                     yield {
                         type: "rate_limit_event",
                         rate_limit_info: {
@@ -90,7 +101,15 @@ describe("ClaudeSession", () => {
             state: "error",
             kind: "unknown",
             message: "You've hit your weekly limit · resets Jul 25 at 5am",
-            providerError: { type: "rate_limit", resetAt: 2_000_000 },
+            providerError: {
+                type: "rate_limit",
+                resetAt: 2_000_000,
+                diagnostics: {
+                    attempts: 3,
+                    code: "rate_limit",
+                    upstreamMessage: "You've hit your weekly limit · resets Jul 25 at 5am",
+                },
+            },
         });
     });
 

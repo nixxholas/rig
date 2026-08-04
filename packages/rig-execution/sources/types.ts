@@ -10,6 +10,7 @@ import type {
     ClaudeAuxiliaryQueryRequest,
     ClaudeAuxiliaryQueryResponse,
     SessionAssistantMessage,
+    SessionProviderError,
     SessionToolResultMessage,
 } from "@slopus/rig-providers";
 
@@ -32,13 +33,7 @@ export interface ProfilePromptContext {
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 export type ProviderErrorCode = "incomplete_response" | "invalid_image_request";
 /** `resetAt` is a Unix timestamp in milliseconds when present. */
-export type ProviderError =
-    | { type: "authentication" }
-    | { type: "out_of_tokens"; resetAt?: number }
-    | { type: "rate_limit"; resetAt?: number }
-    | { type: "server_overloaded" }
-    | { type: "internal_server_error"; requestId?: string }
-    | { type: "unclassified" };
+export type ProviderError = SessionProviderError;
 export type ProviderImageProfile = "claude" | "codex";
 export type ProviderToolProfile = "claude" | "codex" | "grok";
 export type ServiceTier = "fast";

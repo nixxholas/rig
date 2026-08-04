@@ -354,6 +354,7 @@ export class ClaudeSession extends BaseSession {
         let assistantError: SDKAssistantMessageError | undefined;
         let rateLimitInfo: SDKRateLimitInfo | undefined;
         let requestId: string | undefined;
+        let attempts = 1;
         let usage = { ...EMPTY_SESSION_CACHE_USAGE };
         let sawInferenceUsage = false;
         try {
@@ -421,6 +422,7 @@ export class ClaudeSession extends BaseSession {
                     return;
                 }
                 if (message.type === "system" && message.subtype === "api_retry") {
+                    attempts = Math.max(attempts, message.attempt + 1);
                     yield toClaudeRetryEvent(message);
                     continue;
                 }
@@ -589,6 +591,7 @@ export class ClaudeSession extends BaseSession {
                             : claudeResultErrorMessage(result);
                     const providerError = classifyClaudeError({
                         ...(assistantError === undefined ? {} : { assistantError }),
+                        attempts,
                         message,
                         ...(rateLimitInfo === undefined ? {} : { rateLimitInfo }),
                         ...(requestId === undefined ? {} : { requestId }),
@@ -624,6 +627,8 @@ export class ClaudeSession extends BaseSession {
             const message = rawMessage.trim() || "Claude inference failed with an unknown error.";
             const providerError = classifyClaudeError({
                 ...(assistantError === undefined ? {} : { assistantError }),
+                attempts,
+                error,
                 message,
                 ...(rateLimitInfo === undefined ? {} : { rateLimitInfo }),
                 ...(requestId === undefined ? {} : { requestId }),

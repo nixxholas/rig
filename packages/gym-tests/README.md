@@ -450,7 +450,8 @@ interface GymInferenceResponse {
 - `serverToolCallDeltaDelayMs` pauses before and after each hosted call's argument delta, so its live row stays observable while the arguments are still incomplete.
 - `stopReason` defaults to `toolUse` when any content block is a tool call, otherwise `stop`.
 - `errorMessage` populates the assistant message error field.
-- `providerError` supplies the provider-neutral error category and optional reset timestamp.
+- `providerError` supplies the provider-neutral error category, optional reset timestamp, and
+  bounded diagnostics such as status, code, request ID, response ID, upstream message, and attempts.
 - `responseModel` simulates a provider reporting a different concrete model.
 - `usage` supplies token and cost accounting. Omitted usage is zeroed.
 

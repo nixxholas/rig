@@ -11,7 +11,11 @@ import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRu
 import type { SessionTool } from "@/core/SessionTool.js";
 import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
-import { classifyCodexError, codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
+import {
+    classifyCodexError,
+    classifyCodexProviderError,
+    codexErrorMessage,
+} from "@/vendors/codex/errors/codexErrors.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";
 import {
     type CodexCompactionMetadata,
@@ -663,6 +667,7 @@ export class CodexSession extends BaseSession {
                     state: "error",
                     kind: classifyCodexError(message),
                     message: displayMessage,
+                    providerError: classifyCodexProviderError(error, message, reportedAttempt + 1),
                 };
                 return;
             }

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { BedrockBearerTokenCredential } from "@/vendors/bedrock/BedrockBearerTokenCredential.js";
 import { CodexApiKeyCredential } from "@/vendors/codex/CodexApiKeyCredential.js";
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
+import { CodexSession } from "@/vendors/codex/CodexSession.js";
 import { CODEX_API_ENDPOINT, CODEX_CHATGPT_ENDPOINT } from "@/vendors/codex/impl/codexConstants.js";
 import { getCodexModelProperties } from "@/vendors/codex/impl/getCodexModelProperties.js";
 import { codex_coding_agent_instructions } from "@/vendors/codex/prompts/codex_coding_agent_instructions.js";
@@ -153,6 +154,145 @@ describe("CodexProvider credential behavior", () => {
             );
             expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
             expect(requests).toBe(2);
+            session.destroy();
+        } finally {
+            server.close();
+        }
+    });
+
+    it("keeps Bedrock failure diagnostics on an exhausted terminal response", async () => {
+        const server = createServer(async (request, response) => {
+            for await (const _chunk of request) {
+                // Drain the request before answering.
+            }
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.end(
+                `data: ${JSON.stringify({
+                    type: "response.failed",
+                    sequence_number: 1,
+                    response: {
+                        id: "response-bedrock-terminal",
+                        error: {
+                            code: "server_error",
+                            message: "Internal server error",
+                        },
+                        incomplete_details: null,
+                    },
+                })}\n\ndata: [DONE]\n\n`,
+            );
+        });
+        await new Promise<void>((resolve, reject) => {
+            server.listen(0, "127.0.0.1", resolve);
+            server.once("error", reject);
+        });
+        const address = server.address();
+        if (typeof address !== "object" || address === null) expect.fail("Missing server port.");
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-test-token",
+        });
+
+        try {
+            const session = new CodexSession("bedrock-terminal-failure", {
+                credential: credential!,
+                endpoint: `http://127.0.0.1:${address.port}/openai/v1`,
+                installationId: "test-installation",
+                instructions: "instructions",
+                model: "openai.gpt-5.6-sol",
+                streamMaxRetries: 0,
+                transport: "sse",
+                userAgent: "rig-test",
+            });
+            const events = [];
+            for await (const event of session.run({
+                context: { messages: [{ role: "user", content: "fail once" }] },
+            })) {
+                events.push(event);
+            }
+
+            expect(events.at(-1)).toEqual({
+                type: "done",
+                state: "error",
+                kind: "internal_error",
+                message: "Internal server error",
+                providerError: {
+                    type: "internal_server_error",
+                    diagnostics: {
+                        attempts: 1,
+                        code: "server_error",
+                        errorType: "response.failed",
+                        responseId: "response-bedrock-terminal",
+                        upstreamMessage: "Internal server error",
+                    },
+                },
+            });
+            session.destroy();
+        } finally {
+            server.close();
+        }
+    });
+
+    it("keeps the Bedrock HTTP status, code, request ID, and retry directive", async () => {
+        const server = createServer(async (request, response) => {
+            for await (const _chunk of request) {
+                // Drain the request before answering.
+            }
+            response.writeHead(424, {
+                "content-type": "application/json",
+                "x-amzn-requestid": "bedrock-request-424",
+                "x-should-retry": "false",
+            });
+            response.end(
+                JSON.stringify({
+                    code: "model_backend_failure",
+                    message: "Internal server error",
+                }),
+            );
+        });
+        await new Promise<void>((resolve, reject) => {
+            server.listen(0, "127.0.0.1", resolve);
+            server.once("error", reject);
+        });
+        const address = server.address();
+        if (typeof address !== "object" || address === null) expect.fail("Missing server port.");
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-test-token",
+        });
+
+        try {
+            const session = new CodexSession("bedrock-http-failure", {
+                credential: credential!,
+                endpoint: `http://127.0.0.1:${address.port}/openai/v1`,
+                installationId: "test-installation",
+                instructions: "instructions",
+                model: "openai.gpt-5.6-sol",
+                streamMaxRetries: 5,
+                transport: "sse",
+                userAgent: "rig-test",
+            });
+            const events = [];
+            for await (const event of session.run({
+                context: { messages: [{ role: "user", content: "fail at HTTP" }] },
+            })) {
+                events.push(event);
+            }
+
+            expect(events.at(-1)).toMatchObject({
+                type: "done",
+                state: "error",
+                kind: "internal_error",
+                providerError: {
+                    type: "internal_server_error",
+                    diagnostics: {
+                        attempts: 1,
+                        code: "model_backend_failure",
+                        requestId: "bedrock-request-424",
+                        retryDirective: false,
+                        status: 424,
+                        upstreamMessage: expect.stringContaining("Internal server error"),
+                    },
+                },
+            });
+            expect(events.some((event) => event.type === "retrying")).toBe(false);
             session.destroy();
         } finally {
             server.close();

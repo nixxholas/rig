@@ -60,7 +60,10 @@ describe("formatProviderError", () => {
         ).toBe("Codex servers are overloaded. Try again later.");
         expect(
             formatProviderError(
-                { type: "internal_server_error", requestId: "request-123" },
+                {
+                    type: "internal_server_error",
+                    diagnostics: { requestId: "request-123" },
+                },
                 { fallbackMessage: "raw internal error", providerId: "codex" },
             ),
         ).toBe("Codex encountered an internal server error. Try again. Request ID: request-123.");

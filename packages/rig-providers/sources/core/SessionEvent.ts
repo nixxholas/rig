@@ -1,17 +1,14 @@
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionProviderError } from "@/core/SessionProviderError.js";
+
+export type {
+    SessionProviderError,
+    SessionProviderErrorDiagnostics,
+} from "@/core/SessionProviderError.js";
 
 export type SessionDoneState = "cancelled" | "normal" | "tool_call" | "length" | "error";
 
 export type SessionErrorKind = "internal_error" | "context_overflow" | "billing_error" | "unknown";
-
-/** Provider failure details that remain meaningful above a native session transport. */
-export type SessionProviderError =
-    | { type: "authentication" }
-    | { type: "out_of_tokens"; resetAt?: number }
-    | { type: "rate_limit"; resetAt?: number }
-    | { type: "server_overloaded" }
-    | { type: "internal_server_error"; requestId?: string }
-    | { type: "unclassified" };
 
 /** Streaming events emitted during a single session run. */
 export type SessionEvent =

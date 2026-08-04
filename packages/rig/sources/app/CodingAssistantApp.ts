@@ -1130,7 +1130,17 @@ export class CodingAssistantApp implements Component, Focusable {
             const alreadyRendered = this.#hasActiveInferenceFailure(event.data.errorMessage);
             this.#activeTurnEntryStart = undefined;
             if (!alreadyRendered) {
-                this.#appendEntry({ role: "error", text: event.data.errorMessage });
+                this.#appendEntry({
+                    role: "error",
+                    ...(event.data.providerError === undefined
+                        ? {}
+                        : { providerError: event.data.providerError }),
+                    providerErrorFallback: event.data.errorMessage,
+                    ...(event.data.providerId === undefined
+                        ? {}
+                        : { providerErrorProviderId: event.data.providerId }),
+                    text: event.data.errorMessage,
+                });
             }
             this.#startDrainQueue();
             return;
@@ -3828,6 +3838,13 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#appendEntry({
                 id: message.id,
                 role: "error",
+                ...(message.providerError === undefined
+                    ? {}
+                    : { providerError: message.providerError }),
+                providerErrorFallback: text,
+                ...(message.providerId === undefined
+                    ? {}
+                    : { providerErrorProviderId: message.providerId }),
                 text,
                 title:
                     message.outcome === "retried"
