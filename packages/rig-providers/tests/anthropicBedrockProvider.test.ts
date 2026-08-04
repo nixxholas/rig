@@ -1064,6 +1064,13 @@ describe("AnthropicBedrockProvider", () => {
             state: "error",
             kind: "unknown",
             message: "stream truncated after compaction",
+            providerError: {
+                diagnostics: {
+                    attempts: 1,
+                    upstreamMessage: "stream truncated after compaction",
+                },
+                type: "unclassified",
+            },
         });
     });
 
@@ -1107,6 +1114,13 @@ describe("AnthropicBedrockProvider", () => {
             state: "error",
             kind: "unknown",
             message: "stream truncated after compaction stop",
+            providerError: {
+                diagnostics: {
+                    attempts: 1,
+                    upstreamMessage: "stream truncated after compaction stop",
+                },
+                type: "unclassified",
+            },
         });
     });
 
