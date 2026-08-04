@@ -37,6 +37,46 @@ describe("plugin installation request identity", () => {
         expect(install).toHaveBeenCalledTimes(1);
     });
 
+    it("recognizes the same package source however its retry ordered the JSON keys", async () => {
+        const requests = new PluginInstallationRequests();
+        const install = vi.fn(async () => installed);
+        const plugin = {
+            description: "A small clock.",
+            displayName: "Clock",
+            name: "clock",
+            path: "plugins/clock",
+            version: "1.2.0",
+        };
+        const source = {
+            catalogId: "a".repeat(64),
+            plugin,
+            repository: "happy-dev/plugins",
+            revision: "b".repeat(40),
+            type: "github",
+        };
+        const reordered = {
+            revision: source.revision,
+            type: source.type,
+            plugin: {
+                version: plugin.version,
+                path: plugin.path,
+                name: plugin.name,
+                displayName: plugin.displayName,
+                description: plugin.description,
+            },
+            repository: source.repository,
+            catalogId: source.catalogId,
+        };
+
+        await expect(requests.run("request-1", source, install)).resolves.toBe(installed);
+        await expect(requests.run("request-1", reordered, install)).resolves.toBe(installed);
+        expect(install).toHaveBeenCalledTimes(1);
+
+        expect(() =>
+            requests.run("request-1", { ...source, revision: "c".repeat(40) }, install),
+        ).toThrow("already belongs to a different source");
+    });
+
     it("allows the same request to restart after an aborted or failed attempt", async () => {
         const requests = new PluginInstallationRequests();
         const install = vi

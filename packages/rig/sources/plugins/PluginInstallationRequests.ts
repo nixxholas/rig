@@ -12,9 +12,10 @@ export class PluginInstallationRequests {
 
     run(
         requestId: string,
-        sourceIdentity: string,
+        source: unknown,
         install: () => Promise<InstalledPlugin>,
     ): Promise<InstalledPlugin> {
+        const sourceIdentity = canonicalIdentity(source);
         const existing = this.#requests.get(requestId);
         if (existing !== undefined) {
             if (existing.sourceIdentity !== sourceIdentity) {
@@ -55,4 +56,24 @@ export class PluginInstallationRequests {
         this.#requests.set(requestId, entry);
         return entry.promise;
     }
+}
+
+/**
+ * Describes an installation source so that the same source always reads the same.
+ *
+ * A retry is a fresh request body, and TypeBox decoding keeps whatever key order arrived, so
+ * comparing serialized sources directly would reject an honest retry that merely reordered its
+ * JSON. Sorting every object key makes the comparison about the source itself.
+ */
+function canonicalIdentity(value: unknown): string {
+    return JSON.stringify(canonicalize(value));
+}
+
+function canonicalize(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value === null || typeof value !== "object") return value;
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0,
+    );
+    return Object.fromEntries(entries.map(([key, entry]) => [key, canonicalize(entry)]));
 }

@@ -1,3 +1,4 @@
+import type { TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import { happyComputeErrorSchema } from "../../happy-plugins/sources/computeTypes.js";
@@ -10,7 +11,10 @@ import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
     PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
     createSessionShareRequestSchema as daemonCreateSessionShareRequestSchema,
+    discoverPluginCatalogRequestSchema as daemonDiscoverPluginCatalogRequestSchema,
+    discoverPluginCatalogResponseSchema as daemonDiscoverPluginCatalogResponseSchema,
     getSessionSharePeerActivityResponseSchema as daemonGetSessionSharePeerActivityResponseSchema,
+    installPluginRequestSchema as daemonInstallPluginRequestSchema,
     listSessionShareReplicaCapabilitiesResponseSchema as daemonListSessionShareReplicaCapabilitiesResponseSchema,
     rigCliInstallationInspectionSchema as daemonRigCliInstallationInspectionSchema,
     rigDaemonInstallationDiscoverySchema as daemonRigDaemonInstallationDiscoverySchema,
@@ -34,7 +38,10 @@ import {
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     computeServiceErrorSchema,
     createSessionShareRequestSchema,
+    discoverPluginCatalogRequestSchema,
     getSessionSharePeerActivityResponseSchema,
+    githubPluginCatalogSchema,
+    installPluginRequestSchema,
     listSessionShareReplicaCapabilitiesResponseSchema,
     projectWorkspaceSchema,
     describeSessionShareToolOutput,
@@ -463,6 +470,101 @@ describe("protocol conformance", () => {
         expect(() =>
             Value.Decode(projectWorkspaceSchema, { ...workspace, unexpected: true }),
         ).toThrow();
+    });
+
+    it("accepts and refuses exactly the same plugin catalog and installation payloads", () => {
+        // The catalog schemas are re-declared here so a browser bundle carries no daemon code,
+        // and the two declarations only agree at the type level. These checks are what proves
+        // they still agree about the values that actually cross the wire.
+        const entry = {
+            description: "A small clock.",
+            displayName: "Clock",
+            name: "clock",
+            path: "plugins/clock",
+            version: "1.2.0",
+        };
+        const source = {
+            catalogId: "a".repeat(64),
+            plugin: entry,
+            ref: "release/1.x",
+            repository: "happy-dev/plugins",
+            revision: "b".repeat(40),
+            type: "github",
+        };
+        const catalog = {
+            catalogId: source.catalogId,
+            plugins: [
+                {
+                    availability: "update-available",
+                    description: entry.description,
+                    displayName: entry.displayName,
+                    installed: { folder: "clock", name: "Clock", version: "1.0.0" },
+                    name: entry.name,
+                    source,
+                    version: entry.version,
+                },
+                {
+                    availability: "not-installed",
+                    description: entry.description,
+                    displayName: entry.displayName,
+                    name: entry.name,
+                    source,
+                    version: entry.version,
+                },
+            ],
+            ref: source.ref,
+            repository: source.repository,
+            revision: source.revision,
+        };
+        const discovery = { ref: source.ref, repository: source.repository };
+        const localInstall = {
+            requestId: "install-1",
+            source: { sourceDirectory: "/Users/steve/plugins/clock", type: "local-directory" },
+        };
+        const githubInstall = { requestId: "install-1", source };
+
+        const accepts = (local: TSchema, daemonSchema: TSchema, value: unknown) => {
+            expect(Value.Decode(local, value)).toEqual(value);
+            expect(Value.Decode(daemonSchema, value)).toEqual(value);
+        };
+        const refuses = (local: TSchema, daemonSchema: TSchema, value: unknown) => {
+            expect(Value.Check(local, value)).toBe(false);
+            expect(Value.Check(daemonSchema, value)).toBe(false);
+        };
+        const catalogs = (value: unknown) =>
+            [githubPluginCatalogSchema, daemonDiscoverPluginCatalogResponseSchema, value] as const;
+        const discoveries = (value: unknown) =>
+            [
+                discoverPluginCatalogRequestSchema,
+                daemonDiscoverPluginCatalogRequestSchema,
+                value,
+            ] as const;
+        const installs = (value: unknown) =>
+            [installPluginRequestSchema, daemonInstallPluginRequestSchema, value] as const;
+
+        accepts(...catalogs(catalog));
+        accepts(...discoveries(discovery));
+        accepts(...installs(localInstall));
+        accepts(...installs(githubInstall));
+
+        refuses(...catalogs({ ...catalog, revision: "b".repeat(39) }));
+        refuses(...catalogs({ ...catalog, catalogId: "A".repeat(64) }));
+        refuses(
+            ...catalogs({
+                ...catalog,
+                plugins: [{ ...catalog.plugins[0], availability: "already-installed" }],
+            }),
+        );
+        refuses(...catalogs({ ...catalog, unexpected: true }));
+        refuses(...discoveries({ ...discovery, ref: "release/../secrets" }));
+        refuses(...discoveries({ repository: "not-a-repository" }));
+        refuses(...installs({ source }));
+        refuses(
+            ...installs({
+                requestId: "install-1",
+                source: { ...source, plugin: { ...entry, version: "1.2" } },
+            }),
+        );
     });
 
     it("decodes the same bounded session-sharing requests and owner responses", () => {

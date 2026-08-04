@@ -259,7 +259,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         if (options.requestId !== undefined) {
             return this.#installationRequests.run(
                 options.requestId,
-                `local:${options.sourceDirectory}`,
+                { sourceDirectory: options.sourceDirectory, type: "local-directory" },
                 () => this.#installFromPath(options),
             );
         }
@@ -344,8 +344,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     ): Promise<InstalledPlugin> {
         this.#assertOpen();
         if (options.requestId === undefined) return this.#installFromGitHub(source, options);
-        const sourceIdentity = `github:${JSON.stringify(source)}`;
-        return this.#installationRequests.run(options.requestId, sourceIdentity, () =>
+        return this.#installationRequests.run(options.requestId, source, () =>
             this.#installFromGitHub(source, options),
         );
     }
