@@ -212,6 +212,45 @@ enabled = true
         });
     });
 
+    it("parses machine-level Iroh networking", () => {
+        expect(
+            parseConfigToml(`
+[p2p]
+enable_iroh = true
+expose_api = true
+[p2p.iroh]
+trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"]
+relay_url = "https://relay.example.com"
+`),
+        ).toEqual({
+            p2p: {
+                enableIroh: true,
+                exposeApi: true,
+                iroh: {
+                    trustedEndpointIds: [
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                    ],
+                    relayUrl: "https://relay.example.com",
+                },
+            },
+        });
+    });
+
+    it("rejects malformed or duplicate Iroh endpoint IDs", () => {
+        expect(() =>
+            parseConfigToml(
+                '[p2p]\nenable_iroh = true\n[p2p.iroh]\ntrusted_endpoint_ids = ["not-an-endpoint"]\n',
+            ),
+        ).toThrow("unique 64-character endpoint IDs");
+        const endpointId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        expect(() =>
+            parseConfigToml(
+                `[p2p]\nenable_iroh = true\n[p2p.iroh]\ntrusted_endpoint_ids = ["${endpointId}", "${endpointId}"]\n`,
+            ),
+        ).toThrow("unique 64-character endpoint IDs");
+    });
+
     it("parses ordered workspace setup commands", () => {
         expect(
             parseConfigToml(`
@@ -601,6 +640,10 @@ show_reasoning = true
 show_usage = true
 [features]
 workflows = true
+[p2p]
+enable_iroh = true
+[p2p.iroh]
+trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
 [providers]
 default_enable = false
 [providers.codex]
@@ -654,6 +697,11 @@ codex_stream_max_retries = 8
                 showUsage: true,
             });
             expect(loaded.config.features.workflows).toBe(true);
+            expect(loaded.config.p2p).toEqual({
+                enableIroh: false,
+                exposeApi: false,
+                iroh: { trustedEndpointIds: [] },
+            });
             expect(loaded.config.providerDefaultEnable).toBe(true);
             expect(loaded.config.providers).toEqual({
                 bedrock: { enabled: true, type: "bedrock" },
@@ -667,7 +715,7 @@ codex_stream_max_retries = 8
             });
             expect(loaded.config.workspace.setupCommands).toEqual(["printf project"]);
             expect(createProjectConfigSecurityNotice(loaded.sources.local.values)).toBe(
-                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, Codex reconnect attempts, daemon heap snapshots, the durable event queue, and the Happy integration under your machine-level control.",
+                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, Codex reconnect attempts, daemon heap snapshots, the durable event queue, the Happy integration, and P2P networking under your machine-level control.",
             );
 
             const emptyCwd = join(root, "empty-repo");
@@ -729,6 +777,7 @@ codex_stream_max_retries = 8
                     workspaces: true,
                 },
                 mcpServers: {},
+                p2p: DEFAULT_RIG_CONFIG.p2p,
                 presence: { states: {} },
                 providerDefaultEnable: false,
                 providers: {

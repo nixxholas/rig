@@ -2492,9 +2492,92 @@ export type SessionShareCapabilitiesChangedEvent = Static<
     typeof sessionShareCapabilitiesChangedEventSchema
 >;
 
+export const p2pPeerConnectionStatusSchema = Type.Union([
+    Type.Literal("connecting"),
+    Type.Literal("connected"),
+    Type.Literal("unreachable"),
+]);
+export const p2pPeerStatusSchema = Type.Object(
+    {
+        address: Type.String({ minLength: 1 }),
+        error: Type.Optional(Type.String()),
+        lastSeenAt: Type.Optional(Type.Number()),
+        peerId: Type.Optional(
+            Type.String({
+                maxLength: 32,
+                minLength: 2,
+                pattern: "^[a-z][a-z0-9]+$",
+            }),
+        ),
+        publicKey: Type.Optional(
+            Type.String({
+                maxLength: 43,
+                minLength: 43,
+                pattern: "^[A-Za-z0-9_-]+$",
+            }),
+        ),
+        rttMs: Type.Optional(Type.Number({ minimum: 0 })),
+        status: p2pPeerConnectionStatusSchema,
+    },
+    { additionalProperties: false },
+);
+export const p2pTransportStatusSchema = Type.Union([
+    Type.Object(
+        {
+            error: Type.String({ minLength: 1 }),
+            state: Type.Literal("unavailable"),
+            transport: Type.Literal("iroh"),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            apiExposed: Type.Optional(Type.Boolean()),
+            localAddress: Type.String({ minLength: 1 }),
+            peers: Type.Array(p2pPeerStatusSchema),
+            relayUrl: Type.Optional(Type.String({ minLength: 1 })),
+            state: Type.Literal("ready"),
+            transport: Type.Literal("iroh"),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export const p2pStatusSchema = Type.Object(
+    {
+        instanceId: Type.Optional(
+            Type.String({
+                maxLength: 32,
+                minLength: 2,
+                pattern: "^[a-z][a-z0-9]+$",
+            }),
+        ),
+        publicKey: Type.Optional(
+            Type.String({
+                maxLength: 43,
+                minLength: 43,
+                pattern: "^[A-Za-z0-9_-]+$",
+            }),
+        ),
+        transports: Type.Array(p2pTransportStatusSchema),
+    },
+    { additionalProperties: false },
+);
+export type P2pStatus = Static<typeof p2pStatusSchema>;
+export const p2pStatusChangedEventSchema = Type.Object(
+    {
+        createdAt: Type.Number(),
+        data: Type.Object({ status: p2pStatusSchema }, { additionalProperties: false }),
+        id: Type.String({ minLength: 1 }),
+        type: Type.Literal("p2p_status_changed"),
+    },
+    { additionalProperties: false },
+);
+export type P2pStatusChangedEvent = Static<typeof p2pStatusChangedEventSchema>;
+
 export type GlobalEvent =
     | ComputePreparationEvent
     | HappyCloudChangedEvent
+    | P2pStatusChangedEvent
     | SessionShareCapabilitiesChangedEvent
     | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"project_updated", { mutationId?: MutationId; project: Project }>

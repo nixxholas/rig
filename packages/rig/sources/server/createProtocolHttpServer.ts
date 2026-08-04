@@ -49,6 +49,7 @@ import type {
     RigDaemonInstallationDiscovery,
     InstallPluginRequest,
     InstallPluginResponse,
+    P2pStatus,
     GitStateResponse,
     GitWatchResponse,
     GoalSessionResponse,
@@ -154,6 +155,7 @@ import {
     listFileTreeRequestSchema,
     happyCloudCommandSchema,
     happyCloudSessionIdSchema,
+    p2pInstanceIdSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
     postSessionShareFriendMessageRequestSchema,
@@ -307,6 +309,8 @@ import {
     FileTreeSymlinkTraversalError,
     listFileTree,
 } from "../file-tree/index.js";
+import type { P2pNetwork } from "../p2p/index.js";
+import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
@@ -319,6 +323,8 @@ export interface ProtocolHttpServerOptions {
     happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
+    p2pNetwork?: P2pNetwork;
+    p2pStatus?: () => P2pStatus;
     murmur?: MurmurServiceContract;
     /** Workspace and project sharing over Murmur. The daemon always supplies it. */
     scopeShares?: ScopeShareServiceContract;
@@ -381,6 +387,8 @@ export function createProtocolHttpServer(
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
+        p2pNetwork: options.p2pNetwork,
+        p2pStatus: options.p2pStatus,
         murmur: options.murmur,
         scopeShares: options.scopeShares,
         sessionShares: options.sessionShares,
@@ -461,6 +469,8 @@ interface ProtocolServerRuntimeConfig {
     globalInstructionsPath: string;
     globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
+    p2pNetwork: P2pNetwork | undefined;
+    p2pStatus: (() => P2pStatus) | undefined;
     murmur: MurmurServiceContract | undefined;
     scopeShares: ScopeShareServiceContract | undefined;
     sessionShares: SessionShareServiceContract | undefined;
@@ -531,6 +541,7 @@ async function handleRequest(
 ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://unix");
     const route = matchRoute(url.pathname);
+    const p2pPeerRoute = matchP2pPeerRoute(url);
     if (route?.name === "webapp-context") {
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
@@ -553,6 +564,20 @@ async function handleRequest(
         sendJson(response, 401, { error: "Unauthorized" });
         return;
     }
+    if (p2pPeerRoute !== undefined) {
+        if (runtimeConfig.p2pNetwork === undefined) {
+            sendJson(response, 503, { error: "P2P networking is unavailable." });
+            return;
+        }
+        await proxyP2pHttpRequest(
+            runtimeConfig.p2pNetwork,
+            p2pPeerRoute.peerId,
+            p2pPeerRoute.path,
+            request,
+            response,
+        );
+        return;
+    }
     if (route === undefined) {
         sendJson(response, 404, { error: "Not found" });
         return;
@@ -564,6 +589,11 @@ async function handleRequest(
             200,
             healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue.durable),
         );
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "p2p-status") {
+        sendJson<P2pStatus>(response, 200, runtimeConfig.p2pStatus?.() ?? { transports: [] });
         return;
     }
 
@@ -4062,6 +4092,25 @@ async function handleRequest(
     sendJson(response, 405, { error: "Method not allowed" });
 }
 
+function matchP2pPeerRoute(url: URL): { path: string; peerId: string } | undefined {
+    const prefix = "/p2p/peers/";
+    if (!url.pathname.startsWith(prefix)) return undefined;
+    const remainder = url.pathname.slice(prefix.length);
+    const separator = remainder.indexOf("/");
+    if (separator <= 0) return undefined;
+    let peerId: string;
+    try {
+        peerId = decodeURIComponent(remainder.slice(0, separator));
+    } catch {
+        return undefined;
+    }
+    if (!Value.Check(p2pInstanceIdSchema, peerId)) return undefined;
+    const apiPath = remainder.slice(separator + 1);
+    if (apiPath !== "api" && !apiPath.startsWith("api/")) return undefined;
+    const path = apiPath === "api" ? "/" : `/${apiPath.slice("api/".length)}`;
+    return { path: `${path}${url.search}`, peerId };
+}
+
 function resolveProjectScopeDirectory(
     store: SessionStore,
     scope: ProjectScope,
@@ -4246,6 +4295,7 @@ function matchRoute(pathname: string):
               | "debug-inspector"
               | "health"
               | "installation"
+              | "p2p-status"
               | "happy-cloud-commands"
               | "happy-cloud-profile"
               | "happy-cloud-status"
@@ -4472,6 +4522,7 @@ function matchRoute(pathname: string):
     | undefined {
     if (pathname === "/health") return { name: "health" };
     if (pathname === "/installation") return { name: "installation" };
+    if (pathname === "/p2p/status") return { name: "p2p-status" };
     if (pathname === "/happy-cloud/commands") return { name: "happy-cloud-commands" };
     if (pathname === "/happy-cloud/profile") return { name: "happy-cloud-profile" };
     if (pathname === "/happy-cloud/status") return { name: "happy-cloud-status" };

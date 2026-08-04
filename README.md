@@ -580,6 +580,71 @@ In restricted Docker sessions, `allowed_loopback_ports` refers to loopback on
 the machine running Rig, not an arbitrary container port. Full access remains
 unrestricted and can bypass the managed proxy by design.
 
+### P2P networking
+
+Iroh P2P networking is opt-in and machine-wide. Enable it in the user
+`happy.toml`, restart the daemon, then run `rig daemon status` to copy this
+machine's endpoint ID:
+
+```toml
+[p2p]
+enable_iroh = true
+expose_api = true
+
+[p2p.iroh]
+trusted_endpoint_ids = [
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+]
+# relay_url = "https://relay.example.com"
+```
+
+Put each daemon's endpoint ID in the other daemon's `trusted_endpoint_ids` list.
+The endpoint ID is a transport address and first-contact allowlist entry, not
+the peer's durable Rig identity.
+
+Each Rig installation owns a stable cuid2 instance ID and one protected
+Ed25519 identity key. The same public key is the only key other parties need:
+Rig converts it to X25519 when encrypting, using the standard
+Edwards-to-Montgomery conversion.
+
+On the first allowed connection, both daemons exchange signed, expiring identity
+claims. The signatures cover the identity public keys, fresh challenges, and
+both Iroh endpoint IDs, binding the stable identity to that exact authenticated
+QUIC connection. Rig then pins the instance ID, public key, and transport binding.
+Later transports or replacement endpoint IDs can resolve to the same instance
+only by presenting the same stable key. Its X25519 form supports authenticated
+end-to-end encryption when payloads need protection beyond the already encrypted
+Iroh connection. The daemon keeps pinging every configured address and reports
+the verified instance identity and its transport status through
+`rig daemon status` and `rig-connect`.
+
+`expose_api` is separate from connectivity and defaults to `false`. When the
+serving machine enables it, its daemon API is available through the consuming
+machine's local authenticated daemon at:
+
+```text
+/p2p/peers/<instance-id>/api
+```
+
+For example, Happy can pass that URL prefix and the local daemon token to
+`rig-connect`; ordinary requests and long-lived event streams use the same
+prefix. Tokens never cross the P2P connection. The remote daemon authenticates
+the Iroh identity, then injects its own local token for the loopback request.
+
+API exposure grants substantial authority. A trusted instance can read
+transcripts, send messages that run agents and tools, change project files,
+install plugins, and manage workspaces as this Rig user. Only bootstrap endpoint
+IDs for machines you trust to act as you. Rig does not forward P2P topology routes,
+daemon shutdown, the debug inspector, or one-time webapp context exchanges.
+
+When `relay_url` is absent, Iroh uses its default discovery and relay services.
+The stable Rig identity seed and the Iroh transport identity are stored
+separately beside Rig's durable database with owner-only permissions. Learned
+peer pins are durable there as well. Project configuration cannot enable P2P
+networking. Upstream Iroh does not currently publish a native binding for Intel
+macOS; on that platform Rig reports P2P as unavailable and continues running
+normally.
+
 Provider availability is machine-wide because the local daemon owns the model
 catalog and authentication paths. Configure it in the user `happy.toml`:
 

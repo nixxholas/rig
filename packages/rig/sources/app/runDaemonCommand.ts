@@ -49,6 +49,41 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             return;
         }
         console.log(`Daemon is running at ${connection.client.socketPath}`);
+        try {
+            const p2p = await connection.client.getP2pStatus();
+            if (p2p.transports.length === 0) console.log("P2P networking is disabled.");
+            if (p2p.instanceId !== undefined) {
+                console.log(`P2P instance: ${p2p.instanceId}`);
+            }
+            if (p2p.publicKey !== undefined) {
+                console.log(`P2P public key: ${p2p.publicKey}`);
+            }
+            for (const transport of p2p.transports) {
+                if (transport.state === "unavailable") {
+                    console.log(`Iroh P2P networking is unavailable: ${transport.error}`);
+                    continue;
+                }
+                console.log(`Iroh P2P endpoint: ${transport.localAddress}`);
+                console.log(
+                    `Iroh P2P API sharing: ${transport.apiExposed ? "Enabled" : "Disabled"}`,
+                );
+                for (const peer of transport.peers) {
+                    const latency =
+                        peer.rttMs === undefined ? "" : ` (${String(Math.round(peer.rttMs))} ms)`;
+                    const error = peer.error === undefined ? "" : ` — ${peer.error}`;
+                    const identity =
+                        peer.peerId === undefined
+                            ? `unverified endpoint ${peer.address}`
+                            : `${peer.peerId} via endpoint ${peer.address}`;
+                    console.log(
+                        `Iroh P2P peer ${identity}: ${describePeerStatus(peer.status)}${latency}${error}`,
+                    );
+                }
+            }
+        } catch {
+            // A daemon from before the P2P status route still has a useful status.
+            console.log("P2P status is unavailable from this daemon.");
+        }
         console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
         return;
     }
@@ -59,6 +94,12 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
     }
     await connection.client.shutdown();
     console.log("Daemon is stopping.");
+}
+
+function describePeerStatus(status: "connected" | "connecting" | "unreachable"): string {
+    if (status === "connected") return "Connected";
+    if (status === "connecting") return "Connecting";
+    return "Unreachable";
 }
 
 async function connectToExistingDaemon(): Promise<

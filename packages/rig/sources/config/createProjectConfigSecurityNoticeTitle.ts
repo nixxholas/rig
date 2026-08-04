@@ -9,7 +9,11 @@ export function createProjectConfigSecurityNoticeTitle(config: PartialRigConfig)
     const durableEventQueue = config.settings?.durableGlobalEventQueue !== undefined;
     const happyIntegration = config.settings?.happyIntegration !== undefined;
     const daemonSetting =
-        codexRetries || daemonHeapSnapshots || durableEventQueue || happyIntegration;
+        codexRetries ||
+        daemonHeapSnapshots ||
+        durableEventQueue ||
+        happyIntegration ||
+        config.p2p !== undefined;
     if (daemonSetting && (permission || docker || providers)) {
         return "Project machine settings ignored";
     }

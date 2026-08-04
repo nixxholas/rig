@@ -14,6 +14,10 @@ export function mergeConfigValues(
     const features = { ...baseDefaults.features };
     const mcpServers = { ...baseDefaults.mcpServers };
     let network = baseDefaults.network;
+    const p2p = {
+        ...baseDefaults.p2p,
+        iroh: { ...baseDefaults.p2p.iroh },
+    };
     const presence: ConfigPresence = {
         ...baseDefaults.presence,
         states: { ...baseDefaults.presence.states },
@@ -84,6 +88,14 @@ export function mergeConfigValues(
         if (config.features?.crossWorkspace !== undefined) {
             features.crossWorkspace = config.features.crossWorkspace;
         }
+        if (config.p2p?.enableIroh !== undefined) p2p.enableIroh = config.p2p.enableIroh;
+        if (config.p2p?.exposeApi !== undefined) p2p.exposeApi = config.p2p.exposeApi;
+        if (config.p2p?.iroh?.trustedEndpointIds !== undefined) {
+            p2p.iroh.trustedEndpointIds = config.p2p.iroh.trustedEndpointIds;
+        }
+        if (config.p2p?.iroh?.relayUrl !== undefined) {
+            p2p.iroh.relayUrl = config.p2p.iroh.relayUrl;
+        }
         if (config.providerDefaultEnable !== undefined) {
             providerDefaultEnable = config.providerDefaultEnable;
         }
@@ -132,6 +144,7 @@ export function mergeConfigValues(
         features,
         mcpServers,
         ...(network === undefined ? {} : { network }),
+        p2p,
         presence,
         providerDefaultEnable,
         providers: Object.fromEntries(
