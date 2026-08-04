@@ -6,12 +6,19 @@ import { querySessionShare, querySessionShareMembers } from "./querySessionShare
 import { querySessionShareForOwnerSession } from "./querySessionShareForOwnerSession.js";
 import { querySessionShareReplica, querySessionShareReplicas } from "./querySessionShareReplica.js";
 import { querySessionShareReplicaEntries } from "./querySessionShareReplica.js";
-import { querySessionShareMemberCapabilities } from "./querySessionShareMemberCapabilities.js";
+import type { PeerAction } from "../../session-sharing/peer-access/index.js";
+import {
+    querySessionShareMemberCapabilities,
+    querySessionShareMemberCapability,
+} from "./querySessionShareMemberCapabilities.js";
+import { sessionSharePeerActionAppend } from "./sessionSharePeerActionAppend.js";
 import { querySessionSharePeerActions } from "./querySessionSharePeerActions.js";
 import type {
     SessionShareCapabilityRecord,
     SessionShareMemberRecord,
+    SessionSharePeerActionOutcome,
     SessionSharePeerActionRecord,
+    SessionSharePeerCapability,
     SessionShareReplicaRecord,
 } from "./types.js";
 
@@ -85,6 +92,36 @@ export class PersistentSessionShareDaemonStore implements SessionShareDaemonStor
 
     queryMemberCapabilities(shareId: string): readonly SessionShareCapabilityRecord[] {
         return querySessionShareMemberCapabilities(this.#tx(), shareId);
+    }
+
+    queryMemberCapability(input: {
+        capability: SessionSharePeerCapability;
+        shareId: string;
+        shareMemberId: string;
+    }): SessionShareCapabilityRecord | undefined {
+        return querySessionShareMemberCapability(this.#tx(), input);
+    }
+
+    /** Appends one audit row. Its own transaction: a decision is already made. */
+    appendPeerAction(input: {
+        action: PeerAction;
+        capability: SessionSharePeerCapability;
+        grantEpoch: number;
+        now: number;
+        outcome: SessionSharePeerActionOutcome;
+        shareId: string;
+        shareMemberId: string;
+    }): void {
+        sessionSharePeerActionAppend(this.#tx(), {
+            action: input.action.name,
+            capability: input.capability,
+            ...(input.action.detail === undefined ? {} : { detail: input.action.detail }),
+            grantEpoch: input.grantEpoch,
+            now: input.now,
+            outcome: input.outcome,
+            shareId: input.shareId,
+            shareMemberId: input.shareMemberId,
+        });
     }
 
     queryPeerActions(

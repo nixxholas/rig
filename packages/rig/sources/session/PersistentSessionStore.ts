@@ -1701,6 +1701,27 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         };
     }
 
+    /**
+     * The container environment a scope's terminals run in, or `undefined`.
+     *
+     * The same answer `#remoteTerminalContext` computes, exposed because peer
+     * access has to ask it before it will mirror a terminal to anybody: a
+     * terminal with no container is a terminal that can read the owner's
+     * credentials. Asking the one resolver rather than re-deriving it keeps that
+     * decision from drifting away from what the terminal actually got.
+     *
+     * Returns `undefined` rather than throwing for a scope that cannot open a
+     * terminal at all, because "no container here" is the answer that fails
+     * closed either way.
+     */
+    remoteTerminalDocker(scope: RemoteTerminalScope): DockerExecutionConfig | undefined {
+        try {
+            return this.#remoteTerminalContext(scope).docker;
+        } catch {
+            return undefined;
+        }
+    }
+
     #remoteTerminalContext(scope: RemoteTerminalScope): ProjectRemoteTerminalContext {
         const project = this.#projects.getProject(scope.projectId);
         if (project === undefined) throw new Error("Project not found.");

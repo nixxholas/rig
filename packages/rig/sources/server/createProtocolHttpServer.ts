@@ -131,6 +131,7 @@ import type {
     PostSessionShareFriendMessageResponse,
     SessionShareOwnerResponse,
     SessionSharedMetadata,
+    RequestSessionSharePeerTerminalResponse,
 } from "../protocol/index.js";
 import {
     addSessionShareMemberRequestSchema,
@@ -162,6 +163,7 @@ import {
     signupMurmurAccountRequestSchema,
     startMurmurServiceRequestSchema,
     setSessionShareFriendMessagesRequestSchema,
+    requestSessionSharePeerTerminalRequestSchema,
     setSessionShareMemberCapabilitiesRequestSchema,
     setSessionShareToolOutputRequestSchema,
     stopSessionShareRequestSchema,
@@ -1089,6 +1091,22 @@ async function handleRequest(
             if (capabilities === undefined)
                 sendJson(response, 404, { error: "Shared session not found." });
             else sendJson<ListSessionShareReplicaCapabilitiesResponse>(response, 200, capabilities);
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-replica-terminal") {
+            const body = await readCheckedBody(
+                request,
+                requestSessionSharePeerTerminalRequestSchema,
+            );
+            if (body === undefined) {
+                sendJson(response, 400, { error: "Request body is invalid." });
+                return;
+            }
+            // This machine is the member here, asking the owner for something. It
+            // grants nothing and learns nothing about whether it is allowed: the
+            // owner's gates decide, and a refusal is a channel that never opens.
+            const result = await sessionShares.requestPeerTerminal(route.shareId, body.terminalId);
+            sendJson<RequestSessionSharePeerTerminalResponse>(response, 200, result);
             return;
         }
         if (request.method === "GET" && route.name === "session-share-health") {
@@ -4268,7 +4286,8 @@ function matchRoute(pathname: string):
           name:
               | "session-share-health"
               | "session-share-replica-capabilities"
-              | "session-share-replica-history";
+              | "session-share-replica-history"
+              | "session-share-replica-terminal";
           sessionId?: undefined;
           shareId: string;
       }
@@ -4571,6 +4590,16 @@ function matchRoute(pathname: string):
         return shareId === undefined
             ? undefined
             : { name: "session-share-replica-capabilities", shareId };
+    }
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "session-share-replicas" &&
+        globalParts[2] === "terminal"
+    ) {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        return shareId === undefined
+            ? undefined
+            : { name: "session-share-replica-terminal", shareId };
     }
     if (
         globalParts.length === 3 &&

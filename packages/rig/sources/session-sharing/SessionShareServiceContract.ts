@@ -64,6 +64,12 @@ export interface SessionShareServiceContract {
         sessionId: string,
         after?: string,
     ): GetSessionSharePeerActivityResponse | undefined;
+    /**
+     * Ask the owner of a replicated share to mirror one terminal to this machine.
+     *
+     * Grants nothing and answers nothing about permission: the owner decides.
+     */
+    requestPeerTerminal(shareId: string, terminalId: string): Promise<{ requested: boolean }>;
     /** What this machine's own replica of somebody else's share may do. */
     replicaCapabilities(shareId: string): ListSessionShareReplicaCapabilitiesResponse | undefined;
     health(shareId: string): GetSessionShareHealthResponse | undefined;

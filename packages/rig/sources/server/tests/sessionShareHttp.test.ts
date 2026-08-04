@@ -144,6 +144,30 @@ describe("session share HTTP API", () => {
                 },
                 status: 200,
             });
+            // A member asking the owner to mirror a terminal. The answer says only
+            // that the request went out: whether it is honoured is decided on the
+            // owner's side, against the owner's grants and the owner's container.
+            expect(
+                await request(
+                    server.socketPath,
+                    "POST",
+                    "/session-share-replicas/share-1/terminal",
+                    {
+                        terminalId: "terminal-1",
+                    },
+                ),
+            ).toMatchObject({ body: { requested: true }, status: 200 });
+            expect(service.requestPeerTerminal).toHaveBeenCalledWith("share-1", "terminal-1");
+            expect(
+                await request(
+                    server.socketPath,
+                    "POST",
+                    "/session-share-replicas/share-1/terminal",
+                    {
+                        notATerminalId: "x",
+                    },
+                ),
+            ).toMatchObject({ status: 400 });
             expect(
                 await request(server.socketPath, "POST", "/session-shares/friend-messages", {
                     clientMessageId: "client-1",
@@ -394,6 +418,9 @@ function createStub(): SessionShareServiceContract & {
         typeof vi.fn<SessionShareServiceContract["replicaCapabilities"]>
     >;
     replicaHistory: ReturnType<typeof vi.fn<SessionShareServiceContract["replicaHistory"]>>;
+    requestPeerTerminal: ReturnType<
+        typeof vi.fn<SessionShareServiceContract["requestPeerTerminal"]>
+    >;
     revoke: ReturnType<typeof vi.fn<SessionShareServiceContract["revoke"]>>;
     setMemberCapabilities: ReturnType<
         typeof vi.fn<SessionShareServiceContract["setMemberCapabilities"]>
@@ -426,6 +453,9 @@ function createStub(): SessionShareServiceContract & {
         entries: [],
         replica,
     }));
+    const requestPeerTerminal = vi.fn<SessionShareServiceContract["requestPeerTerminal"]>(
+        async () => ({ requested: true }),
+    );
     const revoke = vi.fn<SessionShareServiceContract["revoke"]>(async () => owner);
     const setMemberCapabilities = vi.fn<SessionShareServiceContract["setMemberCapabilities"]>(
         async () => owner,
@@ -454,6 +484,7 @@ function createStub(): SessionShareServiceContract & {
         ),
         replicaCapabilities,
         replicaHistory,
+        requestPeerTerminal,
         revoke,
         setFriendMessages: vi.fn<SessionShareServiceContract["setFriendMessages"]>(
             async () => owner,

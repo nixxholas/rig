@@ -57,7 +57,11 @@ import { MurmurService } from "../murmur/index.js";
 import { createEventIdFactory, type GlobalLiveEvent } from "../protocol/index.js";
 import { createScopeShareKind } from "../scope-sharing/createScopeShareKind.js";
 import { createSessionShareKind } from "../session-sharing/createSessionShareKind.js";
-import { describePeerCapabilities } from "../session-sharing/peer-access/index.js";
+import {
+    describePeerCapabilities,
+    PeerCapabilityContext,
+    PeerTerminalViewerService,
+} from "../session-sharing/peer-access/index.js";
 import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 
@@ -551,6 +555,82 @@ async function runOwnedLocalProtocolServer(
         await murmurService.getAccount();
         const activeMurmur = murmurService;
         const createSessionShareCapabilitiesEventId = createEventIdFactory();
+        /**
+         * Resolves the session one share belongs to, and the terminal scope it runs in.
+         *
+         * Every peer question is really a question about the owner's session: which
+         * project, which workspace, which container, which permission mode. Asking the
+         * share for its owner session and then asking the session is the only path, so
+         * a share that has been stopped or a session that has ended answers nothing
+         * rather than answering stale.
+         */
+        const peerShareSession = (shareId: string) => {
+            const ownerSessionId =
+                activeStore.sessionShareDaemonStore.queryShare(shareId)?.ownerSessionId;
+            if (ownerSessionId === undefined) return undefined;
+            const session = activeStore.get(ownerSessionId);
+            return session === undefined ? undefined : { session, snapshot: session.snapshot() };
+        };
+        const peerCapabilities = new PeerCapabilityContext({
+            recordAction: (entry) => {
+                try {
+                    activeStore.sessionShareDaemonStore.appendPeerAction({
+                        ...entry,
+                        now: Date.now(),
+                    });
+                } catch {
+                    // An audit row that cannot be written must never turn an allowed action
+                    // into a crash or a denied one into an allowed one. The decision has
+                    // already been made and returned; this is the record of it.
+                }
+            },
+            resolveGrant: (request) => {
+                const owner = peerShareSession(request.shareId);
+                if (owner === undefined) return undefined;
+                // Gate one, in full: the row must exist, be active, sit at the member's
+                // current epoch, and belong to a member that is itself active. The query
+                // answers all four or answers nothing.
+                const row = activeStore.sessionShareDaemonStore.queryMemberCapability({
+                    capability: request.capability,
+                    shareId: request.shareId,
+                    shareMemberId: request.shareMemberId,
+                });
+                if (row === undefined) return undefined;
+                // The session's mode is read here, at use time, rather than stored with
+                // the grant. The capability is intent; what it amounts to is whatever the
+                // owner's session permits right now.
+                return { grantEpoch: row.grantEpoch, sessionMode: owner.snapshot.permissionMode };
+            },
+        });
+        const peerTerminalViewer = new PeerTerminalViewerService({
+            capabilities: peerCapabilities,
+            docker: (shareId) => {
+                const owner = peerShareSession(shareId);
+                if (owner === undefined) return undefined;
+                // The very same resolver the terminal itself was built from, so the
+                // confinement answer can never drift from the container the terminal
+                // actually got.
+                return activeStore.remoteTerminalDocker({
+                    projectId: owner.snapshot.projectId,
+                    ...(owner.snapshot.workspaceId === undefined
+                        ? {}
+                        : { workspaceId: owner.snapshot.workspaceId }),
+                });
+            },
+            terminal: (shareId, terminalId) => {
+                const owner = peerShareSession(shareId);
+                if (owner === undefined) return undefined;
+                return activeStore.remoteTerminals.get(
+                    {
+                        projectId: owner.snapshot.projectId,
+                        ...(owner.snapshot.workspaceId === undefined
+                            ? {}
+                            : { workspaceId: owner.snapshot.workspaceId }),
+                    },
+                    terminalId,
+                );
+            },
+        });
         shareRuntime = createShareRuntime({
             kinds: {
                 scope: createScopeShareKind({
@@ -559,6 +639,19 @@ async function runOwnedLocalProtocolServer(
                 }),
                 session: createSessionShareKind({
                     daemonStore: activeStore.sessionShareDaemonStore,
+                    docker: (ownerSessionId) => {
+                        const session = activeStore.get(ownerSessionId);
+                        if (session === undefined) return undefined;
+                        const snapshot = session.snapshot();
+                        return activeStore.remoteTerminalDocker({
+                            projectId: snapshot.projectId,
+                            ...(snapshot.workspaceId === undefined
+                                ? {}
+                                : { workspaceId: snapshot.workspaceId }),
+                        });
+                    },
+                    peerAccess: peerCapabilities,
+                    peerTerminalViewer,
                     deliverFriendMessage: (ownerSessionId, message, persisted) => {
                         activeStore
                             .get(ownerSessionId)

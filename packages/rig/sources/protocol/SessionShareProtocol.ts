@@ -132,6 +132,30 @@ export type GetSessionSharePeerActivityResponse = Static<
     typeof getSessionSharePeerActivityResponseSchema
 >;
 
+/** A member asking the owner of a share it replicates to mirror one terminal. */
+export const requestSessionSharePeerTerminalRequestSchema = Type.Object(
+    { terminalId: identifierSchema },
+    exact,
+);
+export type RequestSessionSharePeerTerminalRequest = Static<
+    typeof requestSessionSharePeerTerminalRequestSchema
+>;
+
+/**
+ * That the request was sent, and nothing about whether it will be honoured.
+ *
+ * Saying more here would be a guess: the decision is the owner's, is made
+ * against the owner's own grant rows and container, and reaches the member as a
+ * channel that opens or stays silent.
+ */
+export const requestSessionSharePeerTerminalResponseSchema = Type.Object(
+    { requested: Type.Boolean() },
+    exact,
+);
+export type RequestSessionSharePeerTerminalResponse = Static<
+    typeof requestSessionSharePeerTerminalResponseSchema
+>;
+
 export const listSessionShareReplicaCapabilitiesResponseSchema = Type.Object(
     {
         capabilities: Type.Array(sessionSharePeerCapabilitySchema, { maxItems: 16 }),

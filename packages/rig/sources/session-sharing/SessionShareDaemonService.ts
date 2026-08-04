@@ -27,6 +27,7 @@ import type {
 import {
     describePeerActivityEntry,
     describePeerCapabilities,
+    PEER_TERMINAL_ATTACH_CONTROL_ID,
     type PeerCapability,
 } from "./peer-access/index.js";
 import type { SessionShareServiceContract } from "./SessionShareServiceContract.js";
@@ -244,6 +245,36 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
             entries,
             ...(page.complete || lastSeq === undefined ? {} : { nextCursor: String(lastSeq) }),
         };
+    }
+
+    /**
+     * Ask the owner of a share this machine replicates to mirror one terminal.
+     *
+     * This is the whole member-side surface, and it deliberately grants nothing:
+     * it sends one authenticated request and returns. Whether a channel opens is
+     * decided entirely on the owner's side, against the owner's own grant rows
+     * and the owner's own container, and a refusal reaches the member as a
+     * channel that never carries a frame rather than as an answer here.
+     */
+    async requestPeerTerminal(
+        shareId: string,
+        terminalId: string,
+    ): Promise<{ requested: boolean }> {
+        const replica = this.#store.queryReplica(shareId);
+        if (replica === undefined || replica.state !== "active") {
+            throw new Error("This shared session is no longer active.");
+        }
+        await this.#service.requestPeer(
+            {
+                grantEpoch: replica.grantEpoch,
+                murmurPeerId: replica.murmurPeerId,
+                shareId: replica.shareId,
+                shareMemberId: replica.shareMemberId,
+            },
+            PEER_TERMINAL_ATTACH_CONTROL_ID,
+            { terminalId },
+        );
+        return { requested: true };
     }
 
     replicaCapabilities(shareId: string): ListSessionShareReplicaCapabilitiesResponse | undefined {

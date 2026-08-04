@@ -1,4 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
+import type { SharedSessionEphemeralChannel } from "@slopus/murmur/sharedSession";
 import { Value } from "@sinclair/typebox/value";
 
 import type { UserMessage } from "../agent/types.js";
@@ -434,6 +435,29 @@ export class SessionShareService {
     async post(post: ShareTransportMemberPost): Promise<void> {
         this.#assertOpen();
         await this.#transport.postMember(post);
+    }
+
+    /**
+     * Ask the owner, as a member, to open one peer channel.
+     *
+     * The request carries only what it wants; who is asking is asserted by
+     * Murmur from the frame's signature on the owner's side. Nothing here can
+     * grant anything — the owner's two gates decide, and a refusal arrives as
+     * the channel simply never opening.
+     */
+    async requestPeer(
+        grant: ShareTransportGrant,
+        controlId: string,
+        payload: unknown,
+    ): Promise<void> {
+        this.#assertOpen();
+        await this.#transport.sendMemberControl(grant, controlId, payload);
+    }
+
+    /** The member side of a share's peer channel, once the owner has opened it. */
+    peerChannel(grant: ShareTransportGrant): SharedSessionEphemeralChannel | undefined {
+        if (this.#closed) return undefined;
+        return this.#transport.openMemberEphemeralChannel(grant);
     }
 
     close(): void {
