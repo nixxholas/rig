@@ -13,7 +13,9 @@ import type { PeerCapabilityContext } from "./PeerCapabilityContext.js";
 import type { PeerCapabilityDecision } from "./types.js";
 
 /**
- * How many terminals may be mirrored to peers in one session at a time.
+ * How many terminals may be mirrored to peers at a time, counted across every
+ * share this service serves — one service is constructed per daemon, so this
+ * bound is daemon-wide rather than per session.
  *
  * One, and the reason is the transport rather than a budget. Murmur's ephemeral
  * channel is one lossy, epoch-keyed broadcast per shared session: there is
@@ -23,8 +25,9 @@ import type { PeerCapabilityDecision } from "./types.js";
  * decoder could resynchronize, and the peer socket ends on exactly that kind of
  * hole.
  *
- * So the honest bound is one. Terminals also share the project's `MAX_TERMINALS`
- * budget, and a bound of one additionally means a peer reattaching in a loop can
+ * So the honest bound is one. A peer attachment is an extra `attach` on a
+ * terminal the owner already opened, so it consumes no `MAX_TERMINALS` slot of
+ * its own; a bound of one additionally means a peer reattaching in a loop can
  * never starve the owner out of their own terminals.
  */
 export const MAX_PEER_ATTACHED_TERMINALS = 1;
@@ -138,7 +141,7 @@ export class PeerTerminalViewerService {
         // refused by the bound it is itself occupying.
         if (!this.#attachments.has(key) && this.#attachments.size >= MAX_PEER_ATTACHED_TERMINALS) {
             return refuse(
-                "This session is already mirroring a terminal. Close that one before opening another.",
+                "Rig is already mirroring a terminal to somebody. Close that one before opening another.",
             );
         }
         // Reattaching replaces rather than adds. Otherwise a friend whose channel died

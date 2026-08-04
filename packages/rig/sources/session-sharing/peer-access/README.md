@@ -82,8 +82,10 @@ not a safer subset of typing either: the owner's own `cat ~/.codex/auth.json`
 mirrors straight to the friend. Without a container there is no honest version
 of this feature, so it fails closed with that sentence in English.
 
-Peer-attached terminals also hold their own small budget under the project's
-`MAX_TERMINALS`, so a friend cannot exhaust the owner's.
+A peer never opens a terminal; it attaches to one the owner already opened, so
+it takes no slot of the project's `MAX_TERMINALS`. What bounds a peer instead is
+`MAX_PEER_ATTACHED_TERMINALS`, which is one, so a friend reattaching in a loop
+cannot cost the owner anything.
 
 ## No second terminal protocol
 

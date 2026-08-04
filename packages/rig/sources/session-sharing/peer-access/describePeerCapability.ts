@@ -30,7 +30,7 @@ export function describePeerCapability(capability: PeerCapability): string {
 export function describePeerCapabilityDetail(capability: PeerCapability): string {
     switch (capability) {
         case "terminal_view":
-            return "They can watch a container terminal in this session as you use it. They cannot type into it, resize it, or run anything.";
+            return "They can watch a container terminal in this session, including whatever is already on its screen and in its scrollback when you turn this on. They cannot type into it, resize it, or run anything.";
         default:
             capability satisfies never;
             throw new Error(
@@ -75,13 +75,19 @@ export function describePeerCapabilitiesActivePhrase(
  * The owner sees this before they grant, not after. Revocation stops what
  * happens next and nothing else, and a terminal is exactly the place where a
  * secret crosses in a single line of scrollback.
+ *
+ * It says "already there" deliberately. A viewer's first frames are the
+ * emulator's snapshot, and the protocol lets it ask for scrollback, so the
+ * grant reaches backwards into output the owner produced before granting —
+ * promising only "what happens from now on" would be a promise the code does
+ * not keep.
  */
 export function describePeerCapabilityGrantWarning(
     capabilities: readonly PeerCapability[],
 ): string {
     if (capabilities.length === 0) return "";
     const shared = [
-        "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen.",
+        "Anything they see is theirs to keep, including what was already on that terminal when you turned this on. Turning it off stops what happens next; it cannot recall what has already been seen.",
     ];
     if (capabilities.includes("terminal_view")) {
         shared.push(

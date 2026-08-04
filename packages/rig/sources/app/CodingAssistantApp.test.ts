@@ -9669,9 +9669,9 @@ describe("CodingAssistantApp", () => {
                 {
                     capability: "terminal_view",
                     description:
-                        "They can watch a container terminal in this session as you use it.",
+                        "They can watch a container terminal in this session, including whatever is already on its screen and in its scrollback when you turn this on.",
                     grantWarning:
-                        "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
+                        "Anything they see is theirs to keep, including what was already on that terminal when you turned this on. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
                     label: "Watch a terminal",
                     offerable: true,
                 },
@@ -9718,9 +9718,10 @@ describe("CodingAssistantApp", () => {
         const offerableCapabilities: SessionSharedMetadata["offerableCapabilities"] = [
             {
                 capability: "terminal_view",
-                description: "They can watch a container terminal in this session as you use it.",
+                description:
+                    "They can watch a container terminal in this session, including whatever is already on its screen and in its scrollback when you turn this on.",
                 grantWarning:
-                    "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
+                    "Anything they see is theirs to keep, including what was already on that terminal when you turned this on. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
                 label: "Watch a terminal",
                 offerable: true,
             },

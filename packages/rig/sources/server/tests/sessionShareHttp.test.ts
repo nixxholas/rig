@@ -36,9 +36,9 @@ const offerableCapabilities = [
     {
         capability: "terminal_view" as const,
         description:
-            "They can watch a container terminal in this session as you use it. They cannot type into it, resize it, or run anything.",
+            "They can watch a container terminal in this session, including whatever is already on its screen and in its scrollback when you turn this on. They cannot type into it, resize it, or run anything.",
         grantWarning:
-            "Anything they see while this is on is theirs to keep. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
+            "Anything they see is theirs to keep, including what was already on that terminal when you turned this on. Turning it off stops what happens next; it cannot recall what has already been seen. Treat every credential that passes through a shared terminal as disclosed, and rotate it.",
         label: "Watch a terminal",
         offerable: true,
     },
