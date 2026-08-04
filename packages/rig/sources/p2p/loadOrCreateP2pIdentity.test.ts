@@ -32,6 +32,14 @@ describe("loadOrCreateP2pIdentity", () => {
             instanceId: first.instanceId,
             publicKey: first.publicKey,
         });
+        const sender = createP2pInstanceIdentity();
+        const encrypted = sender.encryptFor(
+            Buffer.from("survives restart", "utf8"),
+            first.publicKey,
+        );
+        expect(Buffer.from(second.decryptFrom(encrypted, sender.publicKey)).toString("utf8")).toBe(
+            "survives restart",
+        );
         expect((await lstat(path)).mode & 0o777).toBe(0o600);
     });
 

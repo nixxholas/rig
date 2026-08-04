@@ -602,15 +602,21 @@ Put each daemon's endpoint ID in the other daemon's `trusted_endpoint_ids` list.
 The endpoint ID is a transport address and first-contact allowlist entry, not
 the peer's durable Rig identity.
 
-Each Rig installation owns a stable cuid2 instance ID and a separate Ed25519
-identity key. On the first allowed connection, both daemons exchange signed,
-expiring identity claims. The signatures cover fresh challenges and both Iroh
-endpoint IDs, binding the stable identity to that exact authenticated QUIC
-connection. Rig then pins the instance ID, public key, and transport binding.
+Each Rig installation owns a stable cuid2 instance ID and one protected
+Ed25519 identity key. The same public key is the only key other parties need:
+Rig converts it to X25519 when encrypting, using the standard
+Edwards-to-Montgomery conversion.
+
+On the first allowed connection, both daemons exchange signed, expiring identity
+claims. The signatures cover the identity public keys, fresh challenges, and
+both Iroh endpoint IDs, binding the stable identity to that exact authenticated
+QUIC connection. Rig then pins the instance ID, public key, and transport binding.
 Later transports or replacement endpoint IDs can resolve to the same instance
-only by presenting the same stable signing key. The daemon keeps pinging every
-configured address and reports the verified instance identity and its transport
-status through `rig daemon status` and `rig-connect`.
+only by presenting the same stable key. Its X25519 form supports authenticated
+end-to-end encryption when payloads need protection beyond the already encrypted
+Iroh connection. The daemon keeps pinging every configured address and reports
+the verified instance identity and its transport status through
+`rig daemon status` and `rig-connect`.
 
 `expose_api` is separate from connectivity and defaults to `false`. When the
 serving machine enables it, its daemon API is available through the consuming
@@ -632,11 +638,12 @@ IDs for machines you trust to act as you. Rig does not forward P2P topology rout
 daemon shutdown, the debug inspector, or one-time webapp context exchanges.
 
 When `relay_url` is absent, Iroh uses its default discovery and relay services.
-The stable Rig signing key and the Iroh transport identity are stored separately
-beside Rig's durable database with owner-only permissions. Learned peer pins are
-durable there as well. Project configuration cannot enable P2P networking. Upstream Iroh
-does not currently publish a native binding for Intel macOS; on that platform
-Rig reports P2P as unavailable and continues running normally.
+The stable Rig identity seed and the Iroh transport identity are stored
+separately beside Rig's durable database with owner-only permissions. Learned
+peer pins are durable there as well. Project configuration cannot enable P2P
+networking. Upstream Iroh does not currently publish a native binding for Intel
+macOS; on that platform Rig reports P2P as unavailable and continues running
+normally.
 
 Provider availability is machine-wide because the local daemon owns the model
 catalog and authentication paths. Configure it in the user `happy.toml`:
