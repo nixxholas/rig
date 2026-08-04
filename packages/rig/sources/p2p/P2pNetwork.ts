@@ -2,6 +2,7 @@ import type { ConfigP2p } from "../config/types.js";
 import type { P2pStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import { IrohNetwork } from "./IrohNetwork.js";
 import { loadOrCreateIrohSecretKey } from "./loadOrCreateIrohSecretKey.js";
+import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pTransport, P2pTransportKind } from "./P2pTransport.js";
 
 export interface CreateP2pNetworkOptions {
@@ -13,6 +14,7 @@ export interface CreateP2pNetworkOptions {
     irohSecretKeyPath: string;
     onStatusChange?: (status: P2pStatus) => void;
     onTransportUnavailable?: (transport: P2pTransportKind, error: unknown) => void;
+    serveRequest?: ServeP2pHttpRequest;
 }
 
 export class P2pNetwork {
@@ -51,6 +53,9 @@ export class P2pNetwork {
                               config: options.config.iroh,
                               onStatusChange: onIrohStatusChange,
                               secretKey: await loadOrCreateIrohSecretKey(options.irohSecretKeyPath),
+                              ...(options.config.exposeApi && options.serveRequest !== undefined
+                                  ? { serveRequest: options.serveRequest }
+                                  : {}),
                           })
                         : await options.createIrohTransport(onIrohStatusChange);
                 transports.push(iroh);
@@ -76,6 +81,28 @@ export class P2pNetwork {
 
     async close(): Promise<void> {
         await Promise.allSettled(this.#transports.map((transport) => transport.close()));
+    }
+
+    async fetch(
+        peerId: string,
+        request: P2pHttpRequest,
+        signal: AbortSignal,
+    ): Promise<{ response: P2pHttpResponse; transport: P2pTransportKind }> {
+        const transport = this.#transports.find((candidate) => {
+            const status = candidate.status();
+            return (
+                candidate.fetch !== undefined &&
+                status.state === "ready" &&
+                status.peers.some((peer) => peer.peerId === peerId)
+            );
+        });
+        if (transport?.fetch === undefined) {
+            throw new Error("No active P2P transport owns that trusted peer ID.");
+        }
+        return {
+            response: await transport.fetch(peerId, request, signal),
+            transport: transport.kind,
+        };
     }
 
     status(): P2pStatus {

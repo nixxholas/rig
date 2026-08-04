@@ -2518,6 +2518,7 @@ export const p2pTransportStatusSchema = Type.Union([
     ),
     Type.Object(
         {
+            apiExposed: Type.Optional(Type.Boolean()),
             localId: Type.String({ minLength: 1 }),
             peers: Type.Array(p2pPeerStatusSchema),
             relayUrl: Type.Optional(Type.String({ minLength: 1 })),

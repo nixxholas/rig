@@ -308,6 +308,14 @@ import {
     FileTreeSymlinkTraversalError,
     listFileTree,
 } from "../file-tree/index.js";
+import type { P2pNetwork } from "../p2p/index.js";
+import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
+
+const p2pPeerIdSchema = Type.String({
+    maxLength: 256,
+    minLength: 1,
+    pattern: "^[A-Za-z0-9._~-]+$",
+});
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
@@ -320,6 +328,7 @@ export interface ProtocolHttpServerOptions {
     happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
+    p2pNetwork?: P2pNetwork;
     p2pStatus?: () => P2pStatus;
     murmur?: MurmurServiceContract;
     /** Workspace and project sharing over Murmur. The daemon always supplies it. */
@@ -383,6 +392,7 @@ export function createProtocolHttpServer(
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
+        p2pNetwork: options.p2pNetwork,
         p2pStatus: options.p2pStatus,
         murmur: options.murmur,
         scopeShares: options.scopeShares,
@@ -464,6 +474,7 @@ interface ProtocolServerRuntimeConfig {
     globalInstructionsPath: string;
     globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
+    p2pNetwork: P2pNetwork | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
     murmur: MurmurServiceContract | undefined;
     scopeShares: ScopeShareServiceContract | undefined;
@@ -535,6 +546,7 @@ async function handleRequest(
 ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://unix");
     const route = matchRoute(url.pathname);
+    const p2pPeerRoute = matchP2pPeerRoute(url);
     if (route?.name === "webapp-context") {
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
@@ -555,6 +567,20 @@ async function handleRequest(
     }
     if (!isAuthorizedProtocolRequest(request, token)) {
         sendJson(response, 401, { error: "Unauthorized" });
+        return;
+    }
+    if (p2pPeerRoute !== undefined) {
+        if (runtimeConfig.p2pNetwork === undefined) {
+            sendJson(response, 503, { error: "P2P networking is unavailable." });
+            return;
+        }
+        await proxyP2pHttpRequest(
+            runtimeConfig.p2pNetwork,
+            p2pPeerRoute.peerId,
+            p2pPeerRoute.path,
+            request,
+            response,
+        );
         return;
     }
     if (route === undefined) {
@@ -4069,6 +4095,25 @@ async function handleRequest(
     }
 
     sendJson(response, 405, { error: "Method not allowed" });
+}
+
+function matchP2pPeerRoute(url: URL): { path: string; peerId: string } | undefined {
+    const prefix = "/p2p/peers/";
+    if (!url.pathname.startsWith(prefix)) return undefined;
+    const remainder = url.pathname.slice(prefix.length);
+    const separator = remainder.indexOf("/");
+    if (separator <= 0) return undefined;
+    let peerId: string;
+    try {
+        peerId = decodeURIComponent(remainder.slice(0, separator));
+    } catch {
+        return undefined;
+    }
+    if (!Value.Check(p2pPeerIdSchema, peerId)) return undefined;
+    const apiPath = remainder.slice(separator + 1);
+    if (apiPath !== "api" && !apiPath.startsWith("api/")) return undefined;
+    const path = apiPath === "api" ? "/" : `/${apiPath.slice("api/".length)}`;
+    return { path: `${path}${url.search}`, peerId };
 }
 
 function resolveProjectScopeDirectory(

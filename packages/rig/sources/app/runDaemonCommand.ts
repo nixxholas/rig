@@ -58,6 +58,9 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
                     continue;
                 }
                 console.log(`Iroh P2P endpoint: ${transport.localId}`);
+                console.log(
+                    `Iroh P2P API sharing: ${transport.apiExposed ? "Enabled" : "Disabled"}`,
+                );
                 for (const peer of transport.peers) {
                     const latency =
                         peer.rttMs === undefined ? "" : ` (${String(Math.round(peer.rttMs))} ms)`;

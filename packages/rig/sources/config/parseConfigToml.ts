@@ -243,7 +243,7 @@ function readP2pConfig(
 ): import("./types.js").PartialConfigP2p | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("p2p must be a TOML table.");
-    assertKnownKeys(value, "p2p", ["enable_iroh", "iroh"]);
+    assertKnownKeys(value, "p2p", ["enable_iroh", "expose_api", "iroh"]);
     const irohTable = readTable(value.iroh, "p2p.iroh");
     const iroh = {
         ...(irohTable === undefined
@@ -273,8 +273,10 @@ function readP2pConfig(
         throw new Error("p2p.iroh.relay_url must be an HTTP or HTTPS URL.");
     }
     const enableIroh = readBoolean(value, "enable_iroh", "p2p.enable_iroh");
+    const exposeApi = readBoolean(value, "expose_api", "p2p.expose_api");
     return {
         ...(enableIroh === undefined ? {} : { enableIroh }),
+        ...(exposeApi === undefined ? {} : { exposeApi }),
         ...(Object.keys(iroh).length === 0 ? {} : { iroh }),
     };
 }

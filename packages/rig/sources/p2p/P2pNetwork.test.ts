@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import type { P2pTransport } from "./P2pTransport.js";
 import { P2pNetwork } from "./P2pNetwork.js";
 
 const disabledConfig = {
     enableIroh: false,
+    exposeApi: false,
     iroh: { trustedEndpointIds: [] },
 } as const;
 
@@ -46,8 +48,9 @@ describe("P2pNetwork", () => {
     it("aggregates transport status changes and closes enabled transports", async () => {
         const changed = vi.fn();
         const close = vi.fn(async () => undefined);
-        let publish!: (status: ReturnType<P2pTransport["status"]>) => void;
-        const initial: ReturnType<P2pTransport["status"]> = {
+        let publish!: (status: P2pTransportStatus) => void;
+        const initial: Extract<P2pTransportStatus, { state: "ready" }> = {
+            apiExposed: false,
             localId: "local",
             peers: [],
             state: "ready",

@@ -89,6 +89,7 @@ export function mergeConfigValues(
             features.crossWorkspace = config.features.crossWorkspace;
         }
         if (config.p2p?.enableIroh !== undefined) p2p.enableIroh = config.p2p.enableIroh;
+        if (config.p2p?.exposeApi !== undefined) p2p.exposeApi = config.p2p.exposeApi;
         if (config.p2p?.iroh?.trustedEndpointIds !== undefined) {
             p2p.iroh.trustedEndpointIds = config.p2p.iroh.trustedEndpointIds;
         }

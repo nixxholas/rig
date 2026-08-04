@@ -46,6 +46,7 @@
 
 # [p2p]
 # enable_iroh = true
+# expose_api = false
 #
 # [p2p.iroh]
 # trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]

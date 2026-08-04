@@ -167,11 +167,13 @@ export type PartialConfigIrohTransport = Partial<ConfigIrohTransport>;
 
 export interface ConfigP2p {
     enableIroh: boolean;
+    exposeApi: boolean;
     iroh: ConfigIrohTransport;
 }
 
 export interface PartialConfigP2p {
     enableIroh?: boolean;
+    exposeApi?: boolean;
     iroh?: PartialConfigIrohTransport;
 }
 

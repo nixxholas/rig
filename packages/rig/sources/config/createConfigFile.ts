@@ -45,12 +45,14 @@ export async function createConfigFile(
                 workspaces: config.features.workspaces,
             },
             ...(!config.p2p.enableIroh &&
+            !config.p2p.exposeApi &&
             config.p2p.iroh.trustedEndpointIds.length === 0 &&
             config.p2p.iroh.relayUrl === undefined
                 ? {}
                 : {
                       p2p: {
                           enable_iroh: config.p2p.enableIroh,
+                          expose_api: config.p2p.exposeApi,
                           iroh: {
                               trusted_endpoint_ids: config.p2p.iroh.trustedEndpointIds,
                               ...(config.p2p.iroh.relayUrl === undefined

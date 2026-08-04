@@ -13,6 +13,7 @@ describe("P2P HTTP API", () => {
         const status: P2pStatus = {
             transports: [
                 {
+                    apiExposed: false,
                     localId: "local-endpoint",
                     peers: [
                         {

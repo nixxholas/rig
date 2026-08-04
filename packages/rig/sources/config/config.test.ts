@@ -217,6 +217,7 @@ enabled = true
             parseConfigToml(`
 [p2p]
 enable_iroh = true
+expose_api = true
 [p2p.iroh]
 trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"]
 relay_url = "https://relay.example.com"
@@ -224,6 +225,7 @@ relay_url = "https://relay.example.com"
         ).toEqual({
             p2p: {
                 enableIroh: true,
+                exposeApi: true,
                 iroh: {
                     trustedEndpointIds: [
                         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -697,6 +699,7 @@ codex_stream_max_retries = 8
             expect(loaded.config.features.workflows).toBe(true);
             expect(loaded.config.p2p).toEqual({
                 enableIroh: false,
+                exposeApi: false,
                 iroh: { trustedEndpointIds: [] },
             });
             expect(loaded.config.providerDefaultEnable).toBe(true);

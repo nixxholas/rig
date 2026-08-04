@@ -14,6 +14,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
     mcpServers: {},
     p2p: {
         enableIroh: false,
+        exposeApi: false,
         iroh: {
             trustedEndpointIds: [],
         },

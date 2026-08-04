@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { IrohNetwork } from "./IrohNetwork.js";
 
-const ALPN = [...Buffer.from("rig/p2p/1", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/2", "utf8")];
 const networks: IrohNetwork[] = [];
 
 afterEach(async () => {
@@ -96,6 +96,7 @@ describe("IrohNetwork", () => {
             });
         });
         expect(allowed.status()).toEqual({
+            apiExposed: false,
             localId: allowedId,
             peers: [],
             state: "ready",
@@ -141,6 +142,124 @@ describe("IrohNetwork", () => {
             await serverEndpoint.close();
             await serverTask;
         }
+    });
+
+    it("forwards an HTTP response stream without blocking peer pings", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const [clientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const clientId = clientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        let finishStream!: () => void;
+        let cancellationObserved = false;
+        let responseBodyStarted = false;
+        let requestServed = false;
+        const streamFinished = new Promise<void>((resolve) => {
+            finishStream = resolve;
+        });
+        const client = await IrohNetwork.create({
+            config: { trustedEndpointIds: [serverId] },
+            endpoint: clientEndpoint,
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 25,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            config: { trustedEndpointIds: [clientId] },
+            endpoint: serverEndpoint,
+            peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
+            pingIntervalMs: 25,
+            relayMode: RelayMode.disabled(),
+            secretKey: serverKey,
+            serveRequest: async (peerId, request, signal) => {
+                requestServed = true;
+                expect(peerId).toBe(clientId);
+                if (request.path === "/cancel") {
+                    return {
+                        body: (async function* () {
+                            yield Buffer.from("started");
+                            await new Promise<void>((resolve) => {
+                                if (signal.aborted) return resolve();
+                                signal.addEventListener("abort", () => resolve(), { once: true });
+                            });
+                            cancellationObserved = true;
+                        })(),
+                        headers: { "content-type": "text/event-stream" },
+                        status: 200,
+                    };
+                }
+                expect(request).toMatchObject({
+                    body: new Uint8Array(Buffer.from("hello")),
+                    headers: { "content-type": "text/plain" },
+                    method: "POST",
+                    path: "/stream?room=one",
+                });
+                return {
+                    body: (async function* () {
+                        responseBodyStarted = true;
+                        yield Buffer.from("first");
+                        await streamFinished;
+                        yield Buffer.from("second");
+                    })(),
+                    headers: { "content-type": "text/event-stream" },
+                    status: 201,
+                };
+            },
+        });
+        networks.push(server);
+        expect(server.status().apiExposed).toBe(true);
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]).toMatchObject({ status: "connected" }),
+        );
+        const pingBeforeStream = client.status().peers[0]!.lastSeenAt!;
+        const responsePromise = client.fetch(
+            serverId,
+            {
+                body: Buffer.from("hello"),
+                headers: { "content-type": "text/plain" },
+                method: "POST",
+                path: "/stream?room=one",
+            },
+            new AbortController().signal,
+        );
+        await vi.waitFor(() => expect(requestServed).toBe(true));
+        await vi.waitFor(() => expect(responseBodyStarted).toBe(true));
+        const response = await responsePromise;
+        const chunks = response.body[Symbol.asyncIterator]();
+
+        expect(response.status).toBe(201);
+        await expect(chunks.next()).resolves.toMatchObject({
+            done: false,
+            value: new Uint8Array(Buffer.from("first")),
+        });
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]!.lastSeenAt).toBeGreaterThan(pingBeforeStream),
+        );
+        finishStream();
+        await expect(chunks.next()).resolves.toMatchObject({
+            done: false,
+            value: new Uint8Array(Buffer.from("second")),
+        });
+        await expect(chunks.next()).resolves.toEqual({ done: true, value: undefined });
+
+        const cancellation = new AbortController();
+        const cancelledResponse = await client.fetch(
+            serverId,
+            { body: new Uint8Array(), headers: {}, method: "GET", path: "/cancel" },
+            cancellation.signal,
+        );
+        const cancelledChunks = cancelledResponse.body[Symbol.asyncIterator]();
+        await expect(cancelledChunks.next()).resolves.toMatchObject({
+            done: false,
+            value: new Uint8Array(Buffer.from("started")),
+        });
+        cancellation.abort();
+        await vi.waitFor(() => expect(cancellationObserved).toBe(true));
     });
 
     it("retries a timed-out native connection without accumulating attempts", async () => {
@@ -237,7 +356,7 @@ function fakePingConnection(peerId: string): Connection {
         close: () => undefined,
         openBi: async () => ({
             recv: {
-                readToEnd: async () => [...Buffer.from("pong")],
+                readToEnd: async () => [1],
             },
             send: {
                 finish: async () => undefined,

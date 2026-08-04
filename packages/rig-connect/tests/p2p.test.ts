@@ -9,6 +9,7 @@ describe("P2P status subscription", () => {
         const initial = {
             transports: [
                 {
+                    apiExposed: false,
                     localId: "local-endpoint",
                     peers: [{ peerId: "remote-endpoint", status: "connecting" as const }],
                     state: "ready" as const,
@@ -19,6 +20,7 @@ describe("P2P status subscription", () => {
         const connected = {
             transports: [
                 {
+                    apiExposed: false,
                     localId: "local-endpoint",
                     peers: [
                         {
@@ -80,6 +82,7 @@ describe("P2P status subscription", () => {
         const snapshot = {
             transports: [
                 {
+                    apiExposed: false,
                     localId: "local-endpoint",
                     peers: [{ peerId: "remote-endpoint", status: "connecting" as const }],
                     state: "ready" as const,
@@ -90,6 +93,7 @@ describe("P2P status subscription", () => {
         const live = {
             transports: [
                 {
+                    apiExposed: false,
                     localId: "local-endpoint",
                     peers: [{ peerId: "remote-endpoint", rttMs: 5, status: "connected" as const }],
                     state: "ready" as const,
@@ -156,6 +160,7 @@ describe("P2P status subscription", () => {
         const live = {
             transports: [
                 {
+                    apiExposed: false,
                     localId: "local-endpoint",
                     peers: [{ peerId: "remote-endpoint", status: "connected" as const }],
                     state: "ready" as const,
@@ -262,6 +267,7 @@ describe("P2P status subscription", () => {
                 return Response.json({
                     transports: [
                         {
+                            apiExposed: false,
                             localId: "local-endpoint",
                             peers: [
                                 {

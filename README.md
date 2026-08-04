@@ -589,6 +589,7 @@ machine's endpoint ID:
 ```toml
 [p2p]
 enable_iroh = true
+expose_api = true
 
 [p2p.iroh]
 trusted_endpoint_ids = [
@@ -602,6 +603,25 @@ authenticates the Ed25519 endpoint identity during its QUIC handshake, and Rig
 refuses an incoming connection unless that identity is allowlisted. The daemon
 keeps pinging every configured peer and reports Connected, Connecting, or
 Unreachable status through `rig daemon status` and `rig-connect`.
+
+`expose_api` is separate from connectivity and defaults to `false`. When both
+machines enable it, the peer's daemon API is available through the local
+authenticated daemon at:
+
+```text
+/p2p/peers/<endpoint-id>/api
+```
+
+For example, Happy can pass that URL prefix and the local daemon token to
+`rig-connect`; ordinary requests and long-lived event streams use the same
+prefix. Tokens never cross the P2P connection. The remote daemon authenticates
+the Iroh identity, then injects its own local token for the loopback request.
+
+API exposure grants substantial authority. A trusted endpoint can read
+transcripts, send messages that run agents and tools, change project files,
+install plugins, and manage workspaces as this Rig user. Only add endpoint IDs
+for machines you trust to act as you. Rig does not forward P2P topology routes,
+daemon shutdown, the debug inspector, or one-time webapp context exchanges.
 
 When `relay_url` is absent, Iroh uses its default discovery and relay services.
 The endpoint identity is stored beside Rig's durable database with owner-only

@@ -65,6 +65,7 @@ import {
 import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 import { P2pNetwork } from "../p2p/index.js";
+import { createServeP2pHttpRequest } from "./createServeP2pHttpRequest.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -567,6 +568,7 @@ async function runOwnedLocalProtocolServer(
                     { error: errorToMessage(error), transport },
                 );
             },
+            serveRequest: createServeP2pHttpRequest({ socketPath, token }),
         });
         const irohStatus = p2pNetwork
             .status()
@@ -836,6 +838,7 @@ async function runOwnedLocalProtocolServer(
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
                 happyCloud: store.happyCloud,
+                p2pNetwork,
                 p2pStatus: () => p2pNetwork?.status() ?? { transports: [] },
                 murmur: murmurService,
                 ...(shareRuntime === undefined
