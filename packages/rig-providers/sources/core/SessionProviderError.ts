@@ -54,6 +54,10 @@ export const sessionProviderErrorSchema = Type.Union([
         { additionalProperties: false },
     ),
     Type.Object(
+        { type: Type.Literal("empty_response"), ...diagnosticFields },
+        { additionalProperties: false },
+    ),
+    Type.Object(
         { type: Type.Literal("unclassified"), ...diagnosticFields },
         { additionalProperties: false },
     ),

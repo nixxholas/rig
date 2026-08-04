@@ -32,7 +32,7 @@ export async function writeRuntimeConfigInsideLock(
         };
         theme?: Record<string, string>;
         settings?: {
-            codex_stream_max_retries?: number;
+            inference_max_retries?: number;
             compact_completed_turns?: boolean;
             completion_chime?: boolean;
             daemon_heap_snapshots?: boolean;
@@ -77,8 +77,8 @@ export async function writeRuntimeConfigInsideLock(
 
     if (settings !== undefined) {
         document.settings = {};
-        if (settings.codexStreamMaxRetries !== undefined) {
-            document.settings.codex_stream_max_retries = settings.codexStreamMaxRetries;
+        if (settings.inferenceMaxRetries !== undefined) {
+            document.settings.inference_max_retries = settings.inferenceMaxRetries;
         }
         if (settings.compactCompletedTurns !== undefined) {
             document.settings.compact_completed_turns = settings.compactCompletedTurns;

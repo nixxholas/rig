@@ -342,7 +342,7 @@ async function runOwnedLocalProtocolServer(
         const loadedConfig = await loadConfig({ cwd: process.cwd() });
         if (stopping) return;
         const runtimeSettings = {
-            codexStreamMaxRetries: loadedConfig.config.settings.codexStreamMaxRetries,
+            inferenceMaxRetries: loadedConfig.config.settings.inferenceMaxRetries,
         };
 
         const providerUsageService = createProviderUsageService({
@@ -492,7 +492,7 @@ async function runOwnedLocalProtocolServer(
                         current: async () => (await providerUsageTracker?.refreshAll()) ?? [],
                     },
                     providers: availableProviders,
-                    resolveCodexStreamMaxRetries: () => runtimeSettings.codexStreamMaxRetries,
+                    resolveInferenceMaxRetries: () => runtimeSettings.inferenceMaxRetries,
                 }),
             databasePath: paths.databasePath,
             ...(loadedConfig.config.docker === undefined
@@ -833,7 +833,7 @@ async function runOwnedLocalProtocolServer(
 
         createProtocolHttpServer(
             {
-                codexStreamMaxRetries: runtimeSettings.codexStreamMaxRetries,
+                inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
                 ...(loadedConfig.config.docker === undefined
                     ? {}
                     : { defaultDocker: loadedConfig.config.docker }),
@@ -861,9 +861,9 @@ async function runOwnedLocalProtocolServer(
                         settings.durableGlobalEventQueue,
                     );
                     if (globalEventQueue === undefined) return undefined;
-                    runtimeSettings.codexStreamMaxRetries = settings.codexStreamMaxRetries;
+                    runtimeSettings.inferenceMaxRetries = settings.inferenceMaxRetries;
                     return {
-                        codexStreamMaxRetries: runtimeSettings.codexStreamMaxRetries,
+                        inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
                         globalEventQueue,
                     };
                 },

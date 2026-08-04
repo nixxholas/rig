@@ -2,6 +2,7 @@ import {
     extractProviderErrorDiagnostics,
     extractProviderRetryResetAt,
 } from "@/core/extractProviderErrorDiagnostics.js";
+import { isEmptyResponseError } from "@/core/EmptyResponseError.js";
 import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
 
 /**
@@ -172,21 +173,44 @@ function readDetails(
 }
 
 export function isRetryableCodexStreamError(error: unknown): boolean {
+    if (isEmptyResponseError(error)) return true;
     if (hasAbortError(error, new Set())) return false;
     return shouldRetry(error, new Set());
 }
 
 /** Unknown inference failures are transient unless the provider proves they are fatal. */
 function shouldRetry(error: unknown, seen: Set<object>): boolean {
-    const directive = readCodexErrorHeader(error, "x-should-retry")?.trim().toLowerCase();
-    if (directive === "true") return true;
-    if (directive === "false") return false;
     if (typeof error === "object" && error !== null) {
         if (seen.has(error)) return false;
         seen.add(error);
     }
-    if (isCodexWebSocketConnectionLimitError(error) || isCodexWebSocketRetryableServerError(error))
+    const code = stringProperty(error, "code") ?? stringProperty(error, "errno");
+    const serverError = readWebSocketServerError(error);
+    const providerCodes = [
+        code,
+        serverError === undefined ? undefined : stringProperty(serverError, "type"),
+        serverError === undefined ? undefined : stringProperty(serverError, "code"),
+    ];
+    if (
+        providerCodes.some(
+            (providerCode) =>
+                providerCode !== undefined && FATAL_CODES.has(providerCode.toLowerCase()),
+        )
+    )
+        return false;
+    if (
+        providerCodes.some(
+            (providerCode) =>
+                providerCode !== undefined &&
+                RETRYABLE_PROVIDER_CODES.has(providerCode.toLowerCase()),
+        )
+    )
         return true;
+    const directive = readCodexErrorHeader(error, "x-should-retry")?.trim().toLowerCase();
+    if (directive === "true") return true;
+    if (directive === "false") return false;
+    if (isCodexWebSocketConnectionLimitError(error)) return true;
+    if (isCodexWebSocketRetryableServerError(error)) return true;
     const status =
         numericProperty(error, "status") ??
         readCodexWebSocketHandshakeStatus(stringProperty(error, "message"));
@@ -194,17 +218,7 @@ function shouldRetry(error: unknown, seen: Set<object>): boolean {
         if (status === 408 || status === 409 || status === 429 || status >= 500) return true;
         if (status >= 400 && status < 500) return false;
     }
-    const code = stringProperty(error, "code") ?? stringProperty(error, "errno");
-    if (code !== undefined && FATAL_CODES.has(code.toLowerCase())) return false;
     if (code !== undefined && RETRYABLE_CODES.has(code.toUpperCase())) return true;
-    const serverError = readWebSocketServerError(error);
-    if (
-        serverError !== undefined &&
-        [stringProperty(serverError, "type"), stringProperty(serverError, "code")].some(
-            (value) => value !== undefined && FATAL_CODES.has(value.toLowerCase()),
-        )
-    )
-        return false;
     if (isCodexContextWindowError(error)) return false;
     if (isWebSocketError(error)) {
         if (readWebSocketServerEvent(error) === undefined) return true;
@@ -246,6 +260,14 @@ const RETRYABLE_NAMES = new Set([
     "TimeoutError",
 ]);
 
+const RETRYABLE_PROVIDER_CODES = new Set([
+    "insufficient_quota",
+    "invalid_prompt",
+    "invalid_request_error",
+    "model_not_found",
+    "permission_error",
+]);
+
 const FATAL_CODES = new Set([
     "authentication_error",
     "billing_error",
@@ -260,16 +282,11 @@ const FATAL_CODES = new Set([
     "image_parse_error",
     "image_too_large",
     "image_too_small",
-    "insufficient_quota",
     "invalid_base64_image",
     "invalid_image",
     "invalid_image_format",
     "invalid_image_mode",
     "invalid_image_url",
-    "invalid_prompt",
-    "invalid_request_error",
-    "model_not_found",
-    "permission_error",
     "unsupported_image_media_type",
 ]);
 

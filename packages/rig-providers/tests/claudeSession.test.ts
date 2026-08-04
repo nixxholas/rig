@@ -8,6 +8,115 @@ import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivac
 import { collectSessionEvents, textFromSessionEvents } from "./helpers/collectSessionEvents.js";
 
 describe("ClaudeSession", () => {
+    it("retries a successful result with zero output tokens", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const firstClose = vi.fn();
+        const query = vi.fn<ClaudeSdkQuery>(() => {
+            if (query.mock.calls.length > 1) return fakeQuery("RECOVERED");
+            async function* messages() {
+                yield {
+                    type: "result",
+                    subtype: "success",
+                    duration_ms: 1,
+                    duration_api_ms: 1,
+                    is_error: false,
+                    num_turns: 1,
+                    result: "",
+                    stop_reason: "end_turn",
+                    total_cost_usd: 0,
+                    usage: {
+                        input_tokens: 1,
+                        output_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    },
+                    modelUsage: {},
+                    permission_denials: [],
+                    uuid: "empty-result",
+                    session_id: "empty-output-session",
+                };
+            }
+            return Object.assign(messages(), {
+                close: firstClose,
+            }) as unknown as ReturnType<ClaudeSdkQuery>;
+        });
+        const session = new ClaudeSession("empty-output-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query,
+            tools: [],
+            waitForInferenceRetry: async () => {},
+        });
+
+        const events = await collectSessionEvents(
+            session.run({
+                context: { messages: [{ role: "user", content: "Retry empty output." }] },
+            }),
+        );
+
+        expect(query).toHaveBeenCalledTimes(2);
+        expect(firstClose).toHaveBeenCalledOnce();
+        expect(events).toContainEqual({
+            type: "retrying",
+            attempt: 1,
+            reason: "Claude returned a response with zero output tokens.",
+        });
+        expect(events.filter((event) => event.type === "token_usage")).toEqual([
+            {
+                type: "token_usage",
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    input: 1,
+                    output: 0,
+                    totalTokens: 1,
+                },
+            },
+            {
+                type: "token_usage",
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    input: 10,
+                    output: 2,
+                    totalTokens: 12,
+                },
+            },
+        ]);
+        expect(textFromSessionEvents(events)).toBe("RECOVERED");
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+    });
+
+    it("preserves a non-abort empty-response retry delay failure", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const delayError = Object.assign(new Error("retry timer failed"), {
+            code: "RETRY_TIMER_FAILURE",
+        });
+        const session = new ClaudeSession("empty-output-delay-failure", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query: () => fakeQuery("", 0),
+            tools: [],
+            waitForInferenceRetry: async () => {
+                throw delayError;
+            },
+        });
+
+        await expect(
+            collectSessionEvents(
+                session.run({
+                    context: {
+                        messages: [{ role: "user", content: "Retry empty output." }],
+                    },
+                }),
+            ),
+        ).rejects.toBe(delayError);
+    });
+
     it("preserves weekly quota classification, reset time, retries, and the native error", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
@@ -147,7 +256,7 @@ describe("ClaudeSession", () => {
                         total_cost_usd: 0,
                         usage: {
                             input_tokens: 0,
-                            output_tokens: 0,
+                            output_tokens: 1,
                             cache_creation_input_tokens: 0,
                             cache_read_input_tokens: 0,
                         },
@@ -725,6 +834,59 @@ describe("ClaudeSession", () => {
         ).rejects.toThrow("SDK construction failed.");
         expect(addAbortListener).toHaveBeenCalledOnce();
         expect(removeAbortListener).toHaveBeenCalledOnce();
+    });
+
+    it("commits a terminal result when abort races after the terminal was observed", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const controller = new AbortController();
+        const usage = {
+            input_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            get output_tokens() {
+                controller.abort();
+                return 1;
+            },
+        };
+        const session = new ClaudeSession("terminal-abort-race", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query: (() => {
+                async function* messages() {
+                    yield {
+                        type: "result",
+                        subtype: "success",
+                        duration_ms: 1,
+                        duration_api_ms: 1,
+                        is_error: false,
+                        num_turns: 1,
+                        result: "completed",
+                        stop_reason: "end_turn",
+                        total_cost_usd: 0,
+                        usage,
+                        modelUsage: {},
+                        permission_denials: [],
+                        uuid: "terminal-abort-race-result",
+                        session_id: "terminal-abort-race",
+                    };
+                }
+                return Object.assign(messages(), { close: () => {} });
+            }) as unknown as ClaudeSdkQuery,
+            tools: [],
+        });
+
+        const events = await collectSessionEvents(
+            session.run({
+                abort: controller.signal,
+                context: { messages: [{ role: "user", content: "Finish." }] },
+            }),
+        );
+
+        expect(controller.signal.aborted).toBe(true);
+        expect(events).toContainEqual({ type: "block_stop" });
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
     });
 
     it("stops immediately when the Claude SDK does not settle after interruption", async () => {
@@ -1357,7 +1519,7 @@ function fakeNativeCompactQuery(
     return Object.assign(generator, { close: () => {} }) as unknown as ReturnType<ClaudeSdkQuery>;
 }
 
-function fakeQuery(text: string): ReturnType<ClaudeSdkQuery> {
+function fakeQuery(text: string, outputTokens = 2): ReturnType<ClaudeSdkQuery> {
     const result = {
         type: "result",
         subtype: "success",
@@ -1371,7 +1533,7 @@ function fakeQuery(text: string): ReturnType<ClaudeSdkQuery> {
         total_cost_usd: 0,
         usage: {
             input_tokens: 10,
-            output_tokens: 2,
+            output_tokens: outputTokens,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         },

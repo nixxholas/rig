@@ -9,10 +9,11 @@ import type {
 import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
 import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
-import type {
-    ProviderModelCompatibilityType,
-    ProviderQuota,
-    ProviderUsage,
+import {
+    MAX_INFERENCE_MAX_RETRIES,
+    type ProviderModelCompatibilityType,
+    type ProviderQuota,
+    type ProviderUsage,
 } from "@slopus/rig-providers";
 import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
@@ -225,7 +226,7 @@ export interface ListModelsResponse {
 
 export interface DaemonConfig {
     settings: {
-        codexStreamMaxRetries: number;
+        inferenceMaxRetries: number;
         durableGlobalEventQueue: boolean;
     };
 }
@@ -234,12 +235,23 @@ export interface GetDaemonConfigResponse {
     config: DaemonConfig;
 }
 
-export interface UpdateDaemonConfigRequest {
-    settings: {
-        codexStreamMaxRetries: number;
-        durableGlobalEventQueue: boolean;
-    };
-}
+export const updateDaemonConfigRequestSchema = Type.Object(
+    {
+        settings: Type.Object(
+            {
+                inferenceMaxRetries: Type.Integer({
+                    minimum: 0,
+                    maximum: MAX_INFERENCE_MAX_RETRIES,
+                }),
+                durableGlobalEventQueue: Type.Boolean(),
+            },
+            { additionalProperties: false },
+        ),
+    },
+    { additionalProperties: false },
+);
+
+export type UpdateDaemonConfigRequest = Static<typeof updateDaemonConfigRequestSchema>;
 
 export type UpdateDaemonConfigResponse = GetDaemonConfigResponse;
 

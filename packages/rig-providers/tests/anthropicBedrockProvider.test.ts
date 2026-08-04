@@ -538,12 +538,12 @@ describe("AnthropicBedrockProvider", () => {
                         return streamEvents([
                             {
                                 type: "message_start",
-                                message: { usage: { input_tokens: 1, output_tokens: 0 } },
+                                message: { usage: { input_tokens: 1, output_tokens: 1 } },
                             },
                             {
                                 type: "message_delta",
                                 delta: { stop_reason: "end_turn", stop_sequence: null },
-                                usage: { output_tokens: 0 },
+                                usage: { output_tokens: 1 },
                             },
                             { type: "message_stop" },
                         ]);
@@ -780,6 +780,221 @@ describe("AnthropicBedrockProvider", () => {
             session.destroy();
             await new Promise<void>((resolve) => server.close(() => resolve()));
         }
+    });
+
+    it("retries a completed response with zero output tokens", async () => {
+        let attempts = 0;
+        const requests: unknown[] = [];
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-empty-output-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async (request: unknown) => {
+                        requests.push(request);
+                        attempts += 1;
+                        return streamEvents(
+                            attempts === 1
+                                ? [
+                                      {
+                                          type: "message_start",
+                                          message: {
+                                              usage: { input_tokens: 1, output_tokens: 0 },
+                                          },
+                                      },
+                                      {
+                                          type: "content_block_start",
+                                          index: 0,
+                                          content_block: { type: "text", text: "" },
+                                      },
+                                      {
+                                          type: "content_block_delta",
+                                          index: 0,
+                                          delta: {
+                                              type: "text_delta",
+                                              text: "discarded",
+                                          },
+                                      },
+                                      { type: "content_block_stop", index: 0 },
+                                      {
+                                          type: "content_block_start",
+                                          index: 1,
+                                          content_block: {
+                                              type: "tool_use",
+                                              id: "discarded-call",
+                                              name: "discarded_tool",
+                                              input: {},
+                                          },
+                                      },
+                                      {
+                                          type: "content_block_delta",
+                                          index: 1,
+                                          delta: {
+                                              type: "input_json_delta",
+                                              partial_json: "{}",
+                                          },
+                                      },
+                                      { type: "content_block_stop", index: 1 },
+                                      {
+                                          type: "message_delta",
+                                          delta: {
+                                              stop_reason: "tool_use",
+                                              stop_sequence: null,
+                                          },
+                                          usage: { output_tokens: 0 },
+                                      },
+                                      { type: "message_stop" },
+                                  ]
+                                : attempts === 2
+                                  ? [
+                                        {
+                                            type: "message_start",
+                                            message: {
+                                                usage: { input_tokens: 1, output_tokens: 0 },
+                                            },
+                                        },
+                                        {
+                                            type: "content_block_start",
+                                            index: 0,
+                                            content_block: { type: "text", text: "" },
+                                        },
+                                        {
+                                            type: "content_block_delta",
+                                            index: 0,
+                                            delta: {
+                                                type: "text_delta",
+                                                text: "recovered",
+                                            },
+                                        },
+                                        { type: "content_block_stop", index: 0 },
+                                        {
+                                            type: "message_delta",
+                                            delta: {
+                                                stop_reason: "end_turn",
+                                                stop_sequence: null,
+                                            },
+                                            usage: { output_tokens: 1 },
+                                        },
+                                        { type: "message_stop" },
+                                    ]
+                                  : [
+                                        {
+                                            type: "message_start",
+                                            message: {
+                                                usage: {
+                                                    input_tokens: 0,
+                                                    output_tokens: 0,
+                                                },
+                                            },
+                                        },
+                                        {
+                                            type: "content_block_start",
+                                            index: 0,
+                                            content_block: {
+                                                type: "compaction",
+                                                content: null,
+                                                encrypted_content: null,
+                                            },
+                                        },
+                                        {
+                                            type: "content_block_delta",
+                                            index: 0,
+                                            delta: {
+                                                type: "compaction_delta",
+                                                content: "summary",
+                                                encrypted_content: "opaque",
+                                            },
+                                        },
+                                        { type: "content_block_stop", index: 0 },
+                                        {
+                                            type: "message_delta",
+                                            delta: {
+                                                stop_reason: "compaction",
+                                                stop_sequence: null,
+                                            },
+                                            usage: { output_tokens: 1 },
+                                        },
+                                        { type: "message_stop" },
+                                    ],
+                        );
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+            waitForInferenceRetry: async () => {},
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "retry zero output" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(2);
+        const resetIndex = events.findIndex((event) => event.type === "block_reset");
+        expect(events.slice(resetIndex, resetIndex + 3)).toEqual([
+            { type: "block_reset" },
+            {
+                type: "token_usage",
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    input: 1,
+                    output: 0,
+                    totalTokens: 1,
+                },
+            },
+            {
+                type: "retrying",
+                attempt: 1,
+                reason: "Anthropic Bedrock returned a response with zero output tokens.",
+            },
+        ]);
+        expect(
+            committedSessionEvents(events).some(
+                (event) =>
+                    (event.type === "text_delta" && event.delta === "discarded") ||
+                    (event.type === "tool_call_start" && event.name === "discarded_tool"),
+            ),
+        ).toBe(false);
+        expect(events.filter((event) => event.type === "token_usage")).toEqual([
+            {
+                type: "token_usage",
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    input: 1,
+                    output: 0,
+                    totalTokens: 1,
+                },
+            },
+            {
+                type: "token_usage",
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    input: 1,
+                    output: 1,
+                    totalTokens: 2,
+                },
+            },
+        ]);
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        await expect(session.compact()).resolves.toMatchObject({ status: "completed" });
+        expect(JSON.stringify(requests[2])).toContain("recovered");
+        expect(JSON.stringify(requests[2])).not.toContain("discarded");
+        expect(JSON.stringify(requests[2])).not.toContain("discarded_tool");
     });
 
     it("frames request failures as a reset block", async () => {

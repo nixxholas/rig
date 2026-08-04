@@ -69,6 +69,15 @@ describe("formatProviderError", () => {
         ).toBe("Codex encountered an internal server error. Try again. Request ID: request-123.");
     });
 
+    it("reports exhausted empty responses", () => {
+        expect(
+            formatProviderError(
+                { type: "empty_response", diagnostics: { attempts: 3 } },
+                { fallbackMessage: "raw empty response", providerId: "codex" },
+            ),
+        ).toBe("Codex repeatedly returned an empty response. Try again.");
+    });
+
     it("explains expired credentials instead of showing the upstream diagnostic string", () => {
         expect(
             formatProviderError(

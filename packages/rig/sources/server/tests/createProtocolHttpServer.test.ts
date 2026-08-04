@@ -1571,7 +1571,7 @@ describe("createProtocolHttpServer", () => {
             await expect(client.getDaemonConfig()).resolves.toEqual({
                 config: {
                     settings: {
-                        codexStreamMaxRetries: 5,
+                        inferenceMaxRetries: 10,
                         durableGlobalEventQueue: false,
                     },
                 },
@@ -1615,7 +1615,7 @@ describe("createProtocolHttpServer", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         const { client, close } = await startServer({
             onDaemonSettingsChange: (settings) => ({
-                codexStreamMaxRetries: settings.codexStreamMaxRetries,
+                inferenceMaxRetries: settings.inferenceMaxRetries,
                 globalEventQueue: store.setDurableGlobalEventQueue(
                     settings.durableGlobalEventQueue,
                 ),
@@ -1623,25 +1623,27 @@ describe("createProtocolHttpServer", () => {
             store,
         });
         try {
+            for (const inferenceMaxRetries of [-1, 1.5, 101]) {
+                await expect(
+                    client.updateDaemonConfig({
+                        settings: {
+                            inferenceMaxRetries,
+                            durableGlobalEventQueue: false,
+                        },
+                    }),
+                ).rejects.toThrow("Daemon settings must use valid values.");
+            }
             await expect(
                 client.updateDaemonConfig({
                     settings: {
-                        codexStreamMaxRetries: 101,
-                        durableGlobalEventQueue: false,
-                    },
-                }),
-            ).rejects.toThrow("Codex reconnect attempts must be a whole number from 0 to 100.");
-            await expect(
-                client.updateDaemonConfig({
-                    settings: {
-                        codexStreamMaxRetries: 7,
+                        inferenceMaxRetries: 7,
                         durableGlobalEventQueue: true,
                     },
                 }),
             ).resolves.toEqual({
                 config: {
                     settings: {
-                        codexStreamMaxRetries: 7,
+                        inferenceMaxRetries: 7,
                         durableGlobalEventQueue: true,
                     },
                 },
@@ -1671,7 +1673,7 @@ describe("createProtocolHttpServer", () => {
 
             await client.updateDaemonConfig({
                 settings: {
-                    codexStreamMaxRetries: 7,
+                    inferenceMaxRetries: 7,
                     durableGlobalEventQueue: false,
                 },
             });
@@ -1679,7 +1681,7 @@ describe("createProtocolHttpServer", () => {
             await expect(client.getDaemonConfig()).resolves.toEqual({
                 config: {
                     settings: {
-                        codexStreamMaxRetries: 7,
+                        inferenceMaxRetries: 7,
                         durableGlobalEventQueue: false,
                     },
                 },
@@ -1687,7 +1689,7 @@ describe("createProtocolHttpServer", () => {
 
             await client.updateDaemonConfig({
                 settings: {
-                    codexStreamMaxRetries: 7,
+                    inferenceMaxRetries: 7,
                     durableGlobalEventQueue: true,
                 },
             });
@@ -3357,13 +3359,13 @@ async function startServer(
         globalEventQueue?: GlobalEventQueue;
         getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
         onDaemonSettingsChange?: (settings: {
-            codexStreamMaxRetries: number;
+            inferenceMaxRetries: number;
             durableGlobalEventQueue: boolean;
         }) =>
-            | { codexStreamMaxRetries: number; globalEventQueue: GlobalEventQueue }
+            | { inferenceMaxRetries: number; globalEventQueue: GlobalEventQueue }
             | undefined
             | Promise<
-                  { codexStreamMaxRetries: number; globalEventQueue: GlobalEventQueue } | undefined
+                  { inferenceMaxRetries: number; globalEventQueue: GlobalEventQueue } | undefined
               >;
         onShutdown?: () => void;
         onReloadHappy?: () => boolean | Promise<boolean>;

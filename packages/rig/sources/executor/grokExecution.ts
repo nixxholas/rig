@@ -13,6 +13,7 @@ export function grokExecution(options: {
     config: ConfigGrokProvider;
     env: NodeJS.ProcessEnv;
     id: string;
+    resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }): ExecutorProvider {
     const baseUrl = options.config.baseUrl ?? options.env.RIG_GROK_BASE_URL;
@@ -45,6 +46,9 @@ export function grokExecution(options: {
                 // Web and X search run on Grok's backend, so a Grok session gets them the way
                 // the Grok CLI does rather than through a tool Rig would have to execute.
                 hostedTools: grok_hosted_tools,
+                ...(options.resolveInferenceMaxRetries === undefined
+                    ? {}
+                    : { resolveInferenceMaxRetries: options.resolveInferenceMaxRetries }),
                 ...(baseUrl === undefined ? {} : { endpoint: baseUrl }),
             });
         },

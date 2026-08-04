@@ -11,7 +11,7 @@
 # instructions = "Additional instructions for every Rig session."
 
 # [settings]
-# codex_stream_max_retries = 5
+# inference_max_retries = 10
 # compact_completed_turns = false
 # completion_chime = false
 # daemon_heap_snapshots = false

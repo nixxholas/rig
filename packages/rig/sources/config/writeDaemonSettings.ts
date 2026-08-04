@@ -3,7 +3,7 @@ import type { DaemonSettings, LoadConfigOptions, PartialRigConfig } from "./type
 import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 
 export async function writeDaemonSettings(
-    settings: Pick<DaemonSettings, "codexStreamMaxRetries" | "durableGlobalEventQueue">,
+    settings: Pick<DaemonSettings, "inferenceMaxRetries" | "durableGlobalEventQueue">,
     options: LoadConfigOptions = {},
 ): Promise<void> {
     const loaded = await loadConfig(options);
@@ -19,7 +19,7 @@ export async function writeDaemonSettings(
             ...(runtime.theme === undefined ? {} : { theme: runtime.theme }),
             settings: {
                 ...runtime.settings,
-                codexStreamMaxRetries: settings.codexStreamMaxRetries,
+                inferenceMaxRetries: settings.inferenceMaxRetries,
                 durableGlobalEventQueue: settings.durableGlobalEventQueue,
             },
         } satisfies PartialRigConfig;

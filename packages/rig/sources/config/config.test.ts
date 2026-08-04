@@ -280,7 +280,7 @@ permission_mode = "auto"
 service_tier = "fast"
 
 [settings]
-codex_stream_max_retries = 9
+inference_max_retries = 9
 compact_completed_turns = true
 completion_chime = true
 daemon_heap_snapshots = true
@@ -337,7 +337,7 @@ mounts = [
                 serviceTier: "fast",
             },
             settings: {
-                codexStreamMaxRetries: 9,
+                inferenceMaxRetries: 9,
                 compactCompletedTurns: true,
                 completionChime: true,
                 daemonHeapSnapshots: true,
@@ -507,12 +507,12 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             "settings.compact_completed_turns must be a boolean.",
         ],
         [
-            "[settings]\ncodex_stream_max_retries = 101\n",
-            "settings.codex_stream_max_retries must be a whole number from 0 to 100.",
+            "[settings]\ninference_max_retries = 101\n",
+            "settings.inference_max_retries must be a whole number from 0 to 100.",
         ],
         [
-            "[settings]\ncodex_stream_max_retries = 1.5\n",
-            "settings.codex_stream_max_retries must be a whole number from 0 to 100.",
+            "[settings]\ninference_max_retries = 1.5\n",
+            "settings.inference_max_retries must be a whole number from 0 to 100.",
         ],
         ['[settings]\nshow_usage = "yes"\n', "settings.show_usage must be a boolean."],
         ["[theme]\nprimary = 5\n", "theme.primary must be a string."],
@@ -568,7 +568,7 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
         ).toBe("Project daemon setting ignored");
         expect(
             createProjectConfigSecurityNoticeTitle({
-                settings: { codexStreamMaxRetries: 20 },
+                settings: { inferenceMaxRetries: 20 },
             }),
         ).toBe("Project daemon setting ignored");
         expect(
@@ -607,7 +607,7 @@ model = "openai/gpt-5.4"
 effort = "low"
 permission_mode = "read_only"
 [settings]
-codex_stream_max_retries = 7
+inference_max_retries = 7
 daemon_heap_snapshots = false
 durable_global_event_queue = false
 happy_integration = false
@@ -632,7 +632,7 @@ effort = "high"
 instructions = "Hide project tool activity."
 permission_mode = "full_access"
 [settings]
-codex_stream_max_retries = 99
+inference_max_retries = 99
 daemon_heap_snapshots = true
 durable_global_event_queue = true
 happy_integration = true
@@ -666,7 +666,7 @@ setup_commands = ["printf project"]
 model = "openai/gpt-5.5"
 effort = "minimal"
 [settings]
-codex_stream_max_retries = 8
+inference_max_retries = 8
 `,
                 "utf8",
             );
@@ -687,7 +687,7 @@ codex_stream_max_retries = 8
                 providerId: "bedrock",
             });
             expect(loaded.config.settings).toEqual({
-                codexStreamMaxRetries: 8,
+                inferenceMaxRetries: 8,
                 compactCompletedTurns: false,
                 completionChime: false,
                 daemonHeapSnapshots: false,
@@ -715,7 +715,7 @@ codex_stream_max_retries = 8
             });
             expect(loaded.config.workspace.setupCommands).toEqual(["printf project"]);
             expect(createProjectConfigSecurityNotice(loaded.sources.local.values)).toBe(
-                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, Codex reconnect attempts, daemon heap snapshots, the durable event queue, the Happy integration, and P2P networking under your machine-level control.",
+                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, inference retries, daemon heap snapshots, the durable event queue, the Happy integration, and P2P networking under your machine-level control.",
             );
 
             const emptyCwd = join(root, "empty-repo");
@@ -728,7 +728,7 @@ codex_stream_max_retries = 8
                 } as NodeJS.ProcessEnv,
             });
             expect(defaultLoaded.config.settings).toEqual({
-                codexStreamMaxRetries: 5,
+                inferenceMaxRetries: 10,
                 compactCompletedTurns: false,
                 completionChime: false,
                 daemonHeapSnapshots: false,
@@ -762,7 +762,7 @@ codex_stream_max_retries = 8
                     permissionMode: "workspace_write",
                 },
                 settings: {
-                    codexStreamMaxRetries: 12,
+                    inferenceMaxRetries: 12,
                     compactCompletedTurns: true,
                     completionChime: true,
                     daemonHeapSnapshots: true,
@@ -823,7 +823,7 @@ codex_stream_max_retries = 8
                     'effort = "low"',
                     "",
                     "[settings]",
-                    "codex_stream_max_retries = 12",
+                    "inference_max_retries = 12",
                     "compact_completed_turns = true",
                     "completion_chime = true",
                     "daemon_heap_snapshots = true",
@@ -994,7 +994,7 @@ codex_stream_max_retries = 8
 
             await writeDaemonSettings(
                 {
-                    codexStreamMaxRetries: 11,
+                    inferenceMaxRetries: 11,
                     durableGlobalEventQueue: true,
                 },
                 {
@@ -1009,7 +1009,7 @@ codex_stream_max_retries = 8
             expect(parseConfigToml(await readFile(runtimePath, "utf8"))).toEqual({
                 defaults: { modelId: "openai/gpt-5.5" },
                 settings: {
-                    codexStreamMaxRetries: 11,
+                    inferenceMaxRetries: 11,
                     durableGlobalEventQueue: true,
                     showUsage: true,
                 },

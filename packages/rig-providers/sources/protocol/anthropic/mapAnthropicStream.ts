@@ -4,6 +4,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { APIConnectionError } from "@anthropic-ai/sdk/error";
 
+import { EmptyResponseError } from "@/core/EmptyResponseError.js";
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import type { SessionTool } from "@/core/SessionTool.js";
@@ -46,6 +47,7 @@ export async function* mapAnthropicStream(
         cacheWrite: 0,
         totalTokens: 0,
     };
+    let outputTokensReported = false;
     let stopReason: BetaStopReason | null = null;
     let sawCompaction = false;
     let started = false;
@@ -56,6 +58,7 @@ export async function* mapAnthropicStream(
         }
         if (event.type === "message_start") {
             usage = toUsage(event.message.usage);
+            outputTokensReported = typeof event.message.usage.output_tokens === "number";
             continue;
         }
         if (event.type === "content_block_start") {
@@ -179,6 +182,7 @@ export async function* mapAnthropicStream(
         }
         if (event.type === "message_delta") {
             usage = mergeUsage(usage, event.usage);
+            if (typeof event.usage.output_tokens === "number") outputTokensReported = true;
             stopReason = event.delta.stop_reason;
             if (stopReason === "compaction") options.onOutputStarted?.();
             continue;
@@ -187,6 +191,15 @@ export async function* mapAnthropicStream(
             const orderedBlocks = [...blocks.entries()]
                 .sort(([left], [right]) => left - right)
                 .map(([, block]) => block);
+            const terminal = toDoneEvent(stopReason, tools.size > 0, sawCompaction);
+            if (
+                terminal.state !== "error" &&
+                terminal.state !== "cancelled" &&
+                outputTokensReported &&
+                usage.output === 0
+            ) {
+                throw new EmptyResponseError("Anthropic Bedrock", usage);
+            }
             if (orderedBlocks.length > 0) {
                 yield {
                     type: "response_items",
@@ -195,7 +208,7 @@ export async function* mapAnthropicStream(
             }
             yield { type: "token_usage", usage };
             yield { type: "block_stop" };
-            yield toDoneEvent(stopReason, tools.size > 0, sawCompaction);
+            yield terminal;
             return;
         }
     }

@@ -158,8 +158,9 @@ Vanilla Claude Code retries retryable transport and API failures before producin
 result. Its default is ten retries and it emits SDK `system/api_retry` messages containing
 the attempt, maximum, delay, category, and HTTP status.
 
-Rig forces `CLAUDE_CODE_MAX_RETRIES=10` in `impl/toClaudeSdkOptions.ts`, overriding inherited
-values so provider behavior is stable. `impl/toClaudeRetryEvent.ts` converts each native
+Rig sets `CLAUDE_CODE_MAX_RETRIES` from the shared inference retry budget, whose default is ten,
+overriding inherited values so provider behavior is stable and follows live configuration.
+`impl/toClaudeRetryEvent.ts` converts each native
 retry notification into a Rig `retrying` event. Rig does not replay the query itself; the
 retry remains inside Claude Code, avoiding duplicate tool or session effects.
 

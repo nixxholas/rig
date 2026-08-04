@@ -528,6 +528,7 @@ export {
     SESSION_STREAM_TURN_LIMIT,
     submitContextMessageRequestSchema,
     transferSessionRequestSchema,
+    updateDaemonConfigRequestSchema,
 } from "./SessionProtocol.js";
 export {
     AttachmentImagePreviewSchema,

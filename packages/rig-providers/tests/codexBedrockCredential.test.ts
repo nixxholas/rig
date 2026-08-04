@@ -86,7 +86,87 @@ describe("CodexProvider credential behavior", () => {
         }
     });
 
-    it("retries an unclassified Bedrock response failure before surfacing it", async () => {
+    it.each(["server_error", "invalid_prompt"])(
+        "retries a Bedrock %s response failure before surfacing it",
+        async (failureCode) => {
+            let requests = 0;
+            const server = createServer(async (request, response) => {
+                for await (const _chunk of request) {
+                    // Drain the request before answering.
+                }
+                requests += 1;
+                if (requests === 1) {
+                    response.writeHead(200, { "content-type": "text/event-stream" });
+                    response.end(
+                        `data: ${JSON.stringify({
+                            type: "response.failed",
+                            sequence_number: 1,
+                            response: {
+                                error: {
+                                    code: failureCode,
+                                    message:
+                                        "The server had an error while processing your request. Sorry about that!",
+                                },
+                                incomplete_details: null,
+                            },
+                        })}\n\ndata: [DONE]\n\n`,
+                    );
+                    return;
+                }
+                completeTextSse(response, "recovered", 2);
+            });
+            await new Promise<void>((resolve, reject) => {
+                server.listen(0, "127.0.0.1", resolve);
+                server.once("error", reject);
+            });
+            const address = server.address();
+            if (typeof address !== "object" || address === null)
+                expect.fail("Missing server port.");
+            const credential = await BedrockBearerTokenCredential.tryLoad({
+                bearerToken: "bedrock-test-token",
+            });
+
+            try {
+                const session = new CodexSession("bedrock-retry", {
+                    credential: credential!,
+                    endpoint: `http://127.0.0.1:${address.port}/openai/v1`,
+                    installationId: "test-installation",
+                    instructions: "instructions",
+                    model: "openai.gpt-5.6-sol",
+                    inferenceMaxRetries: 1,
+                    transport: "sse",
+                    userAgent: "rig-test",
+                });
+                const events = [];
+                for await (const event of session.run({
+                    context: { messages: [{ role: "user", content: "retry me" }] },
+                })) {
+                    events.push(event);
+                }
+
+                expect(events.map((event) => event.type)).toEqual([
+                    "block_start",
+                    "block_reset",
+                    "retrying",
+                    "block_start",
+                    "token_usage",
+                    "response_items",
+                    "block_stop",
+                    "done",
+                ]);
+                expect(events).toContainEqual(
+                    expect.objectContaining({ type: "retrying", attempt: 1 }),
+                );
+                expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+                expect(requests).toBe(2);
+                session.destroy();
+            } finally {
+                server.close();
+            }
+        },
+    );
+
+    it("retries a completed Bedrock response with zero output tokens", async () => {
         let requests = 0;
         const server = createServer(async (request, response) => {
             for await (const _chunk of request) {
@@ -97,15 +177,11 @@ describe("CodexProvider credential behavior", () => {
                 response.writeHead(200, { "content-type": "text/event-stream" });
                 response.end(
                     `data: ${JSON.stringify({
-                        type: "response.failed",
-                        sequence_number: 1,
+                        type: "response.completed",
                         response: {
-                            error: {
-                                code: "server_error",
-                                message:
-                                    "The server had an error while processing your request. Sorry about that!",
-                            },
-                            incomplete_details: null,
+                            id: "response-empty",
+                            output: [],
+                            usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
                         },
                     })}\n\ndata: [DONE]\n\n`,
                 );
@@ -124,24 +200,29 @@ describe("CodexProvider credential behavior", () => {
         });
 
         try {
-            const session = await new CodexProvider({
+            const session = new CodexSession("bedrock-empty-retry", {
                 credential: credential!,
                 endpoint: `http://127.0.0.1:${address.port}/openai/v1`,
-                model: "openai.gpt-5.6-sol",
-                streamMaxRetries: 1,
-            }).session("bedrock-retry", {
+                installationId: "test-installation",
                 instructions: "instructions",
+                model: "openai.gpt-5.6-sol",
+                inferenceMaxRetries: 1,
+                waitForInferenceRetry: async () => {},
+                transport: "sse",
+                userAgent: "rig-test",
             });
             const events = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "retry me" }] },
+                context: { messages: [{ role: "user", content: "retry empty output" }] },
             })) {
                 events.push(event);
             }
 
+            expect(requests).toBe(2);
             expect(events.map((event) => event.type)).toEqual([
                 "block_start",
                 "block_reset",
+                "token_usage",
                 "retrying",
                 "block_start",
                 "token_usage",
@@ -149,11 +230,12 @@ describe("CodexProvider credential behavior", () => {
                 "block_stop",
                 "done",
             ]);
-            expect(events).toContainEqual(
-                expect.objectContaining({ type: "retrying", attempt: 1 }),
-            );
+            expect(events).toContainEqual({
+                type: "retrying",
+                attempt: 1,
+                reason: "Codex returned a response with zero output tokens.",
+            });
             expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
-            expect(requests).toBe(2);
             session.destroy();
         } finally {
             server.close();
@@ -198,7 +280,7 @@ describe("CodexProvider credential behavior", () => {
                 installationId: "test-installation",
                 instructions: "instructions",
                 model: "openai.gpt-5.6-sol",
-                streamMaxRetries: 0,
+                inferenceMaxRetries: 0,
                 transport: "sse",
                 userAgent: "rig-test",
             });
@@ -265,7 +347,7 @@ describe("CodexProvider credential behavior", () => {
                 installationId: "test-installation",
                 instructions: "instructions",
                 model: "openai.gpt-5.6-sol",
-                streamMaxRetries: 5,
+                inferenceMaxRetries: 5,
                 transport: "sse",
                 userAgent: "rig-test",
             });

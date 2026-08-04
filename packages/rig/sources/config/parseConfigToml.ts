@@ -1,7 +1,7 @@
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { MAX_CODEX_STREAM_MAX_RETRIES } from "./codexStreamRetrySettings.js";
+import { MAX_INFERENCE_MAX_RETRIES } from "./inferenceRetrySettings.js";
 
 import type {
     ConfigPresenceState,
@@ -120,7 +120,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     const settingsTable = readTable(table.settings, "settings");
     if (settingsTable !== undefined) {
         assertKnownKeys(settingsTable, "settings", [
-            "codex_stream_max_retries",
+            "inference_max_retries",
             "compact_completed_turns",
             "completion_chime",
             "daemon_heap_snapshots",
@@ -129,15 +129,15 @@ export function parseConfigToml(source: string): PartialRigConfig {
             "show_reasoning",
             "show_usage",
         ]);
-        const codexStreamMaxRetries = readIntegerInRange(
+        const inferenceMaxRetries = readIntegerInRange(
             settingsTable,
-            "codex_stream_max_retries",
-            "settings.codex_stream_max_retries",
+            "inference_max_retries",
+            "settings.inference_max_retries",
             0,
-            MAX_CODEX_STREAM_MAX_RETRIES,
+            MAX_INFERENCE_MAX_RETRIES,
         );
-        if (codexStreamMaxRetries !== undefined) {
-            settings.codexStreamMaxRetries = codexStreamMaxRetries;
+        if (inferenceMaxRetries !== undefined) {
+            settings.inferenceMaxRetries = inferenceMaxRetries;
         }
         const compactCompletedTurns = readBoolean(
             settingsTable,

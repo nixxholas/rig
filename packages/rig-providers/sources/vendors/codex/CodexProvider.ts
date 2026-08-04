@@ -1,5 +1,9 @@
 import type { ProviderModality } from "@/core/ProviderModality.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
+import {
+    createInferenceMaxRetriesResolver,
+    type InferenceRetryOptions,
+} from "@/core/inferenceRetrySettings.js";
 import { ResponsesProvider } from "@/protocol/responses/ResponsesProvider.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import {
@@ -11,10 +15,7 @@ import { assertCodexCredential } from "@/vendors/codex/impl/assertCodexCredentia
 import { resolveCodexInstallationId } from "@/vendors/codex/impl/resolveCodexInstallationId.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
 import { resolveCodexUserAgent } from "@/vendors/codex/impl/codexUserAgent.js";
-import {
-    resolveCodexStreamIdleTimeout,
-    resolveCodexStreamMaxRetries,
-} from "@/vendors/codex/impl/codexRetry.js";
+import { resolveCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 import {
     CODEX_API_ENDPOINT,
     CODEX_CHATGPT_ENDPOINT,
@@ -26,17 +27,13 @@ import {
     type GenerateCodexImageResult,
 } from "@/vendors/codex/generateCodexImage.js";
 
-export interface CodexProviderOptions {
+export interface CodexProviderOptions extends InferenceRetryOptions {
     credential: CodexProviderCredential;
     endpoint?: string;
     model?: string;
     /** Enables multi-call batches; Codex v2 uses standard Responses instead of Responses Lite. */
     parallelToolCalls?: boolean;
     region?: string;
-    /** Maximum stream reconnection attempts per transport, matching upstream Codex. */
-    streamMaxRetries?: number;
-    /** Resolves the current retry limit so a long-lived session can follow runtime config. */
-    resolveStreamMaxRetries?: () => number;
     /** Maximum time a connected stream may remain idle, matching upstream Codex. */
     streamIdleTimeoutMs?: number;
     transport?: CodexTransport;
@@ -56,7 +53,8 @@ export class CodexProvider extends ResponsesProvider {
     readonly streamIdleTimeoutMs: number;
     readonly transport: CodexTransport;
     readonly userAgent: string | undefined;
-    readonly #resolveStreamMaxRetries: () => number;
+    readonly #resolveInferenceMaxRetries: () => number;
+    readonly #waitForInferenceRetry: InferenceRetryOptions["waitForInferenceRetry"];
 
     constructor(options: CodexProviderOptions) {
         super();
@@ -80,19 +78,15 @@ export class CodexProvider extends ResponsesProvider {
                 ? undefined
                 : resolveCodexSessionModelId(options.model, isBedrock);
         this.parallelToolCalls = options.parallelToolCalls;
-        const configuredStreamMaxRetries =
-            options.resolveStreamMaxRetries ??
-            (() => resolveCodexStreamMaxRetries(options.streamMaxRetries));
-        this.#resolveStreamMaxRetries = () =>
-            resolveCodexStreamMaxRetries(configuredStreamMaxRetries());
-        this.#resolveStreamMaxRetries();
+        this.#resolveInferenceMaxRetries = createInferenceMaxRetriesResolver(options);
+        this.#waitForInferenceRetry = options.waitForInferenceRetry;
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.transport = isBedrock ? "sse" : (options.transport ?? "auto");
         this.userAgent = options.userAgent;
     }
 
-    get streamMaxRetries(): number {
-        return this.#resolveStreamMaxRetries();
+    get inferenceMaxRetries(): number {
+        return this.#resolveInferenceMaxRetries();
     }
 
     async generateImage(request: GenerateCodexImageRequest): Promise<GenerateCodexImageResult> {
@@ -120,7 +114,10 @@ export class CodexProvider extends ResponsesProvider {
             ...(this.parallelToolCalls === undefined
                 ? {}
                 : { parallelToolCalls: this.parallelToolCalls }),
-            resolveStreamMaxRetries: () => this.streamMaxRetries,
+            resolveInferenceMaxRetries: () => this.inferenceMaxRetries,
+            ...(this.#waitForInferenceRetry === undefined
+                ? {}
+                : { waitForInferenceRetry: this.#waitForInferenceRetry }),
             streamIdleTimeoutMs: this.streamIdleTimeoutMs,
             transport: this.transport,
             userAgent,

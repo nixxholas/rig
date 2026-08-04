@@ -235,8 +235,7 @@ The captured production policy is represented by `impl/grokRetry.ts`:
 - aborts and `x-should-retry: false` are terminal;
 - `retry-after-ms` and `retry-after` are honored;
 - otherwise delay starts at two seconds, doubles to a 30-second cap, and adds jitter;
-- total transport attempts are bounded to 15, including the initial request;
-- 429 is bounded to two total attempts, including the initial request;
+- retries use the shared inference budget, defaulting to ten retries after the initial request;
 - the first ordinary transport retry rebuilds the connection pool with HTTP/2 disabled;
 - a 413, or a 400/500 containing `Could not process image`, removes image blocks while preserving
   text and message order, then replays once.

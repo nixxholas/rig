@@ -31,6 +31,7 @@ interface ActiveOutputItem {
 export interface OpenAIResponseRunResult {
     assistantText: string;
     encryptedReasoning?: string | undefined;
+    outputTokensReported: boolean;
     responseItems: readonly string[];
     stopReason: "stop" | "length" | "tool_use";
     toolCalls: readonly SessionToolCall[];
@@ -67,12 +68,14 @@ export async function* mapOpenAIResponseStream(
     const responseItems = new Map<number, string>();
     const finishedServerToolCalls = new Set<string>();
     let usage: SessionCacheUsage = { ...EMPTY_SESSION_CACHE_USAGE };
+    let outputTokensReported = false;
 
     for await (const event of responseStream) {
         if (options.signal?.aborted) {
             return {
                 assistantText,
                 encryptedReasoning,
+                outputTokensReported,
                 responseItems: [...responseItems.entries()]
                     .sort(([left], [right]) => left - right)
                     .map(([, item]) => item),
@@ -463,6 +466,7 @@ export async function* mapOpenAIResponseStream(
                 activeItems.delete(outputIndex);
             }
             usage = toSessionCacheUsage(event.response.usage);
+            outputTokensReported = hasReportedOutputTokens(event.response.usage);
             if (usage.totalTokens > 0) {
                 yield { type: "token_usage", usage };
             }
@@ -471,6 +475,7 @@ export async function* mapOpenAIResponseStream(
                 return {
                     assistantText,
                     encryptedReasoning,
+                    outputTokensReported,
                     responseItems: [...responseItems.entries()]
                         .sort(([left], [right]) => left - right)
                         .map(([, item]) => item),
@@ -540,6 +545,7 @@ export async function* mapOpenAIResponseStream(
                 activeItems.delete(outputIndex);
             }
             usage = toSessionCacheUsage(event.response.usage);
+            outputTokensReported = hasReportedOutputTokens(event.response.usage);
             yield { type: "token_usage", usage };
             yield {
                 type: "done",
@@ -548,6 +554,7 @@ export async function* mapOpenAIResponseStream(
             return {
                 assistantText,
                 encryptedReasoning,
+                outputTokensReported,
                 responseItems: [...responseItems.entries()]
                     .sort(([left], [right]) => left - right)
                     .map(([, item]) => item),
@@ -575,6 +582,7 @@ export async function* mapOpenAIResponseStream(
     return {
         assistantText,
         encryptedReasoning,
+        outputTokensReported,
         responseItems: [...responseItems.entries()]
             .sort(([left], [right]) => left - right)
             .map(([, item]) => item),
@@ -582,6 +590,15 @@ export async function* mapOpenAIResponseStream(
         toolCalls,
         usage,
     };
+}
+
+function hasReportedOutputTokens(usage: unknown): boolean {
+    return (
+        typeof usage === "object" &&
+        usage !== null &&
+        "output_tokens" in usage &&
+        typeof usage.output_tokens === "number"
+    );
 }
 
 /**

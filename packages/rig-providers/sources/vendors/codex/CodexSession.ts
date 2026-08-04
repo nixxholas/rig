@@ -3,6 +3,15 @@ import { randomUUID } from "node:crypto";
 import type OpenAI from "openai";
 
 import { BaseSession } from "@/core/BaseSession.js";
+import {
+    createInferenceMaxRetriesResolver,
+    type InferenceRetryOptions,
+} from "@/core/inferenceRetrySettings.js";
+import {
+    EmptyResponseError,
+    emptyResponseDoneEvent,
+    isEmptyResponseError,
+} from "@/core/EmptyResponseError.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type { SessionContext, SessionMessage } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
@@ -46,7 +55,6 @@ import { resolveCodexReasoningEffort } from "@/vendors/codex/impl/resolveCodexRe
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
 import {
     resolveCodexStreamIdleTimeout,
-    resolveCodexStreamMaxRetries,
     waitForCodexCompactionRetry,
     waitForCodexRetry,
 } from "@/vendors/codex/impl/codexRetry.js";
@@ -59,7 +67,7 @@ import type { CodexTransport } from "@/vendors/codex/impl/codexConstants.js";
 
 const CODEX_COMPACTION_MAX_RETRIES = 2;
 
-export interface CodexSessionOptions {
+export interface CodexSessionOptions extends InferenceRetryOptions {
     instructions: string;
     credential: CodexProviderCredential;
     endpoint: string;
@@ -67,10 +75,6 @@ export interface CodexSessionOptions {
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     parallelToolCalls?: boolean;
-    /** Maximum stream reconnection attempts per transport, matching upstream Codex. */
-    streamMaxRetries?: number;
-    /** Resolves the current retry limit before each reconnect decision. */
-    resolveStreamMaxRetries?: () => number;
     streamIdleTimeoutMs?: number;
     tools?: readonly SessionTool[];
     transport?: CodexTransport;
@@ -95,7 +99,8 @@ export class CodexSession extends BaseSession {
     private forceSse = false;
     private readonly installationId: string;
     private readonly modelConfigurations = new Map<string, SessionModelConfiguration>();
-    readonly #resolveStreamMaxRetries: () => number;
+    readonly #resolveInferenceMaxRetries: () => number;
+    readonly #emptyResponseRetryWait: NonNullable<InferenceRetryOptions["waitForInferenceRetry"]>;
     private turnId = randomUUID();
     private turnKey: string | undefined;
     private readonly turnState = new CodexTurnState();
@@ -111,12 +116,10 @@ export class CodexSession extends BaseSession {
         this.model = options.model;
         this.parallelToolCalls = options.parallelToolCalls;
         this.activeModel = options.model;
-        const configuredStreamMaxRetries =
-            options.resolveStreamMaxRetries ??
-            (() => resolveCodexStreamMaxRetries(options.streamMaxRetries));
-        this.#resolveStreamMaxRetries = () =>
-            resolveCodexStreamMaxRetries(configuredStreamMaxRetries());
-        this.#resolveStreamMaxRetries();
+        this.#resolveInferenceMaxRetries = createInferenceMaxRetriesResolver(options);
+        this.#emptyResponseRetryWait =
+            options.waitForInferenceRetry ??
+            ((attempt, signal) => waitForCodexRetry(attempt, undefined, signal));
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.tools = options.tools ?? [];
         this.transport = options.transport ?? "auto";
@@ -153,8 +156,8 @@ export class CodexSession extends BaseSession {
         });
     }
 
-    get streamMaxRetries(): number {
-        return this.#resolveStreamMaxRetries();
+    get inferenceMaxRetries(): number {
+        return this.#resolveInferenceMaxRetries();
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -243,7 +246,7 @@ export class CodexSession extends BaseSession {
         let previousResponseRecoveries = 0;
         let transportRetries = 0;
         let unauthorizedRecoveryStep = 0;
-        const maxRetries = Math.min(this.streamMaxRetries, CODEX_COMPACTION_MAX_RETRIES);
+        const maxRetries = Math.min(this.inferenceMaxRetries, CODEX_COMPACTION_MAX_RETRIES);
 
         for (;;) {
             try {
@@ -379,7 +382,7 @@ export class CodexSession extends BaseSession {
         setCodexRequestKind(payload, "compaction", metadata);
         let contextWindowRetries = 0;
         let retries = 0;
-        const maxRetries = Math.min(this.streamMaxRetries, CODEX_COMPACTION_MAX_RETRIES);
+        const maxRetries = Math.min(this.inferenceMaxRetries, CODEX_COMPACTION_MAX_RETRIES);
         for (;;) {
             try {
                 const stream = await this.sseConnection.stream({
@@ -503,6 +506,7 @@ export class CodexSession extends BaseSession {
         let unauthorizedRecoveryStep = 0;
 
         for (;;) {
+            const attemptUsage: Extract<SessionEvent, { type: "token_usage" }>[] = [];
             yield { type: "block_start" };
             try {
                 const responseStream = useSse
@@ -536,6 +540,10 @@ export class CodexSession extends BaseSession {
                         terminal = event;
                         continue;
                     }
+                    if (event.type === "token_usage") {
+                        attemptUsage.push(event);
+                        continue;
+                    }
                     yield event;
                 }
 
@@ -551,6 +559,15 @@ export class CodexSession extends BaseSession {
                     yield terminal;
                     return;
                 }
+                if (
+                    result !== undefined &&
+                    "outputTokensReported" in result &&
+                    result.outputTokensReported &&
+                    result.usage.output === 0
+                ) {
+                    throw new EmptyResponseError("Codex");
+                }
+                for (const event of attemptUsage) yield event;
                 if (result !== undefined && "assistantText" in result) {
                     if (
                         result.assistantText.length > 0 ||
@@ -588,6 +605,7 @@ export class CodexSession extends BaseSession {
             } catch (error) {
                 if (!useSse) this.websocketConnection.reset("stream did not complete");
                 yield { type: "block_reset" };
+                for (const event of attemptUsage) yield event;
                 if (request.abort?.aborted) {
                     yield { type: "done", state: "cancelled" };
                     return;
@@ -622,17 +640,23 @@ export class CodexSession extends BaseSession {
                 if (
                     isRetryableCodexStreamError(error) &&
                     (useSse || !isCodexWebSocketUnavailableError(error)) &&
-                    transportRetries < this.streamMaxRetries
+                    reportedAttempt < this.inferenceMaxRetries
                 ) {
                     transportRetries += 1;
                     reportedAttempt += 1;
                     yield {
                         type: "retrying",
                         attempt: reportedAttempt,
-                        reason: `Stream disconnected; reconnecting: ${displayMessage}`,
+                        reason: isEmptyResponseError(error)
+                            ? error.message
+                            : `Stream disconnected; reconnecting: ${displayMessage}`,
                     };
                     try {
-                        await waitForCodexRetry(transportRetries, error, request.abort);
+                        if (isEmptyResponseError(error)) {
+                            await this.#emptyResponseRetryWait(transportRetries, request.abort);
+                        } else {
+                            await waitForCodexRetry(transportRetries, error, request.abort);
+                        }
                     } catch (delayError) {
                         if (request.abort?.aborted) {
                             yield { type: "done", state: "cancelled" };
@@ -645,6 +669,7 @@ export class CodexSession extends BaseSession {
                 if (
                     this.transport === "auto" &&
                     !useSse &&
+                    reportedAttempt < this.inferenceMaxRetries &&
                     (isRetryableCodexStreamError(error) || isCodexWebSocketUnavailableError(error))
                 ) {
                     this.forceSse = true;
@@ -662,13 +687,19 @@ export class CodexSession extends BaseSession {
                     }
                     continue;
                 }
-                yield {
-                    type: "done",
-                    state: "error",
-                    kind: classifyCodexError(message),
-                    message: displayMessage,
-                    providerError: classifyCodexProviderError(error, message, reportedAttempt + 1),
-                };
+                yield isEmptyResponseError(error)
+                    ? emptyResponseDoneEvent(error, reportedAttempt + 1)
+                    : {
+                          type: "done",
+                          state: "error",
+                          kind: classifyCodexError(message),
+                          message: displayMessage,
+                          providerError: classifyCodexProviderError(
+                              error,
+                              message,
+                              reportedAttempt + 1,
+                          ),
+                      };
                 return;
             }
         }

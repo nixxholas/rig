@@ -59,8 +59,8 @@ export function mergeConfigValues(
         if (config.settings?.compactCompletedTurns !== undefined) {
             settings.compactCompletedTurns = config.settings.compactCompletedTurns;
         }
-        if (config.settings?.codexStreamMaxRetries !== undefined) {
-            settings.codexStreamMaxRetries = config.settings.codexStreamMaxRetries;
+        if (config.settings?.inferenceMaxRetries !== undefined) {
+            settings.inferenceMaxRetries = config.settings.inferenceMaxRetries;
         }
         if (config.settings?.showReasoning !== undefined) {
             settings.showReasoning = config.settings.showReasoning;

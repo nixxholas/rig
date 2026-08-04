@@ -134,6 +134,7 @@ import type {
     SessionSharedMetadata,
     RequestSessionSharePeerTerminalResponse,
 } from "../protocol/index.js";
+import { updateDaemonConfigRequestSchema } from "../protocol/index.js";
 import {
     addSessionShareMemberRequestSchema,
     HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
@@ -225,10 +226,7 @@ import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { getGeneratedDirectory, resolveGeneratedMediaLocation } from "../generated-media/index.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
-import {
-    DEFAULT_CODEX_STREAM_MAX_RETRIES,
-    MAX_CODEX_STREAM_MAX_RETRIES,
-} from "../config/codexStreamRetrySettings.js";
+import { DEFAULT_INFERENCE_MAX_RETRIES } from "../config/inferenceRetrySettings.js";
 import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
 import { GLOBAL_AGENTS_MD_MAX_BYTES } from "../config/globalAgentsMdMaxBytes.js";
 import { readGlobalAgentsMd } from "../config/readGlobalAgentsMd.js";
@@ -313,7 +311,7 @@ import type { P2pNetwork } from "../p2p/index.js";
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 
 export interface ProtocolHttpServerOptions {
-    codexStreamMaxRetries?: number;
+    inferenceMaxRetries?: number;
     /** Where the user's global AGENTS.md lives. Defaults to the file beside the daemon config. */
     globalInstructionsPath?: string;
     /** Where the user's global SECURITY.md lives. Defaults to the file beside the daemon config. */
@@ -381,7 +379,7 @@ export function createProtocolHttpServer(
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
     const webappContextTokens = new WebappContextTokenStore();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
-        codexStreamMaxRetries: options.codexStreamMaxRetries ?? DEFAULT_CODEX_STREAM_MAX_RETRIES,
+        inferenceMaxRetries: options.inferenceMaxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES,
         gitStateTracker: options.gitStateTracker,
         globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
@@ -463,7 +461,7 @@ export function createProtocolHttpServer(
 }
 
 interface ProtocolServerRuntimeConfig {
-    codexStreamMaxRetries: number;
+    inferenceMaxRetries: number;
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
     globalInstructionsPath: string;
@@ -499,7 +497,7 @@ interface ProtocolServerRuntimeConfig {
 }
 
 interface AppliedDaemonSettings {
-    codexStreamMaxRetries: number;
+    inferenceMaxRetries: number;
     globalEventQueue: GlobalEventQueue;
 }
 
@@ -2772,7 +2770,7 @@ async function handleRequest(
         sendJson<GetDaemonConfigResponse>(response, 200, {
             config: {
                 settings: {
-                    codexStreamMaxRetries: runtimeConfig.codexStreamMaxRetries,
+                    inferenceMaxRetries: runtimeConfig.inferenceMaxRetries,
                     durableGlobalEventQueue: runtimeConfig.globalEventQueue.durable,
                 },
             },
@@ -2781,26 +2779,14 @@ async function handleRequest(
     }
 
     if (request.method === "PATCH" && route.name === "config") {
-        const body = await readJson<UpdateDaemonConfigRequest>(request);
-        const codexStreamMaxRetries = body.settings?.codexStreamMaxRetries;
-        const enabled = body.settings?.durableGlobalEventQueue;
-        if (
-            typeof codexStreamMaxRetries !== "number" ||
-            !Number.isInteger(codexStreamMaxRetries) ||
-            codexStreamMaxRetries < 0 ||
-            codexStreamMaxRetries > MAX_CODEX_STREAM_MAX_RETRIES
-        ) {
-            sendJson(response, 400, {
-                error: `Codex reconnect attempts must be a whole number from 0 to ${MAX_CODEX_STREAM_MAX_RETRIES}.`,
-            });
+        const rawBody = await readJson<unknown>(request);
+        if (!Value.Check(updateDaemonConfigRequestSchema, rawBody)) {
+            sendJson(response, 400, { error: "Daemon settings must use valid values." });
             return;
         }
-        if (typeof enabled !== "boolean") {
-            sendJson(response, 400, {
-                error: "Durable global event queue must be enabled or disabled.",
-            });
-            return;
-        }
+        const body: UpdateDaemonConfigRequest = rawBody;
+        const inferenceMaxRetries = body.settings.inferenceMaxRetries;
+        const enabled = body.settings.durableGlobalEventQueue;
         if (runtimeConfig.onDaemonSettingsChange === undefined) {
             sendJson(response, 409, {
                 error: "This daemon cannot change its settings at runtime.",
@@ -2808,22 +2794,22 @@ async function handleRequest(
             return;
         }
         const applied = await runtimeConfig.onDaemonSettingsChange({
-            codexStreamMaxRetries,
+            inferenceMaxRetries,
             durableGlobalEventQueue: enabled,
         });
         if (
             applied === undefined ||
-            applied.codexStreamMaxRetries !== codexStreamMaxRetries ||
+            applied.inferenceMaxRetries !== inferenceMaxRetries ||
             applied.globalEventQueue.durable !== enabled
         ) {
             throw new Error("The daemon could not apply the requested settings.");
         }
-        runtimeConfig.codexStreamMaxRetries = applied.codexStreamMaxRetries;
+        runtimeConfig.inferenceMaxRetries = applied.inferenceMaxRetries;
         runtimeConfig.globalEventQueue = applied.globalEventQueue;
         sendJson<UpdateDaemonConfigResponse>(response, 200, {
             config: {
                 settings: {
-                    codexStreamMaxRetries,
+                    inferenceMaxRetries,
                     durableGlobalEventQueue: enabled,
                 },
             },

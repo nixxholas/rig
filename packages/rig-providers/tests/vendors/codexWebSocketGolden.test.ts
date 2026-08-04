@@ -52,8 +52,8 @@ vi.mock("@/vendors/codex/impl/createCodexClient.js", () => ({
                                     output: [],
                                     usage: {
                                         input_tokens: 0,
-                                        output_tokens: 0,
-                                        total_tokens: 0,
+                                        output_tokens: 1,
+                                        total_tokens: 1,
                                     },
                                 },
                             };
@@ -387,8 +387,8 @@ vi.mock("openai/resources/responses/ws", () => ({
                         output: responseOutput,
                         usage: {
                             input_tokens: websocket.usageTotalTokens,
-                            output_tokens: 0,
-                            total_tokens: websocket.usageTotalTokens,
+                            output_tokens: 1,
+                            total_tokens: websocket.usageTotalTokens + 1,
                         },
                     },
                 },
@@ -1172,7 +1172,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             } as never,
             endpoint: "http://localhost.invalid/backend-api/codex",
             model: "gpt-5.6-sol",
-            streamMaxRetries: 1,
+            inferenceMaxRetries: 1,
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
@@ -1213,7 +1213,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             } as never,
             endpoint: "http://localhost.invalid/backend-api/codex",
             model: "gpt-5.6-sol",
-            streamMaxRetries: 1,
+            inferenceMaxRetries: 1,
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
@@ -1254,7 +1254,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             } as never,
             endpoint: "http://localhost.invalid/backend-api/codex",
             model: "gpt-5.6-sol",
-            streamMaxRetries: 1,
+            inferenceMaxRetries: 1,
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
@@ -1298,7 +1298,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             } as never,
             endpoint: "http://localhost.invalid/backend-api/codex",
             model: "gpt-5.6-sol",
-            streamMaxRetries: 1,
+            inferenceMaxRetries: 1,
             transport: "auto",
         });
         const session = await provider.session("<SESSION_ID>", {
@@ -1700,7 +1700,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             } as never,
             endpoint: "http://localhost.invalid/backend-api/codex",
             model: "gpt-5.6-sol",
-            streamMaxRetries: 1,
+            inferenceMaxRetries: 1,
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
@@ -2088,7 +2088,7 @@ function blockLifecycle(events: readonly { type: string }[]): string[] {
 
 function codexProvider(
     transport: "auto" | "websocket",
-    streamMaxRetries: number,
+    inferenceMaxRetries: number,
     parallelToolCalls?: boolean,
 ): CodexProvider {
     return new CodexProvider({
@@ -2099,7 +2099,7 @@ function codexProvider(
         endpoint: "http://localhost.invalid/backend-api/codex",
         model: "gpt-5.6-sol",
         ...(parallelToolCalls === undefined ? {} : { parallelToolCalls }),
-        streamMaxRetries,
+        inferenceMaxRetries,
         transport,
     });
 }

@@ -88,7 +88,7 @@ export interface CreateCodingAssistantAgentOptions {
     permissionMode?: PermissionMode;
     providers?: ConfigProviders;
     providerUsage?: ProviderUsageContext;
-    resolveCodexStreamMaxRetries?: () => number;
+    resolveInferenceMaxRetries?: () => number;
     serviceTier?: ServiceTier;
     startDate?: string;
     secrets?: SessionSecretContext;
@@ -224,10 +224,10 @@ export function createCodingAssistantAgent(
                     ? {}
                     : { onAccountUsage: options.onAccountUsage }),
                 providers: options.providers ?? DEFAULT_RIG_CONFIG.providers,
-                ...(options.resolveCodexStreamMaxRetries === undefined
+                ...(options.resolveInferenceMaxRetries === undefined
                     ? {}
                     : {
-                          resolveCodexStreamMaxRetries: options.resolveCodexStreamMaxRetries,
+                          resolveInferenceMaxRetries: options.resolveInferenceMaxRetries,
                       }),
                 sessionId: agentId,
             });

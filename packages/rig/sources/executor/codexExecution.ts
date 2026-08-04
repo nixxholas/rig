@@ -17,7 +17,7 @@ export function codexExecution(options: {
     config: ConfigCodexProvider;
     env: NodeJS.ProcessEnv;
     id: string;
-    resolveStreamMaxRetries?: () => number;
+    resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }): ExecutorProvider {
     const baseUrl = options.config.baseUrl ?? options.env.RIG_CODEX_BASE_URL;
@@ -34,9 +34,9 @@ export function codexExecution(options: {
         new CodexProvider({
             credential,
             parallelToolCalls: true,
-            ...(options.resolveStreamMaxRetries === undefined
+            ...(options.resolveInferenceMaxRetries === undefined
                 ? {}
-                : { resolveStreamMaxRetries: options.resolveStreamMaxRetries }),
+                : { resolveInferenceMaxRetries: options.resolveInferenceMaxRetries }),
             ...(baseUrl === undefined ? {} : { endpoint: baseUrl }),
             ...(transport === "auto" || transport === "sse" || transport === "websocket"
                 ? { transport }

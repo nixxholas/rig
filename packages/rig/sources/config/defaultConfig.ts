@@ -1,5 +1,5 @@
 import type { RigConfig } from "./types.js";
-import { DEFAULT_CODEX_STREAM_MAX_RETRIES } from "./codexStreamRetrySettings.js";
+import { DEFAULT_INFERENCE_MAX_RETRIES } from "./inferenceRetrySettings.js";
 
 export const DEFAULT_RIG_CONFIG: RigConfig = {
     defaults: {
@@ -40,7 +40,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         },
     },
     settings: {
-        codexStreamMaxRetries: DEFAULT_CODEX_STREAM_MAX_RETRIES,
+        inferenceMaxRetries: DEFAULT_INFERENCE_MAX_RETRIES,
         compactCompletedTurns: false,
         completionChime: false,
         daemonHeapSnapshots: false,

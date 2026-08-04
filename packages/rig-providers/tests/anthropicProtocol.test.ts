@@ -32,6 +32,19 @@ describe("Anthropic protocol stop reasons", () => {
         expect(events.at(-1)).toMatchObject(expected);
     });
 
+    it("keeps a zero-token refusal terminal instead of retrying it as empty", async () => {
+        const events: SessionEvent[] = [];
+        for await (const event of mapAnthropicStream(streamEndingWith("refusal", 0))) {
+            events.push(event);
+        }
+
+        expect(events.at(-1)).toMatchObject({
+            type: "done",
+            state: "error",
+            message: "The model refused to complete the request.",
+        });
+    });
+
     it.each(["start", "delta"] as const)(
         "fails a paused compaction from a %s event instead of completing an empty response",
         async (eventType) => {
@@ -54,6 +67,7 @@ describe("Anthropic protocol stop reasons", () => {
 
 async function* streamEndingWith(
     stopReason: "pause_turn" | "refusal" | "compaction",
+    outputTokens = 1,
 ): AsyncGenerator<BetaRawMessageStreamEvent> {
     yield {
         type: "message_start",
@@ -64,7 +78,7 @@ async function* streamEndingWith(
     yield {
         type: "message_delta",
         delta: { stop_reason: stopReason, stop_sequence: null },
-        usage: { output_tokens: 1 },
+        usage: { output_tokens: outputTokens },
     } as BetaRawMessageStreamEvent;
     yield { type: "message_stop" } as BetaRawMessageStreamEvent;
 }

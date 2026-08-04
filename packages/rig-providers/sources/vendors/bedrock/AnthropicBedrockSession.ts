@@ -1,10 +1,16 @@
 import { BaseSession } from "@/core/BaseSession.js";
+import { emptyResponseDoneEvent, isEmptyResponseError } from "@/core/EmptyResponseError.js";
+import {
+    createInferenceMaxRetriesResolver,
+    type InferenceRetryOptions,
+} from "@/core/inferenceRetrySettings.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type { SessionContext, SessionToolCall } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
+import { waitForInferenceRetry } from "@/core/waitForInferenceRetry.js";
 import type { BedrockCredential } from "@/vendors/VendorCredential.js";
 import type { AnthropicBedrockTransport } from "@/vendors/bedrock/AnthropicBedrockTransport.js";
 import {
@@ -27,7 +33,7 @@ import { resolveClaudeTools } from "@/vendors/claude/impl/resolveClaudeTools.js"
 
 export type AnthropicBedrockClient = CreatedAnthropicBedrockClient;
 
-export interface AnthropicBedrockSessionOptions {
+export interface AnthropicBedrockSessionOptions extends InferenceRetryOptions {
     client?: AnthropicBedrockClient;
     instructions: string;
     credential: BedrockCredential;
@@ -56,6 +62,10 @@ export class AnthropicBedrockSession extends BaseSession {
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
         | undefined;
+    private readonly resolveInferenceMaxRetries: () => number;
+    private readonly emptyResponseRetryWait: NonNullable<
+        InferenceRetryOptions["waitForInferenceRetry"]
+    >;
 
     constructor(id: string, options: AnthropicBedrockSessionOptions) {
         super(id);
@@ -68,6 +78,8 @@ export class AnthropicBedrockSession extends BaseSession {
         this.transport = options.transport;
         this.userAgent = options.userAgent;
         this.modelConfigurations = options.modelConfigurations;
+        this.resolveInferenceMaxRetries = createInferenceMaxRetriesResolver(options);
+        this.emptyResponseRetryWait = options.waitForInferenceRetry ?? waitForInferenceRetry;
         this.connection = new AnthropicBedrockConnection({
             bearerToken: () => this.credential.credential.bearerToken,
             ...(options.client === undefined ? {} : { client: options.client }),
@@ -101,6 +113,7 @@ export class AnthropicBedrockSession extends BaseSession {
         try {
             const native = await requestAnthropicBedrockCompaction({
                 client: this.connection.client(),
+                maxRetries: this.resolveInferenceMaxRetries(),
                 request: this.createRequest({
                     compactionInstructions: options.instructions ?? null,
                     context: original,
@@ -204,6 +217,12 @@ export class AnthropicBedrockSession extends BaseSession {
                     toolCalls.set(event.callId, { ...call, arguments: event.arguments });
                 }
             }
+            if (event.type === "block_reset") {
+                assistantText = "";
+                encryptedReasoning = undefined;
+                responseItems = undefined;
+                toolCalls.clear();
+            }
             if (event.type === "done" && event.state !== "error" && event.state !== "cancelled") {
                 this.context = {
                     instructions: this.context.instructions,
@@ -260,20 +279,34 @@ export class AnthropicBedrockSession extends BaseSession {
                     }
                     return;
                 } catch (error) {
-                    if (responseContentStarted) throw error;
+                    if (responseContentStarted && !isEmptyResponseError(error)) throw error;
                     failedAttempts += 1;
-                    if (!shouldRetryAnthropicBedrock(error, failedAttempts)) throw error;
                     if (blockStarted) {
                         yield { type: "block_reset" };
                         blockStarted = false;
                     }
+                    if (isEmptyResponseError(error) && error.usage !== undefined) {
+                        yield { type: "token_usage", usage: error.usage };
+                    }
+                    const maxRetries = this.resolveInferenceMaxRetries();
+                    if (!shouldRetryAnthropicBedrock(error, failedAttempts, maxRetries))
+                        throw error;
                     const delay = resolveAnthropicBedrockRetryDelay(error, failedAttempts);
                     yield {
                         type: "retrying",
                         attempt: failedAttempts,
-                        reason: describeAnthropicBedrockRetry(error, failedAttempts, delay),
+                        reason: describeAnthropicBedrockRetry(
+                            error,
+                            failedAttempts,
+                            delay,
+                            maxRetries,
+                        ),
                     };
-                    await waitForAnthropicBedrockRetry(delay, options.signal);
+                    if (isEmptyResponseError(error)) {
+                        await this.emptyResponseRetryWait(failedAttempts, options.signal);
+                    } else {
+                        await waitForAnthropicBedrockRetry(delay, options.signal);
+                    }
                 }
             }
         } catch (error) {
@@ -284,13 +317,15 @@ export class AnthropicBedrockSession extends BaseSession {
                 return;
             }
             yield { type: "block_reset" };
-            yield {
-                type: "done",
-                state: "error",
-                kind: classifyAnthropicBedrockError(error),
-                message: error instanceof Error ? error.message : String(error),
-                providerError: classifyAnthropicBedrockProviderError(error, attempts),
-            };
+            yield isEmptyResponseError(error)
+                ? emptyResponseDoneEvent(error, attempts)
+                : {
+                      type: "done",
+                      state: "error",
+                      kind: classifyAnthropicBedrockError(error),
+                      message: error instanceof Error ? error.message : String(error),
+                      providerError: classifyAnthropicBedrockProviderError(error, attempts),
+                  };
         }
     }
 

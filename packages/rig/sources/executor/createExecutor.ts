@@ -20,7 +20,7 @@ export interface CreateExecutorOptions {
     /** Receives account usage a provider reports while it is already answering. */
     onAccountUsage?: (usage: ProviderUsage) => void;
     providers: ConfigProviders;
-    resolveCodexStreamMaxRetries?: () => number;
+    resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }
 
@@ -80,10 +80,10 @@ function configuredExecutor(
               config,
               env: options.env,
               id,
-              ...(options.resolveCodexStreamMaxRetries === undefined
+              ...(options.resolveInferenceMaxRetries === undefined
                   ? {}
                   : {
-                        resolveStreamMaxRetries: options.resolveCodexStreamMaxRetries,
+                        resolveInferenceMaxRetries: options.resolveInferenceMaxRetries,
                     }),
               ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
           })
@@ -95,6 +95,9 @@ function configuredExecutor(
                 ...(options.onAccountUsage === undefined
                     ? {}
                     : { onAccountUsage: options.onAccountUsage }),
+                ...(options.resolveInferenceMaxRetries === undefined
+                    ? {}
+                    : { resolveInferenceMaxRetries: options.resolveInferenceMaxRetries }),
                 ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
             })
           : config.type === "grok"
@@ -103,6 +106,9 @@ function configuredExecutor(
                   config,
                   env: options.env,
                   id,
+                  ...(options.resolveInferenceMaxRetries === undefined
+                      ? {}
+                      : { resolveInferenceMaxRetries: options.resolveInferenceMaxRetries }),
                   ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
               })
             : configuredBedrockExecution({
@@ -110,5 +116,8 @@ function configuredExecutor(
                   config,
                   env: options.env,
                   id,
+                  ...(options.resolveInferenceMaxRetries === undefined
+                      ? {}
+                      : { resolveInferenceMaxRetries: options.resolveInferenceMaxRetries }),
               });
 }

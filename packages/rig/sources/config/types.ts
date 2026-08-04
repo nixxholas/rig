@@ -23,7 +23,7 @@ export interface PartialConfigDefaults {
 }
 
 export interface ConfigSettings {
-    codexStreamMaxRetries: number;
+    inferenceMaxRetries: number;
     compactCompletedTurns: boolean;
     completionChime: boolean;
     daemonHeapSnapshots: boolean;
@@ -34,7 +34,7 @@ export interface ConfigSettings {
 }
 
 export interface PartialConfigSettings {
-    codexStreamMaxRetries?: number;
+    inferenceMaxRetries?: number;
     compactCompletedTurns?: boolean;
     completionChime?: boolean;
     daemonHeapSnapshots?: boolean;
@@ -236,7 +236,7 @@ export interface LoadConfigOptions {
 }
 
 export interface DaemonSettings {
-    codexStreamMaxRetries: number;
+    inferenceMaxRetries: number;
     daemonHeapSnapshots: boolean;
     durableGlobalEventQueue: boolean;
 }
