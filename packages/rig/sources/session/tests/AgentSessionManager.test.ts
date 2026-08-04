@@ -1282,6 +1282,86 @@ describe("AgentSessionManager", () => {
         });
     });
 
+    it("reports a failed child when its background monitor rejects", async () => {
+        const deliverNotification = vi.fn();
+        const parent = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            deliverNotification,
+            id: "root-1",
+            isSubagent: () => false,
+            recordSubagentChanged: vi.fn(),
+            requestForSubagent: () => ({
+                cwd: "/tmp/rig-manager-test",
+                modelId: "openai/gpt-5.5",
+            }),
+        } as unknown as InMemorySession;
+        const child = {
+            agentIdentity: () => ({ agentId: "agent-2", folder: "workspace" }),
+            agentMetadata: () => ({
+                depth: 1,
+                description: "Inspect code",
+                parentSessionId: "root-1",
+                rootSessionId: "root-1",
+                taskName: "inspect_code",
+                type: "subagent" as const,
+            }),
+            id: "child-1",
+            isSubagent: () => true,
+            lastErrorMessage: () => "The child process disconnected.",
+            snapshot: () => ({ snapshot: { messages: [] } }),
+            subagentSummary: () => ({
+                agentId: "agent-2",
+                createdAt: 2,
+                depth: 1,
+                description: "Inspect code",
+                id: "child-1",
+                modelId: "openai/gpt-5.5",
+                parentSessionId: "root-1",
+                status: "error" as const,
+                taskName: "inspect_code",
+                updatedAt: 3,
+            }),
+            submit: vi.fn(() => ({
+                eventId: "event-1",
+                runId: "run-1",
+                sessionId: "child-1",
+            })),
+            waitForRun: vi.fn(async () => {
+                throw new Error("The background monitor lost the child completion.");
+            }),
+        } as unknown as InMemorySession;
+        const sessions = new Map([
+            ["root-1", parent],
+            ["child-1", child],
+        ]);
+        let created = false;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: () => {
+                    created = true;
+                    return child;
+                },
+                get: (sessionId) => sessions.get(sessionId),
+                listByRoot: () => (created ? [child] : []),
+            },
+        });
+
+        await manager.spawn("root-1", {
+            background: true,
+            description: "Inspect code",
+            prompt: "Inspect the codebase.",
+            taskName: "inspect_code",
+        });
+
+        await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledOnce());
+        expect(deliverNotification).toHaveBeenCalledWith({
+            displayText: 'Background work "Inspect code" failed.',
+            text: expect.stringMatching(
+                /Agent ID: agent-2\nPath: \/root\/inspect_code\nStatus: error\nResult: The child process disconnected\./u,
+            ),
+        });
+    });
+
     it("delivers each background completion immediately", async () => {
         const completions = new Map<string, (value: { status: "completed" }) => void>();
         const statuses = new Map<string, "completed" | "running">();

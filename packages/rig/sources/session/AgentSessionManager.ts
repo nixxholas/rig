@@ -1304,6 +1304,7 @@ export class AgentSessionManager {
         const monitorId = `${child.id}:${runId}`;
         this.#latestBackgroundRunBySession.set(child.id, runId);
         this.#pendingBackgroundRuns.set(monitorId, child.id);
+        let notificationStarted = false;
         try {
             const completion = await child.waitForRun(runId);
             this.recordChanged(child);
@@ -1319,35 +1320,57 @@ export class AgentSessionManager {
                 status,
                 status === completion.status ? completion.errorMessage : undefined,
             );
-            const description = child.subagentSummary().description;
-            const outcome =
-                status === "completed"
-                    ? "completed"
-                    : status === "aborted"
-                      ? "was stopped"
-                      : "failed";
-            parent.deliverNotification({
-                displayText: `Background work "${description}" ${outcome}.`,
-                text: [
-                    "<subagent-notification>",
-                    `Agent ID: ${child.subagentSummary().agentId}`,
-                    `Path: ${this.#pathFor(child)}`,
-                    `Status: ${status}`,
-                    `Result: ${output}`,
-                    "</subagent-notification>",
-                ].join("\n"),
-            });
+            notificationStarted = true;
+            this.#deliverBackgroundCompletion(parent, child, status, output);
         } catch (error) {
             // Delivering the notification is best effort, but the database it writes through is
             // not: a subtree that cannot be recorded has nothing left to fall back on.
             if (isDatabaseFailure(error)) throw error;
             this.recordChanged(child);
+            const status = this.#runStatus(child.subagentSummary().status);
+            if (
+                !notificationStarted &&
+                status === "error" &&
+                parent !== undefined &&
+                parent.isClosing?.() !== true &&
+                this.#latestBackgroundRunBySession.get(child.id) === runId
+            ) {
+                notificationStarted = true;
+                this.#deliverBackgroundCompletion(
+                    parent,
+                    child,
+                    status,
+                    this.#completionOutput(child, status, child.lastErrorMessage()),
+                );
+            }
         } finally {
             this.#pendingBackgroundRuns.delete(monitorId);
             if (this.#latestBackgroundRunBySession.get(child.id) === runId) {
                 this.#latestBackgroundRunBySession.delete(child.id);
             }
         }
+    }
+
+    #deliverBackgroundCompletion(
+        parent: InMemorySession,
+        child: InMemorySession,
+        status: Exclude<SubagentRunStatus, "running">,
+        output: string,
+    ): void {
+        const summary = child.subagentSummary();
+        const outcome =
+            status === "completed" ? "completed" : status === "aborted" ? "was stopped" : "failed";
+        parent.deliverNotification({
+            displayText: `Background work "${summary.description}" ${outcome}.`,
+            text: [
+                "<subagent-notification>",
+                `Agent ID: ${summary.agentId}`,
+                `Path: ${this.#pathFor(child)}`,
+                `Status: ${status}`,
+                `Result: ${output}`,
+                "</subagent-notification>",
+            ].join("\n"),
+        });
     }
 
     async #waitForSettledSubtree(
