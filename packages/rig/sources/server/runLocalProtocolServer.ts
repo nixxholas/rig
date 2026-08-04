@@ -549,6 +549,7 @@ async function runOwnedLocalProtocolServer(
         const createP2pStatusEventId = createEventIdFactory();
         p2pNetwork = await P2pNetwork.create({
             config: loadedConfig.config.p2p,
+            identityPath: paths.p2pIdentityPath,
             irohSecretKeyPath: paths.irohSecretKeyPath,
             onStatusChange: (status) => {
                 const event: GlobalLiveEvent = {
@@ -568,6 +569,7 @@ async function runOwnedLocalProtocolServer(
                     { error: errorToMessage(error), transport },
                 );
             },
+            peerTrustPath: paths.p2pPeerTrustPath,
             serveRequest: createServeP2pHttpRequest({ socketPath, token }),
         });
         const irohStatus = p2pNetwork
@@ -577,7 +579,8 @@ async function runOwnedLocalProtocolServer(
             );
         if (irohStatus?.state === "ready") {
             daemonLog.record("info", "iroh_started", "Rig P2P networking is ready.", {
-                endpointId: irohStatus.localId,
+                endpointId: irohStatus.localAddress,
+                instanceId: p2pNetwork.status().instanceId,
                 peers: loadedConfig.config.p2p.iroh.trustedEndpointIds.length,
                 ...(loadedConfig.config.p2p.iroh.relayUrl === undefined
                     ? {}

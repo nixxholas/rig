@@ -155,6 +155,7 @@ import {
     listFileTreeRequestSchema,
     happyCloudCommandSchema,
     happyCloudSessionIdSchema,
+    p2pInstanceIdSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
     postSessionShareFriendMessageRequestSchema,
@@ -310,12 +311,6 @@ import {
 } from "../file-tree/index.js";
 import type { P2pNetwork } from "../p2p/index.js";
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
-
-const p2pPeerIdSchema = Type.String({
-    maxLength: 256,
-    minLength: 1,
-    pattern: "^[A-Za-z0-9._~-]+$",
-});
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
@@ -4109,7 +4104,7 @@ function matchP2pPeerRoute(url: URL): { path: string; peerId: string } | undefin
     } catch {
         return undefined;
     }
-    if (!Value.Check(p2pPeerIdSchema, peerId)) return undefined;
+    if (!Value.Check(p2pInstanceIdSchema, peerId)) return undefined;
     const apiPath = remainder.slice(separator + 1);
     if (apiPath !== "api" && !apiPath.startsWith("api/")) return undefined;
     const path = apiPath === "api" ? "/" : `/${apiPath.slice("api/".length)}`;

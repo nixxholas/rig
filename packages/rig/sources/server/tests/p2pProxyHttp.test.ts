@@ -8,6 +8,8 @@ import type { P2pHttpRequest, P2pNetwork } from "../../p2p/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
+const peerId = "aremoteinstance0000000001";
+
 describe("P2P-prefixed daemon HTTP", () => {
     it("forwards a request and streams the peer response", async () => {
         const fetch = vi.fn(
@@ -27,7 +29,7 @@ describe("P2P-prefixed daemon HTTP", () => {
         try {
             const result = await sendRequest(
                 started.socketPath,
-                "/p2p/peers/remote-endpoint/api/messages?scope=all",
+                `/p2p/peers/${peerId}/api/messages?scope=all`,
                 {
                     authorization: "Bearer test-token",
                     "content-type": "text/plain",
@@ -41,14 +43,14 @@ describe("P2P-prefixed daemon HTTP", () => {
                 body: "firstsecond",
                 headers: expect.objectContaining({
                     "content-type": "text/plain",
-                    "x-rig-p2p-peer": "remote-endpoint",
+                    "x-rig-p2p-peer": peerId,
                     "x-rig-p2p-transport": "iroh",
                 }),
                 status: 202,
             });
             expect(fetch).toHaveBeenCalledOnce();
-            const [peerId, forwarded, signal] = fetch.mock.calls[0]!;
-            expect(peerId).toBe("remote-endpoint");
+            const [forwardedPeerId, forwarded, signal] = fetch.mock.calls[0]!;
+            expect(forwardedPeerId).toBe(peerId);
             expect(forwarded).toMatchObject({
                 headers: {
                     "content-type": "text/plain",
@@ -69,10 +71,10 @@ describe("P2P-prefixed daemon HTTP", () => {
         const started = await startServer({ fetch } as unknown as P2pNetwork);
         try {
             await expect(
-                sendRequest(started.socketPath, "/p2p/peers/remote-endpoint/api/health", {}),
+                sendRequest(started.socketPath, `/p2p/peers/${peerId}/api/health`, {}),
             ).resolves.toMatchObject({ status: 401 });
             await expect(
-                sendRequest(started.socketPath, "/p2p/peers/remote-endpoint/api/p2p/status", {
+                sendRequest(started.socketPath, `/p2p/peers/${peerId}/api/p2p/status`, {
                     authorization: "Bearer test-token",
                 }),
             ).resolves.toMatchObject({ status: 403 });

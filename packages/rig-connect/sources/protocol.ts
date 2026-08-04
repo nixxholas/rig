@@ -2499,9 +2499,23 @@ export const p2pPeerConnectionStatusSchema = Type.Union([
 ]);
 export const p2pPeerStatusSchema = Type.Object(
     {
+        address: Type.String({ minLength: 1 }),
         error: Type.Optional(Type.String()),
         lastSeenAt: Type.Optional(Type.Number()),
-        peerId: Type.String({ minLength: 1 }),
+        peerId: Type.Optional(
+            Type.String({
+                maxLength: 32,
+                minLength: 2,
+                pattern: "^[a-z][a-z0-9]+$",
+            }),
+        ),
+        publicKey: Type.Optional(
+            Type.String({
+                maxLength: 43,
+                minLength: 43,
+                pattern: "^[A-Za-z0-9_-]+$",
+            }),
+        ),
         rttMs: Type.Optional(Type.Number({ minimum: 0 })),
         status: p2pPeerConnectionStatusSchema,
     },
@@ -2519,7 +2533,7 @@ export const p2pTransportStatusSchema = Type.Union([
     Type.Object(
         {
             apiExposed: Type.Optional(Type.Boolean()),
-            localId: Type.String({ minLength: 1 }),
+            localAddress: Type.String({ minLength: 1 }),
             peers: Type.Array(p2pPeerStatusSchema),
             relayUrl: Type.Optional(Type.String({ minLength: 1 })),
             state: Type.Literal("ready"),
@@ -2529,7 +2543,23 @@ export const p2pTransportStatusSchema = Type.Union([
     ),
 ]);
 export const p2pStatusSchema = Type.Object(
-    { transports: Type.Array(p2pTransportStatusSchema) },
+    {
+        instanceId: Type.Optional(
+            Type.String({
+                maxLength: 32,
+                minLength: 2,
+                pattern: "^[a-z][a-z0-9]+$",
+            }),
+        ),
+        publicKey: Type.Optional(
+            Type.String({
+                maxLength: 43,
+                minLength: 43,
+                pattern: "^[A-Za-z0-9_-]+$",
+            }),
+        ),
+        transports: Type.Array(p2pTransportStatusSchema),
+    },
     { additionalProperties: false },
 );
 export type P2pStatus = Static<typeof p2pStatusSchema>;

@@ -3,21 +3,29 @@ import { describe, expect, it, vi } from "vitest";
 import type { P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import type { P2pTransport } from "./P2pTransport.js";
 import { P2pNetwork } from "./P2pNetwork.js";
+import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 
 const disabledConfig = {
     enableIroh: false,
     exposeApi: false,
     iroh: { trustedEndpointIds: [] },
 } as const;
+const identity = createP2pInstanceIdentity("alocalinstance00000000001");
+const peerId = "aremoteinstance0000000001";
 
 describe("P2pNetwork", () => {
     it("starts with no transports when all transports are disabled", async () => {
         const network = await P2pNetwork.create({
             config: disabledConfig,
+            identity,
             irohSecretKeyPath: "unused",
         });
 
-        expect(network.status()).toEqual({ transports: [] });
+        expect(network.status()).toMatchObject({
+            instanceId: identity.instanceId,
+            publicKey: identity.publicKey,
+            transports: [],
+        });
         await network.close();
     });
 
@@ -28,11 +36,14 @@ describe("P2pNetwork", () => {
             createIrohTransport: async () => {
                 throw new Error("binding unavailable");
             },
+            identity,
             irohSecretKeyPath: "unused",
             onTransportUnavailable: unavailable,
         });
 
         expect(network.status()).toEqual({
+            instanceId: identity.instanceId,
+            publicKey: identity.publicKey,
             transports: [
                 {
                     error: "binding unavailable",
@@ -51,7 +62,7 @@ describe("P2pNetwork", () => {
         let publish!: (status: P2pTransportStatus) => void;
         const initial: Extract<P2pTransportStatus, { state: "ready" }> = {
             apiExposed: false,
-            localId: "local",
+            localAddress: "local",
             peers: [],
             state: "ready",
             transport: "iroh",
@@ -67,16 +78,17 @@ describe("P2pNetwork", () => {
                 publish = onStatusChange;
                 return transport;
             },
+            identity,
             irohSecretKeyPath: "unused",
             onStatusChange: changed,
         });
 
         publish({
             ...initial,
-            peers: [{ peerId: "remote", status: "connected" }],
+            peers: [{ address: "remote-address", peerId, status: "connected" }],
         });
         expect(network.status().transports[0]).toMatchObject({
-            peers: [{ peerId: "remote", status: "connected" }],
+            peers: [{ address: "remote-address", peerId, status: "connected" }],
         });
         await network.close();
         expect(close).toHaveBeenCalledOnce();

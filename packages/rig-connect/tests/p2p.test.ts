@@ -2,30 +2,39 @@ import { describe, expect, it, vi } from "vitest";
 
 import { connectRig } from "@/index.js";
 
+const peerId = "aremoteinstance0000000001";
+const localInstanceId = "alocalinstance00000000001";
+const localPublicKey = "A".repeat(43);
+
 describe("P2P status subscription", () => {
     it("loads the endpoint identity and applies live peer health updates", async () => {
         const encoder = new TextEncoder();
         let stream!: ReadableStreamDefaultController<Uint8Array>;
         const initial = {
+            instanceId: localInstanceId,
+            publicKey: localPublicKey,
             transports: [
                 {
                     apiExposed: false,
-                    localId: "local-endpoint",
-                    peers: [{ peerId: "remote-endpoint", status: "connecting" as const }],
+                    localAddress: "local-endpoint",
+                    peers: [{ address: "remote-endpoint", peerId, status: "connecting" as const }],
                     state: "ready" as const,
                     transport: "iroh" as const,
                 },
             ],
         };
         const connected = {
+            instanceId: localInstanceId,
+            publicKey: localPublicKey,
             transports: [
                 {
                     apiExposed: false,
-                    localId: "local-endpoint",
+                    localAddress: "local-endpoint",
                     peers: [
                         {
+                            address: "remote-endpoint",
                             lastSeenAt: 123,
-                            peerId: "remote-endpoint",
+                            peerId,
                             rttMs: 8,
                             status: "connected" as const,
                         },
@@ -83,8 +92,8 @@ describe("P2P status subscription", () => {
             transports: [
                 {
                     apiExposed: false,
-                    localId: "local-endpoint",
-                    peers: [{ peerId: "remote-endpoint", status: "connecting" as const }],
+                    localAddress: "local-endpoint",
+                    peers: [{ address: "remote-endpoint", peerId, status: "connecting" as const }],
                     state: "ready" as const,
                     transport: "iroh" as const,
                 },
@@ -94,8 +103,15 @@ describe("P2P status subscription", () => {
             transports: [
                 {
                     apiExposed: false,
-                    localId: "local-endpoint",
-                    peers: [{ peerId: "remote-endpoint", rttMs: 5, status: "connected" as const }],
+                    localAddress: "local-endpoint",
+                    peers: [
+                        {
+                            address: "remote-endpoint",
+                            peerId,
+                            rttMs: 5,
+                            status: "connected" as const,
+                        },
+                    ],
                     state: "ready" as const,
                     transport: "iroh" as const,
                 },
@@ -161,8 +177,8 @@ describe("P2P status subscription", () => {
             transports: [
                 {
                     apiExposed: false,
-                    localId: "local-endpoint",
-                    peers: [{ peerId: "remote-endpoint", status: "connected" as const }],
+                    localAddress: "local-endpoint",
+                    peers: [{ address: "remote-endpoint", peerId, status: "connected" as const }],
                     state: "ready" as const,
                     transport: "iroh" as const,
                 },
@@ -268,10 +284,11 @@ describe("P2P status subscription", () => {
                     transports: [
                         {
                             apiExposed: false,
-                            localId: "local-endpoint",
+                            localAddress: "local-endpoint",
                             peers: [
                                 {
-                                    peerId: "remote-endpoint",
+                                    address: "remote-endpoint",
+                                    peerId,
                                     status: reads === 1 ? "connecting" : "connected",
                                 },
                             ],

@@ -504,6 +504,12 @@ export {
 } from "./WebappProtocol.js";
 export { RIG_PROTOCOL_VERSION } from "./ProtocolVersion.js";
 export {
+    p2pInstanceIdSchema,
+    p2pPeerIdentitySchema,
+    p2pPublicKeySchema,
+    type P2pPeerIdentity,
+} from "./P2pIdentityProtocol.js";
+export {
     p2pPeerConnectionStatusSchema,
     p2pPeerStatusSchema,
     p2pStatusChangedEventSchema,

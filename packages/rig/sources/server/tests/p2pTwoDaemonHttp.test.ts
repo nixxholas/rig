@@ -3,14 +3,15 @@ import type { IncomingHttpHeaders, Server } from "node:http";
 import { rm } from "node:fs/promises";
 
 import { Endpoint, RelayMode, SecretKey } from "@number0/iroh/index.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { IrohNetwork, P2pNetwork } from "../../p2p/index.js";
+import { createP2pInstanceIdentity } from "../../p2p/P2pIdentity.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { createServeP2pHttpRequest } from "../createServeP2pHttpRequest.js";
 
-const ALPN = [...Buffer.from("rig/p2p/2", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/3", "utf8")];
 const cleanups: (() => Promise<void>)[] = [];
 
 afterEach(async () => {
@@ -23,6 +24,8 @@ describe("P2P HTTP between two real daemon servers", () => {
         const secondDaemon = await startDaemon("second-token");
         const firstKey = SecretKey.generate();
         const secondKey = SecretKey.generate();
+        const firstIdentity = createP2pInstanceIdentity();
+        const secondIdentity = createP2pInstanceIdentity();
         const [firstEndpoint, secondEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: firstKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: secondKey.toBytes() }, RelayMode.disabled()),
@@ -39,12 +42,14 @@ describe("P2P HTTP between two real daemon servers", () => {
                 IrohNetwork.create({
                     config: { trustedEndpointIds: [secondId] },
                     endpoint: firstEndpoint,
+                    identity: firstIdentity,
                     onStatusChange,
                     peerAddresses: new Map([[secondId, secondEndpoint.addr()]]),
                     relayMode: RelayMode.disabled(),
                     secretKey: firstKey,
                 }),
             irohSecretKeyPath: "unused",
+            identity: firstIdentity,
         });
         cleanups.push(() => firstNetwork.close());
         const secondNetwork = await P2pNetwork.create({
@@ -57,6 +62,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                 IrohNetwork.create({
                     config: { trustedEndpointIds: [firstId] },
                     endpoint: secondEndpoint,
+                    identity: secondIdentity,
                     onStatusChange,
                     peerAddresses: new Map([[firstId, firstEndpoint.addr()]]),
                     relayMode: RelayMode.disabled(),
@@ -67,24 +73,33 @@ describe("P2P HTTP between two real daemon servers", () => {
                     }),
                 }),
             irohSecretKeyPath: "unused",
+            identity: secondIdentity,
         });
         cleanups.push(() => secondNetwork.close());
+        await vi.waitFor(() => {
+            expect(firstNetwork.status().transports[0]).toMatchObject({
+                peers: [{ peerId: secondIdentity.instanceId, status: "connected" }],
+            });
+            expect(secondNetwork.status().transports[0]).toMatchObject({
+                peers: [{ peerId: firstIdentity.instanceId, status: "connected" }],
+            });
+        });
 
         firstDaemon.server.closeAllConnections();
         await firstDaemon.close();
         const exposedFirst = await startDaemon("first-token", firstNetwork);
         const health = await get(
             exposedFirst.socketPath,
-            `/p2p/peers/${secondId}/api/health`,
+            `/p2p/peers/${secondIdentity.instanceId}/api/health`,
             "first-token",
         );
         expect(health.status).toBe(200);
         expect(JSON.parse(health.body)).toMatchObject({ status: "ready" });
-        expect(health.headers["x-rig-p2p-peer"]).toBe(secondId);
+        expect(health.headers["x-rig-p2p-peer"]).toBe(secondIdentity.instanceId);
 
         const hello = await readFirstSseFrame(
             exposedFirst.socketPath,
-            `/p2p/peers/${secondId}/api/events/live`,
+            `/p2p/peers/${secondIdentity.instanceId}/api/events/live`,
             "first-token",
         );
         expect(hello).toContain("event: hello");
@@ -92,7 +107,7 @@ describe("P2P HTTP between two real daemon servers", () => {
         const exposedSecond = await startDaemon("second-token", secondNetwork);
         const refusal = await get(
             exposedSecond.socketPath,
-            `/p2p/peers/${firstId}/api/health`,
+            `/p2p/peers/${firstIdentity.instanceId}/api/health`,
             "second-token",
         );
         expect(refusal.status).toBe(502);

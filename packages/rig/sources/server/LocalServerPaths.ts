@@ -9,6 +9,8 @@ export interface LocalServerPaths {
     directory: string;
     irohSecretKeyPath: string;
     logPath: string;
+    p2pIdentityPath: string;
+    p2pPeerTrustPath: string;
     registryPath: string;
     socketPath: string;
     tokenPath: string;
@@ -31,6 +33,8 @@ export function getLocalServerPaths(
         directory,
         irohSecretKeyPath: join(dirname(databasePath), "iroh-secret-key"),
         logPath: join(directory, "server.log"),
+        p2pIdentityPath: join(dirname(databasePath), "p2p-instance-identity.json"),
+        p2pPeerTrustPath: join(dirname(databasePath), "p2p-peer-trust.json"),
         registryPath: join(directory, "server.json"),
         socketPath: join(directory, "server.sock"),
         tokenPath: join(directory, "token"),

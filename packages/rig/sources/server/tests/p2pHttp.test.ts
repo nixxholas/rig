@@ -9,16 +9,19 @@ import { createTestSocketDirectory } from "../../testing/createTestSocketDirecto
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("P2P HTTP API", () => {
-    it("reports the local endpoint id and live allowlisted peer health", async () => {
+    it("reports the stable instance, transport address, and verified peer health", async () => {
         const status: P2pStatus = {
+            instanceId: "alocalinstance00000000001",
+            publicKey: "A".repeat(43),
             transports: [
                 {
                     apiExposed: false,
-                    localId: "local-endpoint",
+                    localAddress: "local-endpoint",
                     peers: [
                         {
+                            address: "remote-endpoint",
                             lastSeenAt: 123,
-                            peerId: "remote-endpoint",
+                            peerId: "aremoteinstance0000000001",
                             rttMs: 7,
                             status: "connected",
                         },

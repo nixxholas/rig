@@ -4,22 +4,36 @@ import {
     SecretKey,
     type Connection,
     type EndpointAddr,
+    type RecvStream,
+    type SendStream,
 } from "@number0/iroh/index.js";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
 import { IrohNetwork } from "./IrohNetwork.js";
+import { runIrohResponderHello } from "./IrohHelloProtocol.js";
+import { createP2pInstanceIdentity } from "./P2pIdentity.js";
+import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
-const ALPN = [...Buffer.from("rig/p2p/2", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/3", "utf8")];
 const networks: IrohNetwork[] = [];
+const directories: string[] = [];
 
 afterEach(async () => {
     await Promise.all(networks.splice(0).map((network) => network.close()));
+    await Promise.all(
+        directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
+    );
 });
 
 describe("IrohNetwork", () => {
     it("connects and keeps pinging when both endpoint identities are allowlisted", async () => {
         const firstKey = SecretKey.generate();
         const secondKey = SecretKey.generate();
+        const firstIdentity = createP2pInstanceIdentity();
+        const secondIdentity = createP2pInstanceIdentity();
         const [firstEndpoint, secondEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: firstKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: secondKey.toBytes() }, RelayMode.disabled()),
@@ -30,6 +44,7 @@ describe("IrohNetwork", () => {
         const first = await IrohNetwork.create({
             config: { trustedEndpointIds: [secondId] },
             endpoint: firstEndpoint,
+            identity: firstIdentity,
             handshakeTimeoutMs: 100,
             idleTimeoutMs: 500,
             onStatusChange: firstStatusChanged,
@@ -42,6 +57,7 @@ describe("IrohNetwork", () => {
         const second = await IrohNetwork.create({
             config: { trustedEndpointIds: [firstId] },
             endpoint: secondEndpoint,
+            identity: secondIdentity,
             handshakeTimeoutMs: 100,
             idleTimeoutMs: 500,
             peerAddresses: new Map([[firstId, firstEndpoint.addr()]]),
@@ -52,8 +68,16 @@ describe("IrohNetwork", () => {
         networks.push(second);
 
         await vi.waitFor(() => {
-            expect(first.status().peers[0]).toMatchObject({ status: "connected" });
-            expect(second.status().peers[0]).toMatchObject({ status: "connected" });
+            expect(first.status().peers[0]).toMatchObject({
+                peerId: secondIdentity.instanceId,
+                publicKey: secondIdentity.publicKey,
+                status: "connected",
+            });
+            expect(second.status().peers[0]).toMatchObject({
+                peerId: firstIdentity.instanceId,
+                publicKey: firstIdentity.publicKey,
+                status: "connected",
+            });
         });
         const publishedAfterConnect = firstStatusChanged.mock.calls.length;
         const firstPingAt = first.status().peers[0]!.lastSeenAt!;
@@ -66,6 +90,8 @@ describe("IrohNetwork", () => {
     it("refuses a peer whose authenticated endpoint identity is not allowlisted", async () => {
         const allowedKey = SecretKey.generate();
         const refusedKey = SecretKey.generate();
+        const allowedIdentity = createP2pInstanceIdentity();
+        const refusedIdentity = createP2pInstanceIdentity();
         const [allowedEndpoint, refusedEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: allowedKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: refusedKey.toBytes() }, RelayMode.disabled()),
@@ -75,6 +101,7 @@ describe("IrohNetwork", () => {
         const allowed = await IrohNetwork.create({
             config: { trustedEndpointIds: [] },
             endpoint: allowedEndpoint,
+            identity: allowedIdentity,
             relayMode: RelayMode.disabled(),
             secretKey: allowedKey,
         });
@@ -82,6 +109,7 @@ describe("IrohNetwork", () => {
         const refused = await IrohNetwork.create({
             config: { trustedEndpointIds: [allowedId] },
             endpoint: refusedEndpoint,
+            identity: refusedIdentity,
             peerAddresses: new Map([[allowedId, allowedEndpoint.addr()]]),
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
@@ -91,23 +119,24 @@ describe("IrohNetwork", () => {
 
         await vi.waitFor(() => {
             expect(refused.status().peers[0]).toMatchObject({
-                peerId: allowedId,
+                address: allowedId,
                 status: "unreachable",
             });
         });
         expect(allowed.status()).toEqual({
             apiExposed: false,
-            localId: allowedId,
+            localAddress: allowedId,
             peers: [],
             state: "ready",
             transport: "iroh",
         });
-        expect(refused.localId()).toBe(refusedId);
+        expect(refused.localAddress()).toBe(refusedId);
     });
 
     it("marks a connected peer unreachable when its ping stalls", async () => {
         const clientKey = SecretKey.generate();
         const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
         const [clientEndpoint, serverEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
@@ -124,6 +153,8 @@ describe("IrohNetwork", () => {
             const client = await IrohNetwork.create({
                 config: { trustedEndpointIds: [serverId] },
                 endpoint: clientEndpoint,
+                handshakeTimeoutMs: 25,
+                identity: clientIdentity,
                 peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
                 pingIntervalMs: 10,
                 pingTimeoutMs: 25,
@@ -134,7 +165,7 @@ describe("IrohNetwork", () => {
 
             await vi.waitFor(() => {
                 expect(client.status().peers[0]).toMatchObject({
-                    peerId: serverId,
+                    address: serverId,
                     status: "unreachable",
                 });
             });
@@ -144,9 +175,116 @@ describe("IrohNetwork", () => {
         }
     });
 
+    it("rejects a transport-authenticated endpoint that presents the wrong stable key", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const pinnedClientIdentity = createP2pInstanceIdentity();
+        const impostorIdentity = createP2pInstanceIdentity(pinnedClientIdentity.instanceId);
+        const serverIdentity = createP2pInstanceIdentity();
+        const [clientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const clientId = clientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        const directory = await createTestSocketDirectory();
+        directories.push(directory);
+        const trust = await P2pPeerTrustStore.open(join(directory, "peers.json"));
+        await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId);
+
+        const client = await IrohNetwork.create({
+            config: { trustedEndpointIds: [serverId] },
+            endpoint: clientEndpoint,
+            identity: impostorIdentity,
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 10,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            config: { trustedEndpointIds: [clientId] },
+            endpoint: serverEndpoint,
+            identity: serverIdentity,
+            peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
+            pingIntervalMs: 10,
+            relayMode: RelayMode.disabled(),
+            secretKey: serverKey,
+            commitPeer: (identity, endpointId) => trust.verifyOrPin(identity, "iroh", endpointId),
+            validatePeer: (identity, endpointId) => trust.validate(identity, "iroh", endpointId),
+        });
+        networks.push(server);
+
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]).toMatchObject({
+                address: serverId,
+                status: "unreachable",
+            }),
+        );
+        expect(server.status().peers[0]?.peerId).toBeUndefined();
+    });
+
+    it("does not pin an initiator peer before the responder confirms the handshake", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const [clientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const clientId = clientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        const directory = await createTestSocketDirectory();
+        directories.push(directory);
+        const clientTrust = await P2pPeerTrustStore.open(join(directory, "client-peers.json"));
+        const serverTask = (async () => {
+            const incoming = await serverEndpoint.acceptNext();
+            if (incoming === null) return;
+            const connection = await (await incoming.accept()).connect();
+            const stream = await connection.acceptBi();
+            await stream.recv.readExact(1);
+            await runIrohResponderHello(stream.recv, stream.send, {
+                commitPeer: async () => {
+                    throw new Error("The responder refused to commit the peer.");
+                },
+                identity: serverIdentity,
+                localEndpointId: serverId,
+                remoteEndpointId: clientId,
+            }).catch(() => undefined);
+            connection.close(0n, []);
+        })();
+        const client = await IrohNetwork.create({
+            commitPeer: (identity, endpointId) =>
+                clientTrust.verifyOrPin(identity, "iroh", endpointId),
+            config: { trustedEndpointIds: [serverId] },
+            endpoint: clientEndpoint,
+            identity: clientIdentity,
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 10,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+            validatePeer: (identity, endpointId) =>
+                clientTrust.validate(identity, "iroh", endpointId),
+        });
+        networks.push(client);
+
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]).toMatchObject({
+                address: serverId,
+                status: "unreachable",
+            }),
+        );
+        expect(clientTrust.peerForBinding("iroh", serverId)).toBeUndefined();
+        await serverTask;
+        await serverEndpoint.close();
+    });
+
     it("forwards an HTTP response stream without blocking peer pings", async () => {
         const clientKey = SecretKey.generate();
         const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
         const [clientEndpoint, serverEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
@@ -163,6 +301,7 @@ describe("IrohNetwork", () => {
         const client = await IrohNetwork.create({
             config: { trustedEndpointIds: [serverId] },
             endpoint: clientEndpoint,
+            identity: clientIdentity,
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
             pingIntervalMs: 25,
             relayMode: RelayMode.disabled(),
@@ -172,13 +311,14 @@ describe("IrohNetwork", () => {
         const server = await IrohNetwork.create({
             config: { trustedEndpointIds: [clientId] },
             endpoint: serverEndpoint,
+            identity: serverIdentity,
             peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
             pingIntervalMs: 25,
             relayMode: RelayMode.disabled(),
             secretKey: serverKey,
             serveRequest: async (peerId, request, signal) => {
                 requestServed = true;
-                expect(peerId).toBe(clientId);
+                expect(peerId).toBe(clientIdentity.instanceId);
                 if (request.path === "/cancel") {
                     return {
                         body: (async function* () {
@@ -218,7 +358,7 @@ describe("IrohNetwork", () => {
         );
         const pingBeforeStream = client.status().peers[0]!.lastSeenAt!;
         const responsePromise = client.fetch(
-            serverId,
+            serverIdentity.instanceId,
             {
                 body: Buffer.from("hello"),
                 headers: { "content-type": "text/plain" },
@@ -249,7 +389,7 @@ describe("IrohNetwork", () => {
 
         const cancellation = new AbortController();
         const cancelledResponse = await client.fetch(
-            serverId,
+            serverIdentity.instanceId,
             { body: new Uint8Array(), headers: {}, method: "GET", path: "/cancel" },
             cancellation.signal,
         );
@@ -269,7 +409,7 @@ describe("IrohNetwork", () => {
         const accepted = new Promise<null>((resolve) => {
             finishAccept = () => resolve(null);
         });
-        const connection = fakePingConnection(peerId);
+        const connection = fakePingConnection(peerId, ownId, createP2pInstanceIdentity());
         let connectCount = 0;
         const endpoint = {
             acceptNext: () => accepted,
@@ -351,18 +491,73 @@ describe("IrohNetwork", () => {
     });
 });
 
-function fakePingConnection(peerId: string): Connection {
+function fakePingConnection(
+    peerEndpointId: string,
+    clientEndpointId: string,
+    peerIdentity: ReturnType<typeof createP2pInstanceIdentity>,
+): Connection {
+    let streamCount = 0;
     return {
         close: () => undefined,
-        openBi: async () => ({
-            recv: {
-                readToEnd: async () => [1],
-            },
-            send: {
-                finish: async () => undefined,
-                writeAll: async () => undefined,
-            },
-        }),
-        remoteId: () => ({ toString: () => peerId }),
+        openBi: async () => {
+            streamCount += 1;
+            if (streamCount === 1) {
+                const pair = duplexPair();
+                void (async () => {
+                    await pair.right.recv.readExact(1);
+                    await runIrohResponderHello(pair.right.recv, pair.right.send, {
+                        identity: peerIdentity,
+                        localEndpointId: peerEndpointId,
+                        remoteEndpointId: clientEndpointId,
+                    });
+                })();
+                return pair.left;
+            }
+            return {
+                recv: {
+                    readToEnd: async () => [1],
+                },
+                send: {
+                    finish: async () => undefined,
+                    writeAll: async () => undefined,
+                },
+            };
+        },
+        remoteId: () => ({ toString: () => peerEndpointId }),
     } as unknown as Connection;
+}
+
+function duplexPair(): {
+    left: { recv: RecvStream; send: SendStream };
+    right: { recv: RecvStream; send: SendStream };
+} {
+    const leftToRight = bytePipe();
+    const rightToLeft = bytePipe();
+    return {
+        left: { recv: rightToLeft.recv, send: leftToRight.send },
+        right: { recv: leftToRight.recv, send: rightToLeft.send },
+    };
+}
+
+function bytePipe(): { recv: RecvStream; send: SendStream } {
+    const bytes: number[] = [];
+    const waiters: (() => void)[] = [];
+    const wake = () => waiters.splice(0).forEach((waiter) => waiter());
+    return {
+        recv: {
+            readExact: async (length: number) => {
+                while (bytes.length < length) {
+                    await new Promise<void>((resolve) => waiters.push(resolve));
+                }
+                return bytes.splice(0, length);
+            },
+        } as unknown as RecvStream,
+        send: {
+            finish: async () => undefined,
+            writeAll: async (chunk: number[]) => {
+                bytes.push(...chunk);
+                wake();
+            },
+        } as unknown as SendStream,
+    };
 }
