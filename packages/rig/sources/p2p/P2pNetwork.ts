@@ -7,7 +7,7 @@ import { IrohNetwork } from "./IrohNetwork.js";
 import { loadOrCreateIrohSecretKey } from "./loadOrCreateIrohSecretKey.js";
 import { loadOrCreateP2pIdentity } from "./loadOrCreateP2pIdentity.js";
 import type { P2pPeerTrustStoreContract } from "./P2pPeerTrustStore.js";
-import type { P2pInstanceIdentity } from "./P2pIdentity.js";
+import type { P2pInstanceIdentity, P2pPeerIdentity } from "./P2pIdentity.js";
 import type { P2pTrustedPeer } from "./P2pPeer.js";
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pTransport, P2pTransportKind } from "./P2pTransport.js";
@@ -24,6 +24,7 @@ export interface CreateP2pNetworkOptions {
     /** Test seam. Production creates the native Iroh transport. */
     createIrohTransport?: (
         onStatusChange: (status: P2pTransportStatus) => void,
+        validatePeer: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>,
     ) => Promise<P2pTransport>;
     /** Test seam. Production creates the outbound SSH transport. */
     createSshTransport?: (
@@ -187,6 +188,24 @@ export class P2pNetwork {
                     statuses.set(kind, status);
                     publish();
                 };
+                const validateIrohPeer = async (
+                    peerIdentity: P2pPeerIdentity,
+                    endpointId: string,
+                ): Promise<void> => {
+                    // Pairing can add trust after this network starts, so the durable store—not
+                    // the startup projection used to seed the transport—is authoritative here.
+                    const configured = trustStore.peerForBinding("iroh", endpointId);
+                    if (
+                        configured === undefined ||
+                        configured.instanceId !== peerIdentity.instanceId ||
+                        configured.publicKey !== peerIdentity.publicKey
+                    ) {
+                        throw new Error(
+                            "The Iroh peer identity does not match its trusted peer record.",
+                        );
+                    }
+                    await trustStore.validate(peerIdentity, "iroh", endpointId);
+                };
                 const iroh =
                     options.createIrohTransport === undefined
                         ? await IrohNetwork.create({
@@ -214,21 +233,9 @@ export class P2pNetwork {
                               ...(options.config.exposeApi && options.serveTunnel !== undefined
                                   ? { serveTunnel: options.serveTunnel }
                                   : {}),
-                              validatePeer: async (peerIdentity, endpointId) => {
-                                  const configured = peersByEndpoint.get(endpointId);
-                                  if (
-                                      configured === undefined ||
-                                      configured.instanceId !== peerIdentity.instanceId ||
-                                      configured.publicKey !== peerIdentity.publicKey
-                                  ) {
-                                      throw new Error(
-                                          "The Iroh peer identity does not match its allowlist.",
-                                      );
-                                  }
-                                  await trustStore.validate(peerIdentity, "iroh", endpointId);
-                              },
+                              validatePeer: validateIrohPeer,
                           })
-                        : await options.createIrohTransport(onIrohStatusChange);
+                        : await options.createIrohTransport(onIrohStatusChange, validateIrohPeer);
                 transports.push(iroh);
                 statuses.set(iroh.kind, iroh.status());
             } catch (error) {

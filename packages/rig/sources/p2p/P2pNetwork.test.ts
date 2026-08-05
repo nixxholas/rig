@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import type { P2pTransport } from "./P2pTransport.js";
 import { P2pNetwork } from "./P2pNetwork.js";
-import { createP2pInstanceIdentity } from "./P2pIdentity.js";
+import { createP2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.js";
+import type { P2pTrustedPeer } from "./P2pPeer.js";
 import type { P2pPeerTrustStoreContract } from "./P2pPeerTrustStore.js";
 
 const disabledConfig = {
@@ -145,6 +146,59 @@ describe("P2pNetwork", () => {
         await network.close();
         expect(close).toHaveBeenCalledOnce();
         expect(changed).toHaveBeenCalled();
+    });
+
+    it("validates newly persisted Iroh trust without recreating the network", async () => {
+        const endpointId = "a".repeat(64);
+        const remoteIdentity = createP2pInstanceIdentity(peerId);
+        let persistedPeer: P2pTrustedPeer | undefined;
+        let validateIrohPeer!: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
+        const validate = vi.fn(async () => undefined);
+        const initial: Extract<P2pTransportStatus, { state: "ready"; transport: "iroh" }> = {
+            apiExposed: false,
+            localAddress: "local",
+            peers: [],
+            state: "ready",
+            transport: "iroh",
+        };
+        const network = await P2pNetwork.create({
+            config: { ...disabledConfig, enableIroh: true },
+            createIrohTransport: async (_onStatusChange, authenticate) => {
+                validateIrohPeer = authenticate;
+                return {
+                    close: async () => undefined,
+                    kind: "iroh",
+                    status: () => initial,
+                };
+            },
+            identity,
+            irohSecretKeyPath: "unused",
+            peerTrustStore: {
+                ...peerTrustStore,
+                peerForBinding: (_transport, address) =>
+                    persistedPeer?.bindings.some((binding) => binding.address === address) === true
+                        ? remoteIdentity
+                        : undefined,
+                peers: () => (persistedPeer === undefined ? [] : [persistedPeer]),
+                validate,
+            },
+        });
+
+        await expect(validateIrohPeer(remoteIdentity, endpointId)).rejects.toThrow(
+            "does not match its trusted peer record",
+        );
+        persistedPeer = {
+            bindings: [{ address: endpointId, transport: "iroh" }],
+            connections: { iroh: { endpointId } },
+            instanceId: remoteIdentity.instanceId,
+            name: "Remote Rig",
+            publicKey: remoteIdentity.publicKey,
+        };
+        network.addTrustedPeer(persistedPeer);
+
+        await expect(validateIrohPeer(remoteIdentity, endpointId)).resolves.toBeUndefined();
+        expect(validate).toHaveBeenCalledWith(remoteIdentity, "iroh", endpointId);
+        await network.close();
     });
 
     it("routes one stable peer through the best available transport", async () => {

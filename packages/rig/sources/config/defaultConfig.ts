@@ -1,6 +1,5 @@
-import { hostname } from "node:os";
-
 import type { RigConfig } from "./types.js";
+import { detectP2pNodeName } from "./detectP2pNodeName.js";
 import { DEFAULT_INFERENCE_MAX_RETRIES } from "./inferenceRetrySettings.js";
 
 export const DEFAULT_RIG_CONFIG: RigConfig = {
@@ -22,7 +21,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         enableSsh: false,
         exposeApi: false,
         iroh: {},
-        name: hostname(),
+        name: detectP2pNodeName(),
         role: "primary",
     },
     presence: { states: {} },
