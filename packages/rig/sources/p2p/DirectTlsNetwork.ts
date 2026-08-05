@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import type { Socket } from "node:net";
+import { finished } from "node:stream/promises";
 import {
     connect as connectTls,
     createServer as createTlsServer,
@@ -27,12 +28,27 @@ import { runP2pInitiatorHello, runP2pResponderHello } from "./P2pHelloProtocol.j
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import { encodeBase64Url, type P2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.js";
 import type { P2pTransport } from "./P2pTransport.js";
+import {
+    createClosedP2pTunnelStream,
+    type P2pTunnelConnection,
+    type P2pTunnelRequestHead,
+    type ServeP2pTunnel,
+} from "./P2pTunnel.js";
+import {
+    readP2pTunnelRequest,
+    readP2pTunnelResponse,
+    writeP2pTunnelFailure,
+    writeP2pTunnelRequest,
+    writeP2pTunnelResponse,
+} from "./P2pTunnelProtocol.js";
+import { createP2pTunnelStream } from "./P2pTunnelStream.js";
 import { formatDirectAddress, parseDirectAddress } from "./parseDirectAddress.js";
 
-const DIRECT_ALPN = "rig-p2p-direct/1";
+const DIRECT_ALPN = "rig-p2p-direct/2";
 const DIRECT_EXPORTER_LABEL = "rig-p2p-direct-v1";
 const OPERATION_HTTP = 2;
 const OPERATION_PING = 1;
+const OPERATION_TUNNEL = 3;
 const MAXIMUM_CONNECTIONS = 32;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -58,6 +74,7 @@ export interface CreateDirectTlsNetworkOptions {
     onStatusChange?: (status: P2pTransportStatus) => void;
     peers: readonly ConfigP2pPeer[];
     serveRequest?: ServeP2pHttpRequest;
+    serveTunnel?: ServeP2pTunnel;
     startPings?: boolean;
     validatePeer?: (identity: P2pPeerIdentity, publicKey: string) => Promise<void>;
 }
@@ -77,6 +94,7 @@ export class DirectTlsNetwork implements P2pTransport {
     readonly #peerByPublicKey = new Map<string, DirectPeer>();
     readonly #peerStatuses = new Map<string, P2pPeerStatus>();
     readonly #serveRequest: ServeP2pHttpRequest | undefined;
+    readonly #serveTunnel: ServeP2pTunnel | undefined;
     readonly #startPings: boolean;
     readonly #sockets = new Set<TLSSocket>();
     readonly #tasks = new Set<Promise<void>>();
@@ -94,6 +112,7 @@ export class DirectTlsNetwork implements P2pTransport {
         this.#maximumConnections = options.maximumConnections ?? MAXIMUM_CONNECTIONS;
         this.#onStatusChange = options.onStatusChange;
         this.#serveRequest = options.serveRequest;
+        this.#serveTunnel = options.serveTunnel;
         this.#startPings = options.startPings ?? true;
         this.#validatePeer = options.validatePeer;
         for (const configured of options.peers) {
@@ -176,9 +195,53 @@ export class DirectTlsNetwork implements P2pTransport {
         }
     }
 
+    async openTunnel(
+        peerId: string,
+        request: P2pTunnelRequestHead,
+        signal: AbortSignal,
+    ): Promise<P2pTunnelConnection> {
+        const peer = this.#peerById.get(peerId);
+        if (peer === undefined) throw new Error("That peer has no configured direct address.");
+        const socket = await this.#connectAndAuthenticate(peer, signal);
+        const duplex = createNodeFrameDuplex(socket, socket);
+        const close = () => socket.destroy();
+        if (signal.aborted) {
+            close();
+            throw new Error("The direct P2P tunnel was cancelled.");
+        }
+        signal.addEventListener("abort", close, { once: true });
+        try {
+            await writeBytes(duplex.send, Uint8Array.of(OPERATION_TUNNEL));
+            await withDeadline(
+                writeP2pTunnelRequest(duplex.send, request),
+                REQUEST_TIMEOUT_MS,
+                "The direct P2P tunnel request took too long to send.",
+            );
+            const response = await withDeadline(
+                readP2pTunnelResponse(duplex.recv),
+                RESPONSE_HEAD_TIMEOUT_MS,
+                "The direct P2P peer did not return tunnel headers in time.",
+            );
+            if (response.status !== (request.method === "GET" ? 101 : 200)) {
+                signal.removeEventListener("abort", close);
+                close();
+                return { response, stream: createClosedP2pTunnelStream() };
+            }
+            signal.removeEventListener("abort", close);
+            return {
+                response,
+                stream: createP2pTunnelStream(duplex, { close, signal }),
+            };
+        } catch (error) {
+            signal.removeEventListener("abort", close);
+            close();
+            throw error;
+        }
+    }
+
     status(): Extract<P2pTransportStatus, { state: "ready"; transport: "direct" }> {
         return {
-            apiExposed: this.#serveRequest !== undefined,
+            apiExposed: this.#serveRequest !== undefined || this.#serveTunnel !== undefined,
             ...(this.#localAddress === undefined ? {} : { localAddress: this.#localAddress }),
             peers: [...this.#peerById.keys()].map((peerId) => ({
                 ...this.#peerStatuses.get(peerId)!,
@@ -272,12 +335,74 @@ export class DirectTlsNetwork implements P2pTransport {
                 socket.end();
                 return;
             }
-            if (operation !== OPERATION_HTTP) throw new Error("Unknown direct P2P operation.");
-            await this.#serveHttp(socket, duplex, identity.instanceId);
+            if (operation === OPERATION_HTTP) {
+                await this.#serveHttp(socket, duplex, identity.instanceId);
+                return;
+            }
+            if (operation === OPERATION_TUNNEL) {
+                await this.#serveTunnelConnection(socket, duplex, identity.instanceId);
+                return;
+            }
+            throw new Error("Unknown direct P2P operation.");
         } catch {
             socket.destroy();
         } finally {
             this.#sockets.delete(socket);
+        }
+    }
+
+    async #serveTunnelConnection(
+        socket: TLSSocket,
+        duplex: P2pFrameDuplex,
+        peerId: string,
+    ): Promise<void> {
+        if (this.#serveTunnel === undefined) {
+            await writeP2pTunnelFailure(
+                duplex.send,
+                new Error("P2P API sharing is disabled."),
+            ).catch(() => undefined);
+            socket.end();
+            return;
+        }
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        socket.once("close", abort);
+        let local: P2pTunnelConnection | undefined;
+        let tunnel: ReturnType<typeof createP2pTunnelStream> | undefined;
+        try {
+            const request = await withDeadline(
+                readP2pTunnelRequest(duplex.recv),
+                REQUEST_TIMEOUT_MS,
+                "The direct P2P peer did not finish its tunnel request in time.",
+            );
+            local = await withDeadline(
+                this.#serveTunnel(peerId, request, controller.signal),
+                RESPONSE_HEAD_TIMEOUT_MS,
+                "The local daemon did not open the tunnel in time.",
+            );
+            await writeP2pTunnelResponse(duplex.send, local.response);
+            if (local.response.status !== (request.method === "GET" ? 101 : 200)) {
+                local.stream.destroy();
+                socket.end();
+                return;
+            }
+            tunnel = createP2pTunnelStream(duplex, {
+                close: () => socket.destroy(),
+                signal: controller.signal,
+            });
+            local.stream.pipe(tunnel);
+            tunnel.pipe(local.stream);
+            await Promise.all([finished(local.stream), finished(tunnel)]);
+        } catch (error) {
+            if (local === undefined && !controller.signal.aborted) {
+                await writeP2pTunnelFailure(duplex.send, error).catch(() => undefined);
+            }
+            local?.stream.destroy();
+            tunnel?.destroy();
+            socket.destroy();
+        } finally {
+            socket.off("close", abort);
+            controller.abort();
         }
     }
 

@@ -1,4 +1,6 @@
 import { connect, createServer } from "node:net";
+import { once } from "node:events";
+import { Transform } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
@@ -59,6 +61,101 @@ describe("direct TLS P2P transport", () => {
             expect(await collect(secondResponse.body)).toBe(secondIdentity.instanceId);
         } finally {
             await Promise.all([first.close(), second.close()]);
+        }
+    });
+
+    it("opens a bidirectional tunnel and holds capacity until cancellation", async () => {
+        const [clientPort, serverPort] = await Promise.all([reservePort(), reservePort()]);
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const clientAddress = `127.0.0.1:${String(clientPort)}`;
+        const serverAddress = `127.0.0.1:${String(serverPort)}`;
+        let servedPeerId: string | undefined;
+        let servedPath: string | undefined;
+        let servingAborted: Promise<void> | undefined;
+        const client = await DirectTlsNetwork.create({
+            config: { listen: clientAddress },
+            identity: clientIdentity,
+            maximumConnections: 1,
+            peers: [
+                {
+                    direct: { address: serverAddress },
+                    instanceId: serverIdentity.instanceId,
+                    publicKey: serverIdentity.publicKey,
+                },
+            ],
+            startPings: false,
+        });
+        const server = await DirectTlsNetwork.create({
+            config: { listen: serverAddress },
+            identity: serverIdentity,
+            peers: [
+                {
+                    direct: { address: clientAddress },
+                    instanceId: clientIdentity.instanceId,
+                    publicKey: clientIdentity.publicKey,
+                },
+            ],
+            serveTunnel: async (peerId, request, signal) => {
+                servedPeerId = peerId;
+                servedPath = request.path;
+                servingAborted = waitForAbort(signal);
+                return {
+                    response: { headers: { upgrade: "websocket" }, status: 101 },
+                    stream: new Transform({
+                        transform(chunk: Buffer, _encoding, callback) {
+                            callback(null, Buffer.from(chunk.toString("utf8").toUpperCase()));
+                        },
+                    }),
+                };
+            },
+            startPings: false,
+        });
+        const controller = new AbortController();
+        try {
+            const tunnel = await client.openTunnel(
+                serverIdentity.instanceId,
+                {
+                    headers: {
+                        connection: "Upgrade",
+                        "sec-websocket-key": "test-key",
+                        "sec-websocket-version": "13",
+                        upgrade: "websocket",
+                    },
+                    method: "GET",
+                    path: "/projects/project/terminals/terminal/attach",
+                },
+                controller.signal,
+            );
+            tunnel.stream.on("error", () => undefined);
+            expect(tunnel.response).toEqual({
+                headers: { upgrade: "websocket" },
+                status: 101,
+            });
+            expect(servedPeerId).toBe(clientIdentity.instanceId);
+            expect(servedPath).toBe("/projects/project/terminals/terminal/attach");
+
+            const received = once(tunnel.stream, "data");
+            tunnel.stream.write(Buffer.from("hello"));
+            expect(Buffer.from((await received)[0] as Buffer).toString("utf8")).toBe("HELLO");
+
+            await expect(
+                client.openTunnel(
+                    serverIdentity.instanceId,
+                    {
+                        headers: {},
+                        method: "GET",
+                        path: "/projects/project/terminals/other/attach",
+                    },
+                    new AbortController().signal,
+                ),
+            ).rejects.toThrow("Too many outbound direct P2P connections");
+
+            controller.abort();
+            await deadline(servingAborted!, "The served direct tunnel was not cancelled.");
+        } finally {
+            controller.abort();
+            await Promise.all([client.close(), server.close()]);
         }
     });
 
@@ -160,6 +257,7 @@ describe("direct TLS P2P transport", () => {
             serveRequest: async (_peerId, _request, signal) => ({
                 body: (async function* () {
                     await waitForAbort(signal);
+                    yield Buffer.alloc(0);
                 })(),
                 headers: {},
                 status: 200,

@@ -18,7 +18,7 @@ import { runP2pResponderHello } from "./P2pHelloProtocol.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
-const ALPN = [...Buffer.from("rig/p2p/4", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const networks: IrohNetwork[] = [];
 const directories: string[] = [];
 

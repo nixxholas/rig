@@ -5,6 +5,7 @@ import type {
     RelayMode,
     SecretKey,
 } from "@number0/iroh/index.js";
+import { finished } from "node:stream/promises";
 
 import type { ConfigIrohTransport } from "../config/types.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -26,11 +27,26 @@ import {
 } from "./P2pIdentity.js";
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pTransport } from "./P2pTransport.js";
+import {
+    readP2pTunnelRequest,
+    readP2pTunnelResponse,
+    writeP2pTunnelFailure,
+    writeP2pTunnelRequest,
+    writeP2pTunnelResponse,
+} from "./P2pTunnelProtocol.js";
+import { createP2pTunnelStream } from "./P2pTunnelStream.js";
+import {
+    createClosedP2pTunnelStream,
+    type P2pTunnelConnection,
+    type P2pTunnelRequestHead,
+    type ServeP2pTunnel,
+} from "./P2pTunnel.js";
 
-const IROH_ALPN = [...Buffer.from("rig/p2p/4", "utf8")];
+const IROH_ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const STREAM_KIND_PING = 1;
 const STREAM_KIND_HTTP = 2;
 const STREAM_KIND_HELLO = 3;
+const STREAM_KIND_TUNNEL = 4;
 const PONG = Buffer.from([STREAM_KIND_PING]);
 const CLOSE_UNAUTHORIZED = 403n;
 const CLOSE_SHUTDOWN = 0n;
@@ -71,6 +87,7 @@ export interface CreateIrohNetworkOptions {
     responseWriteProgressTimeoutMs?: number;
     knownPeer?: (endpointId: string) => P2pPeerIdentity | undefined;
     serveRequest?: ServeP2pHttpRequest;
+    serveTunnel?: ServeP2pTunnel;
     validatePeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
     onStatusChange?: (status: P2pTransportStatus) => void;
 }
@@ -101,6 +118,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #pingTimeoutMs: number;
     readonly #responseWriteProgressTimeoutMs: number;
     readonly #serveRequest: ServeP2pHttpRequest | undefined;
+    readonly #serveTunnel: ServeP2pTunnel | undefined;
     readonly #tasks = new Set<Promise<void>>();
     readonly #validatePeer:
         | ((identity: P2pPeerIdentity, endpointId: string) => Promise<void>)
@@ -137,6 +155,7 @@ export class IrohNetwork implements P2pTransport {
         this.#responseWriteProgressTimeoutMs =
             options.responseWriteProgressTimeoutMs ?? RESPONSE_WRITE_PROGRESS_TIMEOUT_MS;
         this.#serveRequest = options.serveRequest;
+        this.#serveTunnel = options.serveTunnel;
         this.#onStatusChange = options.onStatusChange;
         this.#validatePeer = options.validatePeer;
         for (const endpointId of options.endpointIds) {
@@ -266,6 +285,69 @@ export class IrohNetwork implements P2pTransport {
         }
     }
 
+    async openTunnel(
+        peerId: string,
+        request: P2pTunnelRequestHead,
+        signal: AbortSignal,
+    ): Promise<P2pTunnelConnection> {
+        const endpointId = this.#endpointForPeer(peerId);
+        if (this.#httpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
+            throw new Error("Too many P2P tunnels are already active.");
+        }
+        this.#httpRequestCount += 1;
+        let connection: Connection | undefined;
+        let released = false;
+        const release = (): void => {
+            if (released) return;
+            released = true;
+            signal.removeEventListener("abort", abort);
+            if (connection !== undefined) {
+                this.#httpConnections.delete(connection);
+                connection.close(CLOSE_SHUTDOWN, []);
+            }
+            this.#httpRequestCount -= 1;
+        };
+        const abort = (): void => release();
+        try {
+            signal.throwIfAborted();
+            connection = await connectOnce(
+                this.#endpoint,
+                this.#peerAddress(endpointId),
+                this.#connectTimeoutMs,
+                signal,
+            );
+            const authenticated = await this.#authenticateOutgoing(connection, endpointId);
+            if (authenticated.instanceId !== peerId) {
+                throw new Error("The Iroh endpoint belongs to a different P2P instance.");
+            }
+            this.#httpConnections.add(connection);
+            signal.addEventListener("abort", abort, { once: true });
+            const stream = await withAbort(connection.openBi(), signal);
+            await withAbort(stream.send.writeAll([STREAM_KIND_TUNNEL]), signal);
+            const duplex = createIrohFrameDuplex(stream.recv, stream.send);
+            await withAbort(writeP2pTunnelRequest(duplex.send, request), signal);
+            const response = await withAbort(
+                withDeadline(
+                    readP2pTunnelResponse(duplex.recv),
+                    RESPONSE_HEAD_TIMEOUT_MS,
+                    "The peer did not return tunnel response headers in time.",
+                ),
+                signal,
+            );
+            if (response.status !== (request.method === "GET" ? 101 : 200)) {
+                release();
+                return { response, stream: createClosedP2pTunnelStream() };
+            }
+            return {
+                response,
+                stream: createP2pTunnelStream(duplex, { close: release, signal }),
+            };
+        } catch (error) {
+            release();
+            throw error;
+        }
+    }
+
     async close(): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
@@ -280,7 +362,7 @@ export class IrohNetwork implements P2pTransport {
                 "The Iroh endpoint did not close in time.",
             ),
             withDeadline(
-                Promise.allSettled([...this.#tasks]),
+                Promise.allSettled(this.#tasks),
                 this.#closeTimeoutMs,
                 "Iroh networking tasks did not stop in time.",
             ),
@@ -402,7 +484,7 @@ export class IrohNetwork implements P2pTransport {
                 );
             }
         } finally {
-            await Promise.allSettled([...streams]);
+            await Promise.allSettled(streams);
         }
     }
 
@@ -423,8 +505,14 @@ export class IrohNetwork implements P2pTransport {
             await stream.send.finish();
             return;
         }
-        if (kind !== STREAM_KIND_HTTP || this.#serveRequest === undefined) {
-            await stream.send.reset(kind === STREAM_KIND_HTTP ? 403n : 400n);
+        if (
+            (kind === STREAM_KIND_HTTP && this.#serveRequest === undefined) ||
+            (kind === STREAM_KIND_TUNNEL && this.#serveTunnel === undefined) ||
+            (kind !== STREAM_KIND_HTTP && kind !== STREAM_KIND_TUNNEL)
+        ) {
+            await stream.send.reset(
+                kind === STREAM_KIND_HTTP || kind === STREAM_KIND_TUNNEL ? 403n : 400n,
+            );
             return;
         }
         if (this.#incomingHttpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
@@ -439,30 +527,78 @@ export class IrohNetwork implements P2pTransport {
             () => controller.abort(),
         );
         try {
-            const request = await withDeadline(
-                readP2pHttpRequest(duplex.recv),
-                REQUEST_BODY_TIMEOUT_MS,
-                "The peer did not finish its HTTP request in time.",
-            );
-            const response = await withDeadline(
-                this.#serveRequest(peerId, request, controller.signal),
-                RESPONSE_HEAD_TIMEOUT_MS,
-                "The local daemon did not return HTTP response headers in time.",
-            );
-            await writeP2pHttpResponse(duplex.send, response, this.#responseWriteProgressTimeoutMs);
+            if (kind === STREAM_KIND_TUNNEL) {
+                await this.#serveTunnelStream(peerId, duplex, controller);
+            } else {
+                const request = await withDeadline(
+                    readP2pHttpRequest(duplex.recv),
+                    REQUEST_BODY_TIMEOUT_MS,
+                    "The peer did not finish its HTTP request in time.",
+                );
+                const response = await withDeadline(
+                    this.#serveRequest!(peerId, request, controller.signal),
+                    RESPONSE_HEAD_TIMEOUT_MS,
+                    "The local daemon did not return HTTP response headers in time.",
+                );
+                await writeP2pHttpResponse(
+                    duplex.send,
+                    response,
+                    this.#responseWriteProgressTimeoutMs,
+                );
+            }
         } catch (error) {
             if (!controller.signal.aborted && !(error instanceof P2pFrameWriteTimeoutError)) {
-                await writeP2pHttpFailure(
-                    duplex.send,
-                    error,
-                    this.#responseWriteProgressTimeoutMs,
-                ).catch(() => undefined);
+                if (kind === STREAM_KIND_TUNNEL) {
+                    await writeP2pTunnelFailure(
+                        duplex.send,
+                        error,
+                        this.#responseWriteProgressTimeoutMs,
+                    ).catch(() => undefined);
+                } else {
+                    await writeP2pHttpFailure(
+                        duplex.send,
+                        error,
+                        this.#responseWriteProgressTimeoutMs,
+                    ).catch(() => undefined);
+                }
             }
         } finally {
             controller.abort();
             this.#incomingHttpRequestCount -= 1;
             connection.close(CLOSE_SHUTDOWN, []);
         }
+    }
+
+    async #serveTunnelStream(
+        peerId: string,
+        duplex: ReturnType<typeof createIrohFrameDuplex>,
+        controller: AbortController,
+    ): Promise<void> {
+        const request = await withDeadline(
+            readP2pTunnelRequest(duplex.recv),
+            REQUEST_BODY_TIMEOUT_MS,
+            "The peer did not finish its tunnel request in time.",
+        );
+        const connection = await withDeadline(
+            this.#serveTunnel!(peerId, request, controller.signal),
+            RESPONSE_HEAD_TIMEOUT_MS,
+            "The local daemon did not open the tunnel in time.",
+        );
+        await writeP2pTunnelResponse(duplex.send, connection.response);
+        if (connection.response.status !== (request.method === "GET" ? 101 : 200)) {
+            connection.stream.destroy();
+            return;
+        }
+        const tunnel = createP2pTunnelStream(duplex, {
+            close: () => connection.stream.destroy(),
+            signal: controller.signal,
+        });
+        connection.stream.pipe(tunnel);
+        tunnel.pipe(connection.stream);
+        await Promise.all([
+            finished(connection.stream, { cleanup: true }),
+            finished(tunnel, { cleanup: true }),
+        ]);
     }
 
     async #pingPeer(endpointId: string): Promise<void> {

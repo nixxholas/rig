@@ -13,6 +13,13 @@ import { readP2pHttpResponse, writeP2pHttpRequest } from "./P2pFrameProtocol.js"
 import { runP2pInitiatorHello } from "./P2pHelloProtocol.js";
 import type { P2pHttpRequest, P2pHttpResponse } from "./P2pHttp.js";
 import { encodeBase64Url, type P2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.js";
+import {
+    createClosedP2pTunnelStream,
+    type P2pTunnelConnection,
+    type P2pTunnelRequestHead,
+} from "./P2pTunnel.js";
+import { readP2pTunnelResponse, writeP2pTunnelRequest } from "./P2pTunnelProtocol.js";
+import { createP2pTunnelStream } from "./P2pTunnelStream.js";
 import { loadSshClientConfig } from "./loadSshClientConfig.js";
 import type { P2pTransport } from "./P2pTransport.js";
 
@@ -24,11 +31,12 @@ import type { P2pTransport } from "./P2pTransport.js";
  * side the host-key hash it just verified so both ends derive the same channel
  * binding.
  */
-export const SSH_BRIDGE_PREFACE_VERSION = 1;
+export const SSH_BRIDGE_PREFACE_VERSION = 2;
 export const SSH_HOST_KEY_HASH_BYTES = 32;
 export const SSH_BRIDGE_PREFACE_BYTES = 1 + SSH_HOST_KEY_HASH_BYTES;
 export const SSH_OPERATION_PING = 1;
 export const SSH_OPERATION_HTTP = 2;
+export const SSH_OPERATION_TUNNEL = 3;
 
 const SSH_BRIDGE_ARGUMENTS = "p2p bridge --stdio";
 const CONNECT_TIMEOUT_MS = 20_000;
@@ -175,6 +183,62 @@ export class SshTransport implements P2pTransport {
                 rttMs: Date.now() - startedAt,
             });
             return response;
+        } catch (error) {
+            release();
+            this.#setPeerStatus(peer, "unreachable", {
+                error: describeFailure(error, channel),
+            });
+            throw error;
+        }
+    }
+
+    async openTunnel(
+        peerId: string,
+        request: P2pTunnelRequestHead,
+        signal: AbortSignal,
+    ): Promise<P2pTunnelConnection> {
+        const peer = this.#peerById.get(peerId);
+        if (peer === undefined) throw new Error("That peer has no configured SSH bridge.");
+        const startedAt = Date.now();
+        const channel = await this.#openAuthenticatedChannel(peer, signal);
+        const release = () => {
+            signal.removeEventListener("abort", release);
+            this.#releaseChannel(channel);
+        };
+        if (signal.aborted) {
+            release();
+            throw new Error("The SSH P2P tunnel was cancelled.");
+        }
+        signal.addEventListener("abort", release, { once: true });
+        try {
+            await writeBytes(channel.duplex.send, Uint8Array.of(SSH_OPERATION_TUNNEL));
+            await withDeadline(
+                writeP2pTunnelRequest(channel.duplex.send, request),
+                REQUEST_TIMEOUT_MS,
+                "The SSH P2P tunnel request took too long to send.",
+                () => channel.close(),
+            );
+            const response = await withDeadline(
+                readP2pTunnelResponse(channel.duplex.recv),
+                RESPONSE_HEAD_TIMEOUT_MS,
+                "The SSH P2P bridge did not return tunnel response headers in time.",
+                () => channel.close(),
+            );
+            if (response.status !== (request.method === "GET" ? 101 : 200)) {
+                release();
+                return { response, stream: createClosedP2pTunnelStream() };
+            }
+            this.#setPeerStatus(peer, "connected", {
+                lastSeenAt: Date.now(),
+                rttMs: Date.now() - startedAt,
+            });
+            return {
+                response,
+                stream: createP2pTunnelStream(channel.duplex, {
+                    close: release,
+                    signal,
+                }),
+            };
         } catch (error) {
             release();
             this.#setPeerStatus(peer, "unreachable", {

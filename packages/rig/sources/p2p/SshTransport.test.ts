@@ -9,6 +9,7 @@ import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js"
 import { readP2pHttpRequest, writeP2pHttpResponse } from "./P2pFrameProtocol.js";
 import { runP2pResponderHello } from "./P2pHelloProtocol.js";
 import { createP2pInstanceIdentity, type P2pInstanceIdentity } from "./P2pIdentity.js";
+import { readP2pTunnelRequest, writeP2pTunnelResponse } from "./P2pTunnelProtocol.js";
 import {
     encodeSshBridgePreface,
     readSshBridgePreface,
@@ -16,6 +17,7 @@ import {
     SshTransport,
     SSH_BRIDGE_PREFACE_BYTES,
     SSH_OPERATION_PING,
+    SSH_OPERATION_TUNNEL,
     type SshBridgeChannel,
 } from "./SshTransport.js";
 
@@ -225,6 +227,59 @@ describe("SSH P2P transport", () => {
         controller.abort();
 
         await expect(request).rejects.toThrow();
+        expect(closed).toBe(true);
+        await transport.close();
+    });
+
+    it("keeps cancellation attached for an open tunnel", async () => {
+        const remote = createP2pInstanceIdentity();
+        const controller = new AbortController();
+        let closed = false;
+        let opened!: () => void;
+        const tunnelOpened = new Promise<void>((resolve) => {
+            opened = resolve;
+        });
+        const transport = SshTransport.create({
+            identity: createP2pInstanceIdentity(),
+            openChannel: () => {
+                const bridge = fakeBridge(HOST_KEY_HASH, async (duplex, binding) => {
+                    await readSshBridgePreface(duplex.recv);
+                    await runP2pResponderHello(duplex, {
+                        identity: remote,
+                        localChannelBinding: binding,
+                        remoteChannelBinding: binding,
+                        transport: "ssh",
+                    });
+                    expect((await readBytes(duplex.recv, 1))[0]).toBe(SSH_OPERATION_TUNNEL);
+                    await readP2pTunnelRequest(duplex.recv);
+                    await writeP2pTunnelResponse(duplex.send, {
+                        headers: {},
+                        status: 101,
+                    });
+                    opened();
+                    await new Promise(() => undefined);
+                });
+                return Promise.resolve({
+                    ...bridge,
+                    close: () => {
+                        closed = true;
+                        bridge.close();
+                    },
+                });
+            },
+            peers: [peerConfig(remote)],
+        });
+
+        const connection = await transport.openTunnel(
+            remote.instanceId,
+            { headers: {}, method: "GET", path: "/terminal" },
+            controller.signal,
+        );
+        await tunnelOpened;
+        connection.stream.on("error", () => undefined);
+        controller.abort();
+
+        expect(connection.stream.destroyed).toBe(true);
         expect(closed).toBe(true);
         await transport.close();
     });

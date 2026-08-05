@@ -10,6 +10,7 @@ import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 import type { P2pInstanceIdentity } from "./P2pIdentity.js";
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pTransport, P2pTransportKind } from "./P2pTransport.js";
+import type { P2pTunnelConnection, P2pTunnelRequestHead, ServeP2pTunnel } from "./P2pTunnel.js";
 import { SshBridgeResponder } from "./SshBridgeResponder.js";
 import { SshTransport } from "./SshTransport.js";
 
@@ -35,6 +36,7 @@ export interface CreateP2pNetworkOptions {
     peerTrustPath?: string;
     peerTrustStore?: P2pPeerTrustStore;
     serveRequest?: ServeP2pHttpRequest;
+    serveTunnel?: ServeP2pTunnel;
 }
 
 export class P2pNetwork {
@@ -143,6 +145,9 @@ export class P2pNetwork {
                               ...(options.config.exposeApi && options.serveRequest !== undefined
                                   ? { serveRequest: options.serveRequest }
                                   : {}),
+                              ...(options.config.exposeApi && options.serveTunnel !== undefined
+                                  ? { serveTunnel: options.serveTunnel }
+                                  : {}),
                               validatePeer: (peerIdentity, publicKey) =>
                                   trustStore!.validate(peerIdentity, kind, publicKey),
                           })
@@ -200,6 +205,9 @@ export class P2pNetwork {
                               ...(options.config.exposeApi && options.serveRequest !== undefined
                                   ? { serveRequest: options.serveRequest }
                                   : {}),
+                              ...(options.config.exposeApi && options.serveTunnel !== undefined
+                                  ? { serveTunnel: options.serveTunnel }
+                                  : {}),
                               validatePeer: async (peerIdentity, endpointId) => {
                                   const configured = peersByEndpoint.get(endpointId);
                                   if (
@@ -246,6 +254,9 @@ export class P2pNetwork {
                               identity,
                               onStatusChange: onSshStatusChange,
                               peers: options.config.peers,
+                              ...(options.config.exposeApi && options.serveTunnel !== undefined
+                                  ? { serveTunnel: options.serveTunnel }
+                                  : {}),
                               validatePeer: (peerIdentity, binding) =>
                                   trustStore!.validate(peerIdentity, kind, binding),
                           })
@@ -280,6 +291,9 @@ export class P2pNetwork {
                       identity,
                       peers: options.config.peers,
                       serveRequest: options.serveRequest,
+                      ...(options.serveTunnel === undefined
+                          ? {}
+                          : { serveTunnel: options.serveTunnel }),
                       validatePeer: (peerIdentity, binding) =>
                           trustStore.validate(peerIdentity, "ssh", binding),
                   })
@@ -311,7 +325,37 @@ export class P2pNetwork {
         request: P2pHttpRequest,
         signal: AbortSignal,
     ): Promise<{ response: P2pHttpResponse; transport: P2pTransportKind }> {
-        const transport = this.#transports
+        const transport = this.#selectTransport(peerId, "fetch");
+        if (transport?.fetch === undefined) {
+            throw new Error("No active P2P transport owns that trusted peer ID.");
+        }
+        return {
+            response: await transport.fetch(peerId, request, signal),
+            transport: transport.kind,
+        };
+    }
+
+    async openTunnel(
+        peerId: string,
+        request: P2pTunnelRequestHead,
+        signal: AbortSignal,
+    ): Promise<{ connection: P2pTunnelConnection; transport: P2pTransportKind }> {
+        const transport = this.#selectTransport(peerId, "openTunnel");
+        if (transport?.openTunnel === undefined) {
+            throw new Error("No active P2P transport can tunnel to that trusted peer ID.");
+        }
+        return {
+            connection: await transport.openTunnel(peerId, request, signal),
+            transport: transport.kind,
+        };
+    }
+
+    status(): P2pStatus {
+        return createStatus(this.#statuses, this.#identity);
+    }
+
+    #selectTransport(peerId: string, capability: "fetch" | "openTunnel"): P2pTransport | undefined {
+        return this.#transports
             .map((candidate) => {
                 const status = candidate.status();
                 const peer =
@@ -330,19 +374,8 @@ export class P2pNetwork {
                                 : 0,
                 };
             })
-            .filter(({ candidate, rank }) => candidate.fetch !== undefined && rank >= 0)
+            .filter(({ candidate, rank }) => candidate[capability] !== undefined && rank >= 0)
             .sort((left, right) => right.rank - left.rank)[0]?.candidate;
-        if (transport?.fetch === undefined) {
-            throw new Error("No active P2P transport owns that trusted peer ID.");
-        }
-        return {
-            response: await transport.fetch(peerId, request, signal),
-            transport: transport.kind,
-        };
-    }
-
-    status(): P2pStatus {
-        return createStatus(this.#statuses, this.#identity);
     }
 }
 

@@ -1,4 +1,4 @@
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import { rm } from "node:fs/promises";
 
@@ -6,12 +6,14 @@ import { Endpoint, RelayMode, SecretKey } from "@number0/iroh/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { IrohNetwork, P2pNetwork } from "../../p2p/index.js";
+import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { createP2pInstanceIdentity } from "../../p2p/P2pIdentity.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { createServeP2pHttpRequest } from "../createServeP2pHttpRequest.js";
+import { createServeP2pTunnel } from "../createServeP2pTunnel.js";
 
-const ALPN = [...Buffer.from("rig/p2p/4", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const cleanups: (() => Promise<void>)[] = [];
 
 afterEach(async () => {
@@ -93,6 +95,10 @@ describe("P2P HTTP between two real daemon servers", () => {
                         socketPath: secondDaemon.socketPath,
                         token: "second-token",
                     }),
+                    serveTunnel: createServeP2pTunnel({
+                        socketPath: secondDaemon.socketPath,
+                        token: "second-token",
+                    }),
                 }),
             irohSecretKeyPath: "unused",
             identity: secondIdentity,
@@ -125,6 +131,38 @@ describe("P2P HTTP between two real daemon servers", () => {
             "first-token",
         );
         expect(hello).toContain("event: hello");
+
+        const peerClient = new ProtocolHttpClient({
+            pathPrefix: `/p2p/peers/${secondIdentity.instanceId}/api`,
+            socketPath: exposedFirst.socketPath,
+            token: "first-token",
+        });
+        const createdSession = await peerClient.createSession({ cwd: process.cwd() });
+        const scope = { projectId: createdSession.session.projectId };
+        const createdTerminal = await peerClient.createRemoteTerminal(scope, {
+            command: 'printf "p2p-terminal-ok\\n"',
+        });
+        const terminal = await peerClient.attachRemoteTerminal(scope, createdTerminal.terminal.id);
+        await expect(terminal.exited).resolves.toBe(0);
+        terminal.close();
+
+        const target = createServer((_request, response) => response.end("p2p-browser-ok"));
+        await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+        cleanups.push(
+            () =>
+                new Promise<void>((resolve) => {
+                    target.closeAllConnections();
+                    target.close(() => resolve());
+                }),
+        );
+        const address = target.address();
+        if (address === null || typeof address === "string") throw new Error("Missing test port.");
+        const browserResponse = await peerClient.proxyHttpRequest(scope, {
+            url: `http://127.0.0.1:${String(address.port)}/`,
+        });
+        const browserChunks: Buffer[] = [];
+        for await (const chunk of browserResponse.body) browserChunks.push(Buffer.from(chunk));
+        expect(Buffer.concat(browserChunks).toString()).toBe("p2p-browser-ok");
 
         const exposedSecond = await startDaemon("second-token", secondNetwork);
         const refusal = await get(

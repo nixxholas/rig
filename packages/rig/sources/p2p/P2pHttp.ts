@@ -4,7 +4,7 @@ const exact = { additionalProperties: false } as const;
 const headersSchema = Type.Record(
     Type.String({ maxLength: 64, minLength: 1, pattern: "^[a-z0-9-]+$" }),
     Type.String({ maxLength: 16 * 1024, pattern: "^[^\\u0000-\\u001F\\u007F]*$" }),
-    { maxProperties: 32 },
+    { additionalProperties: false, maxProperties: 32 },
 );
 
 export const p2pHttpRequestHeadSchema = Type.Object(

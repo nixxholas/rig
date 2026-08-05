@@ -156,7 +156,6 @@ import {
     listFileTreeRequestSchema,
     happyCloudCommandSchema,
     happyCloudSessionIdSchema,
-    p2pInstanceIdSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
     postSessionShareFriendMessageRequestSchema,
@@ -287,6 +286,7 @@ import type {
 } from "../protocol/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
+import { attachP2pPeerTunnels } from "./attachP2pPeerTunnels.js";
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "../session/sessionSummaryWithTerminalPresence.js";
 import { attachHttpConnectProxy } from "./attachHttpConnectProxy.js";
@@ -310,6 +310,7 @@ import {
 } from "../file-tree/index.js";
 import type { P2pNetwork } from "../p2p/index.js";
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
+import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
 
 export interface ProtocolHttpServerOptions {
     inferenceMaxRetries?: number;
@@ -410,6 +411,11 @@ export function createProtocolHttpServer(
             : undefined;
 
     attachRemoteTerminalWebSocketServer({ server, store, token: options.token });
+    attachP2pPeerTunnels({
+        ...(p2pNetwork === undefined ? {} : { network: p2pNetwork }),
+        server,
+        token: options.token,
+    });
     attachP2pSshBridge(server, options.token, acceptSshBridge);
     attachHttpConnectProxy(server, options.token, store);
     server.once("close", () => {
@@ -4086,25 +4092,6 @@ async function handleRequest(
     }
 
     sendJson(response, 405, { error: "Method not allowed" });
-}
-
-function matchP2pPeerRoute(url: URL): { path: string; peerId: string } | undefined {
-    const prefix = "/p2p/peers/";
-    if (!url.pathname.startsWith(prefix)) return undefined;
-    const remainder = url.pathname.slice(prefix.length);
-    const separator = remainder.indexOf("/");
-    if (separator <= 0) return undefined;
-    let peerId: string;
-    try {
-        peerId = decodeURIComponent(remainder.slice(0, separator));
-    } catch {
-        return undefined;
-    }
-    if (!Value.Check(p2pInstanceIdSchema, peerId)) return undefined;
-    const apiPath = remainder.slice(separator + 1);
-    if (apiPath !== "api" && !apiPath.startsWith("api/")) return undefined;
-    const path = apiPath === "api" ? "/" : `/${apiPath.slice("api/".length)}`;
-    return { path: `${path}${url.search}`, peerId };
 }
 
 function resolveProjectScopeDirectory(

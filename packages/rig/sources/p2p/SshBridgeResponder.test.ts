@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { PassThrough } from "node:stream";
+import { Duplex, PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
 import type { ConfigP2pPeer, ConfigP2pSshPeer } from "../config/types.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
+import type { P2pTunnelRequestHead } from "./P2pTunnel.js";
 import { SshBridgeResponder } from "./SshBridgeResponder.js";
 import { SshTransport, type SshBridgeChannel } from "./SshTransport.js";
 
@@ -84,6 +85,135 @@ describe("SSH bridge responder", () => {
         await transport.close();
         responder.close();
     });
+
+    it("serves a bidirectional tunnel over the authenticated SSH bridge", async () => {
+        const initiatorIdentity = createP2pInstanceIdentity();
+        const responderIdentity = createP2pInstanceIdentity();
+        const daemonStream = new EchoDuplex();
+        let seenRequest: P2pTunnelRequestHead | undefined;
+        const responder = new SshBridgeResponder({
+            identity: responderIdentity,
+            peers: [peer(initiatorIdentity)],
+            serveRequest: vi.fn(),
+            serveTunnel: async (_peerId, request) => {
+                seenRequest = request;
+                return {
+                    response: {
+                        headers: { upgrade: "websocket" },
+                        status: 101,
+                    },
+                    stream: daemonStream,
+                };
+            },
+        });
+        const transport = SshTransport.create({
+            identity: initiatorIdentity,
+            openChannel: () => Promise.resolve(bridgeChannel(responder)),
+            peers: [peer(responderIdentity)],
+        });
+        const connection = await transport.openTunnel(
+            responderIdentity.instanceId,
+            {
+                headers: {
+                    "sec-websocket-key": "test-key",
+                    "sec-websocket-version": "13",
+                },
+                method: "GET",
+                path: "/projects/project/terminals/terminal/attach",
+            },
+            new AbortController().signal,
+        );
+        const chunks: Buffer[] = [];
+        connection.stream.end(Buffer.from("terminal bytes"));
+        for await (const chunk of connection.stream) chunks.push(Buffer.from(chunk));
+
+        expect(connection.response).toEqual({
+            headers: { upgrade: "websocket" },
+            status: 101,
+        });
+        expect(Buffer.concat(chunks).toString()).toBe("terminal bytes");
+        expect(seenRequest).toMatchObject({
+            method: "GET",
+            path: "/projects/project/terminals/terminal/attach",
+        });
+        await transport.close();
+        responder.close();
+    });
+
+    it("cancels the serving request when the initiating tunnel closes", async () => {
+        const initiatorIdentity = createP2pInstanceIdentity();
+        const responderIdentity = createP2pInstanceIdentity();
+        const controller = new AbortController();
+        let servingAborted!: () => void;
+        const aborted = new Promise<void>((resolve) => {
+            servingAborted = resolve;
+        });
+        const responder = new SshBridgeResponder({
+            identity: responderIdentity,
+            peers: [peer(initiatorIdentity)],
+            serveRequest: vi.fn(),
+            serveTunnel: async (_peerId, _request, signal) => {
+                signal.addEventListener("abort", servingAborted, { once: true });
+                return {
+                    response: { headers: {}, status: 101 },
+                    stream: new EchoDuplex(),
+                };
+            },
+        });
+        const transport = SshTransport.create({
+            identity: initiatorIdentity,
+            openChannel: () => Promise.resolve(bridgeChannel(responder)),
+            peers: [peer(responderIdentity)],
+        });
+
+        const connection = await transport.openTunnel(
+            responderIdentity.instanceId,
+            { headers: {}, method: "GET", path: "/terminal" },
+            controller.signal,
+        );
+        connection.stream.on("error", () => undefined);
+        controller.abort();
+
+        await aborted;
+        expect(connection.stream.destroyed).toBe(true);
+        await transport.close();
+        responder.close();
+    });
+
+    it("closes a refused tunnel without waiting for peer payload frames", async () => {
+        const initiatorIdentity = createP2pInstanceIdentity();
+        const responderIdentity = createP2pInstanceIdentity();
+        const responder = new SshBridgeResponder({
+            identity: responderIdentity,
+            peers: [peer(initiatorIdentity)],
+            serveRequest: vi.fn(),
+            serveTunnel: async () => ({
+                response: { headers: {}, status: 403 },
+                stream: new EchoDuplex(),
+            }),
+        });
+        const transport = SshTransport.create({
+            identity: initiatorIdentity,
+            openChannel: () => Promise.resolve(bridgeChannel(responder)),
+            peers: [peer(responderIdentity)],
+        });
+
+        const connection = await transport.openTunnel(
+            responderIdentity.instanceId,
+            { headers: {}, method: "GET", path: "/forbidden" },
+            new AbortController().signal,
+        );
+        connection.stream.on("error", () => undefined);
+        const closed = new Promise<void>((resolve) => {
+            connection.stream.once("close", resolve);
+        });
+        connection.stream.resume();
+
+        await closed;
+        expect(connection.response.status).toBe(403);
+        await transport.close();
+        responder.close();
+    });
 });
 
 function peer(identity: ReturnType<typeof createP2pInstanceIdentity>): ConfigP2pPeer {
@@ -93,12 +223,14 @@ function peer(identity: ReturnType<typeof createP2pInstanceIdentity>): ConfigP2p
 function bridgeChannel(responder: SshBridgeResponder): SshBridgeChannel {
     const toResponder = new PassThrough();
     const fromResponder = new PassThrough();
+    const responderStream = Duplex.from({ readable: toResponder, writable: fromResponder });
     void responder
-        .acceptFrames(createNodeFrameDuplex(toResponder, fromResponder))
+        .accept(responderStream)
         .catch((error: unknown) => fromResponder.destroy(error as Error))
         .finally(() => fromResponder.end());
     return {
         close: () => {
+            responderStream.destroy();
             toResponder.destroy();
             fromResponder.destroy();
         },
@@ -106,4 +238,22 @@ function bridgeChannel(responder: SshBridgeResponder): SshBridgeChannel {
         duplex: createNodeFrameDuplex(fromResponder, toResponder),
         hostKeyHash,
     };
+}
+
+class EchoDuplex extends Duplex {
+    override _read(): void {}
+
+    override _write(
+        chunk: Buffer,
+        _encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+    ): void {
+        this.push(chunk);
+        callback();
+    }
+
+    override _final(callback: (error?: Error | null) => void): void {
+        this.push(null);
+        callback();
+    }
 }

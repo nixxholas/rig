@@ -15,3 +15,27 @@ export {
     type ServeP2pHttpRequest,
 } from "./P2pHttp.js";
 export type { P2pTransport, P2pTransportKind } from "./P2pTransport.js";
+export {
+    createClosedP2pTunnelStream,
+    p2pTunnelRequestHeadSchema,
+    p2pTunnelResponseHeadSchema,
+    selectP2pTunnelRequestHeaders,
+    selectP2pTunnelResponseHeaders,
+    type P2pTunnelConnection,
+    type P2pTunnelRequestHead,
+    type P2pTunnelResponseHead,
+    type ServeP2pTunnel,
+} from "./P2pTunnel.js";
+export {
+    readP2pTunnelFrame,
+    readP2pTunnelRequest,
+    readP2pTunnelResponse,
+    writeP2pTunnelChunk,
+    writeP2pTunnelEnd,
+    writeP2pTunnelError,
+    writeP2pTunnelFailure,
+    writeP2pTunnelRequest,
+    writeP2pTunnelResponse,
+    type P2pTunnelFrame,
+} from "./P2pTunnelProtocol.js";
+export { createP2pTunnelStream, type P2pTunnelStreamOptions } from "./P2pTunnelStream.js";

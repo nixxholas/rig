@@ -1,10 +1,11 @@
 import { request } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import { rm } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { P2pHttpRequest, P2pNetwork } from "../../p2p/index.js";
+import type { P2pHttpRequest, P2pNetwork, P2pTunnelRequestHead } from "../../p2p/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -83,6 +84,65 @@ describe("P2P-prefixed daemon HTTP", () => {
             await started.close();
         }
     });
+
+    it("forwards terminal upgrades and scoped browser CONNECT tunnels", async () => {
+        const requests: P2pTunnelRequestHead[] = [];
+        const openTunnel = vi.fn(async (_peerId, tunnel: P2pTunnelRequestHead) => {
+            requests.push(tunnel);
+            return {
+                connection: {
+                    response: {
+                        headers:
+                            tunnel.method === "GET"
+                                ? { connection: "Upgrade", upgrade: "websocket" }
+                                : {},
+                        status: tunnel.method === "GET" ? 101 : 200,
+                    },
+                    stream: new PassThrough(),
+                },
+                transport: "direct" as const,
+            };
+        });
+        const started = await startServer({ openTunnel } as unknown as P2pNetwork);
+        try {
+            const upgrade = await openRawTunnel(
+                started.socketPath,
+                "GET",
+                `/p2p/peers/${peerId}/api/projects/project/terminals/terminal/attach`,
+                {
+                    authorization: "Bearer test-token",
+                    connection: "Upgrade",
+                    "sec-websocket-key": "abc",
+                    "sec-websocket-version": "13",
+                    upgrade: "websocket",
+                },
+            );
+            expect(upgrade.status).toBe(101);
+            upgrade.socket.destroy();
+            const connect = await openRawTunnel(
+                started.socketPath,
+                "CONNECT",
+                `/p2p/peers/${peerId}/api/projects/project/workspaces/workspace/proxy`,
+                { authorization: "Bearer test-token" },
+            );
+            expect(connect.status).toBe(200);
+            connect.socket.destroy();
+
+            expect(requests).toEqual([
+                expect.objectContaining({
+                    method: "GET",
+                    path: "/projects/project/terminals/terminal/attach",
+                }),
+                {
+                    headers: {},
+                    method: "CONNECT",
+                    path: "/projects/project/workspaces/workspace/proxy",
+                },
+            ]);
+        } finally {
+            await started.close();
+        }
+    });
 });
 
 async function startServer(p2pNetwork: P2pNetwork): Promise<{
@@ -145,5 +205,23 @@ function listen(server: Server, socketPath: string): Promise<void> {
 function close(server: Server): Promise<void> {
     return new Promise((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
+    });
+}
+
+function openRawTunnel(
+    socketPath: string,
+    method: "CONNECT" | "GET",
+    path: string,
+    headers: Readonly<Record<string, string>>,
+): Promise<{ socket: import("node:stream").Duplex; status: number }> {
+    return new Promise((resolve, reject) => {
+        const outgoing = request({ headers, method, path, socketPath });
+        const opened = (
+            response: import("node:http").IncomingMessage,
+            socket: import("node:stream").Duplex,
+        ) => resolve({ socket, status: response.statusCode ?? 0 });
+        outgoing.once(method === "GET" ? "upgrade" : "connect", opened);
+        outgoing.once("error", reject);
+        outgoing.end();
     });
 }

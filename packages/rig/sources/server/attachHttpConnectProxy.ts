@@ -3,6 +3,7 @@ import { connect } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
+import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
 import { proxyHttpRequest } from "./proxyHttpRequest.js";
 import { resolveHttpProxyProjectScope } from "./resolveHttpProxyProjectScope.js";
 import type { ProjectScope } from "../protocol/index.js";
@@ -26,7 +27,8 @@ export function attachHttpConnectProxy(server: Server, token: string, store: Ses
     }) as Server["close"];
     server.on("connect", (request, client, head) => {
         if (request.url === "/p2p/transports/ssh") return;
-        const scope = projectScopeFromProxyPath(request.url);
+        if (matchP2pPeerRoute(request.url) !== undefined) return;
+        const scope = matchHttpProxyRoute(request.url);
         if (scope === undefined) {
             client.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
             return;
@@ -92,7 +94,7 @@ function connectProxyTarget(
     });
 }
 
-function projectScopeFromProxyPath(value: string | undefined): ProjectScope | undefined {
+export function matchHttpProxyRoute(value: string | undefined): ProjectScope | undefined {
     if (value === undefined) return undefined;
     const match = /^\/projects\/([^/]+)(?:\/workspaces\/([^/]+))?\/proxy$/u.exec(value);
     if (match?.[1] === undefined) return undefined;

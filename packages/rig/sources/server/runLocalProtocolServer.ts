@@ -67,6 +67,7 @@ import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRun
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 import { P2pNetwork } from "../p2p/index.js";
 import { createServeP2pHttpRequest } from "./createServeP2pHttpRequest.js";
+import { createServeP2pTunnel } from "./createServeP2pTunnel.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -573,6 +574,7 @@ async function runOwnedLocalProtocolServer(
             },
             peerTrustPath: paths.p2pPeerTrustPath,
             serveRequest: createServeP2pHttpRequest({ socketPath, token }),
+            serveTunnel: createServeP2pTunnel({ socketPath, token }),
         });
         const irohStatus = p2pNetwork
             .status()
