@@ -125,6 +125,14 @@ describe("createDockerSandboxCommand", () => {
             mountIndex(command, "--ro-bind-try", "/workspace/happy.toml", "/workspace/happy.toml"),
         ).toBeGreaterThan(lastBindIndex(command, "/workspace"));
         expect(
+            mountIndex(
+                command,
+                "--ro-bind-try",
+                "/workspace/AGENTS_SECURITY.md",
+                "/workspace/AGENTS_SECURITY.md",
+            ),
+        ).toBeGreaterThan(lastBindIndex(command, "/workspace"));
+        expect(
             mountIndex(command, "--ro-bind-try", "/workspace/rig.toml", "/workspace/rig.toml"),
         ).toBe(-1);
     });

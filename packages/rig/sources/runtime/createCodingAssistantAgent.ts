@@ -26,6 +26,7 @@ import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
 import { getGlobalSecurityMdPath } from "../config/getGlobalSecurityMdPath.js";
 import { readGlobalAgentsMd } from "../config/readGlobalAgentsMd.js";
 import { readGlobalSecurityMd } from "../config/readGlobalSecurityMd.js";
+import { readProjectSecurityMd } from "../config/readProjectSecurityMd.js";
 import type { ConfigProviders } from "../config/types.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { NativeProcessManager } from "../processes/index.js";
@@ -335,7 +336,21 @@ export function createCodingAssistantAgent(
                 id: `${agentId}:auto-reviewer`,
                 model: provider.reviewerModel ?? model,
                 provider,
-                readSecurityPolicy: () => readGlobalSecurityMd(getGlobalSecurityMdPath(env)),
+                readSecurityPolicy: async () => {
+                    const [globalPolicy, projectPolicy] = await Promise.all([
+                        readGlobalSecurityMd(getGlobalSecurityMdPath(env)),
+                        readProjectSecurityMd(context.fs),
+                    ]);
+                    const policies = [
+                        ...(globalPolicy === undefined
+                            ? []
+                            : [`## Global SECURITY.md\n\n${globalPolicy}`]),
+                        ...(projectPolicy === undefined
+                            ? []
+                            : [`## Project AGENTS_SECURITY.md\n\n${projectPolicy}`]),
+                    ];
+                    return policies.length === 0 ? undefined : policies.join("\n\n");
+                },
                 ...(options.startDate === undefined ? {} : { startDate: options.startDate }),
                 tools: tools.filter((tool) => tool.availableToPermissionReviewer),
             }),

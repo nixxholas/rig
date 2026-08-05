@@ -278,6 +278,7 @@ export function createDockerBashContext(
                       ".agents",
                       ".codex",
                       ".git",
+                      "AGENTS_SECURITY.md",
                       ...(networkPolicyState?.absentProjectConfigNames ?? [
                           "rig.toml",
                           "happy.toml",

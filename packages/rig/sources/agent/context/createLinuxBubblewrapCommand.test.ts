@@ -123,6 +123,7 @@ describe("createLinuxBubblewrapCommand", () => {
             mkdir(join(root, ".codex")),
             writeFile(join(root, "rig.toml"), "[network]\n"),
             writeFile(join(root, "happy.toml"), "[network]\n"),
+            writeFile(join(root, "AGENTS_SECURITY.md"), "Require approval.\n"),
         ]);
 
         const result = await createLinuxBubblewrapCommand({
@@ -135,7 +136,13 @@ describe("createLinuxBubblewrapCommand", () => {
             temporaryDirectory: privateTemporaryRoot,
         });
 
-        for (const name of [".agents", ".codex", "rig.toml", "happy.toml"]) {
+        for (const name of [
+            ".agents",
+            ".codex",
+            "rig.toml",
+            "happy.toml",
+            "AGENTS_SECURITY.md",
+        ]) {
             expect(bindMode(result.args, join(root, name))).toBe("--ro-bind");
         }
     });

@@ -54,7 +54,11 @@ describe("createMacOsSeatbeltCommand", () => {
         );
         expect(definedPaths(result.args, "PROTECTED_WRITE")).not.toContain(join(cwd, ".git"));
         expect(definedPaths(result.args, "PROTECTED_WRITE")).toEqual(
-            expect.arrayContaining([join(cwd, "rig.toml"), join(cwd, "happy.toml")]),
+            expect.arrayContaining([
+                join(cwd, "rig.toml"),
+                join(cwd, "happy.toml"),
+                join(cwd, "AGENTS_SECURITY.md"),
+            ]),
         );
     });
 

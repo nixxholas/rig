@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
-import { PROJECT_CONFIG_FILE_NAMES } from "../../config/projectConfigFileNames.js";
+import { PROJECT_PROTECTED_FILE_NAMES } from "../../config/projectProtectedFileNames.js";
 import type { PermissionMode } from "../../permissions/index.js";
 import { findGitWritablePaths } from "./findGitWritablePaths.js";
 import { MANAGED_NETWORK_SOCAT_PREFLIGHT } from "./managedNetworkSocatPreflight.js";
@@ -13,7 +13,11 @@ import {
 import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
-const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", ...PROJECT_CONFIG_FILE_NAMES] as const;
+const PROTECTED_WORKSPACE_NAMES = [
+    ".agents",
+    ".codex",
+    ...PROJECT_PROTECTED_FILE_NAMES,
+] as const;
 const PROTECTED_CREATE_ONLY_WORKSPACE_NAMES = [".git"] as const;
 
 export async function createLinuxBubblewrapCommand(options: {

@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 
 import { MANAGED_NETWORK_SOCAT_PREFLIGHT } from "../agent/context/managedNetworkSocatPreflight.js";
-import { PROJECT_CONFIG_FILE_NAMES } from "../config/projectConfigFileNames.js";
+import { PROJECT_PROTECTED_FILE_NAMES } from "../config/projectProtectedFileNames.js";
 import type { PermissionMode } from "../permissions/index.js";
 import type { PreparedDockerSandbox } from "./prepareDockerSandbox.js";
 
@@ -51,12 +51,13 @@ export function createDockerSandboxCommand(options: {
             `${options.workspaceCwd}/${name}`,
             `${options.workspaceCwd}/${name}`,
         );
-    for (const name of PROJECT_CONFIG_FILE_NAMES) {
+    for (const name of PROJECT_PROTECTED_FILE_NAMES) {
         const projectConfigPath = `${options.workspaceCwd}/${name}`;
+        const hasPreparedProjectConfig =
+            name !== "AGENTS_SECURITY.md" &&
+            options.readyProjectConfigNames?.includes(name) === true;
         command.push(
-            options.readyProjectConfigNames?.includes(name) === true
-                ? "--ro-bind"
-                : "--ro-bind-try",
+            hasPreparedProjectConfig ? "--ro-bind" : "--ro-bind-try",
             projectConfigPath,
             projectConfigPath,
         );
