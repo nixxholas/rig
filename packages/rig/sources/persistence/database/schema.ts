@@ -183,6 +183,9 @@ export const sessions = sqliteTable(
         workspaceTransferJson: text("workspace_transfer_json")
             .notNull()
             .default('{"status":"idle"}'),
+        workspaceQueueWaiting: integer("workspace_queue_waiting", { mode: "boolean" })
+            .notNull()
+            .default(false),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),

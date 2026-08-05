@@ -371,6 +371,13 @@ export interface Provider {
         | ((context: ProfilePromptContext) => ProfilePromptContext | Promise<ProfilePromptContext>)
         | undefined;
     reset?(): Promise<void> | void;
+    /**
+     * Immediately tears down provider-owned session state without waiting behind active inference.
+     *
+     * Side-channel providers use this when their bounded operation is cancelled and the native
+     * stream does not cooperate with its abort signal.
+     */
+    forceClose?(): Promise<void> | void;
     compact?(options: {
         context: Context;
         inputTokens?: number;

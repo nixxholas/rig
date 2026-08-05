@@ -38,6 +38,7 @@ import type { PermissionMode } from "../permissions/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
+import { throwIfAborted } from "../concurrency/index.js";
 import { resolveSharedAgentPath } from "./impl/resolveSharedAgentPath.js";
 import type { InMemorySession } from "./InMemorySession.js";
 
@@ -84,6 +85,11 @@ export interface AgentSessionRepository {
         workspaceId: string,
     ): ProjectWorkspace | undefined;
     workspace?(projectId: string, workspaceId: string): ProjectWorkspace | undefined;
+    waitForWorkspaceReady?(
+        projectId: string,
+        workspaceId: string,
+        signal?: AbortSignal,
+    ): Promise<ProjectWorkspace>;
     completeScheduledSessionTransfer?(sessionId: string, targetWorkspaceId: string): Promise<void>;
     scheduleSessionTransfer?(
         sessionId: string,
@@ -268,6 +274,7 @@ export class AgentSessionManager {
         delegatorSessionId: string,
         request: DelegatedSessionRequest,
         options: { crossWorkspace: boolean } = { crossWorkspace: true },
+        signal?: AbortSignal,
     ): Promise<DelegatedSession> {
         const delegator = this.#current(delegatorSessionId);
         const create = this.#repository.createDelegatedSession;
@@ -280,15 +287,11 @@ export class AgentSessionManager {
         }
         const snapshot = delegator.snapshot();
         const projectId = this.#targetProjectId(delegatorSessionId, request.projectId, options);
-        const workspace = await this.#waitForWorkspace(() =>
-            resolveWorkspace(projectId, request.workspaceId),
-        );
+        let workspace = resolveWorkspace(projectId, request.workspaceId);
         if (workspace === undefined) {
             throw new Error("That workspace was not found in that project.");
         }
-        if (workspace.status !== "ready") {
-            throw new Error(`The workspace is ${workspace.status} and cannot start work yet.`);
-        }
+        workspace = await this.#workspaceReady(projectId, workspace, signal);
         if (workspace.id === snapshot.workspaceId) {
             throw new Error("That workspace is the one this session already works in.");
         }
@@ -447,16 +450,12 @@ export class AgentSessionManager {
             throw new Error("This session cannot start workspace agents.");
         }
         const projectId = parent.snapshot().projectId;
-        const workspace = await this.#waitForWorkspace(
-            () => resolveWorkspace(parentSessionId, projectId, request.workspaceId),
-            signal,
-        );
+        throwIfAborted(signal);
+        let workspace = resolveWorkspace(parentSessionId, projectId, request.workspaceId);
         if (workspace === undefined) {
             throw new Error("This workspace was not created by the current session.");
         }
-        if (workspace.status !== "ready") {
-            throw new Error(`The workspace is ${workspace.status} and cannot start an agent yet.`);
-        }
+        workspace = await this.#workspaceReady(projectId, workspace, signal);
         return this.spawn(
             parentSessionId,
             { ...request, cwd: workspace.path, workspaceId: workspace.id },
@@ -464,32 +463,28 @@ export class AgentSessionManager {
         );
     }
 
-    /**
-     * Waits out the moments between a workspace being created and its worktree being usable, so an
-     * agent that just made one does not have to poll for it before starting work there.
-     */
-    async #waitForWorkspace(
-        resolveWorkspace: () => ProjectWorkspace | undefined,
-        signal?: AbortSignal,
-    ): Promise<ProjectWorkspace | undefined> {
-        for (;;) {
-            signal?.throwIfAborted();
-            const workspace = resolveWorkspace();
-            if (workspace === undefined || workspace.status !== "initializing") {
-                return workspace;
+    async #workspaceReady(
+        projectId: string,
+        workspace: ProjectWorkspace,
+        signal: AbortSignal | undefined,
+    ): Promise<ProjectWorkspace> {
+        throwIfAborted(signal);
+        if (workspace.status === "initializing") {
+            const wait = this.#repository.waitForWorkspaceReady;
+            if (wait === undefined) {
+                throw new Error("The workspace is initializing and cannot start work yet.");
             }
-            await new Promise<void>((resolve, reject) => {
-                const onAbort = () => {
-                    clearTimeout(timer);
-                    reject(signal?.reason);
-                };
-                const timer = setTimeout(() => {
-                    signal?.removeEventListener("abort", onAbort);
-                    resolve();
-                }, 100);
-                signal?.addEventListener("abort", onAbort, { once: true });
-            });
+            workspace = await wait(projectId, workspace.id, signal);
         }
+        if (workspace.status !== "ready") {
+            throw new Error(
+                `The workspace is ${workspace.status.replaceAll("_", " ")} and cannot start work.`,
+            );
+        }
+        if (workspace.presence === "missing") {
+            throw new Error("The workspace directory is unavailable and cannot start work.");
+        }
+        return workspace;
     }
 
     communicationContext(sessionId: string): AgentCommunicationContext {

@@ -209,6 +209,8 @@ const MAX_RETAINED_DURABLE_USER_INPUTS = 1_000;
 const MAX_RETAINED_DURABLE_WAITS = 1_000;
 const MAX_RETAINED_SETTLED_SCHEDULED_MESSAGES = 1_000;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
+const SESSION_METADATA_TIMEOUT_MS = 30_000;
+const WORKSPACE_READINESS_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 
 export interface PersistedSessionMessage {
     isPartial: boolean;
@@ -253,6 +255,7 @@ export interface FriendContextDrainResult {
 export interface PersistedQueuedRun {
     debug?: boolean;
     debugDirectory?: string;
+    debugRequestContent?: readonly ContentBlock[];
     displayText: string;
     effort?: string;
     modelId?: string;
@@ -342,6 +345,7 @@ export interface PersistedSessionState {
     systemPrompt?: string;
     workflows?: readonly PersistedWorkflowRun[];
     workflowsEnabled?: boolean;
+    workspaceQueueWaiting?: boolean;
     workspaceTransfer?: SessionWorkspaceTransferState;
 }
 
@@ -356,9 +360,21 @@ export interface PersistedWorkflowRun {
 }
 
 export interface InMemorySessionPersistence {
+    acceptQueuedRun?(input: {
+        event: Extract<SessionEvent, { type: "message_submitted" }>;
+        message: PersistedSessionMessage;
+        run: PersistedQueuedRun;
+        status: "queued" | "running";
+        submittedAt: number;
+        workspaceQueueWaiting: boolean;
+    }): void;
     clearMessages(sessionId: string): void;
     deleteMessagesFrom(sessionId: string, position: number): void;
     deleteQueuedRun(sessionId: string, runId: string): void;
+    failQueuedRun?(input: {
+        event: Extract<SessionEvent, { type: "run_error" }>;
+        runId: string;
+    }): void;
     handoffDurablePermissionToExternalTool?(
         externalCall: ExternalToolCall,
         permissionCall: DurableUserInputCall,
@@ -389,6 +405,16 @@ export interface InMemorySessionPersistence {
     pruneDurableWaits?(sessionId: string, retain: number): void;
     pruneScheduledMessages?(sessionId: string, retain: number): readonly string[];
     saveSession(state: PersistedSessionState): void;
+    startQueuedRun?(input: {
+        activeSince: number;
+        event: Extract<SessionEvent, { type: "run_started" }>;
+        friendLimits: FriendContextDrainLimits;
+        regularMessageIds: readonly string[];
+        runId: string;
+    }): {
+        friends: FriendContextDrainResult;
+        regular: readonly PersistedPendingContextMessage[];
+    };
     setWorkspaceTransferState?(input: {
         contextMessages?: readonly Message[];
         sessionId: string;
@@ -444,7 +470,18 @@ export interface InMemorySessionOptions {
     taskDrain?: TaskDrain;
     workspaceFeatures?: WorkspaceFeatures;
     workspaceId?: string;
+    /** Durable server decision that gates every runtime and queued run for a managed workspace. */
+    workspaceRunReadiness?: (target: {
+        cwd: string;
+        projectId: string;
+        workspaceId: string;
+    }) => WorkspaceRunReadiness;
 }
+
+export type WorkspaceRunReadiness =
+    | { state: "ready" }
+    | { retryable?: boolean; state: "waiting" }
+    | { message: string; state: "failed" };
 
 export interface SessionSlotStores {
     entries: SlotEntryStore;
@@ -608,6 +645,7 @@ export class InMemorySession {
     #metadataRefinementAttempted = false;
     #metadataRevision = 0;
     #metadataRunId: string | undefined;
+    #metadataSettlement: Promise<void> | undefined;
     #metadataUpdatedAt: number | undefined;
     #messages: PersistedSessionMessage[] = [];
     #messageIndexByPosition = new Map<number, number>();
@@ -692,11 +730,17 @@ export class InMemorySession {
     #workflowsEnabled: boolean;
     readonly #workspaceFeatures: WorkspaceFeatures;
     #workspaceArchived = false;
+    #workspaceReleaseMetadataBarrier = false;
+    #workspaceQueueWaiting = false;
+    #workspaceReadinessRetryAttempt = 0;
+    #workspaceReadinessRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    #workspaceRunReadiness: InMemorySessionOptions["workspaceRunReadiness"];
     #workspaceTransfer: SessionWorkspaceTransferState = { status: "idle" };
 
     constructor(options: InMemorySessionOptions) {
         this.#agentManager = options.agentManager;
         this.#workspaceFeatures = options.workspaceFeatures ?? DEFAULT_WORKSPACE_FEATURES;
+        this.#workspaceRunReadiness = options.workspaceRunReadiness;
         this.#createEventId = options.createEventId;
         this.#createdAt = options.restore?.createdAt ?? (options.now ?? Date.now)();
         this.#createRuntime = options.createRuntime ?? createCodingAssistantAgent;
@@ -846,6 +890,13 @@ export class InMemorySession {
         this.#tools = options.restore?.tools ?? [];
         this.#interruption = options.restore?.interruption;
         this.#queue = [...(options.restore?.queuedRuns ?? [])];
+        this.#workspaceQueueWaiting = options.restore?.workspaceQueueWaiting === true;
+        this.#workspaceReleaseMetadataBarrier =
+            options.restore !== undefined &&
+            options.workspaceId !== undefined &&
+            options.restore.activeRunId === undefined &&
+            this.#queue.length > 0 &&
+            this.#workspaceQueueWaiting;
         for (const pending of options.restore?.pendingContextMessages ?? []) {
             this.#pendingContextMessages.set(pending.message.id, {
                 ...pending,
@@ -1133,6 +1184,11 @@ export class InMemorySession {
             };
         }
 
+        const interruptedMetadata = this.#metadataSettlement !== undefined;
+        this.#clearMetadataSettlement();
+        this.#workspaceReleaseMetadataBarrier = false;
+        this.#clearWorkspaceReadinessRetry();
+        this.#workspaceQueueWaiting = false;
         const discardedQueue = this.#queue;
         const queuedRunIds = discardedQueue.map((queued) => queued.runId);
         for (const queued of discardedQueue) {
@@ -1166,7 +1222,7 @@ export class InMemorySession {
             });
         }
         const latestQueuedRunId = queuedRunIds.at(-1);
-        if (latestQueuedRunId !== undefined) {
+        if (latestQueuedRunId !== undefined && !interruptedMetadata) {
             this.#restartMetadataSettlement();
         }
         return {
@@ -3189,6 +3245,7 @@ export class InMemorySession {
     beginShutdown(): Promise<void> {
         if (this.#shutdownCleanup !== undefined) return this.#shutdownCleanup;
         this.#closing = true;
+        this.#clearWorkspaceReadinessRetry();
         for (const timer of this.#durableWaitTimers.values()) clearTimeout(timer);
         this.#durableWaitTimers.clear();
         for (const timer of this.#userInputPresenceTimers.values()) clearTimeout(timer);
@@ -3233,8 +3290,17 @@ export class InMemorySession {
             this.#cancelDurableUserInputs(runId);
             this.#cancelDurableWaits(runId);
         }
-        for (const run of this.#queue) this.#persistence?.deleteQueuedRun(this.id, run.runId);
+        const queuedRuns = this.#queue;
+        for (const run of queuedRuns) this.#persistence?.deleteQueuedRun(this.id, run.runId);
         this.#queue = [];
+        for (const run of queuedRuns) {
+            this.#append("run_error", {
+                errorMessage:
+                    "The queued run could not start because its managed workspace was archived.",
+                modelLocked: false,
+                runId: run.runId,
+            });
+        }
         this.#finishElapsedInterval();
         this.#activeRun = undefined;
         this.#restoredActiveRunId = undefined;
@@ -4144,6 +4210,7 @@ export class InMemorySession {
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             workspaceTransfer: structuredClone(this.#workspaceTransfer),
+            workspaceQueueWaiting: this.#workspaceQueueWaiting,
             secretIds: this.#secrets.sessionIds(),
             queuedRuns: [...this.#queue],
             pendingContextMessages: [...this.#pendingContextMessages.values()].map((pending) => ({
@@ -4429,6 +4496,7 @@ export class InMemorySession {
                           runId,
                           createdAt,
                       ),
+                      debugRequestContent: userMessage.blocks,
                   }
                 : {}),
             displayText,
@@ -4451,15 +4519,14 @@ export class InMemorySession {
                 : { skills: request.skills.map((definition) => ({ ...definition })) }),
             ...(request.systemPrompt === undefined ? {} : { systemPrompt: request.systemPrompt }),
         };
-
-        this.#interruption = undefined;
-        this.#queue.push(queued);
-        this.#persistence?.insertQueuedRun(this.id, queued);
-        this.#status = this.#activeRun === undefined ? "queued" : "running";
-        this.#lastMessageAt = this.#now();
-        this.#separateModelContextFromVisibleTranscript();
-        this.#storeMessage(this.#nextMessagePosition(), visibleMessage, false, runId);
-        const event = this.#append("message_submitted", {
+        const messagePosition = this.#nextMessagePosition();
+        const messageEntry: PersistedSessionMessage = {
+            isPartial: false,
+            message: visibleMessage,
+            position: messagePosition,
+            runId,
+        };
+        const event = this.#createEvent("message_submitted", {
             delivery: "run",
             displayText,
             message: visibleMessage,
@@ -4467,20 +4534,28 @@ export class InMemorySession {
             ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
             ...(options.source === undefined ? {} : { source: options.source }),
         });
-        const debugLog = this.#debugLogFor(queued);
-        void debugLog?.record("request", {
-            agent: this.agentMetadata(),
-            displayText,
-            modelId: this.#modelId,
-            permissionMode: this.#permissionMode,
-            providerId: this.#providerId,
-            request: {
-                ...(request.content === undefined ? {} : { content: request.content }),
-                text: request.text,
-            },
-            runId,
-            sessionId: this.id,
+        const submittedAt = createdAt;
+        const workspaceQueueWaiting =
+            this.#workspaceQueueWaiting || this.#currentWorkspaceRunReadiness().state === "waiting";
+        const acceptedAtomically = this.#persistence?.acceptQueuedRun !== undefined;
+        this.#persistence?.acceptQueuedRun?.({
+            event,
+            message: messageEntry,
+            run: queued,
+            status: this.#activeRun === undefined ? "queued" : "running",
+            submittedAt,
+            workspaceQueueWaiting,
         });
+
+        this.#interruption = undefined;
+        this.#workspaceQueueWaiting = workspaceQueueWaiting;
+        this.#queue.push(queued);
+        if (!acceptedAtomically) this.#persistence?.insertQueuedRun(this.id, queued);
+        this.#status = this.#activeRun === undefined ? "queued" : "running";
+        this.#lastMessageAt = submittedAt;
+        this.#separateModelContextFromVisibleTranscript();
+        this.#storeMessage(messagePosition, visibleMessage, false, runId, !acceptedAtomically);
+        this.#commitEvent(event);
         this.#startDrainQueue();
         this.#restartMetadataSettlement();
         if (options.source === undefined && request.provenance !== "agent") {
@@ -5732,15 +5807,31 @@ export class InMemorySession {
         type: TType,
         data: Extract<SessionEvent, { type: TType }>["data"],
     ): Extract<SessionEvent, { type: TType }> {
-        const event = {
+        return this.#commitEvent({
+            createdAt: this.#now(),
+            data,
+            id: this.#createEventId(),
+            sessionId: this.id,
+            type,
+        } as Extract<SessionEvent, { type: TType }>);
+    }
+
+    #createEvent<TType extends SessionEvent["type"]>(
+        type: TType,
+        data: Extract<SessionEvent, { type: TType }>["data"],
+    ): Extract<SessionEvent, { type: TType }> {
+        return {
             createdAt: this.#now(),
             data,
             id: this.#createEventId(),
             sessionId: this.id,
             type,
         } as Extract<SessionEvent, { type: TType }>;
+    }
+
+    #commitEvent<TEvent extends SessionEvent>(event: TEvent): TEvent {
         if (this.#workspaceArchived) return event;
-        const append = (): Extract<SessionEvent, { type: TType }> => {
+        const append = (): TEvent => {
             this.#appendDurableEvent(event);
             return event;
         };
@@ -6521,6 +6612,14 @@ export class InMemorySession {
         if (this.#runtime !== undefined) {
             return this.#runtime;
         }
+        const readiness = this.#currentWorkspaceRunReadiness();
+        if (readiness.state !== "ready") {
+            throw new Error(
+                readiness.state === "waiting"
+                    ? "The managed workspace is still initializing."
+                    : readiness.message,
+            );
+        }
 
         const agentManager = this.#agentManager;
         const appendSystemPrompt = [
@@ -6676,8 +6775,8 @@ export class InMemorySession {
                     create: async (input) =>
                         workspaceResult(await agentManager.createWorkspace(this.id, input)),
                     crossWorkspace,
-                    delegate: (request) =>
-                        agentManager.delegate(this.id, request, { crossWorkspace }),
+                    delegate: (request, signal) =>
+                        agentManager.delegate(this.id, request, { crossWorkspace }, signal),
                     listProjects: () => agentManager.listProjects(this.id),
                     listSessions: (target) =>
                         agentManager.listSessions(this.id, target, { crossWorkspace }),
@@ -6901,6 +7000,8 @@ export class InMemorySession {
         for (;;) {
             const queued = this.#queue[0];
             if (queued === undefined) {
+                this.#clearWorkspaceReadinessRetry();
+                this.#workspaceQueueWaiting = false;
                 if (this.#status === "queued" || this.#status === "running") {
                     this.#status = "idle";
                 }
@@ -6908,7 +7009,60 @@ export class InMemorySession {
                 return;
             }
 
-            const begin = () => {
+            let readiness = this.#currentWorkspaceRunReadiness();
+            if (readiness.state === "waiting") {
+                const retry =
+                    readiness.retryable === true
+                        ? this.#scheduleWorkspaceReadinessRetry()
+                        : "not_retryable";
+                if (retry !== "exhausted") {
+                    this.#workspaceQueueWaiting = true;
+                    this.#status = "queued";
+                    this.#saveSession();
+                    return;
+                }
+                readiness = {
+                    message:
+                        "The queued run could not start because Rig could not confirm that its managed workspace directory was available after repeated attempts.",
+                    state: "failed",
+                };
+            }
+            this.#clearWorkspaceReadinessRetry();
+            this.#workspaceQueueWaiting = false;
+            if (readiness.state === "failed") {
+                const failedEvent = this.#createEvent("run_error", {
+                    errorMessage: readiness.message,
+                    modelLocked: this.#modelLocked(),
+                    runId: queued.runId,
+                });
+                const failedAtomically = this.#persistence?.failQueuedRun !== undefined;
+                this.#persistence?.failQueuedRun?.({
+                    event: failedEvent,
+                    runId: queued.runId,
+                });
+                if (!failedAtomically) {
+                    this.#persistence?.deleteQueuedRun(this.id, queued.runId);
+                }
+                this.#queue.shift();
+                this.#status = "error";
+                this.#commitEvent(failedEvent);
+                await this.#closeDebugLog(queued);
+                continue;
+            }
+
+            if (this.#workspaceReleaseMetadataBarrier) {
+                // First-message naming is part of the workspace preparation barrier. Once an
+                // initializing checkout becomes ready, finish any available metadata inference
+                // before the real agent starts so naming cannot race work inside the folder.
+                await this.#restartMetadataSettlement();
+                if (this.#currentWorkspaceRunReadiness().state !== "ready") continue;
+                if (this.#queue[0]?.runId !== queued.runId) continue;
+                this.#workspaceReleaseMetadataBarrier = false;
+            }
+
+            const startedEvent = this.#createEvent("run_started", { runId: queued.runId });
+            const activeSince = this.#activeSince ?? startedEvent.createdAt;
+            const beginLegacy = () => {
                 this.#persistence?.deleteQueuedRun(this.id, queued.runId);
                 const regular = this.#persistPendingContextDrain();
                 const friends = this.#persistence?.drainFriendContextMessages?.({
@@ -6935,9 +7089,19 @@ export class InMemorySession {
                 return { friends, regular };
             };
             const drained =
-                this.#persistence?.transaction === undefined
-                    ? begin()
-                    : this.#persistence.transaction(begin);
+                this.#persistence?.startQueuedRun?.({
+                    activeSince,
+                    event: startedEvent,
+                    friendLimits: { ...DEFAULT_FRIEND_CONTEXT_DRAIN_LIMITS },
+                    regularMessageIds: [...this.#pendingContextMessages.values()].flatMap(
+                        (pending) =>
+                            pending.message.friendAuthor === undefined ? [pending.message.id] : [],
+                    ),
+                    runId: queued.runId,
+                }) ??
+                (this.#persistence?.transaction === undefined
+                    ? beginLegacy()
+                    : this.#persistence.transaction(beginLegacy));
             // The durable toggle is read inside the drain transaction. Filtering here is the
             // final provider boundary, so a toggle made while a turn was active still prevents
             // friend-authored context from entering every later provider request.
@@ -6965,7 +7129,7 @@ export class InMemorySession {
                 this.#contextMessages?.push(contextMessages.at(-1)!.message);
             }
             this.#queue.shift();
-            await this.#runQueued(queued, contextMessages);
+            await this.#runQueued(queued, contextMessages, startedEvent, activeSince);
         }
     }
 
@@ -7078,29 +7242,35 @@ export class InMemorySession {
         this.#titleStatus = this.#title === undefined ? "idle" : "ready";
     }
 
-    #restartMetadataSettlement(): void {
-        if (this.#closing || this.#taskDrain?.closing === true) return;
+    #restartMetadataSettlement(): Promise<void> | undefined {
+        if (this.#closing || this.#taskDrain?.closing === true) return undefined;
         if (this.isSubagent()) {
             this.#agentManager?.recordDescendantSettlementActivity(
                 this.#agentMetadata.rootSessionId,
             );
-            return;
+            return undefined;
         }
         if (this.#metadataController !== undefined) {
-            return;
+            return this.#metadataSettlement;
         }
         const target = this.#metadataGenerationTarget();
-        if (target === undefined) return;
+        if (target === undefined) return undefined;
         if (target.kind === "initial") this.#metadataInitialAttempted = true;
         else this.#metadataRefinementAttempted = true;
         const revision = this.#metadataRevision;
         const settle = () => this.#settleMetadata(revision, target);
         const settlement = this.#taskDrain?.run(settle) ?? settle();
-        void settlement.catch(rethrowDatabaseFailure);
+        const tracked = settlement.finally(() => {
+            if (this.#metadataSettlement === tracked) this.#metadataSettlement = undefined;
+        });
+        this.#metadataSettlement = tracked;
+        void tracked.catch(rethrowDatabaseFailure);
+        return tracked;
     }
 
     #metadataGenerationTarget(): MetadataGenerationTarget | undefined {
         if (this.#metadataRunId !== undefined || this.#titleStatus === "error") return undefined;
+        if (this.#currentWorkspaceRunReadiness().state !== "ready") return undefined;
         const submittedRunIds = new Set(
             (this.events.since(undefined) ?? []).flatMap((event) =>
                 event.type === "message_submitted" ? [event.data.runId] : [],
@@ -7148,6 +7318,10 @@ export class InMemorySession {
         }
 
         const controller = new AbortController();
+        const timeout = setTimeout(() => {
+            if (this.#metadataController === controller) this.#clearMetadataSettlement();
+        }, SESSION_METADATA_TIMEOUT_MS);
+        timeout.unref();
         let completed = false;
         this.#metadataController = controller;
         this.#titleStatus = "generating";
@@ -7207,6 +7381,7 @@ export class InMemorySession {
                 status: this.#titleStatus,
             });
         } finally {
+            clearTimeout(timeout);
             if (this.#metadataController === controller) this.#metadataController = undefined;
             if (completed) queueMicrotask(() => this.#restartMetadataSettlement());
         }
@@ -7215,6 +7390,8 @@ export class InMemorySession {
     async #runQueued(
         queued: PersistedQueuedRun,
         pendingContext: readonly PersistedPendingContextMessage[] = [],
+        startedEvent = this.#createEvent("run_started", { runId: queued.runId }),
+        activeSince = this.#activeSince ?? startedEvent.createdAt,
     ): Promise<void> {
         let controller = new AbortController();
         const debugLog = this.#debugLogFor(queued);
@@ -7227,8 +7404,8 @@ export class InMemorySession {
         this.#lastSessionRunId = queued.runId;
         this.#restoredActiveRunId = undefined;
         this.#status = "running";
-        this.#activeSince ??= this.#now();
-        this.#append("run_started", { runId: queued.runId });
+        this.#activeSince = activeSince;
+        this.#commitEvent(startedEvent);
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
 
         let runtime: CodingAssistantRuntime | undefined;
@@ -7258,6 +7435,21 @@ export class InMemorySession {
                 );
             }
             this.#applyIntegrationConfiguration(queued);
+            await debugLog?.record("request", {
+                agent: this.agentMetadata(),
+                displayText: queued.displayText,
+                modelId: this.#modelId,
+                permissionMode: this.#permissionMode,
+                providerId: this.#providerId,
+                request: {
+                    ...(queued.debugRequestContent === undefined
+                        ? {}
+                        : { content: queued.debugRequestContent }),
+                    text: queued.text,
+                },
+                runId: queued.runId,
+                sessionId: this.id,
+            });
             await debugLog?.record("run-started", {
                 runId: queued.runId,
                 sessionId: this.id,
@@ -7419,7 +7611,7 @@ export class InMemorySession {
     }
 
     async #closeDebugLog(queued: PersistedQueuedRun): Promise<void> {
-        const debugLog = this.#debugLogFor(queued);
+        const debugLog = this.#debugLogs.get(queued.runId);
         if (debugLog === undefined) return;
         await debugLog.flush().catch(() => undefined);
         if (this.#debugLogs.get(queued.runId) === debugLog) {
@@ -7456,8 +7648,62 @@ export class InMemorySession {
             this.#draining = undefined;
         });
         void this.#draining.then(() => {
-            if (this.#queue.length > 0) this.#startDrainQueue();
+            if (this.#queue.length > 0 && !this.#workspaceQueueWaiting) this.#startDrainQueue();
         }, rethrowDatabaseFailure);
+    }
+
+    /**
+     * Continues the durable queue after the workspace's ordinary realtime lifecycle changed.
+     *
+     * The queue itself remains the source of truth. This notification only re-evaluates its
+     * durable workspace gate, so duplicate workspace events are harmless.
+     */
+    workspaceReadinessChanged(): void {
+        if (this.#queue.length === 0 || this.#closing) return;
+        this.#clearWorkspaceReadinessRetry();
+        if (this.#workspaceQueueWaiting) this.#workspaceReleaseMetadataBarrier = true;
+        this.#workspaceQueueWaiting = false;
+        this.#startDrainQueue();
+    }
+
+    #scheduleWorkspaceReadinessRetry(): "closing" | "exhausted" | "scheduled" {
+        if (this.#workspaceReadinessRetryTimer !== undefined) return "scheduled";
+        if (this.#closing) return "closing";
+        if (this.#workspaceReadinessRetryAttempt >= WORKSPACE_READINESS_RETRY_DELAYS_MS.length) {
+            return "exhausted";
+        }
+        const delay =
+            WORKSPACE_READINESS_RETRY_DELAYS_MS[this.#workspaceReadinessRetryAttempt] ??
+            WORKSPACE_READINESS_RETRY_DELAYS_MS.at(-1)!;
+        this.#workspaceReadinessRetryAttempt += 1;
+        const timer = setTimeout(() => {
+            if (this.#workspaceReadinessRetryTimer !== timer) return;
+            this.#workspaceReadinessRetryTimer = undefined;
+            this.#workspaceQueueWaiting = false;
+            this.#startDrainQueue();
+        }, delay);
+        timer.unref();
+        this.#workspaceReadinessRetryTimer = timer;
+        return "scheduled";
+    }
+
+    #clearWorkspaceReadinessRetry(): void {
+        if (this.#workspaceReadinessRetryTimer !== undefined) {
+            clearTimeout(this.#workspaceReadinessRetryTimer);
+            this.#workspaceReadinessRetryTimer = undefined;
+        }
+        this.#workspaceReadinessRetryAttempt = 0;
+    }
+
+    #currentWorkspaceRunReadiness(): WorkspaceRunReadiness {
+        if (this.#workspaceId === undefined) return { state: "ready" };
+        return (
+            this.#workspaceRunReadiness?.({
+                cwd: this.#request.cwd,
+                projectId: this.#projectId,
+                workspaceId: this.#workspaceId,
+            }) ?? { state: "ready" }
+        );
     }
 
     #assertAcceptingWork(): void {

@@ -1931,7 +1931,7 @@ async function handleRequest(
     ) {
         const directory = resolveProjectScopeDirectory(store, route);
         if (!directory.ok) {
-            sendJson(response, 404, { error: directory.error });
+            sendJson(response, directory.status, { error: directory.error });
             return;
         }
         if (route.name === "project-file-paths") {
@@ -4097,14 +4097,22 @@ async function handleRequest(
 function resolveProjectScopeDirectory(
     store: SessionStore,
     scope: ProjectScope,
-): { ok: true; path: string } | { error: string; ok: false } {
+): { ok: true; path: string } | { error: string; ok: false; status: 404 | 409 } {
     const project = store.getProject(scope.projectId);
-    if (project === undefined) return { error: "Project not found", ok: false };
+    if (project === undefined) return { error: "Project not found", ok: false, status: 404 };
     if (scope.workspaceId === undefined) return { ok: true, path: project.path };
     const workspace = store.getWorkspace(scope.projectId, scope.workspaceId);
-    return workspace === undefined
-        ? { error: "Workspace not found", ok: false }
-        : { ok: true, path: workspace.path };
+    if (workspace === undefined) {
+        return { error: "Workspace not found", ok: false, status: 404 };
+    }
+    if (workspace.status !== "ready" || workspace.presence !== "present") {
+        return {
+            error: "Only ready, available workspaces can access files.",
+            ok: false,
+            status: 409,
+        };
+    }
+    return { ok: true, path: workspace.path };
 }
 
 function healthResponse(

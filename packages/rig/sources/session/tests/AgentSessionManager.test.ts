@@ -2216,6 +2216,7 @@ describe("AgentSessionManager", () => {
             providerIdsForModel: (modelId) => (modelId === "anthropic/sonnet-5" ? ["claude"] : []),
         });
         const createDelegatedSession = vi.fn(() => delegated);
+        let workspacePresence: ProjectWorkspace["presence"] = "missing";
         const manager = new AgentSessionManager({
             repository: {
                 createDelegatedSession,
@@ -2228,6 +2229,7 @@ describe("AgentSessionManager", () => {
                               id: workspaceId,
                               name: "Changelog",
                               path: "/workspaces/changelog",
+                              presence: workspacePresence,
                               projectId,
                               status: "ready",
                           } as ProjectWorkspace)
@@ -2235,17 +2237,20 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(
-            manager.delegate(delegator.id, {
-                effort: "high",
-                modelId: "anthropic/sonnet-5",
-                prompt: "Update the changelog.",
-                readOnly: true,
-                serviceTier: "fast",
-                title: "Update the changelog",
-                workspaceId: "workspace-2",
-            }),
-        ).resolves.toEqual({
+        const request = {
+            effort: "high",
+            modelId: "anthropic/sonnet-5",
+            prompt: "Update the changelog.",
+            readOnly: true,
+            serviceTier: "fast" as const,
+            title: "Update the changelog",
+            workspaceId: "workspace-2",
+        };
+        await expect(manager.delegate(delegator.id, request)).rejects.toThrow(
+            "directory is unavailable",
+        );
+        workspacePresence = "present";
+        await expect(manager.delegate(delegator.id, request)).resolves.toEqual({
             agentId: "delegate-agent",
             projectId: "project-1",
             sessionId: "delegate-1",
@@ -2450,7 +2455,7 @@ describe("AgentSessionManager", () => {
         ]);
     });
 
-    it("waits for owned workspace initialization before starting its agent", async () => {
+    it("waits for an owned workspace to become ready before starting its agent", async () => {
         const child = {
             agentMetadata: () => ({
                 depth: 1,
@@ -2480,8 +2485,11 @@ describe("AgentSessionManager", () => {
             }),
             snapshot: () => ({ projectId: "project-1" }),
         } as unknown as InMemorySession;
-        let workspaceStatus: ProjectWorkspace["status"] = "initializing";
         const createSubagent = vi.fn(() => child);
+        let workspacePresence: ProjectWorkspace["presence"];
+        let workspaceStatus: ProjectWorkspace["status"] = "initializing";
+        const ready = deferred<ProjectWorkspace>();
+        const waitForWorkspaceReady = vi.fn(() => ready.promise);
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent,
@@ -2492,13 +2500,15 @@ describe("AgentSessionManager", () => {
                         id: "workspace-1",
                         name: "Setup",
                         path: "/workspaces/setup",
+                        presence: workspacePresence,
                         projectId: "project-1",
                         status: workspaceStatus,
                     }) as ProjectWorkspace,
+                waitForWorkspaceReady,
             },
         });
 
-        const spawning = manager.spawnInWorkspace(parent.id, {
+        const request = {
             background: true,
             description: "Wait for setup",
             effort: "medium",
@@ -2507,14 +2517,30 @@ describe("AgentSessionManager", () => {
             providerId: "codex",
             taskName: "wait_for_setup",
             workspaceId: "workspace-1",
-        });
+        };
+        const spawned = manager.spawnInWorkspace(parent.id, request);
         await Promise.resolve();
+        expect(waitForWorkspaceReady).toHaveBeenCalledWith("project-1", "workspace-1", undefined);
         expect(createSubagent).not.toHaveBeenCalled();
+        workspaceStatus = "ready";
+        workspacePresence = "present";
+        ready.resolve({
+            id: "workspace-1",
+            name: "Setup",
+            path: "/workspaces/setup",
+            presence: "present",
+            projectId: "project-1",
+            status: "ready",
+        } as ProjectWorkspace);
+        await expect(spawned).resolves.toMatchObject({ status: "running" });
+        expect(createSubagent).toHaveBeenCalledTimes(1);
 
         workspaceStatus = "ready";
-
-        await expect(spawning).resolves.toMatchObject({ status: "running" });
-        expect(createSubagent).toHaveBeenCalledOnce();
+        workspacePresence = "missing";
+        await expect(manager.spawnInWorkspace(parent.id, request)).rejects.toThrow(
+            "directory is unavailable",
+        );
+        expect(createSubagent).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -2535,6 +2561,14 @@ function delegatorSession(overrides: Partial<InMemorySession> = {}): InMemorySes
         snapshot: () => ({ projectId: "project-1" }),
         ...overrides,
     } as unknown as InMemorySession;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((resolvePromise) => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
 }
 
 function historySession(options: {
