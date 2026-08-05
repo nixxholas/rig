@@ -23,7 +23,6 @@ describe("getEnvironmentLocalServerPaths", () => {
             irohSecretKeyPath: `${directory}/iroh-secret-key`,
             logPath: `${directory}/server.log`,
             p2pIdentityPath: `${directory}/p2p-instance-identity.json`,
-            p2pPeerTrustPath: `${directory}/p2p-peer-trust.json`,
             registryPath: `${directory}/server.json`,
             socketPath: `${directory}/server.sock`,
             tokenPath: `${directory}/token`,

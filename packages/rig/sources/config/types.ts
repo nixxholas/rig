@@ -165,42 +165,13 @@ export interface ConfigIrohTransport {
 
 export type PartialConfigIrohTransport = Partial<ConfigIrohTransport>;
 
-export interface ConfigP2pPeerIdentity {
-    instanceId: string;
-    publicKey: string;
-}
-
-export interface ConfigP2pDirectPeer {
-    address: string;
-}
-
 export interface ConfigDirectTransport {
     listen?: string;
 }
 
 export type PartialConfigDirectTransport = Partial<ConfigDirectTransport>;
 
-export interface ConfigP2pIrohPeer {
-    endpointId: string;
-}
-
-export interface ConfigP2pSshPeer {
-    agentSocketPath?: string;
-    auth: "agent" | "private_key";
-    host: string;
-    hostKeySha256: string;
-    passphraseEnvVar?: string;
-    port: number;
-    privateKeyPath?: string;
-    remoteRig: string;
-    username: string;
-}
-
-export interface ConfigP2pPeer extends ConfigP2pPeerIdentity {
-    direct?: ConfigP2pDirectPeer;
-    iroh?: ConfigP2pIrohPeer;
-    ssh?: ConfigP2pSshPeer;
-}
+export type P2pNodeRole = "primary" | "secondary";
 
 export interface ConfigP2p {
     direct: ConfigDirectTransport;
@@ -209,7 +180,9 @@ export interface ConfigP2p {
     enableSsh: boolean;
     exposeApi: boolean;
     iroh: ConfigIrohTransport;
-    peers: readonly ConfigP2pPeer[];
+    name: string;
+    primaryId?: string;
+    role: P2pNodeRole;
 }
 
 export interface PartialConfigP2p {
@@ -219,7 +192,9 @@ export interface PartialConfigP2p {
     enableSsh?: boolean;
     exposeApi?: boolean;
     iroh?: PartialConfigIrohTransport;
-    peers?: readonly ConfigP2pPeer[];
+    name?: string;
+    primaryId?: string;
+    role?: P2pNodeRole;
 }
 
 export interface RigConfig {

@@ -12,9 +12,20 @@ import { createTestSocketDirectory } from "../../testing/createTestSocketDirecto
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { createServeP2pHttpRequest } from "../createServeP2pHttpRequest.js";
 import { createServeP2pTunnel } from "../createServeP2pTunnel.js";
+import type { P2pPeerTrustStoreContract } from "../../p2p/P2pPeerTrustStore.js";
 
 const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const cleanups: (() => Promise<void>)[] = [];
+const peerTrustStore: P2pPeerTrustStoreContract = {
+    preparePairing: async () => {
+        throw new Error("Pairing is not used by this test.");
+    },
+    peerForBinding: () => undefined,
+    peers: () => [],
+    readyPairings: () => [],
+    validate: async () => undefined,
+    verifyOrPin: async () => undefined,
+};
 
 afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -42,13 +53,8 @@ describe("P2P HTTP between two real daemon servers", () => {
                 enableSsh: false,
                 exposeApi: false,
                 iroh: {},
-                peers: [
-                    {
-                        instanceId: secondIdentity.instanceId,
-                        publicKey: secondIdentity.publicKey,
-                        iroh: { endpointId: secondId },
-                    },
-                ],
+                name: "First",
+                role: "primary",
             },
             createIrohTransport: (onStatusChange) =>
                 IrohNetwork.create({
@@ -63,6 +69,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                 }),
             irohSecretKeyPath: "unused",
             identity: firstIdentity,
+            peerTrustStore,
         });
         cleanups.push(() => firstNetwork.close());
         const secondNetwork = await P2pNetwork.create({
@@ -73,13 +80,8 @@ describe("P2P HTTP between two real daemon servers", () => {
                 enableSsh: false,
                 exposeApi: true,
                 iroh: {},
-                peers: [
-                    {
-                        instanceId: firstIdentity.instanceId,
-                        publicKey: firstIdentity.publicKey,
-                        iroh: { endpointId: firstId },
-                    },
-                ],
+                name: "Second",
+                role: "primary",
             },
             createIrohTransport: (onStatusChange) =>
                 IrohNetwork.create({
@@ -92,6 +94,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                     relayMode: RelayMode.disabled(),
                     secretKey: secondKey,
                     serveRequest: createServeP2pHttpRequest({
+                        allowRequest: () => true,
                         socketPath: secondDaemon.socketPath,
                         token: "second-token",
                     }),
@@ -102,6 +105,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                 }),
             irohSecretKeyPath: "unused",
             identity: secondIdentity,
+            peerTrustStore,
         });
         cleanups.push(() => secondNetwork.close());
         await vi.waitFor(() => {

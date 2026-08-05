@@ -49,8 +49,7 @@ export async function createConfigFile(
             !config.p2p.enableSsh &&
             !config.p2p.exposeApi &&
             config.p2p.direct.listen === undefined &&
-            config.p2p.iroh.relayUrl === undefined &&
-            config.p2p.peers.length === 0
+            config.p2p.iroh.relayUrl === undefined
                 ? {}
                 : {
                       p2p: {
@@ -58,53 +57,19 @@ export async function createConfigFile(
                           enable_iroh: config.p2p.enableIroh,
                           enable_ssh: config.p2p.enableSsh,
                           expose_api: config.p2p.exposeApi,
-                          direct: {
-                              ...(config.p2p.direct.listen === undefined
+                          name: config.p2p.name,
+                          role: config.p2p.role,
+                          ...(config.p2p.primaryId === undefined
+                              ? {}
+                              : { primary_id: config.p2p.primaryId }),
+                          direct:
+                              config.p2p.direct.listen === undefined
                                   ? {}
-                                  : { listen: config.p2p.direct.listen }),
-                          },
-                          iroh: {
-                              ...(config.p2p.iroh.relayUrl === undefined
+                                  : { listen: config.p2p.direct.listen },
+                          iroh:
+                              config.p2p.iroh.relayUrl === undefined
                                   ? {}
-                                  : { relay_url: config.p2p.iroh.relayUrl }),
-                          },
-                          peers: config.p2p.peers.map((peer) => ({
-                              ...(peer.direct === undefined
-                                  ? {}
-                                  : { direct: { address: peer.direct.address } }),
-                              instance_id: peer.instanceId,
-                              ...(peer.iroh === undefined
-                                  ? {}
-                                  : { iroh: { endpoint_id: peer.iroh.endpointId } }),
-                              public_key: peer.publicKey,
-                              ...(peer.ssh === undefined
-                                  ? {}
-                                  : {
-                                        ssh: {
-                                            ...(peer.ssh.agentSocketPath === undefined
-                                                ? {}
-                                                : {
-                                                      agent_socket_path: peer.ssh.agentSocketPath,
-                                                  }),
-                                            auth: peer.ssh.auth,
-                                            host: peer.ssh.host,
-                                            host_key_sha256: peer.ssh.hostKeySha256,
-                                            ...(peer.ssh.passphraseEnvVar === undefined
-                                                ? {}
-                                                : {
-                                                      passphrase_env_var: peer.ssh.passphraseEnvVar,
-                                                  }),
-                                            port: peer.ssh.port,
-                                            ...(peer.ssh.privateKeyPath === undefined
-                                                ? {}
-                                                : {
-                                                      private_key_path: peer.ssh.privateKeyPath,
-                                                  }),
-                                            remote_rig: peer.ssh.remoteRig,
-                                            username: peer.ssh.username,
-                                        },
-                                    }),
-                          })),
+                                  : { relay_url: config.p2p.iroh.relayUrl },
                       },
                   }),
             providers: serializeProviders(config.providers, config.providerDefaultEnable),

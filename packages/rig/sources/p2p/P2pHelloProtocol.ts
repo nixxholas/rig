@@ -106,6 +106,7 @@ interface HelloOptions {
     identity: P2pInstanceIdentity;
     localChannelBinding: string;
     now?: () => number;
+    onContext?: (context: P2pHelloContext) => void;
     randomNonce?: () => string;
     remoteChannelBinding: string;
     transport: P2pTransportKind;
@@ -148,6 +149,7 @@ export async function runP2pInitiatorHello(
     const finish = await readJson(duplex.recv, finishSchema);
     verifyP2pHelloFinish(finish, remoteIdentity, options.identity, context);
     await options.commitPeer?.(remoteIdentity, options.remoteChannelBinding);
+    options.onContext?.(context);
     return remoteIdentity;
 }
 
@@ -191,6 +193,7 @@ export async function runP2pResponderHello(
         finishSchema,
     );
     await finishWrites(duplex.send);
+    options.onContext?.(context);
     return remoteIdentity;
 }
 

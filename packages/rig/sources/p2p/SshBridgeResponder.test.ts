@@ -3,7 +3,7 @@ import { Duplex, PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConfigP2pPeer, ConfigP2pSshPeer } from "../config/types.js";
+import type { P2pSshPeer, P2pTrustedPeer } from "./P2pPeer.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import type { P2pTunnelRequestHead } from "./P2pTunnel.js";
@@ -11,7 +11,7 @@ import { SshBridgeResponder } from "./SshBridgeResponder.js";
 import { SshTransport, type SshBridgeChannel } from "./SshTransport.js";
 
 const hostKeyHash = new Uint8Array(createHash("sha256").update("ssh host").digest());
-const ssh: ConfigP2pSshPeer = {
+const ssh: P2pSshPeer = {
     agentSocketPath: "/unused",
     auth: "agent",
     host: "example.test",
@@ -216,8 +216,14 @@ describe("SSH bridge responder", () => {
     });
 });
 
-function peer(identity: ReturnType<typeof createP2pInstanceIdentity>): ConfigP2pPeer {
-    return { instanceId: identity.instanceId, publicKey: identity.publicKey, ssh };
+function peer(identity: ReturnType<typeof createP2pInstanceIdentity>): P2pTrustedPeer {
+    return {
+        bindings: [],
+        connections: { ssh },
+        name: "Peer",
+        instanceId: identity.instanceId,
+        publicKey: identity.publicKey,
+    };
 }
 
 function bridgeChannel(responder: SshBridgeResponder): SshBridgeChannel {

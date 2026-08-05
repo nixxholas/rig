@@ -13,7 +13,7 @@ import {
     createProjectConfigSecurityNoticeTitle,
     loadConfig,
     resolveProtectedPaths,
-    writeRuntimeConfig,
+    updateRuntimePreferences,
 } from "../config/index.js";
 import { createProjectMcpSecurityNotice, loadMcpServerConfigEntries } from "../mcp/index.js";
 import { NativeProcessManager } from "../processes/index.js";
@@ -354,7 +354,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             },
             onDefaultModelChange: (preference) =>
                 enqueueRuntimeConfigWrite(() =>
-                    writeRuntimeConfig(loadedConfig.paths.runtime, {
+                    updateRuntimePreferences(loadedConfig.paths.runtime, {
                         defaults: {
                             modelId: preference.modelId,
                             providerId: preference.providerId,
@@ -382,7 +382,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                 showReasoning = settings.showReasoning;
                 showUsage = settings.showUsage;
                 await enqueueRuntimeConfigWrite(() =>
-                    writeRuntimeConfig(loadedConfig.paths.runtime, {
+                    updateRuntimePreferences(loadedConfig.paths.runtime, {
                         defaults: {
                             modelId: agent.model.id,
                             providerId: agent.provider.id,

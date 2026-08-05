@@ -15,6 +15,7 @@ export const p2pPeerStatusSchema = Type.Object(
         address: Type.String({ minLength: 1 }),
         error: Type.Optional(Type.String()),
         lastSeenAt: Type.Optional(Type.Number()),
+        name: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
         peerId: Type.Optional(p2pInstanceIdSchema),
         publicKey: Type.Optional(p2pPublicKeySchema),
         rttMs: Type.Optional(Type.Number({ minimum: 0 })),
@@ -75,6 +76,7 @@ export type P2pTransportStatus = Static<typeof p2pTransportStatusSchema>;
 export const p2pStatusSchema = Type.Object(
     {
         instanceId: Type.Optional(p2pInstanceIdSchema),
+        name: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
         publicKey: Type.Optional(p2pPublicKeySchema),
         transports: Type.Array(p2pTransportStatusSchema),
     },

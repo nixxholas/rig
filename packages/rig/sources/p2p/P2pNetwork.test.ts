@@ -4,6 +4,7 @@ import type { P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import type { P2pTransport } from "./P2pTransport.js";
 import { P2pNetwork } from "./P2pNetwork.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
+import type { P2pPeerTrustStoreContract } from "./P2pPeerTrustStore.js";
 
 const disabledConfig = {
     direct: {},
@@ -12,10 +13,21 @@ const disabledConfig = {
     enableSsh: false,
     exposeApi: false,
     iroh: {},
-    peers: [],
+    name: "Test Rig",
+    role: "primary",
 } as const;
 const identity = createP2pInstanceIdentity("alocalinstance00000000001");
 const peerId = "aremoteinstance0000000001";
+const peerTrustStore: P2pPeerTrustStoreContract = {
+    preparePairing: async () => {
+        throw new Error("Pairing is not used by this test.");
+    },
+    peerForBinding: () => undefined,
+    peers: () => [],
+    readyPairings: () => [],
+    validate: async () => undefined,
+    verifyOrPin: async () => undefined,
+};
 
 describe("P2pNetwork", () => {
     it("starts with no transports when all transports are disabled", async () => {
@@ -23,13 +35,43 @@ describe("P2pNetwork", () => {
             config: disabledConfig,
             identity,
             irohSecretKeyPath: "unused",
+            peerTrustStore,
         });
 
         expect(network.status()).toMatchObject({
             instanceId: identity.instanceId,
+            name: "Test Rig",
             publicKey: identity.publicKey,
             transports: [],
         });
+
+        network.setName("Renamed Rig");
+        expect(network.status().name).toBe("Renamed Rig");
+        await network.close();
+    });
+
+    it("contains malformed saved trust without taking down the daemon", async () => {
+        const unavailable = vi.fn();
+        const createIrohTransport = vi.fn();
+        const network = await P2pNetwork.create({
+            config: { ...disabledConfig, enableIroh: true },
+            createIrohTransport,
+            identity,
+            irohSecretKeyPath: "unused",
+            onTransportUnavailable: unavailable,
+            peerTrustStore: {
+                ...peerTrustStore,
+                peers: () => {
+                    throw new Error("The saved P2P peer trust is invalid.");
+                },
+            },
+        });
+
+        expect(createIrohTransport).not.toHaveBeenCalled();
+        expect(unavailable).toHaveBeenCalledWith("iroh", expect.any(Error));
+        expect(network.status().transports).toEqual([
+            expect.objectContaining({ state: "unavailable", transport: "iroh" }),
+        ]);
         await network.close();
     });
 
@@ -43,10 +85,12 @@ describe("P2pNetwork", () => {
             identity,
             irohSecretKeyPath: "unused",
             onTransportUnavailable: unavailable,
+            peerTrustStore,
         });
 
         expect(network.status()).toEqual({
             instanceId: identity.instanceId,
+            name: "Test Rig",
             publicKey: identity.publicKey,
             transports: [
                 {
@@ -85,6 +129,7 @@ describe("P2pNetwork", () => {
             identity,
             irohSecretKeyPath: "unused",
             onStatusChange: changed,
+            peerTrustStore,
         });
 
         publish({
@@ -94,6 +139,9 @@ describe("P2pNetwork", () => {
         expect(network.status().transports[0]).toMatchObject({
             peers: [{ address: "remote-address", peerId, status: "connected" }],
         });
+        network.setName("Renamed Rig");
+        publish(initial);
+        expect(changed).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Renamed Rig" }));
         await network.close();
         expect(close).toHaveBeenCalledOnce();
         expect(changed).toHaveBeenCalled();
@@ -120,22 +168,6 @@ describe("P2pNetwork", () => {
                 ...disabledConfig,
                 enableDirect: true,
                 enableSsh: true,
-                peers: [
-                    {
-                        direct: { address: "peer.example:7443" },
-                        instanceId: peerId,
-                        publicKey: peer.publicKey,
-                        ssh: {
-                            agentSocketPath: "/unused",
-                            auth: "agent",
-                            host: "peer.example",
-                            hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                            port: 22,
-                            remoteRig: "rig",
-                            username: "steve",
-                        },
-                    },
-                ],
             },
             createDirectTransport: async () => ({
                 close: async () => undefined,
@@ -161,6 +193,7 @@ describe("P2pNetwork", () => {
             }),
             identity,
             irohSecretKeyPath: "unused",
+            peerTrustStore,
         });
 
         const selected = await network.fetch(

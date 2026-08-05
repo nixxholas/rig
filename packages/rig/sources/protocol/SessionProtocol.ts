@@ -225,6 +225,11 @@ export interface ListModelsResponse {
 }
 
 export interface DaemonConfig {
+    p2p: {
+        name: string;
+        primaryId?: string;
+        role: "primary" | "secondary";
+    };
     settings: {
         inferenceMaxRetries: number;
         durableGlobalEventQueue: boolean;
@@ -237,6 +242,18 @@ export interface GetDaemonConfigResponse {
 
 export const updateDaemonConfigRequestSchema = Type.Object(
     {
+        p2p: Type.Optional(
+            Type.Object(
+                {
+                    name: Type.String({
+                        maxLength: 128,
+                        minLength: 1,
+                        pattern: "^[^\\u0000-\\u001f\\u007f]+$",
+                    }),
+                },
+                { additionalProperties: false },
+            ),
+        ),
         settings: Type.Object(
             {
                 inferenceMaxRetries: Type.Integer({

@@ -39,6 +39,9 @@ import type {
     GlobalStreamHello,
     HealthResponse,
     P2pStatus,
+    CreateP2pInvitationResponse,
+    JoinP2pInvitationResponse,
+    P2pPairingState,
     HappyCloudCommand,
     HappyCloudCommandResponse,
     HappyCloudProfileCiphertextResponse,
@@ -194,6 +197,24 @@ export class ProtocolHttpClient {
 
     getP2pStatus(): Promise<P2pStatus> {
         return this.#requestJson("GET", "/p2p/status");
+    }
+
+    createP2pInvitation(): Promise<CreateP2pInvitationResponse> {
+        return this.#requestJson("POST", "/p2p/invitations");
+    }
+
+    joinP2pInvitation(invitation: string): Promise<JoinP2pInvitationResponse> {
+        return this.#requestJson("POST", "/p2p/joins", { invitation });
+    }
+
+    getP2pPairing(id: string): Promise<P2pPairingState> {
+        return this.#requestJson("GET", `/p2p/pairings/${encodeURIComponent(id)}`);
+    }
+
+    answerP2pVerification(id: string, accept: boolean): Promise<P2pPairingState> {
+        return this.#requestJson("POST", `/p2p/pairings/${encodeURIComponent(id)}/answer`, {
+            accept,
+        });
     }
 
     applyHappyCloudCommand(command: HappyCloudCommand): Promise<HappyCloudCommandResponse> {

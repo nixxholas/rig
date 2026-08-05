@@ -8,10 +8,14 @@ import {
     type SendStream,
 } from "@number0/iroh/index.js";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
+import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import {
+    openSessionDatabase,
+    type OpenSessionDatabase,
+} from "../persistence/database/openSessionDatabase.js";
 import { IrohNetwork } from "./IrohNetwork.js";
 import { createIrohFrameDuplex } from "./P2pFrameDuplex.js";
 import { runP2pResponderHello } from "./P2pHelloProtocol.js";
@@ -21,9 +25,11 @@ import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const networks: IrohNetwork[] = [];
 const directories: string[] = [];
+const databases: OpenSessionDatabase[] = [];
 
 afterEach(async () => {
     await Promise.all(networks.splice(0).map((network) => network.close()));
+    for (const opened of databases.splice(0)) opened.client.close();
     await Promise.all(
         directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
     );
@@ -195,7 +201,7 @@ describe("IrohNetwork", () => {
         const serverId = serverEndpoint.id().toString();
         const directory = await createTestSocketDirectory();
         directories.push(directory);
-        const trust = await P2pPeerTrustStore.open(join(directory, "peers.json"));
+        const trust = openTrustStore();
         await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId);
 
         const client = await IrohNetwork.create({
@@ -245,7 +251,7 @@ describe("IrohNetwork", () => {
         const serverId = serverEndpoint.id().toString();
         const directory = await createTestSocketDirectory();
         directories.push(directory);
-        const clientTrust = await P2pPeerTrustStore.open(join(directory, "client-peers.json"));
+        const clientTrust = openTrustStore();
         const serverTask = (async () => {
             const incoming = await serverEndpoint.acceptNext();
             if (incoming === null) return;
@@ -505,6 +511,13 @@ describe("IrohNetwork", () => {
         await expect(network.close()).resolves.toBeUndefined();
     });
 });
+
+function openTrustStore(): P2pPeerTrustStore {
+    const opened = openSessionDatabase(":memory:");
+    migrateSessionDatabase(opened.database);
+    databases.push(opened);
+    return P2pPeerTrustStore.fromDatabase(opened.database);
+}
 
 function fakePingConnection(
     peerEndpointId: string,

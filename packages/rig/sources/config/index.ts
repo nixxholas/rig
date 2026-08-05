@@ -27,8 +27,10 @@ export { resolveProtectedPaths } from "./resolveProtectedPaths.js";
 export { PROJECT_PROTECTED_FILE_NAMES } from "./projectProtectedFileNames.js";
 export { resolveConfigPaths } from "./resolveConfigPaths.js";
 export { writeRuntimeConfig } from "./writeRuntimeConfig.js";
+export { updateRuntimePreferences } from "./updateRuntimePreferences.js";
 export { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
 export { writeDaemonSettings } from "./writeDaemonSettings.js";
+export { writeP2pNodeSettings, type P2pNodeSettings } from "./writeP2pNodeSettings.js";
 export { writePresenceSelection } from "./writePresenceSelection.js";
 export type {
     ConfigDefaults,

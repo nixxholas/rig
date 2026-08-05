@@ -65,6 +65,7 @@ const RESPONSE_HEAD_TIMEOUT_MS = 30_000;
 const RESPONSE_WRITE_PROGRESS_TIMEOUT_MS = 30_000;
 
 export interface CreateIrohNetworkOptions {
+    apiExposed?: boolean;
     /** Test seam. Production dynamically loads the platform's native Iroh binding. */
     bindings?: IrohBindings;
     closeTimeoutMs?: number;
@@ -85,7 +86,7 @@ export interface CreateIrohNetworkOptions {
     pingIntervalMs?: number;
     pingTimeoutMs?: number;
     responseWriteProgressTimeoutMs?: number;
-    knownPeer?: (endpointId: string) => P2pPeerIdentity | undefined;
+    knownPeer?: (endpointId: string) => (P2pPeerIdentity & { name?: string }) | undefined;
     serveRequest?: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
     validatePeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
@@ -94,8 +95,9 @@ export interface CreateIrohNetworkOptions {
 
 export class IrohNetwork implements P2pTransport {
     readonly kind = "iroh";
+    readonly #apiExposed: boolean;
     readonly #abort = new AbortController();
-    readonly #allowedPeers: ReadonlySet<string>;
+    readonly #allowedPeers: Set<string>;
     readonly #bindings: IrohBindings;
     readonly #closeTimeoutMs: number;
     readonly #commitPeer:
@@ -104,16 +106,19 @@ export class IrohNetwork implements P2pTransport {
     readonly #config: ConfigIrohTransport;
     readonly #connectTimeoutMs: number;
     readonly #endpoint: Endpoint;
-    readonly #endpointIds: readonly string[];
+    readonly #endpointIds: string[];
     readonly #handshakeTimeoutMs: number;
     readonly #idleTimeoutMs: number;
     readonly #identity: P2pInstanceIdentity;
-    readonly #knownPeer: ((endpointId: string) => P2pPeerIdentity | undefined) | undefined;
+    readonly #knownPeer:
+        | ((endpointId: string) => (P2pPeerIdentity & { name?: string }) | undefined)
+        | undefined;
     readonly #onStatusChange: ((status: P2pTransportStatus) => void) | undefined;
     readonly #pendingConnects = new Map<string, Set<Promise<Connection>>>();
-    readonly #peerAddresses: ReadonlyMap<string, EndpointAddr>;
+    readonly #peerAddresses: Map<string, EndpointAddr>;
     readonly #peerStatuses = new Map<string, P2pPeerStatus>();
     readonly #peerIdentities = new Map<string, P2pPeerIdentity>();
+    readonly #peerNames = new Map<string, string>();
     readonly #pingIntervalMs: number;
     readonly #pingTimeoutMs: number;
     readonly #responseWriteProgressTimeoutMs: number;
@@ -133,6 +138,7 @@ export class IrohNetwork implements P2pTransport {
         bindings: IrohBindings,
         options: CreateIrohNetworkOptions,
     ) {
+        this.#apiExposed = options.apiExposed ?? options.serveRequest !== undefined;
         this.#bindings = bindings;
         this.#endpoint = endpoint;
         this.#config = options.config;
@@ -141,10 +147,10 @@ export class IrohNetwork implements P2pTransport {
         this.#connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
         this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
         this.#identity = options.identity ?? createP2pInstanceIdentity();
-        this.#endpointIds = options.endpointIds;
+        this.#endpointIds = [...options.endpointIds];
         this.#allowedPeers = new Set(options.endpointIds);
         this.#knownPeer = options.knownPeer;
-        this.#peerAddresses = options.peerAddresses ?? new Map();
+        this.#peerAddresses = new Map(options.peerAddresses);
         this.#pingIntervalMs = options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
         this.#idleTimeoutMs = Math.max(
             options.idleTimeoutMs ?? 0,
@@ -160,12 +166,19 @@ export class IrohNetwork implements P2pTransport {
         this.#validatePeer = options.validatePeer;
         for (const endpointId of options.endpointIds) {
             const known = this.#knownPeer?.(endpointId);
-            if (known !== undefined) this.#peerIdentities.set(endpointId, known);
+            if (known !== undefined) {
+                this.#peerIdentities.set(endpointId, known);
+                if (known.name !== undefined) this.#peerNames.set(endpointId, known.name);
+            }
             this.#peerStatuses.set(endpointId, {
                 address: endpointId,
                 ...(known === undefined
                     ? {}
-                    : { peerId: known.instanceId, publicKey: known.publicKey }),
+                    : {
+                          ...(known.name === undefined ? {} : { name: known.name }),
+                          peerId: known.instanceId,
+                          publicKey: known.publicKey,
+                      }),
                 status: "connecting",
             });
         }
@@ -199,9 +212,32 @@ export class IrohNetwork implements P2pTransport {
         return this.#endpoint.id().toString();
     }
 
+    addPeer(endpointId: string, identity: P2pPeerIdentity, name?: string): void {
+        if (endpointId === this.localAddress()) {
+            throw new Error("A P2P peer must not use this daemon's own Iroh endpoint ID.");
+        }
+        this.#peerIdentities.set(endpointId, identity);
+        if (name !== undefined) this.#peerNames.set(endpointId, name);
+        if (this.#allowedPeers.has(endpointId)) {
+            this.#setPeerStatus(endpointId, this.#statusFor(endpointId, "connecting"));
+            return;
+        }
+        this.#allowedPeers.add(endpointId);
+        this.#endpointIds.push(endpointId);
+        this.#peerStatuses.set(endpointId, {
+            address: endpointId,
+            ...(name === undefined ? {} : { name }),
+            peerId: identity.instanceId,
+            publicKey: identity.publicKey,
+            status: "connecting",
+        });
+        this.#track(this.#pingPeer(endpointId));
+        this.#publishStatus();
+    }
+
     status(): Extract<P2pTransportStatus, { state: "ready"; transport: "iroh" }> {
         return {
-            apiExposed: this.#serveRequest !== undefined,
+            apiExposed: this.#apiExposed,
             localAddress: this.localAddress(),
             peers: this.#endpointIds.map((endpointId) => ({
                 ...this.#peerStatuses.get(endpointId)!,
@@ -726,6 +762,9 @@ export class IrohNetwork implements P2pTransport {
             address: endpointId,
             ...(previous?.error === undefined ? {} : { error: previous.error }),
             ...(previous?.lastSeenAt === undefined ? {} : { lastSeenAt: previous.lastSeenAt }),
+            ...(this.#peerNames.get(endpointId) === undefined
+                ? {}
+                : { name: this.#peerNames.get(endpointId)! }),
             peerId: identity.instanceId,
             publicKey: identity.publicKey,
             ...(previous?.rttMs === undefined ? {} : { rttMs: previous.rttMs }),
@@ -751,7 +790,13 @@ export class IrohNetwork implements P2pTransport {
             address: endpointId,
             ...(identity === undefined
                 ? {}
-                : { peerId: identity.instanceId, publicKey: identity.publicKey }),
+                : {
+                      ...(this.#peerNames.get(endpointId) === undefined
+                          ? {}
+                          : { name: this.#peerNames.get(endpointId)! }),
+                      peerId: identity.instanceId,
+                      publicKey: identity.publicKey,
+                  }),
             status,
         };
     }

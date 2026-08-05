@@ -5,6 +5,36 @@ export { loadOrCreateIrohSecretKey } from "./loadOrCreateIrohSecretKey.js";
 export { P2pNetwork } from "./P2pNetwork.js";
 export type { CreateP2pNetworkOptions } from "./P2pNetwork.js";
 export {
+    decodeInvitation,
+    encodeInvitation,
+    P2pPairingService,
+    type CreateP2pPairingServiceOptions,
+    type P2pPairingServiceContract,
+} from "./P2pPairingService.js";
+export { loadOrCreateP2pIdentity } from "./loadOrCreateP2pIdentity.js";
+export type { P2pInstanceIdentity, P2pPeerIdentity } from "./P2pIdentity.js";
+export {
+    p2pDirectPeerSchema,
+    p2pIrohPeerSchema,
+    p2pPeerConnectionsSchema,
+    p2pPeerNameSchema,
+    p2pSshPeerSchema,
+    p2pTransportBindingSchema,
+    p2pTrustedPeerSchema,
+    type P2pDirectPeer,
+    type P2pIrohPeer,
+    type P2pPeerConnections,
+    type P2pSshPeer,
+    type P2pTransportBinding,
+    type P2pTrustedPeer,
+} from "./P2pPeer.js";
+export {
+    P2pPeerTrustStore,
+    type P2pPeerTrustStoreContract,
+    type P2pPeerTrustDatabase,
+} from "./P2pPeerTrustStore.js";
+export { recoverP2pPairings } from "./recoverP2pPairings.js";
+export {
     P2P_HTTP_MAXIMUM_BODY_BYTES,
     p2pHttpRequestHeadSchema,
     p2pHttpResponseHeadSchema,

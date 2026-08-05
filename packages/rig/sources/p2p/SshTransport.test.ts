@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
-import type { ConfigP2pPeer, ConfigP2pSshPeer } from "../config/types.js";
+import type { P2pSshPeer, P2pTrustedPeer } from "./P2pPeer.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js";
 import { readP2pHttpRequest, writeP2pHttpResponse } from "./P2pFrameProtocol.js";
@@ -22,7 +22,7 @@ import {
 } from "./SshTransport.js";
 
 const HOST_KEY_HASH = new Uint8Array(createHash("sha256").update("host key").digest());
-const sshSettings: ConfigP2pSshPeer = {
+const sshSettings: P2pSshPeer = {
     auth: "agent",
     host: "rig.example.com",
     hostKeySha256: `SHA256:${Buffer.from(HOST_KEY_HASH).toString("base64")}`,
@@ -45,6 +45,7 @@ describe("SSH P2P transport", () => {
             peers: [
                 {
                     address: "steve@rig.example.com:22",
+                    name: "Peer",
                     peerId: remote.instanceId,
                     publicKey: remote.publicKey,
                     status: "connecting",
@@ -373,11 +374,13 @@ function bytes(values: Uint8Array) {
     return createNodeFrameDuplex(pipe, new PassThrough()).recv;
 }
 
-function peerConfig(identity: P2pInstanceIdentity): ConfigP2pPeer {
+function peerConfig(identity: P2pInstanceIdentity): P2pTrustedPeer {
     return {
+        bindings: [],
+        connections: { ssh: sshSettings },
+        name: "Peer",
         instanceId: identity.instanceId,
         publicKey: identity.publicKey,
-        ssh: sshSettings,
     };
 }
 

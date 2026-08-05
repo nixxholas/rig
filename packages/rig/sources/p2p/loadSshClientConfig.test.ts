@@ -4,10 +4,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { ConfigP2pSshPeer } from "../config/types.js";
+import type { P2pSshPeer } from "./P2pPeer.js";
 import { loadSshClientConfig } from "./loadSshClientConfig.js";
 
-const basePeer: ConfigP2pSshPeer = {
+const basePeer: P2pSshPeer = {
     auth: "agent",
     host: "rig.example.com",
     hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

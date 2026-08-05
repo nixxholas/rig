@@ -100,7 +100,12 @@ export function mergeConfigValues(
         if (config.p2p?.iroh?.relayUrl !== undefined) {
             p2p.iroh.relayUrl = config.p2p.iroh.relayUrl;
         }
-        if (config.p2p?.peers !== undefined) p2p.peers = config.p2p.peers;
+        if (config.p2p?.name !== undefined) p2p.name = config.p2p.name;
+        if (config.p2p?.role !== undefined) {
+            p2p.role = config.p2p.role;
+            if (config.p2p.role === "primary") delete p2p.primaryId;
+        }
+        if (config.p2p?.primaryId !== undefined) p2p.primaryId = config.p2p.primaryId;
         if (config.providerDefaultEnable !== undefined) {
             providerDefaultEnable = config.providerDefaultEnable;
         }

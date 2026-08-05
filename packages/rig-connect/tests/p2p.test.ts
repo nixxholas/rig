@@ -7,6 +7,53 @@ const localInstanceId = "alocalinstance00000000001";
 const localPublicKey = "A".repeat(43);
 
 describe("P2P status subscription", () => {
+    it("creates, joins, reads, and answers daemon pairings", async () => {
+        const pairingId = "apairinginstance000000001";
+        const verifying = {
+            emojis: ["💍", "☔️", "📅", "🍞"],
+            expiresAt: Date.now() + 60_000,
+            id: pairingId,
+            peer: {
+                instanceId: peerId,
+                name: "Build Mac 🛠️",
+                publicKey: "B".repeat(43),
+            },
+            phase: "verifying",
+            role: "joiner",
+        };
+        const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+            const path = new URL(String(input)).pathname;
+            expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
+            if (path === "/p2p/invitations") {
+                return Response.json({ id: pairingId, invitation: "rig://join/payload" });
+            }
+            if (path === "/p2p/joins") {
+                expect(JSON.parse(String(init?.body))).toEqual({
+                    invitation: "rig://join/payload",
+                });
+                return Response.json({ id: pairingId });
+            }
+            if (path.endsWith("/answer")) {
+                expect(JSON.parse(String(init?.body))).toEqual({ accept: true });
+                return Response.json(verifying);
+            }
+            if (path === `/p2p/pairings/${pairingId}`) return Response.json(verifying);
+            return new Response("not found", { status: 404 });
+        });
+        const rig = connectRig({ endpoint: "http://rig.test", fetch, token: "secret" });
+
+        await expect(rig.createP2pInvitation()).resolves.toEqual({
+            id: pairingId,
+            invitation: "rig://join/payload",
+        });
+        await expect(rig.joinP2pInvitation("rig://join/payload")).resolves.toEqual({
+            id: pairingId,
+        });
+        await expect(rig.getP2pPairing(pairingId)).resolves.toEqual(verifying);
+        await expect(rig.answerP2pVerification(pairingId, true)).resolves.toEqual(verifying);
+        rig.close();
+    });
+
     it("loads the endpoint identity and applies live peer health updates", async () => {
         const encoder = new TextEncoder();
         let stream!: ReadableStreamDefaultController<Uint8Array>;

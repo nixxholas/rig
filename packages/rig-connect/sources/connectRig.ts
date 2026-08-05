@@ -88,6 +88,9 @@ import type {
     HappyCloudSessionBlobResponse,
     HappyCloudStatus,
     P2pStatus,
+    CreateP2pInvitationResponse,
+    JoinP2pInvitationResponse,
+    P2pPairingState,
     SendMurmurFriendRequestResponse,
     SignupMurmurAccountRequest,
     SignupMurmurAccountResponse,
@@ -131,6 +134,9 @@ import {
     happyCloudStatusSchema,
     p2pStatusChangedEventSchema,
     p2pStatusSchema,
+    createP2pInvitationResponseSchema,
+    joinP2pInvitationResponseSchema,
+    p2pPairingStateSchema,
     listMurmurContactsResponseSchema,
     listMurmurFriendRequestsResponseSchema,
     listPluginsResponseSchema,
@@ -596,6 +602,10 @@ export interface RigConnection {
     connectHappyCloud: (options: RigHappyCloudSubscriptionOptions) => RigHappyCloudConnection;
     /** Follows authenticated P2P transports and trusted peer reachability. */
     connectP2p: (options: RigP2pSubscriptionOptions) => RigP2pConnection;
+    createP2pInvitation: () => Promise<CreateP2pInvitationResponse>;
+    joinP2pInvitation: (invitation: string) => Promise<JoinP2pInvitationResponse>;
+    getP2pPairing: (id: string) => Promise<P2pPairingState>;
+    answerP2pVerification: (id: string, accept: boolean) => Promise<P2pPairingState>;
     /**
      * Follows how much of each provider account's plan has been used.
      *
@@ -3170,6 +3180,38 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return { data, status: response.status };
     };
 
+    const requestP2pPairing = async <Schema extends TSchema>(
+        path: string,
+        schema: Schema,
+        init: RequestInit = {},
+    ): Promise<Static<Schema>> => {
+        const response = await requestJson(path, init);
+        try {
+            return Value.Decode(schema, response.data);
+        } catch {
+            throw new Error("Rig returned an invalid P2P pairing response.");
+        }
+    };
+
+    const createP2pInvitation: RigConnection["createP2pInvitation"] = () =>
+        requestP2pPairing("p2p/invitations", createP2pInvitationResponseSchema, {
+            method: "POST",
+        });
+    const joinP2pInvitation: RigConnection["joinP2pInvitation"] = (invitation) =>
+        requestP2pPairing("p2p/joins", joinP2pInvitationResponseSchema, {
+            body: JSON.stringify({ invitation }),
+            headers: { "content-type": "application/json" },
+            method: "POST",
+        });
+    const getP2pPairing: RigConnection["getP2pPairing"] = (id) =>
+        requestP2pPairing(`p2p/pairings/${encodeURIComponent(id)}`, p2pPairingStateSchema);
+    const answerP2pVerification: RigConnection["answerP2pVerification"] = (id, accept) =>
+        requestP2pPairing(`p2p/pairings/${encodeURIComponent(id)}/answer`, p2pPairingStateSchema, {
+            body: JSON.stringify({ accept }),
+            headers: { "content-type": "application/json" },
+            method: "POST",
+        });
+
     const requestSessionShare = async <T extends TSchema>(
         path: string,
         schema: T,
@@ -5189,6 +5231,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     // them gets it loaded and followed without opening a view of its own.
     if (options.onSessionFinished !== undefined) startGroupEntry(createGroupEntry());
     return {
+        answerP2pVerification,
         archiveWorkspace,
         compatibility: () => compatibility,
         markSessionRead,
@@ -5269,6 +5312,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectSession,
         connectTerminalPresence,
         connectTimeline,
+        createP2pInvitation,
         createSessionShare,
         createWorkspace,
         createSession,
@@ -5285,6 +5329,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         getHappyCloudProfile,
         getHappyCloudSessionBlob,
         getHappyCloudStatus,
+        getP2pPairing,
+        joinP2pInvitation,
         listMurmurContacts,
         listMurmurFriends,
         listMurmurFriendRequests,

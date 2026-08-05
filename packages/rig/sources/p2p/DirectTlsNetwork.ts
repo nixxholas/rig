@@ -8,7 +8,7 @@ import {
     type TLSSocket,
 } from "node:tls";
 
-import type { ConfigDirectTransport, ConfigP2pPeer } from "../config/types.js";
+import type { ConfigDirectTransport } from "../config/types.js";
 import type { P2pPeerStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import {
     createDirectTlsCredentials,
@@ -27,6 +27,7 @@ import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js"
 import { runP2pInitiatorHello, runP2pResponderHello } from "./P2pHelloProtocol.js";
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import { encodeBase64Url, type P2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.js";
+import type { P2pTrustedPeer } from "./P2pPeer.js";
 import type { P2pTransport } from "./P2pTransport.js";
 import {
     createClosedP2pTunnelStream,
@@ -65,6 +66,7 @@ interface DirectPeer {
 }
 
 export interface CreateDirectTlsNetworkOptions {
+    apiExposed?: boolean;
     closeTimeoutMs?: number;
     commitPeer?: (identity: P2pPeerIdentity, publicKey: string) => Promise<void>;
     config: ConfigDirectTransport;
@@ -72,7 +74,7 @@ export interface CreateDirectTlsNetworkOptions {
     identity: P2pInstanceIdentity;
     maximumConnections?: number;
     onStatusChange?: (status: P2pTransportStatus) => void;
-    peers: readonly ConfigP2pPeer[];
+    peers: readonly P2pTrustedPeer[];
     serveRequest?: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
     startPings?: boolean;
@@ -81,6 +83,7 @@ export interface CreateDirectTlsNetworkOptions {
 
 export class DirectTlsNetwork implements P2pTransport {
     readonly kind = "direct" as const;
+    readonly #apiExposed: boolean;
     readonly #abort = new AbortController();
     readonly #commitPeer: CreateDirectTlsNetworkOptions["commitPeer"];
     readonly #closeTimeoutMs: number;
@@ -104,6 +107,9 @@ export class DirectTlsNetwork implements P2pTransport {
     #server: TlsServer | undefined;
 
     private constructor(options: CreateDirectTlsNetworkOptions, credentials: DirectTlsCredentials) {
+        this.#apiExposed =
+            options.apiExposed ??
+            (options.serveRequest !== undefined || options.serveTunnel !== undefined);
         this.#commitPeer = options.commitPeer;
         this.#closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
         this.#config = options.config;
@@ -116,9 +122,9 @@ export class DirectTlsNetwork implements P2pTransport {
         this.#startPings = options.startPings ?? true;
         this.#validatePeer = options.validatePeer;
         for (const configured of options.peers) {
-            if (configured.direct === undefined) continue;
+            if (configured.connections.direct === undefined) continue;
             const peer: DirectPeer = {
-                address: configured.direct.address,
+                address: configured.connections.direct.address,
                 instanceId: configured.instanceId,
                 publicKey: configured.publicKey,
             };
@@ -129,6 +135,7 @@ export class DirectTlsNetwork implements P2pTransport {
             this.#peerByPublicKey.set(peer.publicKey, peer);
             this.#peerStatuses.set(peer.instanceId, {
                 address: peer.address,
+                name: configured.name,
                 peerId: peer.instanceId,
                 publicKey: peer.publicKey,
                 status: "connecting",
@@ -241,7 +248,7 @@ export class DirectTlsNetwork implements P2pTransport {
 
     status(): Extract<P2pTransportStatus, { state: "ready"; transport: "direct" }> {
         return {
-            apiExposed: this.#serveRequest !== undefined || this.#serveTunnel !== undefined,
+            apiExposed: this.#apiExposed,
             ...(this.#localAddress === undefined ? {} : { localAddress: this.#localAddress }),
             peers: [...this.#peerById.keys()].map((peerId) => ({
                 ...this.#peerStatuses.get(peerId)!,

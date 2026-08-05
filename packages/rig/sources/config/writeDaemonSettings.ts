@@ -5,6 +5,7 @@ import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 export async function writeDaemonSettings(
     settings: Pick<DaemonSettings, "inferenceMaxRetries" | "durableGlobalEventQueue">,
     options: LoadConfigOptions = {},
+    p2pName?: string,
 ): Promise<void> {
     const loaded = await loadConfig(options);
     await updateRuntimeConfig(loaded.paths.runtime, async () => {
@@ -12,6 +13,14 @@ export async function writeDaemonSettings(
         return {
             ...(runtime.defaults === undefined ? {} : { defaults: runtime.defaults }),
             ...(runtime.presence === undefined ? {} : { presence: runtime.presence }),
+            ...(runtime.p2p === undefined && p2pName === undefined
+                ? {}
+                : {
+                      p2p: {
+                          ...runtime.p2p,
+                          ...(p2pName === undefined ? {} : { name: p2pName }),
+                      },
+                  }),
             ...(runtime.providerDefaultEnable === undefined
                 ? {}
                 : { providerDefaultEnable: runtime.providerDefaultEnable }),

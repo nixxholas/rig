@@ -1672,6 +1672,10 @@ describe("createProtocolHttpServer", () => {
         try {
             await expect(client.getDaemonConfig()).resolves.toEqual({
                 config: {
+                    p2p: {
+                        name: "Rig",
+                        role: "primary",
+                    },
                     settings: {
                         inferenceMaxRetries: 10,
                         durableGlobalEventQueue: false,
@@ -1744,6 +1748,10 @@ describe("createProtocolHttpServer", () => {
                 }),
             ).resolves.toEqual({
                 config: {
+                    p2p: {
+                        name: "Rig",
+                        role: "primary",
+                    },
                     settings: {
                         inferenceMaxRetries: 7,
                         durableGlobalEventQueue: true,
@@ -1782,6 +1790,10 @@ describe("createProtocolHttpServer", () => {
             await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
             await expect(client.getDaemonConfig()).resolves.toEqual({
                 config: {
+                    p2p: {
+                        name: "Rig",
+                        role: "primary",
+                    },
                     settings: {
                         inferenceMaxRetries: 7,
                         durableGlobalEventQueue: false,
@@ -3509,7 +3521,8 @@ async function startServer(
         ...(options.onDaemonSettingsChange === undefined
             ? {}
             : {
-                  onDaemonSettingsChange: options.onDaemonSettingsChange,
+                  onDaemonConfigChange: (config) =>
+                      options.onDaemonSettingsChange!(config.settings),
               }),
         store,
         ...(options.taskDrain === undefined ? {} : { taskDrain: options.taskDrain }),

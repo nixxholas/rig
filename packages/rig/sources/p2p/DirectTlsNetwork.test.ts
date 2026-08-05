@@ -25,7 +25,9 @@ describe("direct TLS P2P transport", () => {
             identity: firstIdentity,
             peers: [
                 {
-                    direct: { address: secondAddress },
+                    bindings: [],
+                    connections: { direct: { address: secondAddress } },
+                    name: "Peer",
                     instanceId: secondIdentity.instanceId,
                     publicKey: secondIdentity.publicKey,
                 },
@@ -37,7 +39,9 @@ describe("direct TLS P2P transport", () => {
             identity: secondIdentity,
             peers: [
                 {
-                    direct: { address: firstAddress },
+                    bindings: [],
+                    connections: { direct: { address: firstAddress } },
+                    name: "Peer",
                     instanceId: firstIdentity.instanceId,
                     publicKey: firstIdentity.publicKey,
                 },
@@ -79,7 +83,9 @@ describe("direct TLS P2P transport", () => {
             maximumConnections: 1,
             peers: [
                 {
-                    direct: { address: serverAddress },
+                    bindings: [],
+                    connections: { direct: { address: serverAddress } },
+                    name: "Peer",
                     instanceId: serverIdentity.instanceId,
                     publicKey: serverIdentity.publicKey,
                 },
@@ -91,7 +97,9 @@ describe("direct TLS P2P transport", () => {
             identity: serverIdentity,
             peers: [
                 {
-                    direct: { address: clientAddress },
+                    bindings: [],
+                    connections: { direct: { address: clientAddress } },
+                    name: "Peer",
                     instanceId: clientIdentity.instanceId,
                     publicKey: clientIdentity.publicKey,
                 },
@@ -169,7 +177,9 @@ describe("direct TLS P2P transport", () => {
             identity: firstIdentity,
             peers: [
                 {
-                    direct: { address: `127.0.0.1:${String(secondPort)}` },
+                    bindings: [],
+                    connections: { direct: { address: `127.0.0.1:${String(secondPort)}` } },
+                    name: "Peer",
                     instanceId: secondIdentity.instanceId,
                     publicKey: secondIdentity.publicKey,
                 },
@@ -180,7 +190,9 @@ describe("direct TLS P2P transport", () => {
             identity: impostorIdentity,
             peers: [
                 {
-                    direct: { address: `127.0.0.1:${String(firstPort)}` },
+                    bindings: [],
+                    connections: { direct: { address: `127.0.0.1:${String(firstPort)}` } },
+                    name: "Peer",
                     instanceId: firstIdentity.instanceId,
                     publicKey: firstIdentity.publicKey,
                 },
@@ -236,7 +248,9 @@ describe("direct TLS P2P transport", () => {
             maximumConnections: 2,
             peers: [
                 {
-                    direct: { address: serverAddress },
+                    bindings: [],
+                    connections: { direct: { address: serverAddress } },
+                    name: "Peer",
                     instanceId: serverIdentity.instanceId,
                     publicKey: serverIdentity.publicKey,
                 },
@@ -249,7 +263,9 @@ describe("direct TLS P2P transport", () => {
             identity: serverIdentity,
             peers: [
                 {
-                    direct: { address: clientAddress },
+                    bindings: [],
+                    connections: { direct: { address: clientAddress } },
+                    name: "Peer",
                     instanceId: clientIdentity.instanceId,
                     publicKey: clientIdentity.publicKey,
                 },

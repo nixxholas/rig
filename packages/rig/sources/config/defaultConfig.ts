@@ -1,3 +1,5 @@
+import { hostname } from "node:os";
+
 import type { RigConfig } from "./types.js";
 import { DEFAULT_INFERENCE_MAX_RETRIES } from "./inferenceRetrySettings.js";
 
@@ -16,11 +18,12 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
     p2p: {
         direct: {},
         enableDirect: false,
-        enableIroh: false,
+        enableIroh: true,
         enableSsh: false,
         exposeApi: false,
         iroh: {},
-        peers: [],
+        name: hostname(),
+        role: "primary",
     },
     presence: { states: {} },
     providerDefaultEnable: true,

@@ -4,12 +4,12 @@ import { open } from "node:fs/promises";
 
 import type { ConnectConfig } from "ssh2";
 
-import type { ConfigP2pSshPeer } from "../config/types.js";
+import type { P2pSshPeer } from "./P2pPeer.js";
 
 const MAXIMUM_PRIVATE_KEY_BYTES = 1024 * 1024;
 
 export async function loadSshClientConfig(
-    peer: ConfigP2pSshPeer,
+    peer: P2pSshPeer,
     environment: NodeJS.ProcessEnv = process.env,
 ): Promise<ConnectConfig> {
     const authentication =
@@ -34,18 +34,16 @@ export async function loadSshClientConfig(
     };
 }
 
-function requireAgentSocket(peer: ConfigP2pSshPeer, environment: NodeJS.ProcessEnv): string {
+function requireAgentSocket(peer: P2pSshPeer, environment: NodeJS.ProcessEnv): string {
     const socket = peer.agentSocketPath ?? environment.SSH_AUTH_SOCK?.trim();
     if (socket === undefined || socket.length === 0) {
-        throw new Error(
-            "SSH agent authentication requires p2p.peers.ssh.agent_socket_path or SSH_AUTH_SOCK.",
-        );
+        throw new Error("The trusted SSH connection needs an agent socket path or SSH_AUTH_SOCK.");
     }
     return socket;
 }
 
 async function readPrivateKeyAuthentication(
-    peer: ConfigP2pSshPeer,
+    peer: P2pSshPeer,
     environment: NodeJS.ProcessEnv,
 ): Promise<Pick<ConnectConfig, "passphrase" | "privateKey">> {
     if (peer.privateKeyPath === undefined) {

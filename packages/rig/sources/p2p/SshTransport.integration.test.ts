@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Server, utils } from "ssh2";
 import { describe, expect, it } from "vitest";
 
-import type { ConfigP2pPeer } from "../config/types.js";
+import type { P2pTrustedPeer } from "./P2pPeer.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import { SshBridgeResponder } from "./SshBridgeResponder.js";
 import { SshTransport } from "./SshTransport.js";
@@ -24,9 +24,11 @@ describe("SSH P2P transport with a real SSH connection", () => {
             identity: responderIdentity,
             peers: [
                 {
+                    bindings: [],
+                    connections: { ssh: placeholderSsh() },
+                    name: "Peer",
                     instanceId: initiatorIdentity.instanceId,
                     publicKey: initiatorIdentity.publicKey,
-                    ssh: placeholderSsh(),
                 },
             ],
             serveRequest: async (_peerId, request) => ({
@@ -68,10 +70,12 @@ describe("SSH P2P transport with a real SSH connection", () => {
             remoteRig: "rig",
             username: "test",
         };
-        const peer: ConfigP2pPeer = {
+        const peer: P2pTrustedPeer = {
+            bindings: [],
+            connections: { ssh },
+            name: "Peer",
             instanceId: responderIdentity.instanceId,
             publicKey: responderIdentity.publicKey,
-            ssh,
         };
         const transport = SshTransport.create({
             identity: initiatorIdentity,

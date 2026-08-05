@@ -31,7 +31,11 @@ describe("serving the local daemon API to an authenticated P2P peer", () => {
             response.end(Buffer.concat(chunks));
         });
         await listen(server, socketPath);
-        const serve = createServeP2pHttpRequest({ socketPath, token: "remote-local-token" });
+        const serve = createServeP2pHttpRequest({
+            allowRequest: () => true,
+            socketPath,
+            token: "remote-local-token",
+        });
         try {
             const alreadyCancelled = new AbortController();
             alreadyCancelled.abort();
@@ -52,6 +56,7 @@ describe("serving the local daemon API to an authenticated P2P peer", () => {
                         authorization: "must-not-cross",
                         cookie: "must-not-cross",
                         "content-type": "text/plain",
+                        "x-rig-p2p-peer": "spoofed-peer",
                     },
                     method: "POST",
                     path: "/echo",
@@ -74,6 +79,25 @@ describe("serving the local daemon API to an authenticated P2P peer", () => {
             );
             expect(protectedResponse.status).toBe(403);
             expect(seen).toHaveLength(1);
+
+            const narrow = createServeP2pHttpRequest({
+                allowRequest: (_peerId, request) => request.path === "/config",
+                socketPath,
+                token: "remote-local-token",
+            });
+            const denied = await narrow(
+                "trusted-peer",
+                { body: new Uint8Array(), headers: {}, method: "GET", path: "/echo" },
+                new AbortController().signal,
+            );
+            expect(denied.status).toBe(403);
+            const allowed = await narrow(
+                "trusted-peer",
+                { body: new Uint8Array(), headers: {}, method: "GET", path: "/config" },
+                new AbortController().signal,
+            );
+            expect(allowed.status).toBe(201);
+            expect(seen.at(-1)?.url).toBe("/config");
 
             const cancellation = new AbortController();
             const streamed = await serve(

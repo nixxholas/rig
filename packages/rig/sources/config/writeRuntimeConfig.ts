@@ -19,6 +19,7 @@ export async function writeRuntimeConfigInsideLock(
     const settings = config.settings;
     const presence = config.presence;
     const providers = config.providers;
+    const p2p = config.p2p;
     const theme = config.theme;
     const workspace = config.workspace;
     const document: {
@@ -48,6 +49,11 @@ export async function writeRuntimeConfigInsideLock(
             until?: string;
         };
         providers?: Record<string, unknown>;
+        p2p?: {
+            name?: string;
+            primary_id?: string;
+            role?: string;
+        };
         workspace?: {
             setup_commands?: readonly string[];
         };
@@ -127,6 +133,14 @@ export async function writeRuntimeConfigInsideLock(
 
     if (providers !== undefined || config.providerDefaultEnable !== undefined) {
         document.providers = serializeProviders(providers ?? {}, config.providerDefaultEnable);
+    }
+
+    if (p2p?.role !== undefined || p2p?.primaryId !== undefined || p2p?.name !== undefined) {
+        document.p2p = {
+            ...(p2p.name === undefined ? {} : { name: p2p.name }),
+            ...(p2p.primaryId === undefined ? {} : { primary_id: p2p.primaryId }),
+            ...(p2p.role === undefined ? {} : { role: p2p.role }),
+        };
     }
 
     if (theme !== undefined) {

@@ -522,6 +522,22 @@ export {
     type P2pTransportStatus,
 } from "./P2pProtocol.js";
 export {
+    answerP2pVerificationRequestSchema,
+    createP2pInvitationResponseSchema,
+    joinP2pInvitationRequestSchema,
+    joinP2pInvitationResponseSchema,
+    p2pInvitationPayloadSchema,
+    p2pPairingPeerSchema,
+    p2pPairingStateSchema,
+    type AnswerP2pVerificationRequest,
+    type CreateP2pInvitationResponse,
+    type JoinP2pInvitationRequest,
+    type JoinP2pInvitationResponse,
+    type P2pInvitationPayload,
+    type P2pPairingPeer,
+    type P2pPairingState,
+} from "./P2pPairingProtocol.js";
+export {
     SESSION_DRAFT_MAX_CLOCK_SKEW_MS,
     SESSION_DRAFT_MAX_LENGTH,
     SESSION_TRANSCRIPT_NOTICE_LIMIT,

@@ -1,6 +1,5 @@
 import type { Duplex } from "node:stream";
 
-import type { ConfigP2pPeer } from "../config/types.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import {
     readP2pHttpRequest,
@@ -11,6 +10,7 @@ import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js"
 import { runP2pResponderHello } from "./P2pHelloProtocol.js";
 import type { ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pInstanceIdentity, P2pPeerIdentity } from "./P2pIdentity.js";
+import type { P2pTrustedPeer } from "./P2pPeer.js";
 import type { ServeP2pTunnel } from "./P2pTunnel.js";
 import {
     readP2pTunnelRequest,
@@ -34,7 +34,7 @@ const MAXIMUM_BRIDGES = 32;
 export interface CreateSshBridgeResponderOptions {
     commitPeer?: (identity: P2pPeerIdentity, binding: string) => Promise<void>;
     identity: P2pInstanceIdentity;
-    peers: readonly ConfigP2pPeer[];
+    peers: readonly P2pTrustedPeer[];
     serveRequest: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
     validatePeer?: (identity: P2pPeerIdentity, binding: string) => Promise<void>;
@@ -43,7 +43,7 @@ export interface CreateSshBridgeResponderOptions {
 export class SshBridgeResponder {
     readonly #active = new Set<Duplex>();
     readonly #options: CreateSshBridgeResponderOptions;
-    readonly #peers = new Map<string, ConfigP2pPeer>();
+    readonly #peers = new Map<string, P2pTrustedPeer>();
 
     constructor(options: CreateSshBridgeResponderOptions) {
         this.#options = options;

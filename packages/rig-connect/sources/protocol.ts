@@ -2502,6 +2502,7 @@ export const p2pPeerStatusSchema = Type.Object(
         address: Type.String({ minLength: 1 }),
         error: Type.Optional(Type.String()),
         lastSeenAt: Type.Optional(Type.Number()),
+        name: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
         peerId: Type.Optional(
             Type.String({
                 maxLength: 32,
@@ -2575,6 +2576,7 @@ export const p2pStatusSchema = Type.Object(
                 pattern: "^[a-z][a-z0-9]+$",
             }),
         ),
+        name: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
         publicKey: Type.Optional(
             Type.String({
                 maxLength: 43,
@@ -2587,6 +2589,89 @@ export const p2pStatusSchema = Type.Object(
     { additionalProperties: false },
 );
 export type P2pStatus = Static<typeof p2pStatusSchema>;
+
+const p2pPairingInstanceIdSchema = Type.String({
+    maxLength: 32,
+    minLength: 2,
+    pattern: "^[a-z][a-z0-9]+$",
+});
+const p2pPairingPublicKeySchema = Type.String({
+    maxLength: 43,
+    minLength: 43,
+    pattern: "^[A-Za-z0-9_-]+$",
+});
+
+export const createP2pInvitationResponseSchema = Type.Object(
+    {
+        id: p2pPairingInstanceIdSchema,
+        invitation: Type.String({ maxLength: 8_192, minLength: 1 }),
+    },
+    { additionalProperties: false },
+);
+export type CreateP2pInvitationResponse = Static<typeof createP2pInvitationResponseSchema>;
+
+export const joinP2pInvitationResponseSchema = Type.Object(
+    { id: p2pPairingInstanceIdSchema },
+    { additionalProperties: false },
+);
+export type JoinP2pInvitationResponse = Static<typeof joinP2pInvitationResponseSchema>;
+
+export const p2pPairingPeerSchema = Type.Object(
+    {
+        instanceId: p2pPairingInstanceIdSchema,
+        name: Type.String({
+            maxLength: 128,
+            minLength: 1,
+            pattern: "^[^\\u0000-\\u001f\\u007f]+$",
+        }),
+        publicKey: p2pPairingPublicKeySchema,
+    },
+    { additionalProperties: false },
+);
+const p2pPairingBase = {
+    expiresAt: Type.Integer({ minimum: 0 }),
+    id: p2pPairingInstanceIdSchema,
+    role: Type.Union([Type.Literal("inviter"), Type.Literal("joiner")]),
+};
+export const p2pPairingStateSchema = Type.Union([
+    Type.Object(
+        {
+            ...p2pPairingBase,
+            phase: Type.Union([Type.Literal("connecting"), Type.Literal("waiting")]),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...p2pPairingBase,
+            emojis: Type.Tuple([Type.String(), Type.String(), Type.String(), Type.String()]),
+            peer: p2pPairingPeerSchema,
+            phase: Type.Literal("verifying"),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...p2pPairingBase,
+            peer: p2pPairingPeerSchema,
+            phase: Type.Literal("connected"),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...p2pPairingBase,
+            error: Type.Optional(Type.String({ maxLength: 1_024, minLength: 1 })),
+            phase: Type.Union([
+                Type.Literal("expired"),
+                Type.Literal("failed"),
+                Type.Literal("rejected"),
+            ]),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export type P2pPairingState = Static<typeof p2pPairingStateSchema>;
 export const p2pStatusChangedEventSchema = Type.Object(
     {
         createdAt: Type.Number(),

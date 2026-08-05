@@ -4,12 +4,16 @@ import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "../p2
 import { selectP2pRequestHeaders, selectP2pResponseHeaders } from "./p2pHttpHeaders.js";
 
 export function createServeP2pHttpRequest(options: {
+    allowRequest: (peerId: string, request: P2pHttpRequest) => boolean;
     socketPath: string;
     token: string;
 }): ServeP2pHttpRequest {
     return async (peerId, request, signal) => {
         if (isProtectedP2pPath(request.path)) {
             return jsonResponse(403, "That daemon API route is not shared over P2P.");
+        }
+        if (!options.allowRequest(peerId, request)) {
+            return jsonResponse(403, "That daemon API route is not available to this P2P peer.");
         }
         return await sendToLocalDaemon(options, peerId, request, signal);
     };

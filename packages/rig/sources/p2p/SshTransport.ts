@@ -1,6 +1,5 @@
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 
-import type { ConfigP2pPeer, ConfigP2pSshPeer } from "../config/types.js";
 import type { P2pPeerStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import {
@@ -21,6 +20,7 @@ import {
 import { readP2pTunnelResponse, writeP2pTunnelRequest } from "./P2pTunnelProtocol.js";
 import { createP2pTunnelStream } from "./P2pTunnelStream.js";
 import { loadSshClientConfig } from "./loadSshClientConfig.js";
+import type { P2pSshPeer, P2pTrustedPeer } from "./P2pPeer.js";
 import type { P2pTransport } from "./P2pTransport.js";
 
 /**
@@ -60,7 +60,7 @@ interface SshPeer {
     address: string;
     instanceId: string;
     publicKey: string;
-    ssh: ConfigP2pSshPeer;
+    ssh: P2pSshPeer;
 }
 
 export interface CreateSshTransportOptions {
@@ -70,8 +70,8 @@ export interface CreateSshTransportOptions {
     identity: P2pInstanceIdentity;
     onStatusChange?: (status: P2pTransportStatus) => void;
     /** Replaced in tests so the transport can run without a live SSH server. */
-    openChannel?: (peer: ConfigP2pSshPeer, signal: AbortSignal) => Promise<SshBridgeChannel>;
-    peers: readonly ConfigP2pPeer[];
+    openChannel?: (peer: P2pSshPeer, signal: AbortSignal) => Promise<SshBridgeChannel>;
+    peers: readonly P2pTrustedPeer[];
     validatePeer?: (identity: P2pPeerIdentity, channelBinding: string) => Promise<void>;
 }
 
@@ -113,19 +113,20 @@ export class SshTransport implements P2pTransport {
                     ...(this.#environment === undefined ? {} : { environment: this.#environment }),
                 }));
         for (const configured of options.peers) {
-            if (configured.ssh === undefined) continue;
+            if (configured.connections.ssh === undefined) continue;
             if (configured.instanceId === this.#identity.instanceId) {
                 throw new Error("An SSH P2P peer cannot use this Rig instance's own ID.");
             }
             const peer: SshPeer = {
-                address: formatSshAddress(configured.ssh),
+                address: formatSshAddress(configured.connections.ssh),
                 instanceId: configured.instanceId,
                 publicKey: configured.publicKey,
-                ssh: configured.ssh,
+                ssh: configured.connections.ssh,
             };
             this.#peerById.set(peer.instanceId, peer);
             this.#peerStatuses.set(peer.instanceId, {
                 address: peer.address,
+                name: configured.name,
                 peerId: peer.instanceId,
                 publicKey: peer.publicKey,
                 status: "connecting",
@@ -436,13 +437,13 @@ function assertHostKeyHash(hostKeyHash: Uint8Array): void {
     }
 }
 
-export function formatSshAddress(peer: ConfigP2pSshPeer): string {
+export function formatSshAddress(peer: P2pSshPeer): string {
     return `${peer.username}@${peer.host}:${peer.port}`;
 }
 
 /** Runs `<remoteRig> p2p bridge --stdio` over a freshly authenticated SSH connection. */
 export async function openSshBridgeChannel(
-    peer: ConfigP2pSshPeer,
+    peer: P2pSshPeer,
     signal: AbortSignal,
     options: { connectTimeoutMs?: number; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<SshBridgeChannel> {

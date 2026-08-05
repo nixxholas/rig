@@ -14,7 +14,9 @@ import { writePresenceSelection } from "./writePresenceSelection.js";
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 import { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
 import { writeDaemonSettings } from "./writeDaemonSettings.js";
+import { writeP2pNodeSettings } from "./writeP2pNodeSettings.js";
 import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
+import { updateRuntimePreferences } from "./updateRuntimePreferences.js";
 
 describe("config", () => {
     it("parses and unions protected paths", () => {
@@ -64,6 +66,33 @@ describe("config", () => {
             await rm(root, { recursive: true, force: true });
         }
     });
+
+    it("keeps a concurrently assigned primary through ordinary TUI preference writes", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-runtime-primary-"));
+        const runtimePath = join(root, "runtime.toml");
+        try {
+            await writeRuntimeConfig(runtimePath, {
+                p2p: {
+                    name: "Build Mac",
+                    primaryId: "aprimaryinstance000000001",
+                    role: "secondary",
+                },
+            });
+            await updateRuntimePreferences(runtimePath, {
+                defaults: { effort: "high", modelId: "model", providerId: "codex" },
+                settings: { showUsage: true },
+            });
+
+            expect(parseConfigToml(await readFile(runtimePath, "utf8")).p2p).toMatchObject({
+                name: "Build Mac",
+                primaryId: "aprimaryinstance000000001",
+                role: "secondary",
+            });
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it("falls back to happy.toml when rig.toml is absent", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-config-"));
         try {
@@ -230,30 +259,21 @@ enabled = true
         });
     });
 
-    it("parses machine-level peers with several transports", () => {
+    it("parses P2P transports and node ownership without peer trust in config", () => {
         expect(
             parseConfigToml(`
 [p2p]
+name = "Build Mac 🛠️"
 enable_direct = true
 enable_iroh = true
 enable_ssh = true
 expose_api = true
+role = "secondary"
+primary_id = "ck1234567890abcdefghijkl"
 [p2p.direct]
 listen = "0.0.0.0:7443"
 [p2p.iroh]
 relay_url = "https://relay.example.com"
-[[p2p.peers]]
-instance_id = "ck1234567890abcdefghijkl"
-public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-[p2p.peers.direct]
-address = "rig.example.com:7443"
-[p2p.peers.iroh]
-endpoint_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-[p2p.peers.ssh]
-auth = "agent"
-host = "rig.example.com"
-host_key_sha256 = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-username = "steve"
 `),
         ).toEqual({
             p2p: {
@@ -263,59 +283,21 @@ username = "steve"
                 enableSsh: true,
                 exposeApi: true,
                 iroh: { relayUrl: "https://relay.example.com" },
-                peers: [
-                    {
-                        direct: { address: "rig.example.com:7443" },
-                        instanceId: "ck1234567890abcdefghijkl",
-                        iroh: {
-                            endpointId:
-                                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                        },
-                        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                        ssh: {
-                            auth: "agent",
-                            host: "rig.example.com",
-                            hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                            port: 22,
-                            remoteRig: "rig",
-                            username: "steve",
-                        },
-                    },
-                ],
+                name: "Build Mac 🛠️",
+                primaryId: "ck1234567890abcdefghijkl",
+                role: "secondary",
             },
         });
     });
 
-    it("allows an identity-only peer as an inbound SSH allowlist entry", () => {
-        expect(
+    it("rejects the removed P2P peer trust config", () => {
+        expect(() =>
             parseConfigToml(`
 [[p2p.peers]]
 instance_id = "ck1234567890abcdefghijkl"
 public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 `),
-        ).toMatchObject({
-            p2p: {
-                peers: [
-                    {
-                        instanceId: "ck1234567890abcdefghijkl",
-                        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                    },
-                ],
-            },
-        });
-    });
-
-    it("rejects malformed or duplicate P2P peer identities", () => {
-        expect(() =>
-            parseConfigToml(
-                '[[p2p.peers]]\ninstance_id = "ck1234567890abcdefghijkl"\npublic_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"\n[p2p.peers.iroh]\nendpoint_id = "not-an-endpoint"\n',
-            ),
-        ).toThrow("64-character Iroh endpoint ID");
-        expect(() =>
-            parseConfigToml(
-                '[[p2p.peers]]\ninstance_id = "ck1234567890abcdefghijkl"\npublic_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"\n[p2p.peers.direct]\naddress = "one.example:7443"\n[[p2p.peers]]\ninstance_id = "ck1234567890abcdefghijkl"\npublic_key = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"\n[p2p.peers.direct]\naddress = "two.example:7443"\n',
-            ),
-        ).toThrow("unique identities and public keys");
+        ).toThrow("Unknown p2p.peers setting");
     });
 
     it("parses ordered workspace setup commands", () => {
@@ -709,11 +691,7 @@ show_usage = true
 workflows = true
 [p2p]
 enable_iroh = true
-[[p2p.peers]]
-instance_id = "ck1234567890abcdefghijkl"
-public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-[p2p.peers.iroh]
-endpoint_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+name = "Injected peer name"
 [providers]
 default_enable = false
 [providers.codex]
@@ -770,11 +748,12 @@ inference_max_retries = 8
             expect(loaded.config.p2p).toEqual({
                 direct: {},
                 enableDirect: false,
-                enableIroh: false,
+                enableIroh: true,
                 enableSsh: false,
                 exposeApi: false,
                 iroh: {},
-                peers: [],
+                name: DEFAULT_RIG_CONFIG.p2p.name,
+                role: "primary",
             });
             expect(loaded.config.providerDefaultEnable).toBe(true);
             expect(loaded.config.providers).toEqual({
@@ -912,6 +891,16 @@ inference_max_retries = 8
                     "workflows = false",
                     "workspaces = true",
                     "",
+                    "[p2p]",
+                    "enable_direct = false",
+                    "enable_iroh = true",
+                    "enable_ssh = false",
+                    "expose_api = false",
+                    `name = "${DEFAULT_RIG_CONFIG.p2p.name}"`,
+                    'role = "primary"',
+                    "",
+                    "[p2p.direct]",
+                    "[p2p.iroh]",
                     "[providers]",
                     "default_enable = false",
                     "",
@@ -1099,6 +1088,35 @@ inference_max_retries = 8
                     warning: "ansi:202",
                 },
             });
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("persists secondary ownership and a printable node name in runtime.toml", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-p2p-node-config-"));
+        const env = {
+            RIG_CONFIGURATION_DIRECTORY: root,
+            RIG_HOME: root,
+        } as NodeJS.ProcessEnv;
+        try {
+            await writeP2pNodeSettings(
+                {
+                    name: "Build Mac 🛠️",
+                    primaryId: "ck1234567890abcdefghijkl",
+                    role: "secondary",
+                },
+                { env },
+            );
+            const loaded = await loadConfig({ env });
+            expect(loaded.config.p2p).toMatchObject({
+                name: "Build Mac 🛠️",
+                primaryId: "ck1234567890abcdefghijkl",
+                role: "secondary",
+            });
+            expect(await readFile(loaded.paths.runtime, "utf8")).toContain(
+                'primary_id = "ck1234567890abcdefghijkl"',
+            );
         } finally {
             await rm(root, { recursive: true, force: true });
         }
