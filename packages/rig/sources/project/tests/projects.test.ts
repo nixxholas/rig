@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { renameSync, rmSync } from "node:fs";
 import {
     access,
     mkdir,
@@ -1834,8 +1835,10 @@ describe("projects", () => {
         if (created === undefined) throw new Error("Expected a workspace.");
         expect(created.storageKey).toBe(`workspace-${id}`);
 
-        await rm(join(repository, ".git"), { force: true });
-        await rename(realGitDirectory, join(repository, ".git"));
+        // Restore the repository without yielding to the setImmediate initialization callback.
+        // An asynchronous rm followed by rename lets Linux begin initialization between them.
+        rmSync(join(repository, ".git"), { force: true });
+        renameSync(realGitDirectory, join(repository, ".git"));
         await expect(
             waitForWorkspace(
                 fixture.store,
