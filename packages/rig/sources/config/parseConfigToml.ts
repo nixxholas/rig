@@ -22,6 +22,7 @@ import type {
 } from "../executor/bedrock-model-overrides.js";
 import type { DockerExecutionConfig, DockerMountConfig } from "../execution/index.js";
 import { p2pInstanceIdSchema, p2pPublicKeySchema } from "../protocol/P2pIdentityProtocol.js";
+import { protectedPathsSchema } from "./configPermissions.js";
 
 const irohEndpointIdsSchema = Type.Array(Type.String({ pattern: "^[0-9a-f]{64}$" }), {
     uniqueItems: true,
@@ -54,6 +55,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         "mcp_servers",
         "network",
         "p2p",
+        "permissions",
         "presence",
         "providers",
         "settings",
@@ -63,6 +65,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     const docker = readDockerConfig(table.docker);
     const network = readNetworkConfig(table.network);
     const p2p = readP2pConfig(table.p2p);
+    const permissions = readPermissionsConfig(table.permissions);
     const presence = readPresenceConfig(table.presence);
     const defaultsTable = readTable(table.defaults, "defaults");
 
@@ -239,6 +242,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(mcpServers !== undefined ? { mcpServers } : {}),
         ...(network !== undefined ? { network } : {}),
         ...(p2p !== undefined ? { p2p } : {}),
+        ...(permissions !== undefined ? { permissions } : {}),
         ...(presence !== undefined ? { presence } : {}),
         ...(providerSettings?.defaultEnable === undefined
             ? {}
@@ -250,6 +254,21 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(theme).length > 0 ? { theme } : {}),
         ...(workspace !== undefined && Object.keys(workspace).length > 0 ? { workspace } : {}),
     };
+}
+
+function readPermissionsConfig(
+    value: TomlValue | undefined,
+): import("./configPermissions.js").PartialConfigPermissions | undefined {
+    if (value === undefined) return undefined;
+    if (!isTomlTable(value)) throw new Error("permissions must be a TOML table.");
+    assertKnownKeys(value, "permissions", ["protected_paths"]);
+    if (value.protected_paths === undefined) return {};
+    if (!Value.Check(protectedPathsSchema, value.protected_paths)) {
+        throw new Error(
+            "permissions.protected_paths must be an array of workspace-relative paths.",
+        );
+    }
+    return { protectedPaths: value.protected_paths };
 }
 
 function readP2pConfig(

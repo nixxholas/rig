@@ -12,6 +12,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         workspaces: true,
     },
     mcpServers: {},
+    permissions: { protectedPaths: [] },
     p2p: {
         direct: {},
         enableDirect: false,

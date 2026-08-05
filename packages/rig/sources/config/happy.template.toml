@@ -44,6 +44,11 @@
 # allowed_loopback_ports = [3000]
 # allow_local_binding = false
 
+# Existing workspace-relative files and directories that require Full access to modify.
+# Missing paths are ignored until the session is recreated.
+# [permissions]
+# protected_paths = ["master-plans", ".env.production"]
+
 # [p2p]
 # enable_direct = false
 # enable_iroh = true

@@ -24,7 +24,12 @@ import { readLocalServerToken } from "./readLocalServerToken.js";
 import { removeStaleSocket } from "./removeStaleSocket.js";
 import { resolveHappyIntegrationMode } from "./resolveHappyIntegrationMode.js";
 import { CompositeMcpToolProvider, McpClientManager, type McpToolProvider } from "../mcp/index.js";
-import { ensureUserConfigurationFiles, loadConfig, writeDaemonSettings } from "../config/index.js";
+import {
+    ensureUserConfigurationFiles,
+    loadConfig,
+    resolveProtectedPaths,
+    writeDaemonSettings,
+} from "../config/index.js";
 import { createConfiguredPresenceStore } from "../presence/index.js";
 import { createProviderQuotaService } from "../executor/createProviderQuotaService.js";
 import {
@@ -341,6 +346,12 @@ async function runOwnedLocalProtocolServer(
             );
         }
         const loadedConfig = await loadConfig({ cwd: process.cwd() });
+        const machineProtectedPaths = [
+            ...new Set([
+                ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
+                ...(loadedConfig.sources.runtime.values.permissions?.protectedPaths ?? []),
+            ]),
+        ];
         if (stopping) return;
         const runtimeSettings = {
             inferenceMaxRetries: loadedConfig.config.settings.inferenceMaxRetries,
@@ -493,6 +504,7 @@ async function runOwnedLocalProtocolServer(
                         current: async () => (await providerUsageTracker?.refreshAll()) ?? [],
                     },
                     providers: availableProviders,
+                    protectedPaths: resolveProtectedPaths(options.cwd, machineProtectedPaths),
                     resolveInferenceMaxRetries: () => runtimeSettings.inferenceMaxRetries,
                 }),
             databasePath: paths.databasePath,

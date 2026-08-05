@@ -40,11 +40,13 @@ describe("createMacOsSeatbeltCommand", () => {
         const cwd = await mkdtemp(join(tmpdir(), "rig-seatbelt-workspace-write-"));
         temporaryDirectories.push(cwd);
         await mkdir(join(cwd, ".git"));
+        await mkdir(join(cwd, "plans"));
 
         const result = await createMacOsSeatbeltCommand({
             command: "git status --short",
             cwd,
             mode: "workspace_write",
+            protectedPaths: [join(cwd, "plans")],
             shell: "/bin/sh",
         });
 
@@ -58,6 +60,7 @@ describe("createMacOsSeatbeltCommand", () => {
                 join(cwd, "rig.toml"),
                 join(cwd, "happy.toml"),
                 join(cwd, "AGENTS_SECURITY.md"),
+                join(cwd, "plans"),
             ]),
         );
     });

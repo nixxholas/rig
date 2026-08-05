@@ -16,6 +16,7 @@ export function createDockerSandboxCommand(options: {
         loopback?: readonly { path: string; port: number }[];
         socks: string;
     };
+    protectedPaths?: readonly string[];
     readyProjectConfigNames?: readonly ("happy.toml" | "rig.toml")[];
     runtime: PreparedDockerSandbox;
     shell: string;
@@ -61,6 +62,9 @@ export function createDockerSandboxCommand(options: {
             projectConfigPath,
             projectConfigPath,
         );
+    }
+    for (const protectedPath of options.protectedPaths ?? []) {
+        command.push("--ro-bind-try", protectedPath, protectedPath);
     }
     const userCommand =
         options.networkUnixProxySockets === undefined

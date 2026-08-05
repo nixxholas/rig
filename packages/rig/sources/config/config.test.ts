@@ -8,6 +8,7 @@ import { DEFAULT_RIG_CONFIG } from "./defaultConfig.js";
 import { createProjectConfigSecurityNotice } from "./createProjectConfigSecurityNotice.js";
 import { createProjectConfigSecurityNoticeTitle } from "./createProjectConfigSecurityNoticeTitle.js";
 import { loadConfig } from "./loadConfig.js";
+import { mergeConfigValues } from "./mergeConfigValues.js";
 import { parseConfigToml } from "./parseConfigToml.js";
 import { writePresenceSelection } from "./writePresenceSelection.js";
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
@@ -16,6 +17,23 @@ import { writeDaemonSettings } from "./writeDaemonSettings.js";
 import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 
 describe("config", () => {
+    it("parses and unions protected paths", () => {
+        expect(
+            parseConfigToml(
+                '[permissions]\nprotected_paths = ["master-plans", ".env.production"]\n',
+            ),
+        ).toEqual({
+            permissions: { protectedPaths: ["master-plans", ".env.production"] },
+        });
+        expect(
+            mergeConfigValues(
+                DEFAULT_RIG_CONFIG,
+                { permissions: { protectedPaths: ["global", "shared"] } },
+                { permissions: { protectedPaths: ["project", "shared"] } },
+            ).permissions.protectedPaths,
+        ).toEqual(["global", "shared", "project"]);
+    });
+
     it("serializes runtime config read-modify-write operations", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-runtime-config-lock-"));
         const runtimePath = join(root, "runtime.toml");
@@ -811,6 +829,7 @@ inference_max_retries = 8
             const runtimePath = join(root, "config-home", "rig", "runtime.toml");
 
             await createConfigFile(configPath, {
+                permissions: { protectedPaths: [] },
                 defaults: {
                     modelId: "openai/gpt-5.4",
                     providerId: "bedrock",

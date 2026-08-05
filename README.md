@@ -424,6 +424,21 @@ brand = "ansi:202"
 accent = "cyan"
 ```
 
+### Protected paths
+
+Add existing workspace-relative files or directories to a project's
+`happy.toml` when modifying them should require Full access:
+
+```toml
+[permissions]
+protected_paths = ["master-plans", ".env.production"]
+```
+
+The user-wide `happy.toml` supports the same list, and Rig merges the user and
+project entries. Directory entries cover their descendants. Missing entries
+are ignored when the session starts; recreating the session picks up paths that
+were created later.
+
 ### Managed workspace setup
 
 A repository can prepare every managed workspace before Rig starts an agent in

@@ -108,6 +108,13 @@ export async function createConfigFile(
                       },
                   }),
             providers: serializeProviders(config.providers, config.providerDefaultEnable),
+            ...(config.permissions.protectedPaths.length === 0
+                ? {}
+                : {
+                      permissions: {
+                          protected_paths: config.permissions.protectedPaths,
+                      },
+                  }),
             theme: config.theme,
             ...(config.workspace.setupCommands.length === 0
                 ? {}

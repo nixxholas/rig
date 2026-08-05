@@ -23,6 +23,7 @@ export { mergeConfigValues } from "./mergeConfigValues.js";
 export { loadNetworkConfig, loadNetworkConfigForProject } from "./loadNetworkConfig.js";
 export { parseConfigToml } from "./parseConfigToml.js";
 export { PROJECT_CONFIG_FILE_NAMES } from "./projectConfigFileNames.js";
+export { resolveProtectedPaths } from "./resolveProtectedPaths.js";
 export { PROJECT_PROTECTED_FILE_NAMES } from "./projectProtectedFileNames.js";
 export { resolveConfigPaths } from "./resolveConfigPaths.js";
 export { writeRuntimeConfig } from "./writeRuntimeConfig.js";

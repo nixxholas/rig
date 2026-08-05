@@ -90,6 +90,7 @@ describe("createDockerSandboxCommand", () => {
             command: "touch changed.txt",
             commandCwd: "/workspace/packages/rig",
             mode: "workspace_write",
+            protectedPaths: ["/workspace/plans"],
             runtime,
             shell: "/bin/sh",
             workspaceCwd: "/workspace",
@@ -101,6 +102,7 @@ describe("createDockerSandboxCommand", () => {
         expect(command.filter((argument) => argument === "--tmpfs")).toHaveLength(2);
         expect(bindMode(command, "/workspace/.git")).toBeUndefined();
         expect(bindMode(command, "/workspace/.agents")).toBe("--ro-bind-try");
+        expect(bindMode(command, "/workspace/plans")).toBe("--ro-bind-try");
         expect(command.slice(command.indexOf("--chdir"), command.indexOf("--chdir") + 2)).toEqual([
             "--chdir",
             "/workspace/packages/rig",

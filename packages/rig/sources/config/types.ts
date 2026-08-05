@@ -3,6 +3,7 @@ import type { McpServerConfig } from "../mcp/types.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { ServiceTier } from "@slopus/rig-execution";
 import type { BedrockModelOverrides } from "../executor/bedrock-model-overrides.js";
+import type { ConfigPermissions, PartialConfigPermissions } from "./configPermissions.js";
 
 export interface ConfigDefaults {
     effort?: string;
@@ -227,6 +228,7 @@ export interface RigConfig {
     features: ConfigFeatures;
     mcpServers: Readonly<Record<string, McpServerConfig>>;
     network?: ConfigNetwork;
+    permissions: ConfigPermissions;
     p2p: ConfigP2p;
     presence: ConfigPresence;
     providerDefaultEnable: boolean;
@@ -242,6 +244,7 @@ export interface PartialRigConfig {
     features?: PartialConfigFeatures;
     mcpServers?: Readonly<Record<string, McpServerConfig>>;
     network?: ConfigNetwork;
+    permissions?: PartialConfigPermissions;
     p2p?: PartialConfigP2p;
     presence?: PartialConfigPresence;
     providerDefaultEnable?: boolean;

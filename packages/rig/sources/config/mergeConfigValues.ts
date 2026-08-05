@@ -14,6 +14,7 @@ export function mergeConfigValues(
     const features = { ...baseDefaults.features };
     const mcpServers = { ...baseDefaults.mcpServers };
     let network = baseDefaults.network;
+    const protectedPaths = new Set(baseDefaults.permissions.protectedPaths);
     const p2p = {
         ...baseDefaults.p2p,
         direct: { ...baseDefaults.p2p.direct },
@@ -118,6 +119,7 @@ export function mergeConfigValues(
             Object.assign(mcpServers, config.mcpServers);
         }
         if (config.network !== undefined) network = config.network;
+        for (const path of config.permissions?.protectedPaths ?? []) protectedPaths.add(path);
         if (config.presence !== undefined) {
             if (config.presence.current !== undefined) {
                 presence.current = config.presence.current;
@@ -148,6 +150,7 @@ export function mergeConfigValues(
         features,
         mcpServers,
         ...(network === undefined ? {} : { network }),
+        permissions: { protectedPaths: [...protectedPaths] },
         p2p,
         presence,
         providerDefaultEnable,

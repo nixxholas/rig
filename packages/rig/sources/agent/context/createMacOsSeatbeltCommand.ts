@@ -28,6 +28,7 @@ export async function createMacOsSeatbeltCommand(options: {
     networkAllowLocalBinding?: boolean;
     networkAllowedLoopbackPorts?: readonly number[];
     path?: string;
+    protectedPaths?: readonly string[];
     shell: string;
 }): Promise<{ args: readonly string[]; command: string }> {
     const environment = options.environment ?? process.env;
@@ -70,6 +71,7 @@ export async function createMacOsSeatbeltCommand(options: {
         ...new Set([
             ...protectedCandidates,
             ...(await Promise.all(protectedCandidates.map(resolvePotentialPath))),
+            ...(options.protectedPaths ?? []),
         ]),
     ];
     const definitions: string[] = [];

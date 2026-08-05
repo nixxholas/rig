@@ -16,6 +16,22 @@ afterEach(async () => {
 });
 
 describe("direct filesystem project configuration protection", () => {
+    it("blocks configured files and directory descendants", async () => {
+        const workspace = await mkdtemp(join(tmpdir(), "rig-protected-path-security-"));
+        temporaryDirectories.push(workspace);
+        await mkdir(join(workspace, "plans"));
+        await writeFile(join(workspace, "plans", "one.md"), "original\n");
+        const context = createNodeFileSystemContext(workspace, {
+            permissionMode: () => "workspace_write",
+            protectedPaths: [join(workspace, "plans")],
+        });
+
+        await expect(context.writeFile("plans/one.md", "changed\n")).rejects.toThrow(
+            "protected workspace path",
+        );
+        await expect(context.writeFile("ordinary.md", "allowed\n")).resolves.toBeUndefined();
+    });
+
     it("blocks changes to root project config files in restricted write modes", async () => {
         const workspace = await mkdtemp(join(tmpdir(), "rig-project-config-security-"));
         temporaryDirectories.push(workspace);

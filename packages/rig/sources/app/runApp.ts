@@ -12,6 +12,7 @@ import {
     createProjectConfigSecurityNotice,
     createProjectConfigSecurityNoticeTitle,
     loadConfig,
+    resolveProtectedPaths,
     writeRuntimeConfig,
 } from "../config/index.js";
 import { createProjectMcpSecurityNotice, loadMcpServerConfigEntries } from "../mcp/index.js";
@@ -78,6 +79,12 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         basename(loadedConfig.sources.local.path),
     );
     const projectMcpNotice = createProjectMcpSecurityNotice(mcpConfigEntries);
+    const machineProtectedPaths = [
+        ...new Set([
+            ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
+            ...(loadedConfig.sources.runtime.values.permissions?.protectedPaths ?? []),
+        ]),
+    ];
     const agentOptions: CreateSessionRequest = {
         trackUnread: true,
         cwd,
@@ -257,6 +264,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             cwd: sessionCwd,
             permissionMode: session.session.permissionMode,
             processManager,
+            protectedPaths: resolveProtectedPaths(sessionCwd, machineProtectedPaths),
         });
         const agent = new RemoteAgent({
             client: localServer.client,

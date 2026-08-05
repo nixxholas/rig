@@ -98,6 +98,7 @@ export interface CreateCodingAssistantAgentOptions {
     subagents?: SubagentContext;
     systemPrompt?: string;
     plugins?: PluginContext;
+    protectedPaths?: readonly string[];
     tasks?: TaskContext;
     userInput?: UserInputContext;
     workflows?: WorkflowContext;
@@ -117,6 +118,7 @@ export function createCodingAssistantAgent(
         ...(options.goals !== undefined ? { goals: options.goals } : {}),
         ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
         ...(options.plugins !== undefined ? { plugins: options.plugins } : {}),
+        ...(options.protectedPaths === undefined ? {} : { protectedPaths: options.protectedPaths }),
         ...(options.secrets !== undefined ? { secrets: options.secrets } : {}),
         ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
         ...(options.userInput !== undefined ? { userInput: options.userInput } : {}),
@@ -248,16 +250,27 @@ export function createCodingAssistantAgent(
     // agent's context would let the agent under review widen the reviewer along with itself.
     const createPermissionReviewContext = () =>
         process.env.RIG_GYM_RUNTIME === "just-bash"
-            ? createGymJustBashAgentContext({ permissionMode: "read_only" })
+            ? createGymJustBashAgentContext({
+                  permissionMode: "read_only",
+                  ...(options.protectedPaths === undefined
+                      ? {}
+                      : { protectedPaths: options.protectedPaths }),
+              })
             : options.docker === undefined
               ? createNodeAgentContext({
                     cwd: options.cwd,
                     permissionMode: "read_only",
                     processManager,
+                    ...(options.protectedPaths === undefined
+                        ? {}
+                        : { protectedPaths: options.protectedPaths }),
                 })
               : createDockerAgentContext({
                     docker: options.docker,
                     permissionMode: "read_only",
+                    ...(options.protectedPaths === undefined
+                        ? {}
+                        : { protectedPaths: options.protectedPaths }),
                     sessionId: `${options.sessionId ?? options.agentId ?? "standalone"}:auto-reviewer`,
                 });
     if (nativeProvider instanceof Executor) nativeProvider.selectProvider(providerId);

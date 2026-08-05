@@ -40,6 +40,7 @@ export async function createLinuxBubblewrapCommand(options: {
         socks: string;
     };
     path?: string;
+    protectedPaths?: readonly string[];
     shell: string;
     temporaryDirectory?: string;
     uid?: number;
@@ -170,7 +171,7 @@ export async function createLinuxBubblewrapCommand(options: {
         options.mode !== "read_only"
             ? await prepareProjectConfigPlaceholder(projectConfigPath, gitExcludePath)
             : undefined;
-    const protectedPaths = allProtectedPaths.filter(
+    const protectedPaths = [...allProtectedPaths, ...(options.protectedPaths ?? [])].filter(
         (path) =>
             existsSync(path) &&
             (!isAtOrBelow(privateTemporaryRoot, path) ||
