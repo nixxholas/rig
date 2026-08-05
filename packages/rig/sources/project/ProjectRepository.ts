@@ -1566,7 +1566,10 @@ export class ProjectRepository {
             if (this.getWorkspace(workspace.projectId, workspace.id)?.status !== "initializing") {
                 return;
             }
-            const loaded = await loadConfig({ cwd: workspace.path });
+            const loaded = await loadConfig({
+                cwd: workspace.path,
+                homeDirectory: this.#homeDirectory,
+            });
             await runWorkspaceSetupCommands(workspace.path, loaded.config.workspace.setupCommands, {
                 signal: controller.signal,
             });
