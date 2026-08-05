@@ -11,7 +11,7 @@ import { createTestSocketDirectory } from "../../testing/createTestSocketDirecto
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { createServeP2pHttpRequest } from "../createServeP2pHttpRequest.js";
 
-const ALPN = [...Buffer.from("rig/p2p/3", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/4", "utf8")];
 const cleanups: (() => Promise<void>)[] = [];
 
 afterEach(async () => {
@@ -34,13 +34,24 @@ describe("P2P HTTP between two real daemon servers", () => {
         const secondId = secondEndpoint.id().toString();
         const firstNetwork = await P2pNetwork.create({
             config: {
+                direct: {},
+                enableDirect: false,
                 enableIroh: true,
+                enableSsh: false,
                 exposeApi: false,
-                iroh: { trustedEndpointIds: [secondId] },
+                iroh: {},
+                peers: [
+                    {
+                        instanceId: secondIdentity.instanceId,
+                        publicKey: secondIdentity.publicKey,
+                        iroh: { endpointId: secondId },
+                    },
+                ],
             },
             createIrohTransport: (onStatusChange) =>
                 IrohNetwork.create({
-                    config: { trustedEndpointIds: [secondId] },
+                    config: {},
+                    endpointIds: [secondId],
                     endpoint: firstEndpoint,
                     identity: firstIdentity,
                     onStatusChange,
@@ -54,13 +65,24 @@ describe("P2P HTTP between two real daemon servers", () => {
         cleanups.push(() => firstNetwork.close());
         const secondNetwork = await P2pNetwork.create({
             config: {
+                direct: {},
+                enableDirect: false,
                 enableIroh: true,
+                enableSsh: false,
                 exposeApi: true,
-                iroh: { trustedEndpointIds: [firstId] },
+                iroh: {},
+                peers: [
+                    {
+                        instanceId: firstIdentity.instanceId,
+                        publicKey: firstIdentity.publicKey,
+                        iroh: { endpointId: firstId },
+                    },
+                ],
             },
             createIrohTransport: (onStatusChange) =>
                 IrohNetwork.create({
-                    config: { trustedEndpointIds: [firstId] },
+                    config: {},
+                    endpointIds: [firstId],
                     endpoint: secondEndpoint,
                     identity: secondIdentity,
                     onStatusChange,

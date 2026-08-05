@@ -24,12 +24,18 @@ export const p2pPeerStatusSchema = Type.Object(
 );
 export type P2pPeerStatus = Static<typeof p2pPeerStatusSchema>;
 
+export const p2pTransportKindSchema = Type.Union([
+    Type.Literal("direct"),
+    Type.Literal("iroh"),
+    Type.Literal("ssh"),
+]);
+
 export const p2pTransportStatusSchema = Type.Union([
     Type.Object(
         {
             error: Type.String({ minLength: 1 }),
             state: Type.Literal("unavailable"),
-            transport: Type.Literal("iroh"),
+            transport: p2pTransportKindSchema,
         },
         exact,
     ),
@@ -41,6 +47,25 @@ export const p2pTransportStatusSchema = Type.Union([
             relayUrl: Type.Optional(Type.String({ minLength: 1 })),
             state: Type.Literal("ready"),
             transport: Type.Literal("iroh"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            apiExposed: Type.Boolean(),
+            localAddress: Type.Optional(Type.String({ minLength: 1 })),
+            peers: Type.Array(p2pPeerStatusSchema),
+            state: Type.Literal("ready"),
+            transport: Type.Literal("direct"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            direction: Type.Literal("outbound"),
+            peers: Type.Array(p2pPeerStatusSchema),
+            state: Type.Literal("ready"),
+            transport: Type.Literal("ssh"),
         },
         exact,
     ),

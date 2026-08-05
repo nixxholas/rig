@@ -6,9 +6,13 @@ import { P2pNetwork } from "./P2pNetwork.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 
 const disabledConfig = {
+    direct: {},
+    enableDirect: false,
     enableIroh: false,
+    enableSsh: false,
     exposeApi: false,
-    iroh: { trustedEndpointIds: [] },
+    iroh: {},
+    peers: [],
 } as const;
 const identity = createP2pInstanceIdentity("alocalinstance00000000001");
 const peerId = "aremoteinstance0000000001";
@@ -93,5 +97,81 @@ describe("P2pNetwork", () => {
         await network.close();
         expect(close).toHaveBeenCalledOnce();
         expect(changed).toHaveBeenCalled();
+    });
+
+    it("routes one stable peer through the best available transport", async () => {
+        const response = {
+            body: (async function* () {
+                yield Buffer.from("direct");
+            })(),
+            headers: {},
+            status: 200,
+        };
+        const directFetch = vi.fn(async () => response);
+        const sshFetch = vi.fn(async () => response);
+        const peer = {
+            address: "peer-address",
+            peerId,
+            publicKey: createP2pInstanceIdentity(peerId).publicKey,
+            status: "connected" as const,
+        };
+        const network = await P2pNetwork.create({
+            config: {
+                ...disabledConfig,
+                enableDirect: true,
+                enableSsh: true,
+                peers: [
+                    {
+                        direct: { address: "peer.example:7443" },
+                        instanceId: peerId,
+                        publicKey: peer.publicKey,
+                        ssh: {
+                            agentSocketPath: "/unused",
+                            auth: "agent",
+                            host: "peer.example",
+                            hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                            port: 22,
+                            remoteRig: "rig",
+                            username: "steve",
+                        },
+                    },
+                ],
+            },
+            createDirectTransport: async () => ({
+                close: async () => undefined,
+                fetch: directFetch,
+                kind: "direct",
+                status: () => ({
+                    apiExposed: false,
+                    peers: [peer],
+                    state: "ready",
+                    transport: "direct",
+                }),
+            }),
+            createSshTransport: async () => ({
+                close: async () => undefined,
+                fetch: sshFetch,
+                kind: "ssh",
+                status: () => ({
+                    direction: "outbound",
+                    peers: [{ ...peer, status: "connecting" }],
+                    state: "ready",
+                    transport: "ssh",
+                }),
+            }),
+            identity,
+            irohSecretKeyPath: "unused",
+        });
+
+        const selected = await network.fetch(
+            peerId,
+            { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/health" },
+            new AbortController().signal,
+        );
+
+        expect(selected.transport).toBe("direct");
+        expect(directFetch).toHaveBeenCalledOnce();
+        expect(sshFetch).not.toHaveBeenCalled();
+        await network.close();
     });
 });

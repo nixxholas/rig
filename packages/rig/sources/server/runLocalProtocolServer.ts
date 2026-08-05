@@ -583,7 +583,8 @@ async function runOwnedLocalProtocolServer(
             daemonLog.record("info", "iroh_started", "Rig P2P networking is ready.", {
                 endpointId: irohStatus.localAddress,
                 instanceId: p2pNetwork.status().instanceId,
-                peers: loadedConfig.config.p2p.iroh.trustedEndpointIds.length,
+                peers: loadedConfig.config.p2p.peers.filter((peer) => peer.iroh !== undefined)
+                    .length,
                 ...(loadedConfig.config.p2p.iroh.relayUrl === undefined
                     ? {}
                     : { relayUrl: loadedConfig.config.p2p.iroh.relayUrl }),

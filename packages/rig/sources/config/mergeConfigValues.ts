@@ -16,6 +16,7 @@ export function mergeConfigValues(
     let network = baseDefaults.network;
     const p2p = {
         ...baseDefaults.p2p,
+        direct: { ...baseDefaults.p2p.direct },
         iroh: { ...baseDefaults.p2p.iroh },
     };
     const presence: ConfigPresence = {
@@ -88,14 +89,17 @@ export function mergeConfigValues(
         if (config.features?.crossWorkspace !== undefined) {
             features.crossWorkspace = config.features.crossWorkspace;
         }
+        if (config.p2p?.enableDirect !== undefined) p2p.enableDirect = config.p2p.enableDirect;
         if (config.p2p?.enableIroh !== undefined) p2p.enableIroh = config.p2p.enableIroh;
+        if (config.p2p?.enableSsh !== undefined) p2p.enableSsh = config.p2p.enableSsh;
         if (config.p2p?.exposeApi !== undefined) p2p.exposeApi = config.p2p.exposeApi;
-        if (config.p2p?.iroh?.trustedEndpointIds !== undefined) {
-            p2p.iroh.trustedEndpointIds = config.p2p.iroh.trustedEndpointIds;
+        if (config.p2p?.direct?.listen !== undefined) {
+            p2p.direct.listen = config.p2p.direct.listen;
         }
         if (config.p2p?.iroh?.relayUrl !== undefined) {
             p2p.iroh.relayUrl = config.p2p.iroh.relayUrl;
         }
+        if (config.p2p?.peers !== undefined) p2p.peers = config.p2p.peers;
         if (config.providerDefaultEnable !== undefined) {
             providerDefaultEnable = config.providerDefaultEnable;
         }

@@ -1,5 +1,8 @@
+import type { Duplex } from "node:stream";
+
 import type { ConfigP2p } from "../config/types.js";
 import type { P2pStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
+import { DirectTlsNetwork } from "./DirectTlsNetwork.js";
 import { IrohNetwork } from "./IrohNetwork.js";
 import { loadOrCreateIrohSecretKey } from "./loadOrCreateIrohSecretKey.js";
 import { loadOrCreateP2pIdentity } from "./loadOrCreateP2pIdentity.js";
@@ -7,11 +10,21 @@ import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 import type { P2pInstanceIdentity } from "./P2pIdentity.js";
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pTransport, P2pTransportKind } from "./P2pTransport.js";
+import { SshBridgeResponder } from "./SshBridgeResponder.js";
+import { SshTransport } from "./SshTransport.js";
 
 export interface CreateP2pNetworkOptions {
     config: ConfigP2p;
+    /** Test seam. Production creates the direct mutual-TLS transport. */
+    createDirectTransport?: (
+        onStatusChange: (status: P2pTransportStatus) => void,
+    ) => Promise<P2pTransport>;
     /** Test seam. Production creates the native Iroh transport. */
     createIrohTransport?: (
+        onStatusChange: (status: P2pTransportStatus) => void,
+    ) => Promise<P2pTransport>;
+    /** Test seam. Production creates the outbound SSH transport. */
+    createSshTransport?: (
         onStatusChange: (status: P2pTransportStatus) => void,
     ) => Promise<P2pTransport>;
     irohSecretKeyPath: string;
@@ -28,15 +41,18 @@ export class P2pNetwork {
     readonly #statuses: Map<P2pTransportKind, P2pTransportStatus>;
     readonly #transports: readonly P2pTransport[];
     readonly #identity: P2pInstanceIdentity | undefined;
+    readonly #sshBridgeResponder: SshBridgeResponder | undefined;
 
     private constructor(
         transports: readonly P2pTransport[],
         statuses: Map<P2pTransportKind, P2pTransportStatus>,
         identity: P2pInstanceIdentity | undefined,
+        sshBridgeResponder?: SshBridgeResponder,
     ) {
         this.#transports = transports;
         this.#statuses = statuses;
         this.#identity = identity;
+        this.#sshBridgeResponder = sshBridgeResponder;
     }
 
     static async create(options: CreateP2pNetworkOptions): Promise<P2pNetwork> {
@@ -58,17 +74,17 @@ export class P2pNetwork {
                     options.identityPath ?? `${options.irohSecretKeyPath}.instance`,
                 ));
         } catch (error) {
-            if (options.config.enableIroh) {
-                statuses.set("iroh", {
+            for (const transport of enabledTransports(options.config)) {
+                statuses.set(transport, {
                     error:
                         error instanceof Error
                             ? error.message
                             : "The stable P2P identity could not be loaded.",
                     state: "unavailable",
-                    transport: "iroh",
+                    transport,
                 });
                 try {
-                    options.onTransportUnavailable?.("iroh", error);
+                    options.onTransportUnavailable?.(transport, error);
                 } catch {
                     // Optional diagnostics must not break the P2P service.
                 }
@@ -78,14 +94,86 @@ export class P2pNetwork {
             return network;
         }
 
-        if (options.config.enableIroh) {
-            const kind = "iroh";
+        let trustStore: P2pPeerTrustStore | undefined;
+        if (enabledTransports(options.config).length > 0) {
             try {
-                const trustStore =
+                trustStore =
                     options.peerTrustStore ??
                     (await P2pPeerTrustStore.open(
                         options.peerTrustPath ?? `${options.irohSecretKeyPath}.peers`,
                     ));
+            } catch (error) {
+                for (const transport of enabledTransports(options.config)) {
+                    statuses.set(transport, {
+                        error:
+                            error instanceof Error
+                                ? error.message
+                                : "The P2P peer trust store could not be loaded.",
+                        state: "unavailable",
+                        transport,
+                    });
+                    try {
+                        options.onTransportUnavailable?.(transport, error);
+                    } catch {
+                        // Optional diagnostics must not break the P2P service.
+                    }
+                }
+                const network = new P2pNetwork(transports, statuses, identity);
+                publish();
+                return network;
+            }
+        }
+
+        if (options.config.enableDirect) {
+            const kind = "direct";
+            try {
+                const onDirectStatusChange = (status: P2pTransportStatus): void => {
+                    statuses.set(kind, status);
+                    publish();
+                };
+                const direct =
+                    options.createDirectTransport === undefined
+                        ? await DirectTlsNetwork.create({
+                              commitPeer: (peerIdentity, publicKey) =>
+                                  trustStore!.verifyOrPin(peerIdentity, kind, publicKey),
+                              config: options.config.direct,
+                              identity,
+                              onStatusChange: onDirectStatusChange,
+                              peers: options.config.peers,
+                              ...(options.config.exposeApi && options.serveRequest !== undefined
+                                  ? { serveRequest: options.serveRequest }
+                                  : {}),
+                              validatePeer: (peerIdentity, publicKey) =>
+                                  trustStore!.validate(peerIdentity, kind, publicKey),
+                          })
+                        : await options.createDirectTransport(onDirectStatusChange);
+                transports.push(direct);
+                statuses.set(direct.kind, direct.status());
+            } catch (error) {
+                statuses.set(kind, {
+                    error:
+                        error instanceof Error
+                            ? error.message
+                            : "Direct P2P networking could not start.",
+                    state: "unavailable",
+                    transport: kind,
+                });
+                try {
+                    options.onTransportUnavailable?.(kind, error);
+                } catch {
+                    // Optional diagnostics must not break the P2P service.
+                }
+            }
+        }
+
+        if (options.config.enableIroh) {
+            const kind = "iroh";
+            try {
+                const peersByEndpoint = new Map(
+                    options.config.peers.flatMap((peer) =>
+                        peer.iroh === undefined ? [] : [[peer.iroh.endpointId, peer] as const],
+                    ),
+                );
                 const onIrohStatusChange = (status: P2pTransportStatus): void => {
                     statuses.set(kind, status);
                     publish();
@@ -94,18 +182,37 @@ export class P2pNetwork {
                     options.createIrohTransport === undefined
                         ? await IrohNetwork.create({
                               commitPeer: (peerIdentity, endpointId) =>
-                                  trustStore.verifyOrPin(peerIdentity, "iroh", endpointId),
+                                  trustStore!.verifyOrPin(peerIdentity, "iroh", endpointId),
                               config: options.config.iroh,
+                              endpointIds: [...peersByEndpoint.keys()],
                               identity,
-                              knownPeer: (endpointId) =>
-                                  trustStore.peerForBinding("iroh", endpointId),
+                              knownPeer: (endpointId) => {
+                                  const peer = peersByEndpoint.get(endpointId);
+                                  return peer === undefined
+                                      ? undefined
+                                      : {
+                                            instanceId: peer.instanceId,
+                                            publicKey: peer.publicKey,
+                                        };
+                              },
                               onStatusChange: onIrohStatusChange,
                               secretKey: await loadOrCreateIrohSecretKey(options.irohSecretKeyPath),
                               ...(options.config.exposeApi && options.serveRequest !== undefined
                                   ? { serveRequest: options.serveRequest }
                                   : {}),
-                              validatePeer: (peerIdentity, endpointId) =>
-                                  trustStore.validate(peerIdentity, "iroh", endpointId),
+                              validatePeer: async (peerIdentity, endpointId) => {
+                                  const configured = peersByEndpoint.get(endpointId);
+                                  if (
+                                      configured === undefined ||
+                                      configured.instanceId !== peerIdentity.instanceId ||
+                                      configured.publicKey !== peerIdentity.publicKey
+                                  ) {
+                                      throw new Error(
+                                          "The Iroh peer identity does not match its allowlist.",
+                                      );
+                                  }
+                                  await trustStore!.validate(peerIdentity, "iroh", endpointId);
+                              },
                           })
                         : await options.createIrohTransport(onIrohStatusChange);
                 transports.push(iroh);
@@ -124,13 +231,79 @@ export class P2pNetwork {
             }
         }
 
-        const network = new P2pNetwork(transports, statuses, identity);
+        if (options.config.enableSsh) {
+            const kind = "ssh";
+            try {
+                const onSshStatusChange = (status: P2pTransportStatus): void => {
+                    statuses.set(kind, status);
+                    publish();
+                };
+                const ssh =
+                    options.createSshTransport === undefined
+                        ? SshTransport.create({
+                              commitPeer: (peerIdentity, binding) =>
+                                  trustStore!.verifyOrPin(peerIdentity, kind, binding),
+                              identity,
+                              onStatusChange: onSshStatusChange,
+                              peers: options.config.peers,
+                              validatePeer: (peerIdentity, binding) =>
+                                  trustStore!.validate(peerIdentity, kind, binding),
+                          })
+                        : await options.createSshTransport(onSshStatusChange);
+                transports.push(ssh);
+                statuses.set(ssh.kind, ssh.status());
+            } catch (error) {
+                statuses.set(kind, {
+                    error:
+                        error instanceof Error
+                            ? error.message
+                            : "SSH P2P networking could not start.",
+                    state: "unavailable",
+                    transport: kind,
+                });
+                try {
+                    options.onTransportUnavailable?.(kind, error);
+                } catch {
+                    // Optional diagnostics must not break the P2P service.
+                }
+            }
+        }
+
+        const sshBridgeResponder =
+            options.config.enableSsh &&
+            options.config.exposeApi &&
+            options.serveRequest !== undefined &&
+            trustStore !== undefined
+                ? new SshBridgeResponder({
+                      commitPeer: (peerIdentity, binding) =>
+                          trustStore.verifyOrPin(peerIdentity, "ssh", binding),
+                      identity,
+                      peers: options.config.peers,
+                      serveRequest: options.serveRequest,
+                      validatePeer: (peerIdentity, binding) =>
+                          trustStore.validate(peerIdentity, "ssh", binding),
+                  })
+                : undefined;
+        const network = new P2pNetwork(transports, statuses, identity, sshBridgeResponder);
         publish();
         return network;
     }
 
     async close(): Promise<void> {
+        this.#sshBridgeResponder?.close();
         await Promise.allSettled(this.#transports.map((transport) => transport.close()));
+    }
+
+    async acceptSshBridge(stream: Duplex): Promise<void> {
+        if (this.#sshBridgeResponder === undefined) {
+            stream.destroy();
+            throw new Error("SSH P2P API sharing is disabled.");
+        }
+        await this.#sshBridgeResponder.accept(stream);
+    }
+
+    sshBridgeEnabled(): boolean {
+        return this.#sshBridgeResponder !== undefined;
     }
 
     async fetch(
@@ -171,6 +344,14 @@ export class P2pNetwork {
     status(): P2pStatus {
         return createStatus(this.#statuses, this.#identity);
     }
+}
+
+function enabledTransports(config: ConfigP2p): readonly P2pTransportKind[] {
+    return [
+        ...(config.enableDirect ? (["direct"] as const) : []),
+        ...(config.enableIroh ? (["iroh"] as const) : []),
+        ...(config.enableSsh ? (["ssh"] as const) : []),
+    ];
 }
 
 function createStatus(

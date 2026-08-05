@@ -12,6 +12,7 @@ import { formatCliHelp, formatDesktopCliHelp } from "./formatCliHelp.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { RigUserError } from "../RigUserError.js";
 import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
+import { runP2pBridgeCommand } from "./runP2pBridgeCommand.js";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<0 | 2 | void> {
     if (argv.length === 1 && argv[0] === "--server") {
@@ -24,6 +25,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
                 ? { tokenPath: process.env.RIG_SERVER_TOKEN_PATH }
                 : {}),
         });
+        return;
+    }
+    if (argv.length === 3 && argv[0] === "p2p" && argv[1] === "bridge" && argv[2] === "--stdio") {
+        await runP2pBridgeCommand();
         return;
     }
 

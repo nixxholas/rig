@@ -1,7 +1,7 @@
 import type { P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import type { P2pHttpRequest, P2pHttpResponse } from "./P2pHttp.js";
 
-export type P2pTransportKind = "iroh";
+export type P2pTransportKind = "direct" | "iroh" | "ssh";
 
 export interface P2pTransport {
     readonly kind: P2pTransportKind;

@@ -25,6 +25,7 @@ export function attachHttpConnectProxy(server: Server, token: string, store: Ses
         return closeServer(callback);
     }) as Server["close"];
     server.on("connect", (request, client, head) => {
+        if (request.url === "/p2p/transports/ssh") return;
         const scope = projectScopeFromProxyPath(request.url);
         if (scope === undefined) {
             client.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");

@@ -13,11 +13,13 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
     },
     mcpServers: {},
     p2p: {
+        direct: {},
+        enableDirect: false,
         enableIroh: false,
+        enableSsh: false,
         exposeApi: false,
-        iroh: {
-            trustedEndpointIds: [],
-        },
+        iroh: {},
+        peers: [],
     },
     presence: { states: {} },
     providerDefaultEnable: true,

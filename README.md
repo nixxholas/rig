@@ -582,41 +582,60 @@ unrestricted and can bypass the managed proxy by design.
 
 ### P2P networking
 
-Iroh P2P networking is opt-in and machine-wide. Enable it in the user
-`happy.toml`, restart the daemon, then run `rig daemon status` to copy this
-machine's endpoint ID:
+P2P networking is opt-in and machine-wide. Configure each stable Rig identity
+once, then add any combination of Iroh, direct TLS, and SSH address hints:
 
 ```toml
 [p2p]
+enable_direct = true
 enable_iroh = true
+enable_ssh = true
 expose_api = true
 
+[p2p.direct]
+listen = "0.0.0.0:7443"
+
+[[p2p.peers]]
+instance_id = "ck1234567890abcdefghijkl"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+[p2p.peers.direct]
+address = "other-rig.example.com:7443"
+
+[p2p.peers.iroh]
+endpoint_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[p2p.peers.ssh]
+auth = "agent"
+host = "other-rig.example.com"
+host_key_sha256 = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+port = 22
+username = "steve"
+
 [p2p.iroh]
-trusted_endpoint_ids = [
-  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-]
 # relay_url = "https://relay.example.com"
 ```
-
-Put each daemon's endpoint ID in the other daemon's `trusted_endpoint_ids` list.
-The endpoint ID is a transport address and first-contact allowlist entry, not
-the peer's durable Rig identity.
 
 Each Rig installation owns a stable cuid2 instance ID and one protected
 Ed25519 identity key. The same public key is the only key other parties need:
 Rig converts it to X25519 when encrypting, using the standard
 Edwards-to-Montgomery conversion.
 
-On the first allowed connection, both daemons exchange signed, expiring identity
-claims. The signatures cover the identity public keys, fresh challenges, and
-both Iroh endpoint IDs, binding the stable identity to that exact authenticated
-QUIC connection. Rig then pins the instance ID, public key, and transport binding.
-Later transports or replacement endpoint IDs can resolve to the same instance
-only by presenting the same stable key. Its X25519 form supports authenticated
-end-to-end encryption when payloads need protection beyond the already encrypted
-Iroh connection. The daemon keeps pinging every configured address and reports
-the verified instance identity and its transport status through
-`rig daemon status` and `rig-connect`.
+Every transport completes the same signed, expiring mutual hello before ping or
+HTTP traffic. The signatures cover both identities, fresh challenges, the
+transport kind, and its authenticated channel binding: Iroh endpoint IDs, TLS
+exporter bytes, or the verified SSH host-key hash. Direct TLS additionally
+requires the self-signed certificate to contain the configured stable Ed25519
+key before Rig reads application data.
+
+Configure the same peer on both daemons for bidirectional Iroh or direct TLS.
+SSH is intentionally initiator-only: it strictly pins the SSH host key,
+authenticates with an SSH agent or an owner-only private-key file, and runs the
+fixed remote command `rig p2p bridge --stdio`. Passwords and private-key
+contents do not belong in the configuration. The serving daemon needs only the
+initiator's `instance_id` and `public_key` entry; it does not need a reverse SSH
+address. All transports for one instance share the same peer route; Rig pins the
+chosen transport for each ordinary or streaming response.
 
 `expose_api` is separate from connectivity and defaults to `false`. When the
 serving machine enables it, its daemon API is available through the consuming
@@ -628,14 +647,14 @@ machine's local authenticated daemon at:
 
 For example, Happy can pass that URL prefix and the local daemon token to
 `rig-connect`; ordinary requests and long-lived event streams use the same
-prefix. Tokens never cross the P2P connection. The remote daemon authenticates
-the Iroh identity, then injects its own local token for the loopback request.
+prefix. Tokens never cross a P2P transport. The remote daemon authenticates the
+stable identity, then injects its own local token when dispatching the request.
 
 API exposure grants substantial authority. A trusted instance can read
 transcripts, send messages that run agents and tools, change project files,
-install plugins, and manage workspaces as this Rig user. Only bootstrap endpoint
-IDs for machines you trust to act as you. Rig does not forward P2P topology routes,
-daemon shutdown, the debug inspector, or one-time webapp context exchanges.
+install plugins, and manage workspaces as this Rig user. Only configure machines
+you trust to act as you. Rig does not forward P2P topology routes, daemon
+shutdown, the debug inspector, or one-time webapp context exchanges.
 
 When `relay_url` is absent, Iroh uses its default discovery and relay services.
 The stable Rig identity seed and the Iroh transport identity are stored

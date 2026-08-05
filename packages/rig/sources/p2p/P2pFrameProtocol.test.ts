@@ -1,24 +1,24 @@
-import type { RecvStream, SendStream } from "@number0/iroh/index.js";
 import { describe, expect, it } from "vitest";
 
+import type { P2pFrameReader, P2pFrameWriter } from "./P2pFrameDuplex.js";
 import {
-    readIrohHttpRequest,
-    readIrohHttpResponse,
-    writeIrohHttpRequest,
-    writeIrohHttpResponse,
-} from "./IrohHttpProtocol.js";
+    readP2pHttpRequest,
+    readP2pHttpResponse,
+    writeP2pHttpRequest,
+    writeP2pHttpResponse,
+} from "./P2pFrameProtocol.js";
 
-describe("Iroh HTTP framing", () => {
-    it("round-trips request metadata and a body through partial native writes", async () => {
+describe("P2P HTTP framing", () => {
+    it("round-trips request metadata and a body through partial transport writes", async () => {
         const wire = new MemoryWire();
-        await writeIrohHttpRequest(wire.send, {
+        await writeP2pHttpRequest(wire.send, {
             body: Buffer.from("request body"),
             headers: { "content-type": "text/plain" },
             method: "POST",
             path: "/messages?scope=all",
         });
 
-        await expect(readIrohHttpRequest(wire.recv())).resolves.toEqual({
+        await expect(readP2pHttpRequest(wire.recv())).resolves.toEqual({
             body: new Uint8Array(Buffer.from("request body")),
             headers: { "content-type": "text/plain" },
             method: "POST",
@@ -26,17 +26,17 @@ describe("Iroh HTTP framing", () => {
         });
     });
 
-    it("reads large request bodies from the native stream in bounded chunks", async () => {
+    it("reads large request bodies from the transport in bounded chunks", async () => {
         const wire = new MemoryWire(64 * 1024);
         const body = Buffer.alloc(128 * 1024 + 17, 42);
-        await writeIrohHttpRequest(wire.send, {
+        await writeP2pHttpRequest(wire.send, {
             body,
             headers: {},
             method: "POST",
             path: "/messages",
         });
 
-        const request = await readIrohHttpRequest(wire.recv());
+        const request = await readP2pHttpRequest(wire.recv());
 
         expect(request.body).toEqual(new Uint8Array(body));
         expect(wire.maximumReadLength).toBeLessThanOrEqual(64 * 1024);
@@ -44,7 +44,7 @@ describe("Iroh HTTP framing", () => {
 
     it("streams response chunks without combining them into one body", async () => {
         const wire = new MemoryWire();
-        await writeIrohHttpResponse(wire.send, {
+        await writeP2pHttpResponse(wire.send, {
             body: (async function* () {
                 yield Buffer.from("first");
                 yield Buffer.from("second");
@@ -53,7 +53,7 @@ describe("Iroh HTTP framing", () => {
             status: 200,
         });
         let closed = false;
-        const response = await readIrohHttpResponse(wire.recv(), () => {
+        const response = await readP2pHttpResponse(wire.recv(), () => {
             closed = true;
         });
         const chunks: string[] = [];
@@ -66,13 +66,13 @@ describe("Iroh HTTP framing", () => {
     });
 
     it("times out when a peer stops reading a response write", async () => {
-        const stalledSend = {
+        const stalledSend: P2pFrameWriter = {
             finish: async () => undefined,
             write: () => new Promise<number>(() => undefined),
-        } as unknown as SendStream;
+        };
 
         await expect(
-            writeIrohHttpResponse(
+            writeP2pHttpResponse(
                 stalledSend,
                 {
                     body: (async function* () {
@@ -96,25 +96,25 @@ class MemoryWire {
         this.#writeLimit = writeLimit;
     }
 
-    readonly send = {
+    readonly send: P2pFrameWriter = {
         finish: async () => undefined,
-        write: async (bytes: number[]) => {
-            const written = Math.min(bytes.length, this.#writeLimit);
-            this.#chunks.push(...bytes.slice(0, written));
+        write: async (bytes: Uint8Array) => {
+            const written = Math.min(bytes.byteLength, this.#writeLimit);
+            this.#chunks.push(...bytes.subarray(0, written));
             return written;
         },
-    } as unknown as SendStream;
+    };
 
-    recv(): RecvStream {
+    recv(): P2pFrameReader {
         let offset = 0;
         return {
-            readExact: async (length: number) => {
+            read: async (length: number) => {
                 this.maximumReadLength = Math.max(this.maximumReadLength, length);
                 const result = this.#chunks.slice(offset, offset + length);
                 if (result.length !== length) throw new Error("Unexpected end of test data.");
                 offset += length;
-                return result;
+                return Uint8Array.from(result);
             },
-        } as unknown as RecvStream;
+        };
     }
 }

@@ -160,21 +160,65 @@ export interface ConfigNetwork {
 
 export interface ConfigIrohTransport {
     relayUrl?: string;
-    trustedEndpointIds: readonly string[];
 }
 
 export type PartialConfigIrohTransport = Partial<ConfigIrohTransport>;
 
+export interface ConfigP2pPeerIdentity {
+    instanceId: string;
+    publicKey: string;
+}
+
+export interface ConfigP2pDirectPeer {
+    address: string;
+}
+
+export interface ConfigDirectTransport {
+    listen?: string;
+}
+
+export type PartialConfigDirectTransport = Partial<ConfigDirectTransport>;
+
+export interface ConfigP2pIrohPeer {
+    endpointId: string;
+}
+
+export interface ConfigP2pSshPeer {
+    agentSocketPath?: string;
+    auth: "agent" | "private_key";
+    host: string;
+    hostKeySha256: string;
+    passphraseEnvVar?: string;
+    port: number;
+    privateKeyPath?: string;
+    remoteRig: string;
+    username: string;
+}
+
+export interface ConfigP2pPeer extends ConfigP2pPeerIdentity {
+    direct?: ConfigP2pDirectPeer;
+    iroh?: ConfigP2pIrohPeer;
+    ssh?: ConfigP2pSshPeer;
+}
+
 export interface ConfigP2p {
+    direct: ConfigDirectTransport;
+    enableDirect: boolean;
     enableIroh: boolean;
+    enableSsh: boolean;
     exposeApi: boolean;
     iroh: ConfigIrohTransport;
+    peers: readonly ConfigP2pPeer[];
 }
 
 export interface PartialConfigP2p {
+    direct?: PartialConfigDirectTransport;
+    enableDirect?: boolean;
     enableIroh?: boolean;
+    enableSsh?: boolean;
     exposeApi?: boolean;
     iroh?: PartialConfigIrohTransport;
+    peers?: readonly ConfigP2pPeer[];
 }
 
 export interface RigConfig {

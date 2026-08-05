@@ -45,11 +45,32 @@
 # allow_local_binding = false
 
 # [p2p]
+# enable_direct = false
 # enable_iroh = true
+# enable_ssh = false
 # expose_api = false
 #
+# [p2p.direct]
+# listen = "0.0.0.0:7443"
+#
+# [[p2p.peers]]
+# instance_id = "ck1234567890abcdefghijkl"
+# public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#
+# [p2p.peers.direct]
+# address = "other-rig.example.com:7443"
+#
+# [p2p.peers.iroh]
+# endpoint_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#
+# [p2p.peers.ssh]
+# auth = "agent"
+# host = "other-rig.example.com"
+# host_key_sha256 = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+# port = 22
+# username = "steve"
+#
 # [p2p.iroh]
-# trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
 # relay_url = "https://relay.example.com"
 
 # [presence]

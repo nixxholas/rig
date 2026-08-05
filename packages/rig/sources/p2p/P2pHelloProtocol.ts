@@ -1,9 +1,14 @@
 import { randomBytes } from "node:crypto";
 
-import type { RecvStream, SendStream } from "@number0/iroh/index.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import {
+    finishWrites,
+    writeBytes,
+    type P2pFrameDuplex,
+    type P2pFrameReader,
+} from "./P2pFrameDuplex.js";
 import {
     encodeBase64Url,
     p2pInstanceIdSchema,
@@ -12,15 +17,28 @@ import {
     type P2pInstanceIdentity,
     type P2pPeerIdentity,
 } from "./P2pIdentity.js";
+import type { P2pTransportKind } from "./P2pTransport.js";
 
 const HELLO_LIFETIME_MS = 5 * 60 * 1_000;
 const MAXIMUM_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 const MAXIMUM_HELLO_BYTES = 8 * 1_024;
-const endpointIdSchema = Type.String({
-    maxLength: 64,
-    minLength: 64,
-    pattern: "^[0-9a-f]{64}$",
+
+/**
+ * Names the transport-specific value that identifies one end of the live
+ * channel: an Iroh endpoint ID, a direct TLS certificate fingerprint, and so
+ * on. Every signed hello message carries it alongside the transport kind, so a
+ * proof minted for one transport can never be replayed on another.
+ */
+const channelBindingSchema = Type.String({
+    maxLength: 128,
+    minLength: 16,
+    pattern: "^[A-Za-z0-9_-]+$",
 });
+const transportSchema = Type.Union([
+    Type.Literal("direct"),
+    Type.Literal("iroh"),
+    Type.Literal("ssh"),
+]);
 const nonceSchema = Type.String({
     maxLength: 43,
     minLength: 43,
@@ -33,14 +51,15 @@ const signatureSchema = Type.String({
 });
 const announcementSchema = Type.Object(
     {
-        endpointId: endpointIdSchema,
+        channelBinding: channelBindingSchema,
         expiresAt: Type.Integer({ minimum: 0 }),
         instanceId: p2pInstanceIdSchema,
         issuedAt: Type.Integer({ minimum: 0 }),
         nonce: nonceSchema,
         publicKey: p2pPublicKeySchema,
         signature: signatureSchema,
-        version: Type.Literal(1),
+        transport: transportSchema,
+        version: Type.Literal(2),
     },
     { additionalProperties: false },
 );
@@ -49,124 +68,138 @@ type Announcement = Static<typeof announcementSchema>;
 const proofSchema = Type.Object(
     {
         expiresAt: Type.Integer({ minimum: 0 }),
-        initiatorEndpointId: endpointIdSchema,
+        initiatorChannelBinding: channelBindingSchema,
         initiatorNonce: nonceSchema,
         instanceId: p2pInstanceIdSchema,
         issuedAt: Type.Integer({ minimum: 0 }),
         publicKey: p2pPublicKeySchema,
-        responderEndpointId: endpointIdSchema,
+        responderChannelBinding: channelBindingSchema,
         responderNonce: nonceSchema,
         role: Type.Union([Type.Literal("initiator"), Type.Literal("responder")]),
         signature: signatureSchema,
-        transport: Type.Literal("iroh"),
-        version: Type.Literal(1),
+        transport: transportSchema,
+        version: Type.Literal(2),
     },
     { additionalProperties: false },
 );
-export type IrohHelloProof = Static<typeof proofSchema>;
+export type P2pHelloProof = Static<typeof proofSchema>;
+
 const finishSchema = Type.Object(
     {
         signature: signatureSchema,
-        version: Type.Literal(1),
+        version: Type.Literal(2),
     },
     { additionalProperties: false },
 );
-export type IrohHelloFinish = Static<typeof finishSchema>;
+export type P2pHelloFinish = Static<typeof finishSchema>;
 
-export interface IrohHelloContext {
-    initiatorEndpointId: string;
+export interface P2pHelloContext {
+    initiatorChannelBinding: string;
     initiatorNonce: string;
-    responderEndpointId: string;
+    responderChannelBinding: string;
     responderNonce: string;
+    transport: P2pTransportKind;
 }
 
 interface HelloOptions {
-    commitPeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
+    commitPeer?: (identity: P2pPeerIdentity, channelBinding: string) => Promise<void>;
     identity: P2pInstanceIdentity;
-    localEndpointId: string;
+    localChannelBinding: string;
     now?: () => number;
     randomNonce?: () => string;
-    remoteEndpointId: string;
-    validatePeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
+    remoteChannelBinding: string;
+    transport: P2pTransportKind;
+    validatePeer?: (identity: P2pPeerIdentity, channelBinding: string) => Promise<void>;
 }
 
-export async function runIrohInitiatorHello(
-    recv: RecvStream,
-    send: SendStream,
+export async function runP2pInitiatorHello(
+    duplex: P2pFrameDuplex,
     options: HelloOptions,
 ): Promise<P2pPeerIdentity> {
     const now = options.now ?? Date.now;
     const initiatorNonce = (options.randomNonce ?? createNonce)();
     await writeJson(
-        send,
-        createAnnouncement(options.identity, options.localEndpointId, initiatorNonce, now()),
+        duplex,
+        createAnnouncement(
+            options.identity,
+            options.transport,
+            options.localChannelBinding,
+            initiatorNonce,
+            now(),
+        ),
         announcementSchema,
     );
-    const responderProof = await readJson(recv, proofSchema);
-    const context: IrohHelloContext = {
-        initiatorEndpointId: options.localEndpointId,
+    const responderProof = await readJson(duplex.recv, proofSchema);
+    const context: P2pHelloContext = {
+        initiatorChannelBinding: options.localChannelBinding,
         initiatorNonce,
-        responderEndpointId: options.remoteEndpointId,
+        responderChannelBinding: options.remoteChannelBinding,
         responderNonce: responderProof.responderNonce,
+        transport: options.transport,
     };
-    const remoteIdentity = verifyIrohHelloProof(responderProof, "responder", context, now());
-    await options.validatePeer?.(remoteIdentity, options.remoteEndpointId);
+    const remoteIdentity = verifyP2pHelloProof(responderProof, "responder", context, now());
+    await options.validatePeer?.(remoteIdentity, options.remoteChannelBinding);
     await writeJson(
-        send,
-        createIrohHelloProof(options.identity, "initiator", context, now()),
+        duplex,
+        createP2pHelloProof(options.identity, "initiator", context, now()),
         proofSchema,
     );
-    await send.finish();
-    const finish = await readJson(recv, finishSchema);
-    verifyIrohHelloFinish(finish, remoteIdentity, options.identity, context);
-    await options.commitPeer?.(remoteIdentity, options.remoteEndpointId);
+    await finishWrites(duplex.send);
+    const finish = await readJson(duplex.recv, finishSchema);
+    verifyP2pHelloFinish(finish, remoteIdentity, options.identity, context);
+    await options.commitPeer?.(remoteIdentity, options.remoteChannelBinding);
     return remoteIdentity;
 }
 
-export async function runIrohResponderHello(
-    recv: RecvStream,
-    send: SendStream,
+export async function runP2pResponderHello(
+    duplex: P2pFrameDuplex,
     options: HelloOptions,
 ): Promise<P2pPeerIdentity> {
     const now = options.now ?? Date.now;
-    const announcement = await readJson(recv, announcementSchema);
-    const announcedIdentity = verifyAnnouncement(announcement, options.remoteEndpointId, now());
-    const context: IrohHelloContext = {
-        initiatorEndpointId: options.remoteEndpointId,
+    const announcement = await readJson(duplex.recv, announcementSchema);
+    const announcedIdentity = verifyAnnouncement(
+        announcement,
+        options.transport,
+        options.remoteChannelBinding,
+        now(),
+    );
+    const context: P2pHelloContext = {
+        initiatorChannelBinding: options.remoteChannelBinding,
         initiatorNonce: announcement.nonce,
-        responderEndpointId: options.localEndpointId,
+        responderChannelBinding: options.localChannelBinding,
         responderNonce: (options.randomNonce ?? createNonce)(),
+        transport: options.transport,
     };
     await writeJson(
-        send,
-        createIrohHelloProof(options.identity, "responder", context, now()),
+        duplex,
+        createP2pHelloProof(options.identity, "responder", context, now()),
         proofSchema,
     );
-    const initiatorProof = await readJson(recv, proofSchema);
-    const remoteIdentity = verifyIrohHelloProof(initiatorProof, "initiator", context, now());
+    const initiatorProof = await readJson(duplex.recv, proofSchema);
+    const remoteIdentity = verifyP2pHelloProof(initiatorProof, "initiator", context, now());
     if (
         remoteIdentity.instanceId !== announcedIdentity.instanceId ||
         remoteIdentity.publicKey !== announcedIdentity.publicKey
     ) {
         throw new Error("The peer changed its P2P identity during the signed hello.");
     }
-    await options.validatePeer?.(remoteIdentity, options.remoteEndpointId);
-    await options.commitPeer?.(remoteIdentity, options.remoteEndpointId);
+    await options.validatePeer?.(remoteIdentity, options.remoteChannelBinding);
+    await options.commitPeer?.(remoteIdentity, options.remoteChannelBinding);
     await writeJson(
-        send,
-        createIrohHelloFinish(options.identity, remoteIdentity, context),
+        duplex,
+        createP2pHelloFinish(options.identity, remoteIdentity, context),
         finishSchema,
     );
-    await send.finish();
+    await finishWrites(duplex.send);
     return remoteIdentity;
 }
 
-export function createIrohHelloProof(
+export function createP2pHelloProof(
     identity: P2pInstanceIdentity,
-    role: IrohHelloProof["role"],
-    context: IrohHelloContext,
+    role: P2pHelloProof["role"],
+    context: P2pHelloContext,
     issuedAt: number,
-): IrohHelloProof {
+): P2pHelloProof {
     const unsigned = {
         expiresAt: issuedAt + HELLO_LIFETIME_MS,
         ...context,
@@ -174,8 +207,7 @@ export function createIrohHelloProof(
         issuedAt,
         publicKey: identity.publicKey,
         role,
-        transport: "iroh" as const,
-        version: 1 as const,
+        version: 2 as const,
     };
     return {
         ...unsigned,
@@ -183,10 +215,10 @@ export function createIrohHelloProof(
     };
 }
 
-export function verifyIrohHelloProof(
-    proof: IrohHelloProof,
-    role: IrohHelloProof["role"],
-    context: IrohHelloContext,
+export function verifyP2pHelloProof(
+    proof: P2pHelloProof,
+    role: P2pHelloProof["role"],
+    context: P2pHelloContext,
     now: number,
 ): P2pPeerIdentity {
     if (!Value.Check(proofSchema, proof)) {
@@ -194,8 +226,9 @@ export function verifyIrohHelloProof(
     }
     if (
         proof.role !== role ||
-        proof.initiatorEndpointId !== context.initiatorEndpointId ||
-        proof.responderEndpointId !== context.responderEndpointId ||
+        proof.transport !== context.transport ||
+        proof.initiatorChannelBinding !== context.initiatorChannelBinding ||
+        proof.responderChannelBinding !== context.responderChannelBinding ||
         proof.initiatorNonce !== context.initiatorNonce ||
         proof.responderNonce !== context.responderNonce
     ) {
@@ -209,24 +242,24 @@ export function verifyIrohHelloProof(
     return { instanceId: proof.instanceId, publicKey: proof.publicKey };
 }
 
-export function createIrohHelloFinish(
+export function createP2pHelloFinish(
     responderIdentity: P2pInstanceIdentity,
     initiatorIdentity: P2pPeerIdentity,
-    context: IrohHelloContext,
-): IrohHelloFinish {
+    context: P2pHelloContext,
+): P2pHelloFinish {
     return {
         signature: responderIdentity.sign(
             finishMessage(responderIdentity, initiatorIdentity, context),
         ),
-        version: 1,
+        version: 2,
     };
 }
 
-export function verifyIrohHelloFinish(
-    finish: IrohHelloFinish,
+export function verifyP2pHelloFinish(
+    finish: P2pHelloFinish,
     responderIdentity: P2pPeerIdentity,
     initiatorIdentity: P2pPeerIdentity,
-    context: IrohHelloContext,
+    context: P2pHelloContext,
 ): void {
     if (!Value.Check(finishSchema, finish)) {
         throw new Error("The peer returned an invalid P2P hello confirmation.");
@@ -244,18 +277,20 @@ export function verifyIrohHelloFinish(
 
 function createAnnouncement(
     identity: P2pInstanceIdentity,
-    endpointId: string,
+    transport: P2pTransportKind,
+    channelBinding: string,
     nonce: string,
     issuedAt: number,
 ): Announcement {
     const unsigned = {
-        endpointId,
+        channelBinding,
         expiresAt: issuedAt + HELLO_LIFETIME_MS,
         instanceId: identity.instanceId,
         issuedAt,
         nonce,
         publicKey: identity.publicKey,
-        version: 1 as const,
+        transport,
+        version: 2 as const,
     };
     return {
         ...unsigned,
@@ -265,11 +300,12 @@ function createAnnouncement(
 
 function verifyAnnouncement(
     announcement: Announcement,
-    endpointId: string,
+    transport: P2pTransportKind,
+    channelBinding: string,
     now: number,
 ): P2pPeerIdentity {
-    if (announcement.endpointId !== endpointId) {
-        throw new Error("The peer signed a different Iroh endpoint ID.");
+    if (announcement.transport !== transport || announcement.channelBinding !== channelBinding) {
+        throw new Error("The peer signed a different P2P transport channel.");
     }
     verifyLifetime(announcement.issuedAt, announcement.expiresAt, now);
     const { signature, ...unsigned } = announcement;
@@ -299,10 +335,11 @@ function verifyLifetime(issuedAt: number, expiresAt: number, now: number): void 
 function announcementMessage(announcement: Omit<Announcement, "signature">): Uint8Array {
     return Buffer.from(
         JSON.stringify([
-            "rig-p2p-announcement-v1",
+            "rig-p2p-announcement-v2",
             announcement.instanceId,
             announcement.publicKey,
-            announcement.endpointId,
+            announcement.transport,
+            announcement.channelBinding,
             announcement.issuedAt,
             announcement.expiresAt,
             announcement.nonce,
@@ -311,18 +348,18 @@ function announcementMessage(announcement: Omit<Announcement, "signature">): Uin
     );
 }
 
-function proofMessage(proof: Omit<IrohHelloProof, "signature">): Uint8Array {
+function proofMessage(proof: Omit<P2pHelloProof, "signature">): Uint8Array {
     return Buffer.from(
         JSON.stringify([
-            "rig-p2p-proof-v1",
+            "rig-p2p-proof-v2",
             proof.role,
             proof.instanceId,
             proof.publicKey,
             proof.issuedAt,
             proof.expiresAt,
             proof.transport,
-            proof.initiatorEndpointId,
-            proof.responderEndpointId,
+            proof.initiatorChannelBinding,
+            proof.responderChannelBinding,
             proof.initiatorNonce,
             proof.responderNonce,
         ]),
@@ -333,17 +370,18 @@ function proofMessage(proof: Omit<IrohHelloProof, "signature">): Uint8Array {
 function finishMessage(
     responderIdentity: P2pPeerIdentity,
     initiatorIdentity: P2pPeerIdentity,
-    context: IrohHelloContext,
+    context: P2pHelloContext,
 ): Uint8Array {
     return Buffer.from(
         JSON.stringify([
-            "rig-p2p-finish-v1",
+            "rig-p2p-finish-v2",
             initiatorIdentity.instanceId,
             initiatorIdentity.publicKey,
             responderIdentity.instanceId,
             responderIdentity.publicKey,
-            context.initiatorEndpointId,
-            context.responderEndpointId,
+            context.transport,
+            context.initiatorChannelBinding,
+            context.responderChannelBinding,
             context.initiatorNonce,
             context.responderNonce,
         ]),
@@ -351,39 +389,43 @@ function finishMessage(
     );
 }
 
-async function readJson(recv: RecvStream, schema: typeof announcementSchema): Promise<Announcement>;
-async function readJson(recv: RecvStream, schema: typeof proofSchema): Promise<IrohHelloProof>;
-async function readJson(recv: RecvStream, schema: typeof finishSchema): Promise<IrohHelloFinish>;
 async function readJson(
-    recv: RecvStream,
+    recv: P2pFrameReader,
+    schema: typeof announcementSchema,
+): Promise<Announcement>;
+async function readJson(recv: P2pFrameReader, schema: typeof proofSchema): Promise<P2pHelloProof>;
+async function readJson(recv: P2pFrameReader, schema: typeof finishSchema): Promise<P2pHelloFinish>;
+async function readJson(
+    recv: P2pFrameReader,
     schema: typeof announcementSchema | typeof finishSchema | typeof proofSchema,
-): Promise<Announcement | IrohHelloFinish | IrohHelloProof> {
-    const length = Buffer.from(await recv.readExact(4)).readUInt32BE(0);
+): Promise<Announcement | P2pHelloFinish | P2pHelloProof> {
+    const length = Buffer.from(await recv.read(4)).readUInt32BE(0);
     if (length === 0 || length > MAXIMUM_HELLO_BYTES) {
         throw new Error("The peer returned an invalid P2P hello frame.");
     }
-    const source = Buffer.from(await recv.readExact(length)).toString("utf8");
+    const source = Buffer.from(await recv.read(length)).toString("utf8");
     let parsed: unknown;
     try {
         parsed = JSON.parse(source);
     } catch {
         throw new Error("The peer returned malformed P2P hello data.");
     }
-    return Value.Decode(schema, parsed) as Announcement | IrohHelloFinish | IrohHelloProof;
+    return Value.Decode(schema, parsed) as Announcement | P2pHelloFinish | P2pHelloProof;
 }
 
 async function writeJson(
-    send: SendStream,
-    value: Announcement | IrohHelloFinish | IrohHelloProof,
+    duplex: P2pFrameDuplex,
+    value: Announcement | P2pHelloFinish | P2pHelloProof,
     schema: typeof announcementSchema | typeof finishSchema | typeof proofSchema,
 ): Promise<void> {
     const encoded = Buffer.from(JSON.stringify(Value.Encode(schema, value)), "utf8");
     if (encoded.byteLength === 0 || encoded.byteLength > MAXIMUM_HELLO_BYTES) {
         throw new Error("The signed P2P hello is too large.");
     }
-    const length = Buffer.allocUnsafe(4);
-    length.writeUInt32BE(encoded.byteLength, 0);
-    await send.writeAll([...length, ...encoded]);
+    const frame = Buffer.allocUnsafe(4 + encoded.byteLength);
+    frame.writeUInt32BE(encoded.byteLength, 0);
+    encoded.copy(frame, 4);
+    await writeBytes(duplex.send, frame);
 }
 
 function createNonce(): string {

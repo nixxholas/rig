@@ -21,11 +21,25 @@ import type {
     BedrockModelOverrides,
 } from "../executor/bedrock-model-overrides.js";
 import type { DockerExecutionConfig, DockerMountConfig } from "../execution/index.js";
+import { p2pInstanceIdSchema, p2pPublicKeySchema } from "../protocol/P2pIdentityProtocol.js";
 
 const irohEndpointIdsSchema = Type.Array(Type.String({ pattern: "^[0-9a-f]{64}$" }), {
     uniqueItems: true,
 });
 const irohRelayUrlSchema = Type.String({ pattern: "^https?://" });
+const p2pAddressSchema = Type.String({
+    maxLength: 512,
+    minLength: 1,
+    pattern: "^\\S+$",
+});
+const sshHostKeySha256Schema = Type.String({
+    pattern: "^SHA256:[A-Za-z0-9+/]{43}$",
+});
+const environmentVariableNameSchema = Type.String({
+    maxLength: 256,
+    minLength: 1,
+    pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+});
 
 export function parseConfigToml(source: string): PartialRigConfig {
     const defaults: PartialConfigDefaults = {};
@@ -243,41 +257,172 @@ function readP2pConfig(
 ): import("./types.js").PartialConfigP2p | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("p2p must be a TOML table.");
-    assertKnownKeys(value, "p2p", ["enable_iroh", "expose_api", "iroh"]);
+    assertKnownKeys(value, "p2p", [
+        "direct",
+        "enable_direct",
+        "enable_iroh",
+        "enable_ssh",
+        "expose_api",
+        "iroh",
+        "peers",
+    ]);
+    const directTable = readTable(value.direct, "p2p.direct");
+    const direct = {
+        ...(directTable === undefined
+            ? {}
+            : readOptionalString(directTable, "listen", "listen", "p2p.direct.listen")),
+    };
+    if (directTable !== undefined) {
+        assertKnownKeys(directTable, "p2p.direct", ["listen"]);
+    }
     const irohTable = readTable(value.iroh, "p2p.iroh");
     const iroh = {
-        ...(irohTable === undefined
-            ? {}
-            : readOptionalStringArray(
-                  irohTable,
-                  "trusted_endpoint_ids",
-                  "trustedEndpointIds",
-                  "p2p.iroh.trusted_endpoint_ids",
-              )),
         ...(irohTable === undefined
             ? {}
             : readOptionalString(irohTable, "relay_url", "relayUrl", "p2p.iroh.relay_url")),
     };
     if (irohTable !== undefined) {
-        assertKnownKeys(irohTable, "p2p.iroh", ["relay_url", "trusted_endpoint_ids"]);
-    }
-    if (
-        iroh.trustedEndpointIds !== undefined &&
-        !Value.Check(irohEndpointIdsSchema, iroh.trustedEndpointIds)
-    ) {
-        throw new Error(
-            "p2p.iroh.trusted_endpoint_ids must contain unique 64-character endpoint IDs.",
-        );
+        assertKnownKeys(irohTable, "p2p.iroh", ["relay_url"]);
     }
     if (iroh.relayUrl !== undefined && !Value.Check(irohRelayUrlSchema, iroh.relayUrl)) {
         throw new Error("p2p.iroh.relay_url must be an HTTP or HTTPS URL.");
     }
+    const peers = value.peers === undefined ? undefined : readConfiguredP2pPeers(value.peers);
+    const enableDirect = readBoolean(value, "enable_direct", "p2p.enable_direct");
     const enableIroh = readBoolean(value, "enable_iroh", "p2p.enable_iroh");
+    const enableSsh = readBoolean(value, "enable_ssh", "p2p.enable_ssh");
     const exposeApi = readBoolean(value, "expose_api", "p2p.expose_api");
     return {
+        ...(Object.keys(direct).length === 0 ? {} : { direct }),
+        ...(enableDirect === undefined ? {} : { enableDirect }),
         ...(enableIroh === undefined ? {} : { enableIroh }),
+        ...(enableSsh === undefined ? {} : { enableSsh }),
         ...(exposeApi === undefined ? {} : { exposeApi }),
         ...(Object.keys(iroh).length === 0 ? {} : { iroh }),
+        ...(peers === undefined ? {} : { peers }),
+    };
+}
+
+function readConfiguredP2pPeers(value: TomlValue): readonly import("./types.js").ConfigP2pPeer[] {
+    const path = "p2p.peers";
+    if (!Array.isArray(value)) throw new Error(`${path} must be an array of tables.`);
+    const identities = new Set<string>();
+    const publicKeys = new Set<string>();
+    return value.map((entry, index) => {
+        if (!isTomlTable(entry)) throw new Error(`${path}[${String(index)}] must be a TOML table.`);
+        const entryPath = `${path}[${String(index)}]`;
+        assertKnownKeys(entry, entryPath, ["direct", "instance_id", "iroh", "public_key", "ssh"]);
+        const instanceId = readString(entry, "instance_id", `${entryPath}.instance_id`);
+        const publicKey = readString(entry, "public_key", `${entryPath}.public_key`);
+        if (
+            instanceId === undefined ||
+            publicKey === undefined ||
+            !Value.Check(p2pInstanceIdSchema, instanceId) ||
+            !Value.Check(p2pPublicKeySchema, publicKey)
+        ) {
+            throw new Error(`${entryPath} requires a cuid2 instance_id and Ed25519 public_key.`);
+        }
+        if (identities.has(instanceId) || publicKeys.has(publicKey)) {
+            throw new Error(`${path} must contain unique identities and public keys.`);
+        }
+        identities.add(instanceId);
+        publicKeys.add(publicKey);
+        const direct = readConfiguredDirectPeer(entry.direct, `${entryPath}.direct`);
+        const iroh = readConfiguredIrohPeer(entry.iroh, `${entryPath}.iroh`);
+        const ssh = readConfiguredSshPeer(entry.ssh, `${entryPath}.ssh`);
+        return {
+            ...(direct === undefined ? {} : { direct }),
+            instanceId,
+            ...(iroh === undefined ? {} : { iroh }),
+            publicKey,
+            ...(ssh === undefined ? {} : { ssh }),
+        };
+    });
+}
+
+function readConfiguredDirectPeer(
+    value: TomlValue | undefined,
+    path: string,
+): import("./types.js").ConfigP2pDirectPeer | undefined {
+    const table = readTable(value, path);
+    if (table === undefined) return undefined;
+    assertKnownKeys(table, path, ["address"]);
+    const address = readString(table, "address", `${path}.address`);
+    if (address === undefined || !Value.Check(p2pAddressSchema, address)) {
+        throw new Error(`${path}.address must be a host and port without whitespace.`);
+    }
+    return { address };
+}
+
+function readConfiguredIrohPeer(
+    value: TomlValue | undefined,
+    path: string,
+): import("./types.js").ConfigP2pIrohPeer | undefined {
+    const table = readTable(value, path);
+    if (table === undefined) return undefined;
+    assertKnownKeys(table, path, ["endpoint_id"]);
+    const endpointId = readString(table, "endpoint_id", `${path}.endpoint_id`);
+    if (endpointId === undefined || !Value.Check(irohEndpointIdsSchema, [endpointId])) {
+        throw new Error(`${path}.endpoint_id must be a 64-character Iroh endpoint ID.`);
+    }
+    return { endpointId };
+}
+
+function readConfiguredSshPeer(
+    value: TomlValue | undefined,
+    path: string,
+): import("./types.js").ConfigP2pSshPeer | undefined {
+    const table = readTable(value, path);
+    if (table === undefined) return undefined;
+    assertKnownKeys(table, path, [
+        "agent_socket_path",
+        "auth",
+        "host",
+        "host_key_sha256",
+        "passphrase_env_var",
+        "port",
+        "private_key_path",
+        "remote_rig",
+        "username",
+    ]);
+    const auth = readString(table, "auth", `${path}.auth`);
+    const host = readString(table, "host", `${path}.host`);
+    const hostKeySha256 = readString(table, "host_key_sha256", `${path}.host_key_sha256`);
+    const port = readIntegerInRange(table, "port", `${path}.port`, 1, 65_535) ?? 22;
+    const username = readString(table, "username", `${path}.username`);
+    const privateKeyPath = readString(table, "private_key_path", `${path}.private_key_path`);
+    const agentSocketPath = readString(table, "agent_socket_path", `${path}.agent_socket_path`);
+    const passphraseEnvVar = readString(table, "passphrase_env_var", `${path}.passphrase_env_var`);
+    const remoteRig = readString(table, "remote_rig", `${path}.remote_rig`) ?? "rig";
+    if (
+        (auth !== "agent" && auth !== "private_key") ||
+        host === undefined ||
+        username === undefined ||
+        !Value.Check(p2pAddressSchema, host) ||
+        hostKeySha256 === undefined ||
+        !Value.Check(sshHostKeySha256Schema, hostKeySha256) ||
+        !Value.Check(p2pAddressSchema, remoteRig) ||
+        (passphraseEnvVar !== undefined &&
+            !Value.Check(environmentVariableNameSchema, passphraseEnvVar))
+    ) {
+        throw new Error(`${path} contains invalid SSH connection or host-key settings.`);
+    }
+    if (auth === "private_key" && privateKeyPath === undefined) {
+        throw new Error(`${path}.private_key_path is required for private_key authentication.`);
+    }
+    if (auth === "agent" && (privateKeyPath !== undefined || passphraseEnvVar !== undefined)) {
+        throw new Error(`${path} cannot configure private-key settings with agent authentication.`);
+    }
+    return {
+        ...(agentSocketPath === undefined ? {} : { agentSocketPath }),
+        auth,
+        host,
+        hostKeySha256,
+        ...(passphraseEnvVar === undefined ? {} : { passphraseEnvVar }),
+        port,
+        ...(privateKeyPath === undefined ? {} : { privateKeyPath }),
+        remoteRig,
+        username,
     };
 }
 

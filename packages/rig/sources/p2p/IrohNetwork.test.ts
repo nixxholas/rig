@@ -13,11 +13,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
 import { IrohNetwork } from "./IrohNetwork.js";
-import { runIrohResponderHello } from "./IrohHelloProtocol.js";
+import { createIrohFrameDuplex } from "./P2pFrameDuplex.js";
+import { runP2pResponderHello } from "./P2pHelloProtocol.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
-const ALPN = [...Buffer.from("rig/p2p/3", "utf8")];
+const ALPN = [...Buffer.from("rig/p2p/4", "utf8")];
 const networks: IrohNetwork[] = [];
 const directories: string[] = [];
 
@@ -42,7 +43,8 @@ describe("IrohNetwork", () => {
         const secondId = secondEndpoint.id().toString();
         const firstStatusChanged = vi.fn();
         const first = await IrohNetwork.create({
-            config: { trustedEndpointIds: [secondId] },
+            config: {},
+            endpointIds: [secondId],
             endpoint: firstEndpoint,
             identity: firstIdentity,
             handshakeTimeoutMs: 100,
@@ -55,7 +57,8 @@ describe("IrohNetwork", () => {
         });
         networks.push(first);
         const second = await IrohNetwork.create({
-            config: { trustedEndpointIds: [firstId] },
+            config: {},
+            endpointIds: [firstId],
             endpoint: secondEndpoint,
             identity: secondIdentity,
             handshakeTimeoutMs: 100,
@@ -99,7 +102,8 @@ describe("IrohNetwork", () => {
         const allowedId = allowedEndpoint.id().toString();
         const refusedId = refusedEndpoint.id().toString();
         const allowed = await IrohNetwork.create({
-            config: { trustedEndpointIds: [] },
+            config: {},
+            endpointIds: [],
             endpoint: allowedEndpoint,
             identity: allowedIdentity,
             relayMode: RelayMode.disabled(),
@@ -107,7 +111,8 @@ describe("IrohNetwork", () => {
         });
         networks.push(allowed);
         const refused = await IrohNetwork.create({
-            config: { trustedEndpointIds: [allowedId] },
+            config: {},
+            endpointIds: [allowedId],
             endpoint: refusedEndpoint,
             identity: refusedIdentity,
             peerAddresses: new Map([[allowedId, allowedEndpoint.addr()]]),
@@ -151,7 +156,8 @@ describe("IrohNetwork", () => {
         })().catch(() => undefined);
         try {
             const client = await IrohNetwork.create({
-                config: { trustedEndpointIds: [serverId] },
+                config: {},
+                endpointIds: [serverId],
                 endpoint: clientEndpoint,
                 handshakeTimeoutMs: 25,
                 identity: clientIdentity,
@@ -193,7 +199,8 @@ describe("IrohNetwork", () => {
         await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId);
 
         const client = await IrohNetwork.create({
-            config: { trustedEndpointIds: [serverId] },
+            config: {},
+            endpointIds: [serverId],
             endpoint: clientEndpoint,
             identity: impostorIdentity,
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
@@ -203,7 +210,8 @@ describe("IrohNetwork", () => {
         });
         networks.push(client);
         const server = await IrohNetwork.create({
-            config: { trustedEndpointIds: [clientId] },
+            config: {},
+            endpointIds: [clientId],
             endpoint: serverEndpoint,
             identity: serverIdentity,
             peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
@@ -244,20 +252,22 @@ describe("IrohNetwork", () => {
             const connection = await (await incoming.accept()).connect();
             const stream = await connection.acceptBi();
             await stream.recv.readExact(1);
-            await runIrohResponderHello(stream.recv, stream.send, {
+            await runP2pResponderHello(createIrohFrameDuplex(stream.recv, stream.send), {
                 commitPeer: async () => {
                     throw new Error("The responder refused to commit the peer.");
                 },
                 identity: serverIdentity,
-                localEndpointId: serverId,
-                remoteEndpointId: clientId,
+                localChannelBinding: serverId,
+                remoteChannelBinding: clientId,
+                transport: "iroh",
             }).catch(() => undefined);
             connection.close(0n, []);
         })();
         const client = await IrohNetwork.create({
             commitPeer: (identity, endpointId) =>
                 clientTrust.verifyOrPin(identity, "iroh", endpointId),
-            config: { trustedEndpointIds: [serverId] },
+            config: {},
+            endpointIds: [serverId],
             endpoint: clientEndpoint,
             identity: clientIdentity,
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
@@ -299,7 +309,8 @@ describe("IrohNetwork", () => {
             finishStream = resolve;
         });
         const client = await IrohNetwork.create({
-            config: { trustedEndpointIds: [serverId] },
+            config: {},
+            endpointIds: [serverId],
             endpoint: clientEndpoint,
             identity: clientIdentity,
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
@@ -309,7 +320,8 @@ describe("IrohNetwork", () => {
         });
         networks.push(client);
         const server = await IrohNetwork.create({
-            config: { trustedEndpointIds: [clientId] },
+            config: {},
+            endpointIds: [clientId],
             endpoint: serverEndpoint,
             identity: serverIdentity,
             peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
@@ -424,7 +436,8 @@ describe("IrohNetwork", () => {
         } as unknown as Endpoint;
         const network = await IrohNetwork.create({
             bindings: {} as never,
-            config: { trustedEndpointIds: [peerId] },
+            config: {},
+            endpointIds: [peerId],
             connectTimeoutMs: 5,
             endpoint,
             peerAddresses: new Map([[peerId, {} as EndpointAddr]]),
@@ -461,7 +474,8 @@ describe("IrohNetwork", () => {
         } as unknown as Endpoint;
         const network = await IrohNetwork.create({
             bindings: {} as never,
-            config: { trustedEndpointIds: [] },
+            config: {},
+            endpointIds: [],
             endpoint,
             handshakeTimeoutMs: 5,
             relayMode: RelayMode.disabled(),
@@ -481,7 +495,8 @@ describe("IrohNetwork", () => {
         const network = await IrohNetwork.create({
             bindings: {} as never,
             closeTimeoutMs: 5,
-            config: { trustedEndpointIds: [] },
+            config: {},
+            endpointIds: [],
             endpoint,
             relayMode: RelayMode.disabled(),
             secretKey: null as never,
@@ -505,11 +520,15 @@ function fakePingConnection(
                 const pair = duplexPair();
                 void (async () => {
                     await pair.right.recv.readExact(1);
-                    await runIrohResponderHello(pair.right.recv, pair.right.send, {
-                        identity: peerIdentity,
-                        localEndpointId: peerEndpointId,
-                        remoteEndpointId: clientEndpointId,
-                    });
+                    await runP2pResponderHello(
+                        createIrohFrameDuplex(pair.right.recv, pair.right.send),
+                        {
+                            identity: peerIdentity,
+                            localChannelBinding: peerEndpointId,
+                            remoteChannelBinding: clientEndpointId,
+                            transport: "iroh",
+                        },
+                    );
                 })();
                 return pair.left;
             }
@@ -554,6 +573,11 @@ function bytePipe(): { recv: RecvStream; send: SendStream } {
         } as unknown as RecvStream,
         send: {
             finish: async () => undefined,
+            write: async (chunk: number[]) => {
+                bytes.push(...chunk);
+                wake();
+                return chunk.length;
+            },
             writeAll: async (chunk: number[]) => {
                 bytes.push(...chunk);
                 wake();

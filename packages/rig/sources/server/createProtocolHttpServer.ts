@@ -290,6 +290,7 @@ import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSo
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "../session/sessionSummaryWithTerminalPresence.js";
 import { attachHttpConnectProxy } from "./attachHttpConnectProxy.js";
+import { attachP2pSshBridge } from "./attachP2pSshBridge.js";
 import {
     ProjectFileConflictError,
     ProjectFileOutsideScopeError,
@@ -399,8 +400,17 @@ export function createProtocolHttpServer(
     // The persistent store caches sessions weakly; each open SSE stream needs its own strong lease.
     const sessionEventStreamLeases = new Set<SessionEventStreamLease>();
     const sessionTerminals = new SessionTerminalTracker();
+    const p2pNetwork = options.p2pNetwork;
+    const sshBridgeEnabled = p2pNetwork?.sshBridgeEnabled;
+    const acceptSshBridge =
+        p2pNetwork !== undefined &&
+        typeof sshBridgeEnabled === "function" &&
+        sshBridgeEnabled.call(p2pNetwork) === true
+            ? p2pNetwork.acceptSshBridge.bind(p2pNetwork)
+            : undefined;
 
     attachRemoteTerminalWebSocketServer({ server, store, token: options.token });
+    attachP2pSshBridge(server, options.token, acceptSshBridge);
     attachHttpConnectProxy(server, options.token, store);
     server.once("close", () => {
         void store.remoteTerminals.close();

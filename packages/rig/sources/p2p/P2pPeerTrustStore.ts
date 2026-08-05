@@ -17,7 +17,7 @@ import type { P2pTransportKind } from "./P2pTransport.js";
 const transportBindingSchema = Type.Object(
     {
         address: Type.String({ maxLength: 512, minLength: 1 }),
-        transport: Type.Union([Type.Literal("iroh")]),
+        transport: Type.Union([Type.Literal("direct"), Type.Literal("iroh"), Type.Literal("ssh")]),
     },
     { additionalProperties: false },
 );

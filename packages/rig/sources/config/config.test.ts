@@ -212,43 +212,92 @@ enabled = true
         });
     });
 
-    it("parses machine-level Iroh networking", () => {
+    it("parses machine-level peers with several transports", () => {
         expect(
             parseConfigToml(`
 [p2p]
+enable_direct = true
 enable_iroh = true
+enable_ssh = true
 expose_api = true
+[p2p.direct]
+listen = "0.0.0.0:7443"
 [p2p.iroh]
-trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"]
 relay_url = "https://relay.example.com"
+[[p2p.peers]]
+instance_id = "ck1234567890abcdefghijkl"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+[p2p.peers.direct]
+address = "rig.example.com:7443"
+[p2p.peers.iroh]
+endpoint_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+[p2p.peers.ssh]
+auth = "agent"
+host = "rig.example.com"
+host_key_sha256 = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+username = "steve"
 `),
         ).toEqual({
             p2p: {
+                direct: { listen: "0.0.0.0:7443" },
+                enableDirect: true,
                 enableIroh: true,
+                enableSsh: true,
                 exposeApi: true,
-                iroh: {
-                    trustedEndpointIds: [
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-                    ],
-                    relayUrl: "https://relay.example.com",
-                },
+                iroh: { relayUrl: "https://relay.example.com" },
+                peers: [
+                    {
+                        direct: { address: "rig.example.com:7443" },
+                        instanceId: "ck1234567890abcdefghijkl",
+                        iroh: {
+                            endpointId:
+                                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        },
+                        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        ssh: {
+                            auth: "agent",
+                            host: "rig.example.com",
+                            hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                            port: 22,
+                            remoteRig: "rig",
+                            username: "steve",
+                        },
+                    },
+                ],
             },
         });
     });
 
-    it("rejects malformed or duplicate Iroh endpoint IDs", () => {
+    it("allows an identity-only peer as an inbound SSH allowlist entry", () => {
+        expect(
+            parseConfigToml(`
+[[p2p.peers]]
+instance_id = "ck1234567890abcdefghijkl"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+`),
+        ).toMatchObject({
+            p2p: {
+                peers: [
+                    {
+                        instanceId: "ck1234567890abcdefghijkl",
+                        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    },
+                ],
+            },
+        });
+    });
+
+    it("rejects malformed or duplicate P2P peer identities", () => {
         expect(() =>
             parseConfigToml(
-                '[p2p]\nenable_iroh = true\n[p2p.iroh]\ntrusted_endpoint_ids = ["not-an-endpoint"]\n',
+                '[[p2p.peers]]\ninstance_id = "ck1234567890abcdefghijkl"\npublic_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"\n[p2p.peers.iroh]\nendpoint_id = "not-an-endpoint"\n',
             ),
-        ).toThrow("unique 64-character endpoint IDs");
-        const endpointId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        ).toThrow("64-character Iroh endpoint ID");
         expect(() =>
             parseConfigToml(
-                `[p2p]\nenable_iroh = true\n[p2p.iroh]\ntrusted_endpoint_ids = ["${endpointId}", "${endpointId}"]\n`,
+                '[[p2p.peers]]\ninstance_id = "ck1234567890abcdefghijkl"\npublic_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"\n[p2p.peers.direct]\naddress = "one.example:7443"\n[[p2p.peers]]\ninstance_id = "ck1234567890abcdefghijkl"\npublic_key = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"\n[p2p.peers.direct]\naddress = "two.example:7443"\n',
             ),
-        ).toThrow("unique 64-character endpoint IDs");
+        ).toThrow("unique identities and public keys");
     });
 
     it("parses ordered workspace setup commands", () => {
@@ -642,8 +691,11 @@ show_usage = true
 workflows = true
 [p2p]
 enable_iroh = true
-[p2p.iroh]
-trusted_endpoint_ids = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+[[p2p.peers]]
+instance_id = "ck1234567890abcdefghijkl"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+[p2p.peers.iroh]
+endpoint_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 [providers]
 default_enable = false
 [providers.codex]
@@ -698,9 +750,13 @@ inference_max_retries = 8
             });
             expect(loaded.config.features.workflows).toBe(true);
             expect(loaded.config.p2p).toEqual({
+                direct: {},
+                enableDirect: false,
                 enableIroh: false,
+                enableSsh: false,
                 exposeApi: false,
-                iroh: { trustedEndpointIds: [] },
+                iroh: {},
+                peers: [],
             });
             expect(loaded.config.providerDefaultEnable).toBe(true);
             expect(loaded.config.providers).toEqual({

@@ -60,13 +60,20 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             }
             for (const transport of p2p.transports) {
                 if (transport.state === "unavailable") {
-                    console.log(`Iroh P2P networking is unavailable: ${transport.error}`);
+                    console.log(
+                        `${describeTransport(transport.transport)} P2P networking is unavailable: ${transport.error}`,
+                    );
                     continue;
                 }
-                console.log(`Iroh P2P endpoint: ${transport.localAddress}`);
-                console.log(
-                    `Iroh P2P API sharing: ${transport.apiExposed ? "Enabled" : "Disabled"}`,
-                );
+                const label = describeTransport(transport.transport);
+                if ("localAddress" in transport && transport.localAddress !== undefined) {
+                    console.log(`${label} P2P endpoint: ${transport.localAddress}`);
+                }
+                if ("apiExposed" in transport) {
+                    console.log(
+                        `${label} P2P API sharing: ${transport.apiExposed ? "Enabled" : "Disabled"}`,
+                    );
+                }
                 for (const peer of transport.peers) {
                     const latency =
                         peer.rttMs === undefined ? "" : ` (${String(Math.round(peer.rttMs))} ms)`;
@@ -76,7 +83,7 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
                             ? `unverified endpoint ${peer.address}`
                             : `${peer.peerId} via endpoint ${peer.address}`;
                     console.log(
-                        `Iroh P2P peer ${identity}: ${describePeerStatus(peer.status)}${latency}${error}`,
+                        `${label} P2P peer ${identity}: ${describePeerStatus(peer.status)}${latency}${error}`,
                     );
                 }
             }
@@ -94,6 +101,12 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
     }
     await connection.client.shutdown();
     console.log("Daemon is stopping.");
+}
+
+function describeTransport(transport: "direct" | "iroh" | "ssh"): string {
+    if (transport === "direct") return "Direct";
+    if (transport === "ssh") return "SSH";
+    return "Iroh";
 }
 
 function describePeerStatus(status: "connected" | "connecting" | "unreachable"): string {

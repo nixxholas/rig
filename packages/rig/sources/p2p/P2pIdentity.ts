@@ -27,10 +27,12 @@ export const p2pSecretSeedSchema = Type.String({
 const P2P_IDENTITY_SEED_BYTES = 32;
 const P2P_PUBLIC_KEY_BYTES = 32;
 const P2P_SIGNATURE_BYTES = 64;
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
 export interface P2pInstanceIdentity extends P2pPeerIdentity {
     decryptFrom(encrypted: P2pEncryptedMessage, senderPublicKey: string): Uint8Array;
     encryptFor(message: Uint8Array, recipientPublicKey: string): P2pEncryptedMessage;
+    exportPrivateKeyPkcs8(): Uint8Array;
     sign(message: Uint8Array): string;
 }
 
@@ -89,6 +91,8 @@ export function createP2pInstanceIdentity(
                 nonce: encodeBase64Url(nonce),
             };
         },
+        exportPrivateKeyPkcs8: () =>
+            new Uint8Array(Buffer.concat([ED25519_PKCS8_SEED_PREFIX, secretSeed])),
         instanceId,
         publicKey: encodeBase64Url(signingPublicKey),
         sign: (message) => encodeBase64Url(ed25519.sign(message, secretSeed)),
