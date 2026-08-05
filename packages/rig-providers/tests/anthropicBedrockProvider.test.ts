@@ -295,7 +295,14 @@ describe("AnthropicBedrockProvider", () => {
             },
         ]);
         expect(capturedRequests[1]?.betas).toEqual(expect.arrayContaining(["compact-2026-01-12"]));
-        expect(capturedRequests[1]).not.toHaveProperty("context_management");
+        expect(capturedRequests[1]?.context_management).toEqual({
+            edits: [
+                {
+                    type: "compact_20260112",
+                    trigger: { type: "input_tokens", value: 2_000_000 },
+                },
+            ],
+        });
 
         await session.compact({
             context: {

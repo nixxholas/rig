@@ -30,19 +30,29 @@ export function createAnthropicRequest(options: {
     if (options.structuredOutput !== undefined) betas.push("structured-outputs-2025-12-15");
     return {
         betas,
-        ...(!requestsCompaction
+        ...(!usesCompaction
             ? {}
             : {
                   context_management: {
                       edits: [
-                          {
-                              type: "compact_20260112" as const,
-                              ...(options.compaction?.instructions === undefined
-                                  ? {}
-                                  : { instructions: options.compaction.instructions }),
-                              pause_after_compaction: true,
-                              trigger: { type: "input_tokens" as const, value: 50_000 },
-                          },
+                          requestsCompaction
+                              ? {
+                                    type: "compact_20260112" as const,
+                                    ...(options.compaction?.instructions === undefined
+                                        ? {}
+                                        : { instructions: options.compaction.instructions }),
+                                    pause_after_compaction: true,
+                                    trigger: { type: "input_tokens" as const, value: 50_000 },
+                                }
+                              : {
+                                    // The API rejects compaction blocks whose strategy is not
+                                    // declared, but offers no way to declare it with compaction
+                                    // disabled. Rig owns compaction timing and the run path
+                                    // treats a mid-run compaction as an error, so the trigger
+                                    // sits beyond the 1M context window and can never fire.
+                                    type: "compact_20260112" as const,
+                                    trigger: { type: "input_tokens" as const, value: 2_000_000 },
+                                },
                       ],
                   },
               }),
