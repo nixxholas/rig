@@ -1938,25 +1938,7 @@ export class InMemorySession {
     }
 
     #switchModel(model: Model, providerId: string, options: { excludeRunId?: string }): void {
-        const previousModel = this.#selectedModel();
-        const compatible = areProviderModelsCompatible(
-            {
-                modelId: previousModel.id,
-                providerId: this.#providerId,
-                providerType:
-                    this.#modelCatalog.providers.find(
-                        (provider) => provider.providerId === this.#providerId,
-                    )?.providerType ?? "gym",
-            },
-            {
-                modelId: model.id,
-                providerId,
-                providerType:
-                    this.#modelCatalog.providers.find(
-                        (provider) => provider.providerId === providerId,
-                    )?.providerType ?? "gym",
-            },
-        );
+        const compatible = this.#modelsAreCompatible(model, providerId);
         if (compatible) {
             this.#syncContextMessages();
         } else {
@@ -1971,18 +1953,7 @@ export class InMemorySession {
                       options.excludeRunId === undefined
                         ? undefined
                         : []
-                    : [
-                          createModelSwitchHistoryMessage({
-                              canReadAgentHistory: this.#agentManager !== undefined,
-                              fromModel: previousModel,
-                              fromProviderId: this.#providerId,
-                              id: createId(),
-                              messages: visibleMessages,
-                              subagentCount: this.#agentManager?.list(this.id).length ?? 0,
-                              toModel: model,
-                              toProviderId: providerId,
-                          }),
-                      ];
+                    : [this.#createModelHandoffHistoryMessage(model, providerId, visibleMessages)];
         }
         const runtime = this.#runtime;
         const reusableExecutor =
@@ -2011,6 +1982,44 @@ export class InMemorySession {
         this.#modelId = model.id;
         this.#providerId = providerId;
         this.#models = this.#modelsForProvider(providerId);
+    }
+
+    #modelsAreCompatible(model: Model, providerId: string): boolean {
+        return areProviderModelsCompatible(
+            {
+                modelId: this.#modelId,
+                providerId: this.#providerId,
+                providerType:
+                    this.#modelCatalog.providers.find(
+                        (provider) => provider.providerId === this.#providerId,
+                    )?.providerType ?? "gym",
+            },
+            {
+                modelId: model.id,
+                providerId,
+                providerType:
+                    this.#modelCatalog.providers.find(
+                        (provider) => provider.providerId === providerId,
+                    )?.providerType ?? "gym",
+            },
+        );
+    }
+
+    #createModelHandoffHistoryMessage(
+        model: Model,
+        providerId: string,
+        messages: readonly Message[],
+    ): SystemMessage {
+        return createModelSwitchHistoryMessage({
+            canReadAgentHistory: this.#agentManager !== undefined,
+            fromModel: this.#selectedModel(),
+            fromProviderId: this.#providerId,
+            id: createId(),
+            messages,
+            subagentCount: this.#agentManager?.list(this.id).length ?? 0,
+            toModel: model,
+            toProviderId: providerId,
+        });
     }
 
     createForkState(): PersistedSessionState {
@@ -3620,6 +3629,28 @@ export class InMemorySession {
             workflowsEnabled: this.#workflowsEnabled,
             ...(this.#request.docker === undefined ? {} : { docker: this.#request.docker }),
         };
+    }
+
+    /** Preserves native checkpoints only when the child can replay the parent's provider format. */
+    contextMessagesForSubagent(
+        contextMessages: readonly Message[],
+        target: { modelId: string; parentToolCallId?: string; providerId: string },
+    ): readonly Message[] {
+        const targetModel = this.#ensureKnownModel(target.modelId, target.providerId);
+        if (this.#modelsAreCompatible(targetModel, target.providerId)) return contextMessages;
+        const selectedMessages = messagesBeforeToolCall(contextMessages, target.parentToolCallId);
+        const sourceMessages = selectedMessages.some((message) => message.role === "compaction")
+            ? messagesBeforeToolCall(this.#committedMessages(), target.parentToolCallId)
+            : selectedMessages;
+        return sourceMessages.length === 0
+            ? []
+            : [
+                  this.#createModelHandoffHistoryMessage(
+                      targetModel,
+                      target.providerId,
+                      sourceMessages,
+                  ),
+              ];
     }
 
     activeRunDebug(): boolean {
@@ -7868,6 +7899,19 @@ export class InMemorySession {
         });
         this.#storeMessage(position, message, true, runId);
     }
+}
+
+function messagesBeforeToolCall(
+    messages: readonly Message[],
+    toolCallId: string | undefined,
+): readonly Message[] {
+    if (toolCallId === undefined) return messages;
+    const currentToolCallIndex = messages.findLastIndex(
+        (message) =>
+            message.role === "agent" &&
+            message.blocks.some((block) => block.type === "tool_call" && block.id === toolCallId),
+    );
+    return currentToolCallIndex === -1 ? messages : messages.slice(0, currentToolCallIndex);
 }
 
 function cloneWorkflowRun(run: WorkflowRun): WorkflowRun {

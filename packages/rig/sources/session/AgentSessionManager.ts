@@ -908,12 +908,30 @@ export class AgentSessionManager {
                 request.workspaceId !== parent.snapshot().workspaceId
                     ? (this.#repository.configureWorkspaceRequest?.(childRequest) ?? childRequest)
                     : childRequest;
+            const inheritedContextMessages = (() => {
+                if (request.contextMode !== "parent" || request.contextMessages === undefined) {
+                    return undefined;
+                }
+                const { modelId, providerId } = configuredChildRequest;
+                if (modelId === undefined || providerId === undefined) {
+                    throw new Error(
+                        "A subagent inheriting parent context requires a resolved model and provider.",
+                    );
+                }
+                return parent.contextMessagesForSubagent(request.contextMessages, {
+                    modelId,
+                    ...(request.parentToolCallId === undefined
+                        ? {}
+                        : { parentToolCallId: request.parentToolCallId }),
+                    providerId,
+                });
+            })();
             child =
                 request.contextMode === "parent"
                     ? this.#repository.createSubagent(
                           configuredChildRequest,
                           metadata,
-                          request.contextMessages,
+                          inheritedContextMessages,
                       )
                     : this.#repository.createSubagent(configuredChildRequest, metadata);
             const childPath = this.#pathFor(child);

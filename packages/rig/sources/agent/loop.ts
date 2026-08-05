@@ -715,7 +715,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             return interrupted;
         }
 
-        const toolMessages = transcript.filter((message) => !isExcludedFromModelContext(message));
+        const permissionMessages = transcript.filter(
+            (message) => !isExcludedFromModelContext(message),
+        );
+        const toolMessages = [...contextTranscript];
         const preparedPermissionEntries = await raceWithAbort(
             (async () => {
                 const entries: [string, PreparedToolPermission][] = [];
@@ -723,7 +726,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     entries.push([
                         toolCall.id,
                         await prepareToolPermission(toolCall, toolsByName, toolContext, {
-                            messages: toolMessages,
+                            messages: permissionMessages,
                             onPermissionReviewStarted: (review) =>
                                 options.signal?.aborted
                                     ? Promise.resolve()
