@@ -83,7 +83,7 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
                     },
                 });
                 if (compaction.status !== "completed") {
-                    expect.fail(`Compaction did not complete: ${JSON.stringify(compaction)}`);
+                    throw new Error(`Compaction did not complete: ${JSON.stringify(compaction)}`);
                 }
 
                 const events = await collectSessionEvents(
