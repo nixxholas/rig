@@ -34,6 +34,7 @@ import { ClaudePromptQueue } from "@/vendors/claude/impl/ClaudePromptQueue.js";
 import {
     classifyClaudeError,
     claudeResultErrorMessage,
+    isClaudeMidResponseServerError,
 } from "@/vendors/claude/errors/claudeErrors.js";
 import { ClaudeToolBridge } from "@/vendors/claude/impl/ClaudeToolBridge.js";
 import {
@@ -233,6 +234,7 @@ export class ClaudeSession extends BaseSession {
             messages: [...request.context.messages],
         };
         let emptyResponseRetries = 0;
+        let completedMidResponseAttempts = 0;
         for (;;) {
             let assistantText = "";
             let reasoningText = "";
@@ -248,6 +250,10 @@ export class ClaudeSession extends BaseSession {
                 ...(request.structuredOutput === undefined
                     ? {}
                     : { structuredOutput: request.structuredOutput }),
+                maxRetries: Math.max(
+                    0,
+                    this.resolveInferenceMaxRetries() - completedMidResponseAttempts,
+                ),
             })) {
                 if (event.type === "text_delta") assistantText += event.delta;
                 if (event.type === "reasoning_delta") reasoningText += event.delta;
@@ -278,6 +284,34 @@ export class ClaudeSession extends BaseSession {
             }
 
             if (terminal === undefined) return;
+            if (
+                terminal.state === "error" &&
+                terminal.providerError?.type === "internal_server_error" &&
+                isClaudeMidResponseServerError(terminal.message)
+            ) {
+                completedMidResponseAttempts += terminal.providerError.diagnostics?.attempts ?? 1;
+                terminal = withClaudeErrorAttempts(terminal, completedMidResponseAttempts);
+                if (completedMidResponseAttempts <= this.resolveInferenceMaxRetries()) {
+                    this.closeActiveQuery();
+                    this.sdkSessionId = randomUUID();
+                    this.lastQueryToolCalls = [];
+                    yield {
+                        type: "retrying",
+                        attempt: completedMidResponseAttempts,
+                        reason: "Claude's response was interrupted by a server error.",
+                    };
+                    try {
+                        await this.retryWait(completedMidResponseAttempts, request.abort);
+                    } catch (delayError) {
+                        if (request.abort?.aborted) {
+                            yield { type: "done", state: "cancelled" };
+                            return;
+                        }
+                        throw delayError;
+                    }
+                    continue;
+                }
+            }
             if (
                 terminal.state !== "error" &&
                 terminal.state !== "cancelled" &&
@@ -339,6 +373,7 @@ export class ClaudeSession extends BaseSession {
         compaction?: boolean;
         context: SessionContext;
         effort?: SessionReasoningEffort;
+        maxRetries?: number;
         model: string;
         structuredOutput?: SessionRunRequest["structuredOutput"];
     }): AsyncGenerator<SessionEvent> {
@@ -432,7 +467,7 @@ export class ClaudeSession extends BaseSession {
                     context: configuredContext,
                     credential: this.credential,
                     env: this.env,
-                    maxRetries: this.resolveInferenceMaxRetries(),
+                    maxRetries: options.maxRetries ?? this.resolveInferenceMaxRetries(),
                     ...(this.pathToClaudeCodeExecutable === undefined
                         ? {}
                         : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
@@ -821,4 +856,21 @@ function toAggregateModelUsage(
 function emptyStream(): SessionStream {
     async function* stream(): AsyncGenerator<SessionEvent> {}
     return stream();
+}
+
+function withClaudeErrorAttempts(
+    event: Extract<SessionEvent, { type: "done"; state: "error" }>,
+    attempts: number,
+): Extract<SessionEvent, { type: "done"; state: "error" }> {
+    if (event.providerError === undefined) return event;
+    return {
+        ...event,
+        providerError: {
+            ...event.providerError,
+            diagnostics: {
+                ...event.providerError.diagnostics,
+                attempts,
+            },
+        },
+    };
 }

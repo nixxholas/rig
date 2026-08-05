@@ -65,7 +65,10 @@ export function classifyClaudeError(options: {
             type: "server_overloaded",
             ...(diagnostics === undefined ? {} : { diagnostics }),
         };
-    if (options.assistantError === "server_error") {
+    if (
+        options.assistantError === "server_error" ||
+        isClaudeMidResponseServerError(options.message)
+    ) {
         return {
             type: "internal_server_error",
             ...(diagnostics === undefined ? {} : { diagnostics }),
@@ -93,6 +96,14 @@ export function claudeResultErrorMessage(
         case "error_max_structured_output_retries":
             return "Claude could not produce valid structured output after repeated attempts.";
     }
+}
+
+export function isClaudeMidResponseServerError(message: string): boolean {
+    const normalized = message.toLowerCase();
+    return (
+        normalized.includes("mid-response") &&
+        normalized.includes("response above may be incomplete")
+    );
 }
 
 function earliestResetAt(rateLimitInfo: SDKRateLimitInfo | undefined): number | undefined {
