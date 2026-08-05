@@ -82,7 +82,7 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
                         ],
                     },
                 });
-                if (compaction.status !== "completed") {
+                if (compaction.status !== "completed" || compaction.compaction === undefined) {
                     throw new Error(`Compaction did not complete: ${JSON.stringify(compaction)}`);
                 }
 
