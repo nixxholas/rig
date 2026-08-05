@@ -61,5 +61,6 @@ The completed contract is:
 - Independent GPT and Opus reviews iterated until both reported no Critical or
   Major findings.
 
-The workspace manifests remain `@slopus/rig@0.0.140` and
-`happy-plugins@0.0.5`. These changes have not been released or pushed.
+The managed-workspace changes shipped in `@slopus/rig@0.0.141`. The companion
+client release is `@slopus/rig-connect@0.0.38`; `happy-plugins` remains
+`0.0.5`.
