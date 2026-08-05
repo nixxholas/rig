@@ -9,7 +9,7 @@ import { createProjectConfigSecurityNotice } from "./createProjectConfigSecurity
 import { createProjectConfigSecurityNoticeTitle } from "./createProjectConfigSecurityNoticeTitle.js";
 import { loadConfig } from "./loadConfig.js";
 import { mergeConfigValues } from "./mergeConfigValues.js";
-import { parseConfigToml } from "./parseConfigToml.js";
+import { parseConfigToml, parseConfigTomlWithUnknownSettings } from "./parseConfigToml.js";
 import { writePresenceSelection } from "./writePresenceSelection.js";
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 import { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
@@ -19,6 +19,37 @@ import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 import { updateRuntimePreferences } from "./updateRuntimePreferences.js";
 
 describe("config", () => {
+    // Rig renamed codex_stream_max_retries to inference_max_retries with no alias, then crashed on
+    // the runtime.toml it had written itself, before there was any UI to report the failure in.
+    it("starts with a runtime setting Rig has since renamed", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-renamed-setting-"));
+        const configHome = join(root, "config-home");
+        try {
+            await mkdir(configHome, { recursive: true });
+            await writeFile(
+                join(configHome, "runtime.toml"),
+                "[settings]\ncodex_stream_max_retries = 5\nshow_usage = true\n",
+                "utf8",
+            );
+
+            const loaded = await loadConfig({
+                cwd: root,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: configHome,
+                    RIG_HOME: configHome,
+                } as NodeJS.ProcessEnv,
+            });
+
+            // The rest of the file still applies, and the retired name falls back to the default.
+            expect(loaded.config.settings.showUsage).toBe(true);
+            expect(loaded.config.settings.inferenceMaxRetries).toBe(
+                DEFAULT_RIG_CONFIG.settings.inferenceMaxRetries,
+            );
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it("parses and unions protected paths", () => {
         expect(
             parseConfigToml(
@@ -146,7 +177,7 @@ describe("config", () => {
         }
     });
 
-    it("does not hide an invalid rig.toml behind a valid happy.toml", async () => {
+    it("does not fall back to happy.toml when rig.toml holds an unknown setting", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-invalid-preferred-config-"));
         try {
             await Promise.all([
@@ -158,15 +189,17 @@ describe("config", () => {
                 ),
             ]);
 
-            await expect(
-                loadConfig({
-                    cwd: root,
-                    env: {
-                        RIG_CONFIGURATION_DIRECTORY: join(root, "config-home"),
-                        RIG_HOME: join(root, "config-home"),
-                    } as NodeJS.ProcessEnv,
-                }),
-            ).rejects.toThrow("Unknown invalid setting.");
+            const loaded = await loadConfig({
+                cwd: root,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: join(root, "config-home"),
+                    RIG_HOME: join(root, "config-home"),
+                } as NodeJS.ProcessEnv,
+            });
+
+            // rig.toml still wins, so happy.toml's commands must not leak in behind it.
+            expect(loaded.sources.local.path).toBe(join(root, "rig.toml"));
+            expect(loaded.config.workspace.setupCommands).toEqual([]);
         } finally {
             await rm(root, { recursive: true, force: true });
         }
@@ -290,14 +323,15 @@ relay_url = "https://relay.example.com"
         });
     });
 
-    it("rejects the removed P2P peer trust config", () => {
-        expect(() =>
-            parseConfigToml(`
+    it("ignores the removed P2P peer trust config", () => {
+        const parsed = parseConfigTomlWithUnknownSettings(`
 [[p2p.peers]]
 instance_id = "ck1234567890abcdefghijkl"
 public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-`),
-        ).toThrow("Unknown p2p.peers setting");
+`);
+        expect(parsed.unknownSettings).toEqual(["p2p.peers"]);
+        // The [p2p] table survives, but nothing from the retired peer trust block comes back.
+        expect(parsed.values.p2p).toEqual({});
     });
 
     it("parses ordered workspace setup commands", () => {
@@ -483,13 +517,15 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
         });
     });
 
-    it("requires a type for custom providers and rejects parameters from another type", () => {
+    it("requires a type for custom providers and ignores parameters from another type", () => {
         expect(() => parseConfigToml("[providers.work]\nenabled = true\n")).toThrow(
             'Provider "work" must set type to "codex", "claude", "grok", or "bedrock".',
         );
-        expect(() =>
-            parseConfigToml('[providers.work]\ntype = "codex"\nconfig_dir = "/tmp/work"\n'),
-        ).toThrow("Unknown providers.work.config_dir setting.");
+        const crossedType = parseConfigTomlWithUnknownSettings(
+            '[providers.work]\ntype = "codex"\nconfig_dir = "/tmp/work"\n',
+        );
+        expect(crossedType.unknownSettings).toEqual(["providers.work.config_dir"]);
+        expect(crossedType.values.providers?.work).toEqual({ type: "codex" });
         expect(() => parseConfigToml('[providers.codex]\ntype = "claude"\n')).toThrow(
             'Built-in provider "codex" must use type "codex".',
         );
@@ -572,21 +608,27 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             '[workspace]\nsetup_commands = "pnpm install"\n',
             "workspace.setup_commands must be an array of strings.",
         ],
-        ['[defaults]\nmodle = "openai/gpt-5.6"\n', "Unknown defaults.modle setting."],
-        ["[settings]\nshow_useage = true\n", "Unknown settings.show_useage setting."],
-        ['[theme]\nprimari = "bright_white"\n', "Unknown theme.primari setting."],
-        ['[docker]\nimage = "node:24"\nnetwrok = "host"\n', "Unknown docker.netwrok setting."],
-        [
-            '[mcp_servers.docs]\ncommand = "docs-server"\nargz = []\n',
-            "Unknown mcp_servers.docs.argz setting.",
-        ],
-        [
-            '[mcp_servers.docs]\ncommand = "docs-server"\ntransport = "http"\n',
-            "Unknown mcp_servers.docs.transport setting.",
-        ],
-        ['defalts = { model = "openai/gpt-5.6" }\n', "Unknown defalts setting."],
     ] as const)("rejects invalid config: %s", (source, message) => {
         expect(() => parseConfigToml(source)).toThrow(message);
+    });
+
+    // A setting Rig does not recognize is never fatal: configuration is read before Rig has a
+    // terminal to report a failure in, and Rig writes runtime.toml itself, so a name Rig has since
+    // renamed is Rig's own stale output rather than a user mistake.
+    it.each([
+        ['[defaults]\nmodle = "openai/gpt-5.6"\n', "defaults.modle"],
+        ["[settings]\nshow_useage = true\n", "settings.show_useage"],
+        ['[theme]\nprimari = "bright_white"\n', "theme.primari"],
+        ['[docker]\nimage = "node:24"\nnetwrok = "host"\n', "docker.netwrok"],
+        ['[mcp_servers.docs]\ncommand = "docs-server"\nargz = []\n', "mcp_servers.docs.argz"],
+        [
+            '[mcp_servers.docs]\ncommand = "docs-server"\ntransport = "http"\n',
+            "mcp_servers.docs.transport",
+        ],
+        ['defalts = { model = "openai/gpt-5.6" }\n', "defalts"],
+    ] as const)("ignores rather than rejects an unrecognized setting: %s", (source, setting) => {
+        expect(() => parseConfigToml(source)).not.toThrow();
+        expect(parseConfigTomlWithUnknownSettings(source).unknownSettings).toEqual([setting]);
     });
 
     it("describes only the machine-level project settings that were ignored", () => {

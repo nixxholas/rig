@@ -27,13 +27,51 @@ import { protectedPathsSchema } from "./configPermissions.js";
 
 const irohRelayUrlSchema = Type.String({ pattern: "^https?://" });
 
+/**
+ * Settings the parse in progress has discarded, named the way they are written in the file.
+ * Parsing is entirely synchronous, so one parse always runs to completion before the next one
+ * begins and this cannot mix the keys of two files together.
+ */
+let droppedSettings: string[] | undefined;
+
+export interface ParsedConfigToml {
+    /** Settings Rig does not recognize, in the order they appear, such as `settings.show_useage`. */
+    unknownSettings: readonly string[];
+    values: PartialRigConfig;
+}
+
 export function parseConfigToml(source: string): PartialRigConfig {
+    return parseConfigTomlWithUnknownSettings(source).values;
+}
+
+/**
+ * Reads a configuration document, discarding every setting Rig does not recognize and naming
+ * what it discarded.
+ *
+ * An unrecognized setting is never fatal. Configuration is read before Rig has a terminal to
+ * report anything in, so refusing to parse leaves the user at a shell prompt with nothing to
+ * read. Rig also writes `runtime.toml` itself, so a setting Rig has since renamed is Rig's own
+ * stale output rather than a user mistake.
+ */
+export function parseConfigTomlWithUnknownSettings(source: string): ParsedConfigToml {
+    const collected: string[] = [];
+    const enclosing = droppedSettings;
+    droppedSettings = collected;
+    try {
+        const values = parseKnownConfigToml(source);
+        return { unknownSettings: collected, values };
+    } finally {
+        droppedSettings = enclosing;
+    }
+}
+
+function parseKnownConfigToml(source: string): PartialRigConfig {
     const defaults: PartialConfigDefaults = {};
     const features: PartialConfigFeatures = {};
     const settings: PartialConfigSettings = {};
     const theme: PartialConfigTheme = {};
     const table = parse(source);
-    assertKnownKeys(table, "", [
+    dropUnknownKeys(table, "", [
         "defaults",
         "docker",
         "features",
@@ -55,7 +93,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     const defaultsTable = readTable(table.defaults, "defaults");
 
     if (defaultsTable !== undefined) {
-        assertKnownKeys(defaultsTable, "defaults", [
+        dropUnknownKeys(defaultsTable, "defaults", [
             "effort",
             "instructions",
             "model",
@@ -96,7 +134,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
 
     const themeTable = readTable(table.theme, "theme");
     if (themeTable !== undefined) {
-        assertKnownKeys(themeTable, "theme", [
+        dropUnknownKeys(themeTable, "theme", [
             "accent",
             "brand",
             "error",
@@ -121,7 +159,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
 
     const settingsTable = readTable(table.settings, "settings");
     if (settingsTable !== undefined) {
-        assertKnownKeys(settingsTable, "settings", [
+        dropUnknownKeys(settingsTable, "settings", [
             "inference_max_retries",
             "compact_completed_turns",
             "completion_chime",
@@ -194,7 +232,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     const mcpServers = readMcpServers(table.mcp_servers);
     const featuresTable = readTable(table.features, "features");
     if (featuresTable !== undefined) {
-        assertKnownKeys(featuresTable, "features", ["cross_workspace", "workflows", "workspaces"]);
+        dropUnknownKeys(featuresTable, "features", ["cross_workspace", "workflows", "workspaces"]);
         const workflows = readBoolean(featuresTable, "workflows", "features.workflows");
         if (workflows !== undefined) features.workflows = workflows;
         const workspaces = readBoolean(featuresTable, "workspaces", "features.workspaces");
@@ -211,7 +249,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         workspaceTable === undefined
             ? undefined
             : (() => {
-                  assertKnownKeys(workspaceTable, "workspace", ["setup_commands"]);
+                  dropUnknownKeys(workspaceTable, "workspace", ["setup_commands"]);
                   return readOptionalStringArray(
                       workspaceTable,
                       "setup_commands",
@@ -246,7 +284,7 @@ function readPermissionsConfig(
 ): import("./configPermissions.js").PartialConfigPermissions | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("permissions must be a TOML table.");
-    assertKnownKeys(value, "permissions", ["protected_paths"]);
+    dropUnknownKeys(value, "permissions", ["protected_paths"]);
     if (value.protected_paths === undefined) return {};
     if (!Value.Check(protectedPathsSchema, value.protected_paths)) {
         throw new Error(
@@ -261,7 +299,7 @@ function readP2pConfig(
 ): import("./types.js").PartialConfigP2p | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("p2p must be a TOML table.");
-    assertKnownKeys(value, "p2p", [
+    dropUnknownKeys(value, "p2p", [
         "direct",
         "enable_direct",
         "enable_iroh",
@@ -279,7 +317,7 @@ function readP2pConfig(
             : readOptionalString(directTable, "listen", "listen", "p2p.direct.listen")),
     };
     if (directTable !== undefined) {
-        assertKnownKeys(directTable, "p2p.direct", ["listen"]);
+        dropUnknownKeys(directTable, "p2p.direct", ["listen"]);
     }
     const irohTable = readTable(value.iroh, "p2p.iroh");
     const iroh = {
@@ -288,7 +326,7 @@ function readP2pConfig(
             : readOptionalString(irohTable, "relay_url", "relayUrl", "p2p.iroh.relay_url")),
     };
     if (irohTable !== undefined) {
-        assertKnownKeys(irohTable, "p2p.iroh", ["relay_url"]);
+        dropUnknownKeys(irohTable, "p2p.iroh", ["relay_url"]);
     }
     if (iroh.relayUrl !== undefined && !Value.Check(irohRelayUrlSchema, iroh.relayUrl)) {
         throw new Error("p2p.iroh.relay_url must be an HTTP or HTTPS URL.");
@@ -334,7 +372,7 @@ function readNetworkConfig(
 ): import("./types.js").ConfigNetwork | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("network must be a TOML table.");
-    assertKnownKeys(value, "network", [
+    dropUnknownKeys(value, "network", [
         "allow_local_binding",
         "allowed_domains",
         "allowed_loopback_ports",
@@ -374,7 +412,7 @@ function readNetworkConfig(
 function readPresenceConfig(value: TomlValue | undefined): PartialConfigPresence | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("presence must be a TOML table.");
-    assertKnownKeys(value, "presence", ["current", "fallback", "states", "until"]);
+    dropUnknownKeys(value, "presence", ["current", "fallback", "states", "until"]);
     const statesTable = readTable(value.states, "presence.states");
     const states: Record<string, ConfigPresenceState> = {};
     for (const [id, rawState] of Object.entries(statesTable ?? {})) {
@@ -387,7 +425,7 @@ function readPresenceConfig(value: TomlValue | undefined): PartialConfigPresence
             throw new Error(`presence.states.${id} must be a TOML table.`);
         }
         const path = `presence.states.${id}`;
-        assertKnownKeys(rawState, path, ["answer_wait", "emoji", "prompt", "title"]);
+        dropUnknownKeys(rawState, path, ["answer_wait", "emoji", "prompt", "title"]);
         states[id] = {
             ...readPresenceAnswerWait(rawState, path),
             ...readOptionalString(rawState, "emoji", "emoji", `${path}.emoji`),
@@ -461,7 +499,7 @@ function readProviders(
             ...readOptionalStringArray(rawProvider, "include_models", "includeModels"),
         };
         if (type === "codex") {
-            assertKnownKeys(rawProvider, `providers.${id}`, [
+            dropUnknownKeys(rawProvider, `providers.${id}`, [
                 "auth_file",
                 "base_url",
                 "enabled",
@@ -496,7 +534,7 @@ function readProviders(
         }
 
         if (type === "grok") {
-            assertKnownKeys(rawProvider, `providers.${id}`, [
+            dropUnknownKeys(rawProvider, `providers.${id}`, [
                 "auth_file",
                 "base_url",
                 "enabled",
@@ -516,7 +554,7 @@ function readProviders(
         }
 
         if (type === "claude") {
-            assertKnownKeys(rawProvider, `providers.${id}`, [
+            dropUnknownKeys(rawProvider, `providers.${id}`, [
                 "config_dir",
                 "enabled",
                 "exclude_models",
@@ -538,7 +576,7 @@ function readProviders(
             continue;
         }
 
-        assertKnownKeys(rawProvider, `providers.${id}`, [
+        dropUnknownKeys(rawProvider, `providers.${id}`, [
             "bearer_token_env_var",
             "enabled",
             "exclude_models",
@@ -592,10 +630,14 @@ function readProviderString(id: string, table: TomlTable, key: string): string |
     return value;
 }
 
-function assertKnownKeys(table: TomlTable, path: string, keys: readonly string[]): void {
-    const unknownKey = Object.keys(table).find((key) => !keys.includes(key));
-    if (unknownKey !== undefined) {
-        throw new Error(`Unknown ${path.length === 0 ? "" : `${path}.`}${unknownKey} setting.`);
+/**
+ * Records every setting in this table that Rig does not recognize. The parse then simply never
+ * reads them, which leaves them out of the returned configuration.
+ */
+function dropUnknownKeys(table: TomlTable, path: string, keys: readonly string[]): void {
+    for (const key of Object.keys(table)) {
+        if (keys.includes(key)) continue;
+        droppedSettings?.push(`${path.length === 0 ? "" : `${path}.`}${key}`);
     }
 }
 
@@ -616,7 +658,7 @@ function readBedrockModelOverrides(
                 `providers.${providerId}.model_overrides.${modelId} must be a TOML table.`,
             );
         }
-        assertKnownKeys(rawOverride, `providers.${providerId}.model_overrides.${modelId}`, [
+        dropUnknownKeys(rawOverride, `providers.${providerId}.model_overrides.${modelId}`, [
             "endpoint",
             "region",
             "transport",
@@ -666,7 +708,7 @@ function readBedrockModelOverrideString(
 function readDockerConfig(value: TomlValue | undefined): DockerExecutionConfig | undefined {
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("docker must be a TOML table.");
-    assertKnownKeys(value, "docker", [
+    dropUnknownKeys(value, "docker", [
         "container",
         "env",
         "image",
@@ -718,7 +760,7 @@ function readDockerMounts(value: TomlValue | undefined): readonly DockerMountCon
             throw new Error(`docker.mounts[${index}] must be a TOML table.`);
         }
         const path = `docker.mounts[${index}]`;
-        assertKnownKeys(entry, path, ["read_only", "source", "target"]);
+        dropUnknownKeys(entry, path, ["read_only", "source", "target"]);
         const source = readString(entry, "source", `${path}.source`);
         const target = readString(entry, "target", `${path}.target`);
         if (source === undefined || target === undefined) {
@@ -780,7 +822,7 @@ function readMcpServer(name: string, table: TomlTable): McpServerConfig {
         ),
     };
     if (command !== undefined) {
-        assertKnownKeys(table, path, [
+        dropUnknownKeys(table, path, [
             "args",
             "command",
             "cwd",
@@ -800,7 +842,7 @@ function readMcpServer(name: string, table: TomlTable): McpServerConfig {
             transport: "stdio",
         };
     }
-    assertKnownKeys(table, path, [
+    dropUnknownKeys(table, path, [
         "bearer_token_env_var",
         "disabled_tools",
         "enabled",
