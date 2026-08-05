@@ -1782,6 +1782,52 @@ describe("AgentSessionManager", () => {
         expect(root.recordSubagentsSuspended).toHaveBeenCalledWith([]);
     });
 
+    it("excludes workspace-archived subagents from collaboration lists and waits", async () => {
+        const archived = {
+            agentMetadata: () => ({
+                depth: 1,
+                description: "Archived child",
+                parentSessionId: "root-1",
+                rootSessionId: "root-1",
+                taskName: "archived_child",
+                type: "subagent" as const,
+            }),
+            id: "archived-child-1",
+            isSubagent: () => true,
+            subagentSummary: () => ({
+                agentId: "archived-agent-1",
+                createdAt: 1,
+                depth: 1,
+                description: "Archived child",
+                id: "archived-child-1",
+                modelId: "openai/gpt-5.6-sol",
+                parentSessionId: "root-1",
+                status: "archived" as const,
+                taskName: "archived_child",
+                updatedAt: 2,
+            }),
+        } as unknown as InMemorySession;
+        const root = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            id: "root-1",
+            isSubagent: () => false,
+        } as unknown as InMemorySession;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (sessionId) =>
+                    sessionId === root.id ? root : sessionId === archived.id ? archived : undefined,
+                listByRoot: () => [archived],
+            },
+        });
+
+        expect(manager.list(root.id)).toEqual([]);
+        await expect(manager.wait(root.id, 0)).resolves.toEqual({
+            agents: [],
+            timedOut: false,
+        });
+    });
+
     it("waits for active work instead of returning an older completed agent", async () => {
         let activeStatus: "completed" | "running" = "running";
         const makeChild = (id: string, taskName: string, status: () => "completed" | "running") =>

@@ -765,7 +765,10 @@ export class AgentSessionManager {
         const root = this.#rootFor(parentSessionId);
         const agents = this.#repository
             .listByRoot(root.id)
-            .filter((session) => session.isSubagent())
+            .filter(
+                (session) =>
+                    session.isSubagent() && session.subagentSummary().status !== "archived",
+            )
             .map((session) => this.#managedSubagent(session))
             .sort((left, right) => left.path.localeCompare(right.path));
         return pathPrefix === undefined
