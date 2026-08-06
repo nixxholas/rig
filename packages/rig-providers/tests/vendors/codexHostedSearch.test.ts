@@ -19,6 +19,22 @@ describe("Codex hosted search", () => {
     // ones that declare a search at all. `external_web_access: false` is what the CLI sent — it
     // prefers OpenAI's index to reaching the open web — so Rig sends what the reference sent
     // rather than quietly asking for more of the web.
+    it("asks again on a retry, so a mode that narrowed mid-turn is honoured", async () => {
+        // Allowed when the first attempt is built, and not when the retry is: exactly a session
+        // downgraded to Read only while its first request was still upstream.
+        let asked = 0;
+        const bodies = await retriedRequestBodies(() =>
+            asked++ === 0 ? codex_hosted_tools : [],
+        );
+
+        expect(asked).toBeGreaterThanOrEqual(2);
+        expect(bodies.length).toBeGreaterThanOrEqual(2);
+        // The first request legitimately carried it; the mode allowed it at the time.
+        expect(declaredIn(bodies[0]!)).toContain("web_search");
+        // The retry is another request, and by then it does not.
+        expect(declaredIn(bodies[bodies.length - 1]!)).not.toContain("web_search");
+    }, 30_000);
+
     it("declares web search the way the captured CLI request does", () => {
         expect(toCodexToolDefinitions(codex_hosted_tools)).toEqual([
             {
@@ -135,6 +151,67 @@ async function replay(events: readonly unknown[], hostedToolNames: ReadonlySet<s
         next = await mapped.next();
     }
     return { events: collected, result: next.value };
+}
+
+/**
+ * A retry is another request, and the mode can narrow while the first one is in flight.
+ *
+ * A hosted search is enforced by declining to declare it, so a request that carries one is the
+ * whole exposure — there is no later call to intercept. Resolving the tools once before the retry
+ * loop meant a session downgraded mid-turn still sent `web_search` on the way past.
+ */
+async function retriedRequestBodies(
+    hostedTools: () => readonly SessionTool[],
+): Promise<readonly Record<string, any>[]> {
+    const bodies: Record<string, any>[] = [];
+    let served = 0;
+    const server = createServer(async (request, response) => {
+        bodies.push(JSON.parse(await readBody(request)));
+        served += 1;
+        if (served === 1) {
+            // A retryable upstream failure, which is the whole point: the turn continues.
+            response.writeHead(500, { "content-type": "application/json" });
+            response.end(JSON.stringify({ error: { message: "server error" } }));
+            return;
+        }
+        completeSse(response);
+    });
+    server.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+        server.once("listening", resolve);
+        server.once("error", reject);
+    });
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("Missing port.");
+    try {
+        const provider = new CodexProvider({
+            credential: { name: "codex-api-key", credential: { apiKey: "test" } } as never,
+            endpoint: `http://127.0.0.1:${address.port}/v1`,
+            hostedTools,
+            transport: "sse",
+        });
+        const session = await provider.session("session-retry", { instructions: "Be brief." });
+        for await (const _event of session.run({
+            context: { messages: [{ role: "user", content: "Reply with OK." }] },
+            effort: "low",
+            model: "gpt-5.6-sol",
+        })) {
+            // Drain the response.
+        }
+    } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    return bodies;
+}
+
+function declaredIn(body: Record<string, any>): readonly string[] {
+    return [
+        ...((body.tools as readonly { type?: string }[] | undefined) ?? []),
+        ...((body.input as readonly Record<string, any>[] | undefined) ?? []).flatMap(
+            (item): readonly { type?: string }[] =>
+                item.type === "additional_tools" ? (item.tools ?? []) : [],
+        ),
+    ].flatMap((tool) => (tool.type === undefined ? [] : [tool.type]));
 }
 
 async function* stream(events: readonly unknown[]) {

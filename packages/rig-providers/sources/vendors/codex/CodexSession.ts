@@ -506,25 +506,6 @@ export class CodexSession extends BaseSession {
         this.activeEffort = effort;
         this.activeModel = model;
 
-        // Tools OpenAI runs on its own backend ride alongside the ones Rig executes, asked for
-        // once per request so a permission change lands on the next request rather than the next
-        // session. Compaction deliberately does not get them: it summarizes context that already
-        // exists, so it has nothing to search for.
-        const turnTools = [...(configuration.tools ?? []), ...this.hostedTools()];
-        const turnConfiguration: SessionModelConfiguration = { ...configuration, tools: turnTools };
-        const payload = this.createRequest(
-            this.context,
-            turnConfiguration,
-            model,
-            effort,
-            request.serviceTier,
-            request.structuredOutput,
-        );
-        // Derived from exactly the tools this request carries, never from a standing list: a name
-        // Rig did not send cannot be work the provider ran.
-        const hostedToolNames = new Set(
-            turnTools.filter((tool) => tool.type === "cloud").map((tool) => tool.name),
-        );
         let useSse = this.transport === "sse" || (this.transport === "auto" && this.forceSse);
         let transportRetries = 0;
         let reportedAttempt = 0;
@@ -532,6 +513,31 @@ export class CodexSession extends BaseSession {
         let unauthorizedRecoveryStep = 0;
 
         for (;;) {
+            // Tools OpenAI runs on its own backend ride alongside the ones Rig executes, asked for
+            // once per request so a permission change lands on the next request rather than the
+            // next session. Asked inside the loop because a retry is another request: the answer
+            // can have changed while the previous attempt was in flight, and a mode that has since
+            // narrowed must not be handed a search on the way past. Compaction deliberately gets
+            // none of them: it summarizes context that already exists, so it has nothing to search
+            // for.
+            const turnTools = [...(configuration.tools ?? []), ...this.hostedTools()];
+            const turnConfiguration: SessionModelConfiguration = {
+                ...configuration,
+                tools: turnTools,
+            };
+            const payload = this.createRequest(
+                this.context,
+                turnConfiguration,
+                model,
+                effort,
+                request.serviceTier,
+                request.structuredOutput,
+            );
+            // Derived from exactly the tools this request carries, never from a standing list: a
+            // name Rig did not send cannot be work the provider ran.
+            const hostedToolNames = new Set(
+                turnTools.filter((tool) => tool.type === "cloud").map((tool) => tool.name),
+            );
             const attemptUsage: Extract<SessionEvent, { type: "token_usage" }>[] = [];
             yield { type: "block_start" };
             try {
