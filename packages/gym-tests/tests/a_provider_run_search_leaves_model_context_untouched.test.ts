@@ -20,16 +20,20 @@ function contextShape(
 }
 
 /**
- * What the provider is sent on the turn after it ran a search of its own.
+ * What the model context holds on the turn after the provider ran a search of its own.
  *
  * A hosted search is answered inside the provider's response, so Rig only ever learns it happened.
- * It is transcript content, and transcript content is not model context: putting it in the request
- * would change the prefix every following turn is matched against, and a changed prefix is a cold
- * cache on every one of them. The cost is invisible in a transcript and shows up as a bill.
+ * It is transcript content, and transcript content is not model context: a search that reached the
+ * message list would change the prefix every following turn is matched against, and a changed
+ * prefix is a cold cache on every one of them.
  *
- * So the request is pinned whole rather than probed for the mistakes already thought of. Anything
- * that moves a provider-run search closer to the message it accompanied has to leave this exactly
- * as it is, and this fails if it does not.
+ * This measures the message list and nothing else. A provider's own response items are the other
+ * half of what it is sent, and the gym's provider does not produce them, so this cannot speak for
+ * them; `codexResponseItems` covers that half against the captured Codex shape. Read the two
+ * together before concluding anything about what a follow-up request costs.
+ *
+ * Anything that moves a provider-run search closer to the message it accompanied has to leave this
+ * exactly as it is, and this fails if it does not.
  */
 describe("the turn after the provider ran its own search", () => {
     it("sends the model the same context it would have sent with no search at all", async () => {

@@ -210,6 +210,80 @@ describe("Codex response items", () => {
         expect(getCodexIncrementalInput(previousRequest, responseItems, rebuilt)).toBeUndefined();
     });
 
+    /**
+     * What a search the provider ran costs the turn after it.
+     *
+     * Codex answers a hosted search inside its own response, as a `web_search_call` output item.
+     * That item is part of what the provider expects to receive back: continuation reuses the
+     * previous response ID only while the rebuilt input still begins with exactly the items it
+     * already produced. Replay the search and the prefix matches, so only the new question is
+     * sent and the cache stays warm.
+     *
+     * The shape here is the captured one from `codexHostedSearch`, so this is the real item rather
+     * than an idea of it.
+     */
+    it("keeps continuation incremental across a search the provider ran itself", () => {
+        const previousRequest = {
+            model: "gpt-5.6-sol",
+            input: [{ type: "message", role: "user", content: "What is the latest Deno release?" }],
+        };
+        const hostedSearch = {
+            action: { query: "Deno current stable version", type: "search" },
+            id: "ws_1",
+            type: "web_search_call",
+        };
+        const answer = { content: [], id: "msg_1", role: "assistant", type: "message" };
+        const responseItems = [hostedSearch, answer];
+        const rebuilt = {
+            model: "gpt-5.6-sol",
+            input: [
+                ...previousRequest.input,
+                hostedSearch,
+                answer,
+                { type: "message", role: "user", content: "Anything else?" },
+            ],
+        };
+
+        // Only the new question travels; everything before it is matched and reused.
+        expect(getCodexIncrementalInput(previousRequest, responseItems, rebuilt)).toEqual([
+            { type: "message", role: "user", content: "Anything else?" },
+        ]);
+    });
+
+    /**
+     * The same turn with the search left out of the replayed prefix.
+     *
+     * This is the regression a move of provider-run searches onto the assistant message could
+     * introduce: represent the search as transcript content and stop replaying the provider's own
+     * item, and the rebuilt input no longer starts with what the provider produced. Continuation
+     * cannot be reused, so the whole conversation is re-sent uncached on every following turn.
+     */
+    it("loses incremental continuation when the provider's own search is not replayed", () => {
+        const previousRequest = {
+            model: "gpt-5.6-sol",
+            input: [{ type: "message", role: "user", content: "What is the latest Deno release?" }],
+        };
+        const hostedSearch = {
+            action: { query: "Deno current stable version", type: "search" },
+            id: "ws_1",
+            type: "web_search_call",
+        };
+        const answer = { content: [], id: "msg_1", role: "assistant", type: "message" };
+        const rebuilt = {
+            model: "gpt-5.6-sol",
+            input: [
+                ...previousRequest.input,
+                // The search is gone from the prefix; only the answer remains.
+                answer,
+                { type: "message", role: "user", content: "Anything else?" },
+            ],
+        };
+
+        expect(
+            getCodexIncrementalInput(previousRequest, [hostedSearch, answer], rebuilt),
+        ).toBeUndefined();
+    });
+
     it("selects the native tool-search definition from vendor metadata, not its name", () => {
         const ordinaryToolSearch: SessionTool = {
             ...tool_search,
