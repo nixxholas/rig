@@ -30,14 +30,16 @@ export function builtinModelProfiles(
 ): readonly ExecutorModelProfile[] {
     if (providerType === "claude") {
         return [
+            // First is what a Claude session selects when nothing names a model, so the most
+            // capable one leads rather than the cheapest.
+            profile(providerId, providerType, modelAnthropicOpus5, {
+                prompt: claude_opus_5_system_prompt,
+            }),
             profile(providerId, providerType, modelAnthropicSonnet5, {
                 prompt: claude_sonnet_5_system_prompt,
             }),
             profile(providerId, providerType, modelAnthropicFable5, {
                 prompt: claude_fable_5_system_prompt,
-            }),
-            profile(providerId, providerType, modelAnthropicOpus5, {
-                prompt: claude_opus_5_system_prompt,
             }),
             profile(providerId, providerType, modelAnthropicOpus48, {
                 prompt: claude_opus_4_8_system_prompt,

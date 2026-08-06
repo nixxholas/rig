@@ -4,6 +4,7 @@ import type {
 } from "../context/SubagentContext.js";
 import type { PermissionMode } from "../../permissions/index.js";
 import { hostedSearchesFor } from "../../runtime/resolveHostedCapabilities.js";
+import { webSearchCapability } from "../../runtime/webSearchCapability.js";
 import type { AnyDefinedTool } from "../types.js";
 
 /** Marks the role section so a child can strip its parent's copy before appending its own. */
@@ -98,7 +99,7 @@ export function createAvailableModelsInstructions(
                             effort === model.defaultEffort ? `${effort} (default)` : effort,
                         )
                         .join(", ");
-                    const searches = describeHostedSearches(model.providerType);
+                    const searches = describeSearches(model);
                     return `- ${model.providerId}: ${model.name} (\`${model.id}\`) — effort levels: ${efforts}${searches}`;
                 }),
                 "",
@@ -130,14 +131,30 @@ export function createAvailableModelsInstructions(
 }
 
 
-/** What a model's own backend can search, said on the line that offers the model. */
-function describeHostedSearches(providerType: string | undefined): string {
-    const searches = hostedSearchesFor(providerType);
-    if (searches.length === 0) return "";
-    const named = searches
-        .map((search) => (search === "x_search" ? "X" : "the web"))
-        .join(" and ");
-    return ` — searches ${named} on its own backend`;
+/**
+ * What a model can search, from the same capability the tool surface is built from.
+ *
+ * Deliberately not about mechanism. Grok and OpenAI search inside their own response and Claude
+ * runs a search Rig executes, but a parent choosing who to delegate to needs to know whether a
+ * subagent can reach the live web and whether it can reach X — not which of those two ways it
+ * happens. Saying only the provider-run kind would report Claude as unable to search, which is
+ * false and is exactly the mistake this listing exists to stop.
+ */
+function searchesFor(model: AvailableSubagentModel): readonly string[] {
+    const capability = webSearchCapability(
+        { id: model.providerId, type: model.providerType as never },
+        { id: model.id } as never,
+    );
+    if (capability === undefined) return [];
+    return hostedSearchesFor(model.providerType).includes("x_search")
+        ? ["the web", "X"]
+        : ["the web"];
+}
+
+/** What a model can search, said on the line that offers the model. */
+function describeSearches(model: AvailableSubagentModel): string {
+    const searches = searchesFor(model);
+    return searches.length === 0 ? "" : ` — searches ${searches.join(" and ")}`;
 }
 
 /**
@@ -149,18 +166,18 @@ function describeHostedSearches(providerType: string | undefined): string {
  * mode can change while this prompt is still cached.
  */
 function hostedSearchNote(models: readonly AvailableSubagentModel[]): readonly string[] {
-    const searchable = models.filter((model) => hostedSearchesFor(model.providerType).length > 0);
+    const searchable = models.filter((model) => searchesFor(model).length > 0);
     if (searchable.length === 0) return [];
-    const reachesX = searchable.some((model) =>
-        hostedSearchesFor(model.providerType).includes("x_search"),
-    );
+    const reachesX = searchable.some((model) => searchesFor(model).includes("X"));
     return [
         [
-            "A model noted as searching on its own backend does the search inside its own response, so it reads pages you have no tool for and returns what it found. This works only while the session is in Auto or Full access; in Read only or Workspace write the search is not offered to it and it will answer without one.",
+            "A model noted as searching reads the live web and returns what it found. This works only while the session is in Auto or Full access; in Read only or Workspace write no search is offered and the model answers without one.",
             reachesX
-                ? "Delegate to one of these when a task needs the live web, and to a model that searches X when a task needs posts on X. Fetching an x.com page directly does not work — the site refuses it — so a subagent is the way to read X at all."
-                : "Delegate to one of these when a task needs the live web.",
-        ].join(" "),
+                ? "Only a model noted as searching X can read posts on X. Fetching an x.com page directly does not work — the site refuses it — so delegating to one of those is the way to read X at all."
+                : "",
+        ]
+            .filter((part) => part.length > 0)
+            .join(" "),
         "",
     ];
 }

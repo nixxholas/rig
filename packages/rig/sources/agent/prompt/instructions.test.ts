@@ -60,11 +60,11 @@ describe("createBundledDocsInstructions", () => {
     });
 });
 
-describe("what a model's own backend can search", () => {
+describe("what a model can search", () => {
     const models = [
         {
             defaultEffort: "medium",
-            effortLevels: ["low", "medium", "high"],
+            effortLevels: ["low", "high"],
             id: "xai/grok-4.5",
             name: "Grok 4.5",
             providerId: "grok",
@@ -72,19 +72,19 @@ describe("what a model's own backend can search", () => {
         },
         {
             defaultEffort: "medium",
-            effortLevels: ["low", "medium", "high"],
-            id: "openai/gpt-5.6-sol",
-            name: "GPT-5.6 Sol",
-            providerId: "codex",
-            providerType: "codex",
+            effortLevels: ["low", "high"],
+            id: "anthropic/opus-5",
+            name: "Opus 5 1M",
+            providerId: "claude",
+            providerType: "claude",
         },
         {
             defaultEffort: "medium",
-            effortLevels: ["low", "medium"],
-            id: "anthropic/sonnet-5",
-            name: "Sonnet 5",
-            providerId: "claude",
-            providerType: "claude",
+            effortLevels: ["low", "high"],
+            id: "anthropic/opus-5",
+            name: "Opus 5 1M",
+            providerId: "bedrock",
+            providerType: "bedrock",
         },
     ];
 
@@ -95,31 +95,45 @@ describe("what a model's own backend can search", () => {
      */
     it("says which model reaches X, so a task about X is delegated instead of fetched", () => {
         const instructions = createAvailableModelsInstructions(models) ?? "";
-        expect(instructions).toContain("Grok 4.5 (`xai/grok-4.5`)");
-        expect(instructions).toMatch(/Grok 4\.5.*searches the web and X on its own backend/u);
-        expect(instructions).toContain("a subagent is the way to read X at all");
+        expect(instructions).toMatch(/Grok 4\.5.*searches the web and X/u);
+        expect(instructions).toContain("the way to read X at all");
     });
 
-    it("does not claim a backend searches when it does not", () => {
+    /**
+     * Claude searches through a tool Rig executes rather than inside the provider's response.
+     * Reporting only the provider-run kind would say Claude cannot search, which is false — the
+     * same false statement this listing replaced.
+     */
+    it("counts a search Rig runs, not only one the provider runs", () => {
         const instructions = createAvailableModelsInstructions(models) ?? "";
         const claudeLine = instructions
             .split("\n")
-            .find((line) => line.includes("anthropic/sonnet-5"));
-        expect(claudeLine).toBeDefined();
-        expect(claudeLine).not.toContain("own backend");
+            .find((line) => line.startsWith("- claude:"));
+        expect(claudeLine).toContain("searches the web");
+        expect(claudeLine).not.toContain("and X");
+    });
+
+    // The same Anthropic model served through Bedrock has no search at all, so its line says none.
+    it("does not claim a search the endpoint cannot serve", () => {
+        const instructions = createAvailableModelsInstructions(models) ?? "";
+        const bedrockLine = instructions
+            .split("\n")
+            .find((line) => line.startsWith("- bedrock:"));
+        expect(bedrockLine).toBeDefined();
+        expect(bedrockLine).not.toContain("searches");
     });
 
     it("states the rule rather than the mode of the moment, because the mode can change", () => {
         const instructions = createAvailableModelsInstructions(models) ?? "";
         expect(instructions).toContain("only while the session is in Auto or Full access");
-        expect(instructions).toContain("in Read only or Workspace write the search is not offered");
+        expect(instructions).toContain("no search is offered");
     });
 
     it("says nothing about searching when no model can", () => {
         const instructions =
-            createAvailableModelsInstructions(models.filter((m) => m.providerType === "claude")) ??
+            createAvailableModelsInstructions(models.filter((m) => m.providerType === "bedrock")) ??
             "";
-        expect(instructions).not.toContain("own backend");
+        expect(instructions).not.toContain("searches");
         expect(instructions).not.toContain("Auto or Full access");
     });
 });
