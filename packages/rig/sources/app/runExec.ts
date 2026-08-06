@@ -11,7 +11,7 @@ import {
 import { createProjectMcpSecurityNotice, loadMcpServerConfigEntries } from "../mcp/index.js";
 import type { CreateSessionRequest, ProtocolSession, SessionEvent } from "../protocol/index.js";
 import type { ServiceTier, StopReason } from "@slopus/rig-execution";
-import type { PermissionMode } from "../permissions/index.js";
+import { parsePermissionMode, type PermissionMode } from "../permissions/index.js";
 import type { ExecCommandOptions } from "./parseExecCommand.js";
 import { readExecPrompt } from "./readExecPrompt.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
@@ -231,7 +231,14 @@ async function openSession(
     const request: CreateSessionRequest = {
         cwd,
         modelId: options.modelId ?? environment.RIG_MODEL ?? defaults.modelId,
-        permissionMode: options.permissionMode ?? defaults.permissionMode,
+        // Read the same way the model and provider are. An exec run that asked for a narrower
+        // mode and silently got the default would be given reach it was told it would not have.
+        permissionMode:
+            options.permissionMode ??
+            (environment.RIG_PERMISSION_MODE === undefined
+                ? undefined
+                : parsePermissionMode(environment.RIG_PERMISSION_MODE)) ??
+            defaults.permissionMode,
         workflowsEnabled,
         ...(docker === null ? { local: true } : {}),
         ...(docker === undefined || docker === null
