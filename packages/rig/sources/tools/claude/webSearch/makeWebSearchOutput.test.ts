@@ -98,6 +98,37 @@ describe("a search the Agent SDK ran", () => {
         ]);
     });
 
+    /**
+     * A title is prose, and prose contains brackets. Ending the array at the first `]` cut the
+     * JSON mid-string, the parse failed, the failure was swallowed, and the whole search came back
+     * as a success that consulted nothing — losing every result, not just the bracketed one.
+     */
+    it("keeps every page when a title contains a bracket", () => {
+        const bracketed = [
+            {
+                type: "tool_use",
+                id: "toolu_bracket",
+                name: "WebSearch",
+                input: { query: "rfc 9000" },
+            },
+            {
+                type: "tool_result",
+                tool_use_id: "toolu_bracket",
+                content:
+                    'Links: [{"title":"[PDF] RFC 9000","url":"https://example.com/rfc"},{"title":"Other","url":"https://other"}]',
+            },
+        ] as never;
+        expect(makeWebSearchOutput(bracketed, "rfc 9000", 0).results).toEqual([
+            {
+                tool_use_id: "toolu_bracket",
+                content: [
+                    { title: "[PDF] RFC 9000", url: "https://example.com/rfc" },
+                    { title: "Other", url: "https://other" },
+                ],
+            },
+        ]);
+    });
+
     it("still sees a search the raw Messages API ran", () => {
         expect(
             blocksContainSearch([

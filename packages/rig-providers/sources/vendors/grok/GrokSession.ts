@@ -390,7 +390,7 @@ export class GrokSession extends BaseSession {
                 // without hosted tools, and search Grok ran itself would still leave a usable
                 // summary, so it is not grounds for discarding one.
                 if (
-                    event.type === "tool_call_start" ||
+                    event.type === "toolcall_start" ||
                     event.type === "toolcall_delta" ||
                     event.type === "toolcall_end"
                 ) {
@@ -479,7 +479,7 @@ export class GrokSession extends BaseSession {
                         event.type === "text_delta" ||
                         event.type === "reasoning_delta" ||
                         event.type === "encrypted_reasoning" ||
-                        event.type === "tool_call_start" ||
+                        event.type === "toolcall_start" ||
                         event.type === "toolcall_delta" ||
                         event.type === "toolcall_end" ||
                         event.type === "server_toolcall_start" ||

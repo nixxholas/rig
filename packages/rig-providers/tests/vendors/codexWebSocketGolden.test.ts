@@ -1339,7 +1339,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         }
 
         expect(first).toContainEqual({
-            type: "tool_call_start",
+            type: "toolcall_start",
             callId: "custom-call",
             name: "exec",
             vendor: { provider: "codex", type: "custom_tool_call" },

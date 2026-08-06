@@ -20,7 +20,7 @@ export type SessionEvent =
     | { type: "encrypted_reasoning"; content: string }
     | { type: "response_items"; items: readonly string[] }
     | {
-          type: "tool_call_start";
+          type: "toolcall_start";
           callId: string;
           name: string;
           namespace?: string;

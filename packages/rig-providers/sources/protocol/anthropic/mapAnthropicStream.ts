@@ -79,7 +79,7 @@ export async function* mapAnthropicStream(
                 };
                 tools.set(event.index, tool);
                 yield {
-                    type: "tool_call_start",
+                    type: "toolcall_start",
                     callId: tool.callId,
                     name: tool.name,
                     ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),

@@ -578,7 +578,7 @@ export class ClaudeSession extends BaseSession {
                             event.content_block.name,
                         );
                         yield {
-                            type: "tool_call_start",
+                            type: "toolcall_start",
                             callId: event.content_block.id,
                             name: event.content_block.name,
                             vendor: { type: "claude_tool_use" },

@@ -194,7 +194,7 @@ export class AnthropicBedrockSession extends BaseSession {
             if (event.type === "text_delta") assistantText += event.delta;
             if (event.type === "encrypted_reasoning") encryptedReasoning = event.content;
             if (event.type === "response_items") responseItems = event.items;
-            if (event.type === "tool_call_start") {
+            if (event.type === "toolcall_start") {
                 toolCalls.set(event.callId, {
                     callId: event.callId,
                     name: event.name,
@@ -387,7 +387,7 @@ function isAnthropicResponseContentEvent(event: SessionEvent): boolean {
     return (
         event.type === "text_delta" ||
         event.type === "reasoning_delta" ||
-        event.type === "tool_call_start" ||
+        event.type === "toolcall_start" ||
         event.type === "toolcall_delta" ||
         event.type === "toolcall_end"
     );

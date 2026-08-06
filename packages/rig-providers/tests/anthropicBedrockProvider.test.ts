@@ -972,7 +972,7 @@ describe("AnthropicBedrockProvider", () => {
             committedSessionEvents(events).some(
                 (event) =>
                     (event.type === "text_delta" && event.delta === "discarded") ||
-                    (event.type === "tool_call_start" && event.name === "discarded_tool"),
+                    (event.type === "toolcall_start" && event.name === "discarded_tool"),
             ),
         ).toBe(false);
         expect(events.filter((event) => event.type === "token_usage")).toEqual([
@@ -1496,11 +1496,11 @@ describe("AnthropicBedrockProvider", () => {
             type === "encrypted_reasoning" ? [index] : [],
         );
         expect(encryptedReasoningIndexes).toHaveLength(2);
-        expect(encryptedReasoningIndexes[0]).toBeLessThan(eventTypes.indexOf("tool_call_start"));
+        expect(encryptedReasoningIndexes[0]).toBeLessThan(eventTypes.indexOf("toolcall_start"));
         expect(encryptedReasoningIndexes[1]).toBeLessThan(eventTypes.indexOf("text_delta"));
         expect(events).toContainEqual({ type: "text_delta", delta: "after" });
         expect(events).toContainEqual({
-            type: "tool_call_start",
+            type: "toolcall_start",
             callId: "tool-1",
             name: "Read",
             namespace: "files",
@@ -1644,7 +1644,7 @@ describe("AnthropicBedrockProvider", () => {
                 expect.arrayContaining([
                     expect.objectContaining({ type: "reasoning_delta" }),
                     expect.objectContaining({
-                        type: "tool_call_start",
+                        type: "toolcall_start",
                         name: "Read",
                         vendor: { type: "claude_tool_use" },
                     }),

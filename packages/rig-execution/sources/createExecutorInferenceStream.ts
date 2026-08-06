@@ -185,7 +185,7 @@ async function* streamExecutorInference(options: {
                 responseItems.splice(0, responseItems.length, ...event.items);
                 continue;
             }
-            if (event.type === "tool_call_start") {
+            if (event.type === "toolcall_start") {
                 activeTextIndex = undefined;
                 activeThinkingIndex = undefined;
                 const contentIndex = partial.content.length;

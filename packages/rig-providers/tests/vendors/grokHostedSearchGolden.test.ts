@@ -89,7 +89,7 @@ describe("Grok hosted search goldens", () => {
         ]);
 
         // The client is never asked to run these, so the turn is a finished answer, not a tool loop.
-        expect(events.filter((event) => event.type === "tool_call_start")).toEqual([]);
+        expect(events.filter((event) => event.type === "toolcall_start")).toEqual([]);
         expect(result.toolCalls).toEqual([]);
         expect(result.stopReason).toBe("stop");
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });

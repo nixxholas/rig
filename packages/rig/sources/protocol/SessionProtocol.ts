@@ -9,7 +9,6 @@ import type {
 import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
 import type {
-    HostedCapability,
     Model,
     ProviderError,
     ServiceTier,
@@ -365,11 +364,6 @@ export interface ProtocolSession {
     draftUpdatedAt?: number;
     providerId: string;
     permissionMode: PermissionMode;
-    /**
-     * Provider-executed searches this session holds, granted at spawn or by configuration.
-     * Absent means none, which is what a session stored before capabilities existed reports.
-     */
-    hostedCapabilities?: readonly HostedCapability[];
     modelId: string;
     /** Absent for a session with no place in an ordered list, such as a subagent. */
     orderKey?: string;
@@ -632,8 +626,6 @@ export interface SessionSummary {
      */
     orderKey?: string;
     permissionMode: PermissionMode;
-    /** Provider-executed searches this session holds. Absent means none. */
-    hostedCapabilities?: readonly HostedCapability[];
     effort?: string;
     serviceTier?: ServiceTier;
     environment?: SessionExecutionEnvironment;
@@ -680,11 +672,6 @@ export interface CreateSessionRequest {
     modelId?: string;
     providerId?: string;
     permissionMode?: PermissionMode;
-    /**
-     * Provider-executed searches to give the new session. These are not reviewable once held, so
-     * a caller sets them only where the grant itself was authorized.
-     */
-    hostedCapabilities?: readonly HostedCapability[];
     secretIds?: readonly string[];
     workflowsEnabled?: boolean;
     docker?: DockerExecutionConfig;

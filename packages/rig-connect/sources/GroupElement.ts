@@ -48,7 +48,6 @@ export interface GroupSession {
     readonly modelId: string;
     readonly orderKey: string;
     readonly permissionMode: string;
-    readonly hostedCapabilities: readonly string[];
     readonly projectId: string;
     readonly providerId: string;
     readonly recap?: string;

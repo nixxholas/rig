@@ -6346,8 +6346,16 @@ export class InMemorySession {
         if (event.type === "permission_review" && event.transcript !== undefined) {
             this.#setCommittedUsage(addUsage(this.#usage, event.transcript.usage));
         }
+        // A call the provider finished carries its sources, and how many it returns is the
+        // provider's choice rather than Rig's. The interrupted case was already bounded; this is
+        // the ordinary one, which is every completed search and therefore the one that decides
+        // whether an unusual response can grow durable state without limit.
+        const durable: AgentLoopEvent =
+            event.type === "server_toolcall_end"
+                ? { ...event, arguments: boundedProviderToolCallArguments(event.arguments) }
+                : event;
         try {
-            this.#append("agent_event", { event, runId });
+            this.#append("agent_event", { event: durable, runId });
         } catch (error) {
             this.#usage = previousUsage;
             this.#lifetimeTotalTokens = previousLifetimeTotalTokens;

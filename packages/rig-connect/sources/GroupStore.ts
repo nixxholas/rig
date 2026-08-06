@@ -884,7 +884,6 @@ export class GroupStore {
             modelId: session.modelId,
             orderKey: session.orderKey ?? "",
             permissionMode: session.permissionMode,
-            hostedCapabilities: session.hostedCapabilities ?? [],
             projectId: session.projectId,
             providerId: session.providerId,
             status: session.status,

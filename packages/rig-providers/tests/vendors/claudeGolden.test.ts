@@ -244,7 +244,7 @@ async function run(
 function collectToolCalls(events: readonly SessionEvent[]): SessionToolCall[] {
     const calls = new Map<string, SessionToolCall>();
     for (const event of events) {
-        if (event.type === "tool_call_start") {
+        if (event.type === "toolcall_start") {
             calls.set(event.callId, {
                 callId: event.callId,
                 name: event.name,

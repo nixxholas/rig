@@ -119,7 +119,7 @@ function parseLinks(text: string): WebSearchHit[] | undefined {
     const start = text.indexOf("Links: [");
     if (start === -1) return undefined;
     const opening = start + "Links: ".length;
-    const closing = text.indexOf("]", opening);
+    const closing = findArrayEnd(text, opening);
     if (closing === -1) return undefined;
     try {
         const parsed: unknown = JSON.parse(text.slice(opening, closing + 1));
@@ -134,4 +134,34 @@ function parseLinks(text: string): WebSearchHit[] | undefined {
     } catch {
         return undefined;
     }
+}
+
+/**
+ * Where the array opened at `opening` closes, or -1 if it never does.
+ *
+ * The helper writes this list as prose with JSON embedded in it, and the titles inside are page
+ * titles: "[PDF] RFC 9000" is an ordinary one. Taking the first `]` as the end cuts the JSON inside
+ * a string, and since a failed parse is indistinguishable here from a reply that listed nothing,
+ * one bracketed title used to discard every result in the list.
+ */
+function findArrayEnd(text: string, opening: number): number {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = opening; index < text.length; index += 1) {
+        const character = text[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (character === "\\") escaped = true;
+            else if (character === '"') inString = false;
+            continue;
+        }
+        if (character === '"') inString = true;
+        else if (character === "[" || character === "{") depth += 1;
+        else if (character === "]" || character === "}") {
+            depth -= 1;
+            if (depth === 0) return index;
+        }
+    }
+    return -1;
 }

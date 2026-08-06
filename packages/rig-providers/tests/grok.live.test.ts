@@ -225,7 +225,7 @@ describeLive("GrokProvider live", () => {
         const searches = events.filter((event) => event.type === "server_toolcall_start");
         expect(searches.length).toBeGreaterThan(0);
         expect(searches.every((event) => event.name.startsWith("x_"))).toBe(true);
-        expect(events.filter((event) => event.type === "tool_call_start")).toEqual([]);
+        expect(events.filter((event) => event.type === "toolcall_start")).toEqual([]);
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events)).toContain("x.com/");
     }, 180_000);

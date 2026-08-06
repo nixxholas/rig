@@ -363,7 +363,6 @@ export interface SessionState {
     projectSecretIds: readonly string[];
     sessionSecretIds: readonly string[];
     permissionMode: string;
-    hostedCapabilities: readonly string[];
     /** True when the session is pinned to its model and cannot switch. */
     modelLocked: boolean;
     models: readonly ModelSummary[];

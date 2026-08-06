@@ -105,7 +105,7 @@ export async function* mapOpenAIResponseStream(
                     argumentsJson: event.item.arguments,
                 });
                 yield {
-                    type: "tool_call_start",
+                    type: "toolcall_start",
                     callId: event.item.call_id,
                     name: event.item.name,
                     ...(event.item.namespace === undefined
@@ -154,7 +154,7 @@ export async function* mapOpenAIResponseStream(
                     argumentsJson: event.item.input,
                 });
                 yield {
-                    type: "tool_call_start",
+                    type: "toolcall_start",
                     callId: event.item.call_id,
                     name: event.item.name,
                     ...(event.item.namespace === undefined
@@ -183,7 +183,7 @@ export async function* mapOpenAIResponseStream(
                     argumentsJson,
                 });
                 yield {
-                    type: "tool_call_start",
+                    type: "toolcall_start",
                     callId: event.item.call_id,
                     name: "tool_search",
                     vendor: responseToolVendor(options.vendor, "tool_search_call"),
@@ -317,7 +317,7 @@ export async function* mapOpenAIResponseStream(
                 if (activeItem === undefined) {
                     sawToolUse = true;
                     yield {
-                        type: "tool_call_start",
+                        type: "toolcall_start",
                         callId: event.item.call_id,
                         name: event.item.name,
                         ...(event.item.namespace === undefined
@@ -357,7 +357,7 @@ export async function* mapOpenAIResponseStream(
                 if (activeItem === undefined) {
                     sawToolUse = true;
                     yield {
-                        type: "tool_call_start",
+                        type: "toolcall_start",
                         callId: event.item.call_id,
                         name: event.item.name,
                         ...(event.item.namespace === undefined
@@ -400,7 +400,7 @@ export async function* mapOpenAIResponseStream(
                 if (activeItem?.type !== "tool_search_call") {
                     sawToolUse = true;
                     yield {
-                        type: "tool_call_start",
+                        type: "toolcall_start",
                         callId,
                         name: "tool_search",
                         vendor: responseToolVendor(options.vendor, "tool_search_call"),

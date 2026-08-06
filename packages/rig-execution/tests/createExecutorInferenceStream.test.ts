@@ -191,7 +191,7 @@ describe("createExecutorInferenceStream", () => {
                 yield { type: "reasoning_delta", delta: "considering" } as const;
                 yield { type: "text_delta", delta: "tentative" } as const;
                 yield {
-                    type: "tool_call_start",
+                    type: "toolcall_start",
                     callId: "tentative-tool",
                     name: "Bash",
                 } as const;
@@ -298,7 +298,7 @@ describe("createExecutorInferenceStream", () => {
         const executor = {
             run: async function* () {
                 yield {
-                    type: "tool_call_start",
+                    type: "toolcall_start",
                     callId: "spawn-call",
                     name: "spawn_agent",
                     namespace: "collaboration",

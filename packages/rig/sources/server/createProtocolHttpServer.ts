@@ -6,7 +6,6 @@ import { basename, extname, isAbsolute, relative } from "node:path";
 import { isCuid } from "@paralleldrive/cuid2";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { parseHostedCapabilities } from "@slopus/rig-execution";
 
 import type {
     Attachment,
@@ -554,7 +553,6 @@ const pluginAppStorageBodySchema = Type.Object(
     { additionalProperties: false },
 );
 const emptyObjectSchema = Type.Object({}, { additionalProperties: false });
-const hostedCapabilitiesSchema = Type.Array(Type.String());
 
 async function handleRequest(
     request: IncomingMessage,
@@ -3105,20 +3103,6 @@ async function handleRequest(
                 error: INVALID_PERMISSION_MODE_MESSAGE,
             });
             return;
-        }
-        if (body.hostedCapabilities !== undefined) {
-            if (!Value.Check(hostedCapabilitiesSchema, body.hostedCapabilities)) {
-                sendJson(response, 400, {
-                    error: "Hosted capabilities must be provided as a list of names.",
-                });
-                return;
-            }
-            try {
-                body.hostedCapabilities = parseHostedCapabilities(body.hostedCapabilities);
-            } catch (error) {
-                sendJson(response, 400, { error: errorToMessage(error) });
-                return;
-            }
         }
         if (body.appendSystemPrompt !== undefined && typeof body.appendSystemPrompt !== "string") {
             sendJson(response, 400, {

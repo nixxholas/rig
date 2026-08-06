@@ -164,7 +164,7 @@ describe("Grok continuation goldens", () => {
                 }),
             },
             {
-                type: "tool_call_start",
+                type: "toolcall_start",
                 callId: "call-1",
                 name: "list_dir",
                 vendor: { provider: "grok", type: "function_call" },
@@ -265,7 +265,7 @@ describe("Grok continuation goldens", () => {
 
         expect(events).toEqual([
             {
-                type: "tool_call_start",
+                type: "toolcall_start",
                 callId: "call-partial",
                 name: "apply_patch",
                 vendor: { provider: "grok", type: "custom_tool_call" },
