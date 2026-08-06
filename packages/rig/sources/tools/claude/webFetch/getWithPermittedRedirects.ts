@@ -1,4 +1,5 @@
 import { createTimedSignal } from "./createTimedSignal.js";
+import { describeWebFetchFailure } from "./describeWebFetchFailure.js";
 import { isPermittedWebFetchRedirect } from "./isPermittedWebFetchRedirect.js";
 import { readWebFetchResponse } from "./readWebFetchResponse.js";
 import type { WebFetchRedirect } from "./types.js";
@@ -23,14 +24,21 @@ export async function getWithPermittedRedirects(
 
     const timedSignal = createTimedSignal(signal, FETCH_TIMEOUT_MS);
     try {
-        const response = await fetch(url, {
-            headers: {
-                Accept: "text/markdown, text/html, */*",
-                "User-Agent": "Claude-User (rig; +https://support.anthropic.com/)",
-            },
-            redirect: "manual",
-            signal: timedSignal.signal,
-        });
+        let response: Response;
+        try {
+            response = await fetch(url, {
+                headers: {
+                    Accept: "text/markdown, text/html, */*",
+                    "User-Agent": "Claude-User (rig; +https://support.anthropic.com/)",
+                },
+                redirect: "manual",
+                signal: timedSignal.signal,
+            });
+        } catch (error) {
+            // A caller's own cancellation is not a failure to describe; it is what they asked for.
+            if (signal?.aborted === true) throw error;
+            throw new Error(describeWebFetchFailure(url, error), { cause: error });
+        }
 
         if (REDIRECT_CODES.has(response.status)) {
             const location = response.headers.get("location");
@@ -57,7 +65,12 @@ export async function getWithPermittedRedirects(
                 const domain = new URL(url).hostname;
                 throw new Error(`Access to ${domain} is blocked by the network egress proxy.`);
             }
-            throw new Error(`Web request failed with ${response.status} ${response.statusText}`);
+            const explained = response.statusText.trim();
+            throw new Error(
+                explained.length === 0
+                    ? `${new URL(url).hostname} answered with HTTP ${String(response.status)}.`
+                    : `${new URL(url).hostname} answered with HTTP ${String(response.status)} ${explained}.`,
+            );
         }
 
         return { response, raw: await readWebFetchResponse(response) };
