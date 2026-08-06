@@ -74,12 +74,17 @@ export function grokExecution(options: {
         };
     };
     const definition: ExecutorProvider = {
+        hostedCapabilitiesForRequest: () => options.hostedCapabilitiesForRequest?.() ?? [],
         id: options.id,
         // An isolate runs an auxiliary query the person never asked for and never sees. A search
         // Grok runs on its own backend is not Rig's to lend into one: it cannot be intercepted,
         // rendered, or accounted for there, and the material such a query carries — the very
         // material an auxiliary query exists to examine — is routinely untrusted.
-        isolated: () => ({ ...definition, native: build(() => []) }),
+        isolated: () => ({
+            ...definition,
+            hostedCapabilitiesForRequest: () => [],
+            native: build(() => []),
+        }),
         profiles: builtinModelProfiles(options.id, "grok"),
         sessionId: options.sessionId ?? options.id,
         native: build(() => options.hostedCapabilitiesForRequest?.() ?? []),

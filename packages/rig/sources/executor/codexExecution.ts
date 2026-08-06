@@ -66,17 +66,30 @@ export function codexExecution(options: {
                   ? { transport: "websocket" as const }
                   : {}),
         });
-    const native = async () => {
-        const credential = await loadCredential();
-        if (credential === null) {
-            throw new Error(
-                "Codex authentication is unavailable. Sign in with Codex or configure an API key.",
-            );
-        }
-        return createNative(credential);
-    };
-    return {
+    const native =
+        (capabilities?: () => readonly HostedCapability[]) => async (): Promise<CodexProvider> => {
+            const credential = await loadCredential();
+            if (credential === null) {
+                throw new Error(
+                    "Codex authentication is unavailable. Sign in with Codex or configure an API key.",
+                );
+            }
+            return capabilities === undefined
+                ? createNative(credential)
+                : createNative(credential, capabilities);
+        };
+    const definition: ExecutorProvider = {
+        hostedCapabilitiesForRequest: () => options.hostedCapabilitiesForRequest?.() ?? [],
         id: options.id,
+        // An isolate runs an auxiliary query the person never asked for and never sees: a title, or
+        // the review that decides an action on their behalf. A search OpenAI runs on its own
+        // backend is not Rig's to lend into one, and least of all into a reviewer, whose whole
+        // input is material Rig already treats as untrusted.
+        isolated: () => ({
+            ...definition,
+            hostedCapabilitiesForRequest: () => [],
+            native: native(() => []),
+        }),
         imageGeneration: {
             generate: async (request) => {
                 let credential: Awaited<ReturnType<typeof loadCredential>>;
@@ -108,6 +121,7 @@ export function codexExecution(options: {
         profiles: builtinModelProfiles(options.id, "codex"),
         serviceTiers: ["fast"],
         sessionId: options.sessionId ?? options.id,
-        native,
+        native: native(),
     };
+    return definition;
 }

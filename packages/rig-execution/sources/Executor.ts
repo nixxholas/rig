@@ -14,6 +14,7 @@ import {
 } from "@slopus/rig-providers";
 
 import type { ExecutorEvent } from "@/ExecutorEvent.js";
+import type { HostedCapability } from "@/HostedCapability.js";
 import type {
     ExecutorModelProfile,
     ExecutorRunRequest,
@@ -113,6 +114,11 @@ export class Executor {
         return this.selectedProvider.profiles
             .filter((profile) => profile.hidden !== true)
             .map((profile) => profile.model);
+    }
+
+    /** What the selected definition would declare on a request built right now. */
+    hostedCapabilitiesForRequest(): readonly HostedCapability[] {
+        return this.selectedProvider.hostedCapabilitiesForRequest?.() ?? [];
     }
 
     get reviewerModel(): Model | undefined {

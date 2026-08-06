@@ -1,6 +1,7 @@
 import type { BaseProvider } from "@slopus/rig-providers";
 
 import type { ExecutorModelProfile } from "@/ExecutorModelProfile.js";
+import type { HostedCapability } from "@/HostedCapability.js";
 import type { ProfilePromptContext, ServiceTier } from "@/types.js";
 import type { ExecutorImageGeneration } from "@/ExecutorImageGeneration.js";
 
@@ -9,6 +10,14 @@ export interface ExecutorProvider {
     extendProfilePromptContext?: (
         context: ProfilePromptContext,
     ) => ProfilePromptContext | Promise<ProfilePromptContext>;
+    /**
+     * Which provider-run searches this definition would declare on a request built right now.
+     *
+     * The answer belongs to the definition rather than to whoever asks, because it depends on the
+     * permission mode at the moment of asking and that changes underneath a live session. A
+     * definition whose backend runs no search of its own leaves this out.
+     */
+    hostedCapabilitiesForRequest?: () => readonly HostedCapability[];
     id: string;
     imageGeneration?: ExecutorImageGeneration;
     /**

@@ -14,6 +14,8 @@ import type {
     SessionToolResultMessage,
 } from "@slopus/rig-providers";
 
+import type { HostedCapability } from "@/HostedCapability.js";
+
 export type ProfileProviderType = "bedrock" | "claude" | "codex" | "grok";
 export interface ProfilePromptContext {
     claudeConfigDirectory?: string;
@@ -369,6 +371,13 @@ export interface Provider {
     readonly models: readonly Model[];
     /** Dedicated Auto permission review model, when this provider ships one. */
     readonly reviewerModel?: Model | undefined;
+    /**
+     * Which provider-run searches a request built right now would declare.
+     *
+     * Asked rather than stored because the answer follows the permission mode, which can change
+     * underneath a live session. A provider whose backend runs no search of its own has none.
+     */
+    hostedCapabilitiesForRequest?(): readonly HostedCapability[];
     /**
      * An independent provider for work that runs alongside the conversation.
      *
