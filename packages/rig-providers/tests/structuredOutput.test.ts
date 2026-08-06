@@ -150,4 +150,112 @@ describe("provider structured output", () => {
             '{"title":"Structured session metadata","recap":"The provider enforced the requested schema."}',
         );
     });
+
+    it("keeps the Claude SDK structured result when the model calls the internal tool", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const session = new ClaudeSession("session", {
+            credential,
+            instructions: "Create metadata.",
+            model: "claude-sonnet-5",
+            query: (() => {
+                // The SDK satisfies a json_schema outputFormat by making the model call its own
+                // StructuredOutput tool, so the turn carries a tool call and no text at all, and
+                // message_stop arrives before the result that holds the value.
+                const streamEvent = (event: unknown) => ({
+                    type: "stream_event",
+                    event,
+                    parent_tool_use_id: null,
+                    session_id: "session",
+                    uuid: "stream-id",
+                });
+                async function* messages() {
+                    yield streamEvent({
+                        type: "message_start",
+                        message: { usage: { input_tokens: 10, output_tokens: 0 } },
+                    });
+                    yield streamEvent({
+                        type: "content_block_start",
+                        index: 0,
+                        content_block: { type: "thinking", thinking: "" },
+                    });
+                    yield streamEvent({
+                        type: "content_block_delta",
+                        index: 0,
+                        delta: { type: "signature_delta", signature: "signature" },
+                    });
+                    yield streamEvent({ type: "content_block_stop", index: 0 });
+                    yield streamEvent({
+                        type: "content_block_start",
+                        index: 1,
+                        content_block: {
+                            type: "tool_use",
+                            id: "structured-output-call",
+                            name: "StructuredOutput",
+                            input: {},
+                        },
+                    });
+                    yield streamEvent({
+                        type: "content_block_delta",
+                        index: 1,
+                        delta: {
+                            type: "input_json_delta",
+                            partial_json: '{"title":"Fixing workspace auto naming"}',
+                        },
+                    });
+                    yield streamEvent({ type: "content_block_stop", index: 1 });
+                    yield streamEvent({
+                        type: "message_delta",
+                        delta: {},
+                        usage: { output_tokens: 24 },
+                    });
+                    yield streamEvent({ type: "message_stop" });
+                    yield {
+                        type: "result",
+                        subtype: "success",
+                        duration_ms: 1,
+                        duration_api_ms: 1,
+                        is_error: false,
+                        num_turns: 1,
+                        result: "",
+                        stop_reason: "end_turn",
+                        structured_output: {
+                            title: "Fixing workspace auto naming",
+                            recap: "The model answered through the SDK's own structured output tool.",
+                        },
+                        total_cost_usd: 0,
+                        usage: {
+                            input_tokens: 10,
+                            output_tokens: 24,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        },
+                        modelUsage: {},
+                        permission_denials: [],
+                        uuid: "result-id",
+                        session_id: "session",
+                    };
+                }
+                const generator = messages();
+                return Object.assign(generator, { close: () => {} });
+            }) as unknown as ClaudeSdkQuery,
+            tools: [],
+        });
+
+        const events = await collectSessionEvents(
+            session.run({
+                context: { messages: [{ role: "user", content: "Create metadata." }] },
+                structuredOutput,
+            }),
+        );
+
+        // The SDK's own tool is not the caller's to run, and the turn is a normal completion.
+        expect(events.filter((event) => event.type === "toolcall_start")).toEqual([]);
+        expect(events.filter((event) => event.type === "done")).toEqual([
+            { type: "done", state: "normal" },
+        ]);
+        expect(textFromSessionEvents(events)).toBe(
+            '{"title":"Fixing workspace auto naming","recap":"The model answered through the SDK\'s own structured output tool."}',
+        );
+    });
 });

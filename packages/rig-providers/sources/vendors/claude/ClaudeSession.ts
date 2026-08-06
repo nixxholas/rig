@@ -53,6 +53,13 @@ import { toClaudeRetryEvent } from "@/vendors/claude/impl/toClaudeRetryEvent.js"
 export type ClaudeSdkQuery = typeof defaultClaudeSdkQuery;
 
 const CLAUDE_QUERY_ABORTED = Symbol("claude_query_aborted");
+
+/**
+ * The SDK answers a json_schema output format by making the model call this tool of its own, then
+ * hands the validated value back on the result message. It belongs to the SDK, not to the caller,
+ * so the turn is a normal completion that ends in text rather than a tool call to run.
+ */
+const CLAUDE_STRUCTURED_OUTPUT_TOOL_NAME = "StructuredOutput";
 export interface ClaudeSessionOptions extends InferenceRetryOptions {
     instructions: string;
     credential: ClaudeCredential;
@@ -588,6 +595,13 @@ export class ClaudeSession extends BaseSession {
                         (event.content_block.type === "tool_use" ||
                             event.content_block.type === "server_tool_use")
                     ) {
+                        if (
+                            options.structuredOutput !== undefined &&
+                            event.content_block.name === CLAUDE_STRUCTURED_OUTPUT_TOOL_NAME
+                        ) {
+                            // Leaving it out of activeTools also drops its argument and stop events.
+                            continue;
+                        }
                         // Claude Code runs a server tool itself and answers it in this same
                         // response, so it is reported like any other call but never becomes work:
                         // it neither stops the turn nor reaches the tool bridge. Anthropic's
