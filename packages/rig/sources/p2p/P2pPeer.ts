@@ -15,6 +15,7 @@ export type P2pDirectPeer = Static<typeof p2pDirectPeerSchema>;
 export const p2pIrohPeerSchema = Type.Object(
     {
         endpointId: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+        ticket: Type.Optional(Type.String({ maxLength: 4_096, minLength: 1 })),
     },
     exact,
 );

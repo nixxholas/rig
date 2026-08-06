@@ -49,9 +49,23 @@ describe("P2pPairingService", () => {
         expect(inviterTrust.pins[0]).toMatchObject({
             instanceId: joinerIdentity.instanceId,
         });
+        expect(inviterTrust.connections[0]?.iroh?.ticket).toEqual(expect.any(String));
         expect(joinerTrust.pins[0]).toMatchObject({
             instanceId: inviterIdentity.instanceId,
         });
+        expect(joinerTrust.connections[0]?.iroh?.ticket).toEqual(expect.any(String));
+        expect(
+            Iroh.EndpointTicket.fromString(inviterTrust.connections[0]!.iroh!.ticket!)
+                .endpointAddr()
+                .id()
+                .toString(),
+        ).toBe(inviterTrust.connections[0]!.iroh!.endpointId);
+        expect(
+            Iroh.EndpointTicket.fromString(joinerTrust.connections[0]!.iroh!.ticket!)
+                .endpointAddr()
+                .id()
+                .toString(),
+        ).toBe(joinerTrust.connections[0]!.iroh!.endpointId);
         expect(primaryId).toBe(inviterIdentity.instanceId);
     });
 
@@ -86,6 +100,35 @@ describe("P2pPairingService", () => {
 
         expect(inviterTrust.pins).toHaveLength(0);
         expect(joinerTrust.pins).toHaveLength(0);
+    });
+
+    it("rejects a signed profile whose stable ticket names another endpoint", async () => {
+        const inviterTrust = recordingTrustStore();
+        const joinerTrust = recordingTrustStore();
+        const inviter = service(
+            "Main",
+            createP2pInstanceIdentity(),
+            inviterTrust.store,
+            noPrimaryChange,
+        );
+        const joiner = service(
+            "Remote",
+            createP2pInstanceIdentity(),
+            joinerTrust.store,
+            noPrimaryChange,
+            undefined,
+            Iroh.SecretKey.generate().public().toString(),
+        );
+
+        const invitation = await inviter.createInvitation();
+        await joiner.join(invitation.invitation);
+        await waitForPhase(inviter, invitation.id, "failed");
+        const state = inviter.get(invitation.id);
+        expect(state !== undefined && "error" in state ? state.error : undefined).toBe(
+            "The peer's stable Iroh address identifies a different endpoint.",
+        );
+        expect(inviterTrust.pins).toEqual([]);
+        expect(joinerTrust.pins).toEqual([]);
     });
 
     it("keeps accepting after a connection presents the wrong one-time token", async () => {
@@ -245,8 +288,16 @@ function service(
     peerTrustStore: P2pPeerTrustStoreContract,
     setPrimaryIfUnset: (primaryId: string) => Promise<void>,
     beforeReadyWrite?: () => Promise<void>,
+    ticketEndpointId?: string,
 ): P2pPairingService {
     const stableIrohEndpointId = Iroh.SecretKey.generate().public().toString();
+    const stableIrohEndpointTicket = Iroh.EndpointTicket.fromAddr(
+        new Iroh.EndpointAddr(
+            Iroh.EndpointId.fromString(ticketEndpointId ?? stableIrohEndpointId),
+            "https://relay.example.com",
+            ["127.0.0.1:7777"],
+        ),
+    ).toString();
     const created = new P2pPairingService({
         ...(beforeReadyWrite === undefined ? {} : { beforeReadyWrite }),
         bindings: Iroh,
@@ -257,6 +308,7 @@ function service(
         relayMode: Iroh.RelayMode.disabled(),
         setPrimaryIfUnset,
         stableIrohEndpointId,
+        stableIrohEndpointTicket: () => stableIrohEndpointTicket,
         waitUntilOnline: false,
     });
     services.push(created);
@@ -264,15 +316,18 @@ function service(
 }
 
 function recordingTrustStore(options: { failMarkReady?: boolean; failPrepare?: boolean } = {}): {
+    connections: P2pTrustedPeer["connections"][];
     onReady(listener: () => void): void;
     pins: { instanceId: string; publicKey: string }[];
     localReadyCount(): number;
     store: P2pPeerTrustStoreContract;
 } {
     const pins: { instanceId: string; publicKey: string }[] = [];
+    const connectionsSeen: P2pTrustedPeer["connections"][] = [];
     const prepared = new Map<string, P2pPeerPairingTrust>();
     const readyListeners = new Set<() => void>();
     return {
+        connections: connectionsSeen,
         onReady: (listener) => {
             readyListeners.add(listener);
         },
@@ -322,6 +377,7 @@ function recordingTrustStore(options: { failMarkReady?: boolean; failPrepare?: b
                                 publicKey: identity.publicKey,
                             });
                         }
+                        connectionsSeen.push(connections);
                         return peer;
                     },
                     abort: async () => {
@@ -372,14 +428,14 @@ async function presentWrongToken(invitation: string): Promise<void> {
     const payload = decodeInvitation(invitation);
     const endpoint = await Iroh.Endpoint.bind(
         {
-            alpns: [[...Buffer.from("rig/p2p/pair/1", "utf8")]],
+            alpns: [[...Buffer.from("rig/p2p/pair/2", "utf8")]],
             secretKey: Iroh.SecretKey.generate().toBytes(),
         },
         Iroh.RelayMode.disabled(),
     );
     const ticket = Iroh.EndpointTicket.fromString(payload.address);
     const connection = await endpoint.connect(ticket.endpointAddr(), [
-        ...Buffer.from("rig/p2p/pair/1", "utf8"),
+        ...Buffer.from("rig/p2p/pair/2", "utf8"),
     ]);
     try {
         const stream = await connection.openBi();

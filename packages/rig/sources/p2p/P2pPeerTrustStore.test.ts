@@ -34,6 +34,26 @@ describe("P2pPeerTrustStore", () => {
         expect(restored.peers()[0]?.connections.iroh?.endpointId).toBe("a".repeat(64));
     });
 
+    it("refreshes an Iroh address ticket without changing the trusted identity", async () => {
+        const opened = openTrustDatabase();
+        const identity = createP2pInstanceIdentity();
+        const store = P2pPeerTrustStore.fromDatabase(opened.database);
+        const endpointId = "a".repeat(64);
+
+        await store.verifyOrPin(identity, "iroh", endpointId, {
+            iroh: { endpointId, ticket: "first-ticket" },
+        });
+        await store.verifyOrPin(identity, "iroh", endpointId, {
+            iroh: { endpointId, ticket: "second-ticket" },
+        });
+
+        expect(store.peers()[0]).toMatchObject({
+            connections: { iroh: { endpointId, ticket: "second-ticket" } },
+            instanceId: identity.instanceId,
+            publicKey: identity.publicKey,
+        });
+    });
+
     it("lets one stable identity add transport addresses but rejects conflicting pins", async () => {
         const opened = openTrustDatabase();
         const trusted = createP2pInstanceIdentity();

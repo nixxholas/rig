@@ -633,6 +633,13 @@ async function runOwnedLocalProtocolServer(
                     peerTrustStore: p2pPeerTrustStore,
                     setPrimaryIfUnset: setP2pPrimaryIfUnset,
                     stableIrohEndpointId: irohSecret.public().toString(),
+                    stableIrohEndpointTicket: async () => {
+                        const ticket = await p2pNetwork?.irohEndpointTicket();
+                        if (ticket === undefined) {
+                            throw new Error("The stable Iroh P2P endpoint is unavailable.");
+                        }
+                        return ticket;
+                    },
                 });
             } catch (error) {
                 daemonLog.record(

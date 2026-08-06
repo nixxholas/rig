@@ -184,6 +184,18 @@ export class P2pNetwork {
                             : [[peer.connections.iroh.endpointId, peer] as const],
                     ),
                 );
+                const peerTickets = new Map(
+                    peers.flatMap((peer) =>
+                        peer.connections.iroh?.ticket === undefined
+                            ? []
+                            : [
+                                  [
+                                      peer.connections.iroh.endpointId,
+                                      peer.connections.iroh.ticket,
+                                  ] as const,
+                              ],
+                    ),
+                );
                 const onIrohStatusChange = (status: P2pTransportStatus): void => {
                     statuses.set(kind, status);
                     publish();
@@ -226,7 +238,12 @@ export class P2pNetwork {
                                         };
                               },
                               onStatusChange: onIrohStatusChange,
+                              peerTickets,
                               secretKey: await loadOrCreateIrohSecretKey(options.irohSecretKeyPath),
+                              updatePeerAddress: (peerIdentity, endpointId, ticket) =>
+                                  trustStore.verifyOrPin(peerIdentity, "iroh", endpointId, {
+                                      iroh: { endpointId, ticket },
+                                  }),
                               ...(options.serveRequest !== undefined
                                   ? { serveRequest: options.serveRequest }
                                   : {}),
@@ -374,6 +391,13 @@ export class P2pNetwork {
         this.#name = name;
     }
 
+    async irohEndpointTicket(): Promise<string | undefined> {
+        for (const transport of this.#transports) {
+            if (transport instanceof IrohNetwork) return transport.endpointTicket();
+        }
+        return undefined;
+    }
+
     addTrustedPeer(peer: P2pTrustedPeer): void {
         if (peer.connections.iroh === undefined) return;
         for (const transport of this.#transports) {
@@ -385,6 +409,7 @@ export class P2pNetwork {
                         publicKey: peer.publicKey,
                     },
                     peer.name,
+                    peer.connections.iroh.ticket,
                 );
             }
         }

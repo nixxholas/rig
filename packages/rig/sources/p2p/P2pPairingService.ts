@@ -31,11 +31,12 @@ import type { P2pPeerTrustStoreContract } from "./P2pPeerTrustStore.js";
 import { p2pPairingTransactionIdSchema, type P2pTrustedPeer } from "./P2pPeer.js";
 import { telegramEmojiFingerprint } from "./telegramEmojiFingerprint.js";
 
-const PAIRING_ALPN = [...Buffer.from("rig/p2p/pair/1", "utf8")];
+const PAIRING_ALPN = [...Buffer.from("rig/p2p/pair/2", "utf8")];
 const INVITATION_LIFETIME_MS = 5 * 60 * 1_000;
 const VERIFICATION_LIFETIME_MS = 5 * 60 * 1_000;
 const HANDSHAKE_TIMEOUT_MS = 30_000;
 const BOOTSTRAP_TIMEOUT_MS = 5_000;
+const CLOSE_TIMEOUT_MS = 5_000;
 const MAXIMUM_PAIRINGS = 8;
 const MAXIMUM_RETAINED_PAIRINGS = 64;
 const MAXIMUM_PAIRING_FRAME_BYTES = 8 * 1_024;
@@ -57,6 +58,7 @@ const profileSchema = Type.Object(
             pattern: "^[a-z][a-z0-9]+$",
         }),
         irohEndpointId: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+        irohEndpointTicket: Type.String({ maxLength: 4_096, minLength: 1 }),
         name: Type.String({
             maxLength: 128,
             minLength: 1,
@@ -73,7 +75,7 @@ const profileSchema = Type.Object(
             minLength: 86,
             pattern: "^[A-Za-z0-9_-]+$",
         }),
-        version: Type.Literal(1),
+        version: Type.Literal(2),
     },
     exact,
 );
@@ -108,6 +110,7 @@ export interface CreateP2pPairingServiceOptions {
     peerTrustStore: P2pPeerTrustStoreContract;
     setPrimaryIfUnset: (primaryId: string) => Promise<void>;
     stableIrohEndpointId: string;
+    stableIrohEndpointTicket: () => Promise<string> | string;
     /** Test seam for relay-free endpoints. */
     relayMode?: RelayMode;
     /** Production waits for a usable relay before printing the invitation. */
@@ -136,7 +139,11 @@ export class P2pPairingService implements P2pPairingServiceContract {
         }
         await Promise.allSettled([
             ...[...this.#operations.values()].map((operation) => operation.endpoint.close()),
-            ...this.#tasks,
+            withDeadline(
+                Promise.allSettled(this.#tasks),
+                CLOSE_TIMEOUT_MS,
+                "The P2P pairing service did not stop in time.",
+            ),
         ]);
     }
 
@@ -401,10 +408,16 @@ export class P2pPairingService implements P2pPairingServiceContract {
         context: P2pHelloContext,
         role: PairingProfile["role"],
     ): Promise<void> {
+        const stableIrohEndpointTicket = await withPairingDeadline(
+            operation,
+            Promise.resolve(this.#options.stableIrohEndpointTicket()),
+            "The stable Iroh endpoint did not obtain a usable relay address in time.",
+        );
         const localProfile = createProfile(
             this.#options.identity,
             this.#options.name(),
             this.#options.stableIrohEndpointId,
+            stableIrohEndpointTicket,
             role,
             context,
             operation.token,
@@ -437,6 +450,13 @@ export class P2pPairingService implements P2pPairingServiceContract {
                       return profile;
                   })();
         verifyProfile(remoteProfile, remoteIdentity, oppositeRole(role), context, operation.token);
+        const bindings = this.#options.bindings ?? (await loadIrohBindings());
+        const remoteAddress = bindings.EndpointTicket.fromString(
+            remoteProfile.irohEndpointTicket,
+        ).endpointAddr();
+        if (remoteAddress.id().toString() !== remoteProfile.irohEndpointId) {
+            throw new Error("The peer's stable Iroh address identifies a different endpoint.");
+        }
         await this.#options.peerTrustStore.validate(
             remoteIdentity,
             "iroh",
@@ -497,7 +517,12 @@ export class P2pPairingService implements P2pPairingServiceContract {
             remoteIdentity,
             "iroh",
             remoteProfile.irohEndpointId,
-            { iroh: { endpointId: remoteProfile.irohEndpointId } },
+            {
+                iroh: {
+                    endpointId: remoteProfile.irohEndpointId,
+                    ticket: remoteProfile.irohEndpointTicket,
+                },
+            },
             remoteProfile.name,
             operation.state.role === "joiner",
             operation.state.expiresAt,
@@ -662,6 +687,7 @@ function createProfile(
     identity: P2pInstanceIdentity,
     name: string,
     irohEndpointId: string,
+    irohEndpointTicket: string,
     role: PairingProfile["role"],
     context: P2pHelloContext,
     token: string,
@@ -669,10 +695,11 @@ function createProfile(
     const unsigned = {
         instanceId: identity.instanceId,
         irohEndpointId,
+        irohEndpointTicket,
         name,
         publicKey: identity.publicKey,
         role,
-        version: 1 as const,
+        version: 2 as const,
     };
     return {
         ...unsigned,
@@ -709,13 +736,14 @@ function profileMessage(
 ): Uint8Array {
     return Buffer.from(
         JSON.stringify([
-            "rig-p2p-profile-v1",
+            "rig-p2p-profile-v2",
             token,
             profile.role,
             profile.instanceId,
             profile.publicKey,
             profile.name,
             profile.irohEndpointId,
+            profile.irohEndpointTicket,
             context.transport,
             context.initiatorChannelBinding,
             context.responderChannelBinding,
@@ -736,14 +764,16 @@ function verificationHash(
         createHash("sha256")
             .update(
                 JSON.stringify([
-                    "rig-p2p-verification-v1",
+                    "rig-p2p-verification-v2",
                     token,
                     initiator.instanceId,
                     initiator.publicKey,
                     initiator.irohEndpointId,
+                    initiator.irohEndpointTicket,
                     responder.instanceId,
                     responder.publicKey,
                     responder.irohEndpointId,
+                    responder.irohEndpointTicket,
                     context.transport,
                     context.initiatorChannelBinding,
                     context.responderChannelBinding,
