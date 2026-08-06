@@ -11,6 +11,7 @@ import {
 import { happySessionSetRemote } from "../persistence/happy/happySessionSetRemote.js";
 import { queryHappyOutbox } from "../persistence/happy/queryHappyOutbox.js";
 import { queryHappySession } from "../persistence/happy/queryHappySession.js";
+import { queryHappySessionIds } from "../persistence/happy/queryHappySessionIds.js";
 import {
     openSessionDatabase,
     type SessionDatabase,
@@ -18,6 +19,8 @@ import {
 import type { HappyEncryptionVariant, HappySessionProtocolMessage } from "./types.js";
 
 const MAX_PENDING_MESSAGES_PER_SESSION = 10_000;
+const MAX_RESTORED_SESSIONS = 64;
+const RESTORED_SESSION_ACTIVITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export { HappySyncOutboxFullError };
 export type { HappySessionState };
@@ -71,6 +74,19 @@ export class HappySyncRepository {
 
     getSession(sessionId: string): HappySessionState | undefined {
         return queryHappySession(this.#database, sessionId);
+    }
+
+    /** Sessions worth reconnecting after a restart, most recently active first. */
+    sessionIds(
+        credentialFingerprint: string,
+        options: { activeSinceMs?: number; limit?: number } = {},
+    ): readonly string[] {
+        return queryHappySessionIds(this.#database, {
+            activeSinceMs:
+                options.activeSinceMs ?? this.#now() - RESTORED_SESSION_ACTIVITY_WINDOW_MS,
+            credentialFingerprint,
+            limit: options.limit ?? MAX_RESTORED_SESSIONS,
+        });
     }
 
     pending(sessionId: string, limit = 50): readonly HappySessionProtocolMessage[] {

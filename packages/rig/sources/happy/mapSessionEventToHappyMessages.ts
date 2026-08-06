@@ -40,6 +40,19 @@ export class HappyMessageMapper {
                 this.#pendingSteering.set(event.data.runId, pending);
                 return [];
             }
+            if (event.data.message.provenance === "agent") {
+                /*
+                 * Buffering only pays off before agent work exists: once a group is
+                 * open the notification belongs inside it, and holding it back would
+                 * drop it whenever no further iteration starts.
+                 */
+                const active = this.#activeGroups.get(event.data.runId);
+                if (active !== undefined) return [steeringMessage(event, active.id)];
+                const headers = this.#pendingSteeringHeaders.get(event.data.runId) ?? [];
+                headers.push(event);
+                this.#pendingSteeringHeaders.set(event.data.runId, headers);
+                return [];
+            }
             return [userMessage(event)];
         }
         if (event.type === "run_started") {
@@ -92,7 +105,8 @@ export class HappyMessageMapper {
         }
         if (event.type === "abort_requested" && event.data.runId !== undefined) {
             if (event.data.continuePendingSteering === true) return [];
-            const output = this.#close(event, event.data.runId, "abort", "cancelled");
+            const output = this.#takeTerminalGroupHeaders(event.data.runId);
+            output.push(...this.#close(event, event.data.runId, "abort", "cancelled"));
             this.#markRunTerminal(event.data.runId);
             return output;
         }
@@ -114,21 +128,22 @@ export class HappyMessageMapper {
                 event.data.stopReason === "error"
                     ? this.#ensureFailureGroup(event, event.data.runId)
                     : this.#activeGroups.get(event.data.runId);
-            const output =
+            const output = this.#takeTerminalGroupHeaders(event.data.runId);
+            if (
                 event.data.stopReason === "error" &&
                 group !== undefined &&
                 !this.#runsWithTerminalFailureMessage.has(event.data.runId)
-                    ? [
-                          ...this.#takePendingGroupHeaders(event.data.runId, group.id),
-                          failureMessage(
-                              event,
-                              `${event.id}:failure`,
-                              group.id,
-                              "failed",
-                              event.data.errorMessage ?? "The model response failed.",
-                          ),
-                      ]
-                    : [];
+            ) {
+                output.push(
+                    failureMessage(
+                        event,
+                        `${event.id}:failure`,
+                        group.id,
+                        "failed",
+                        event.data.errorMessage ?? "The model response failed.",
+                    ),
+                );
+            }
             output.push(...this.#close(event, event.data.runId, reason, status));
             this.#markRunTerminal(event.data.runId);
             return output;
@@ -241,7 +256,9 @@ export class HappyMessageMapper {
         if (steering === undefined) return output;
         this.#pendingSteeringHeaders.delete(runId);
         for (const event of steering) {
-            if (event.type === "message_submitted") output.push(userMessage(event, groupId));
+            if (event.type === "message_submitted") {
+                output.push(steeringMessage(event, groupId));
+            }
         }
         return output;
     }
@@ -251,6 +268,15 @@ export class HappyMessageMapper {
         if (pending === undefined) return [];
         this.#pendingCompactions.delete(runId);
         return mapAgentEvent(pending, groupId);
+    }
+
+    /*
+     * A terminal event is the last chance to deliver what the run buffered, and
+     * #markRunTerminal drops the buffer, so it flushes against the open group while
+     * one is still there and against the run itself otherwise.
+     */
+    #takeTerminalGroupHeaders(runId: string): HappySessionProtocolMessage[] {
+        return this.#takePendingGroupHeaders(runId, this.#activeGroups.get(runId)?.id ?? runId);
     }
 
     #close(
@@ -289,6 +315,19 @@ function userMessage(
         time: event.createdAt,
         ...(groupId === undefined ? {} : { turn: groupId }),
     });
+}
+
+function steeringMessage(
+    event: Extract<SessionEvent, { type: "message_submitted" }>,
+    groupId: string,
+): HappySessionProtocolMessage {
+    if (event.data.message.provenance === "agent") {
+        return agentMessage(event, event.data.message.id, groupId, {
+            t: "service",
+            text: event.data.displayText,
+        });
+    }
+    return userMessage(event, groupId);
 }
 
 function failureMessage(

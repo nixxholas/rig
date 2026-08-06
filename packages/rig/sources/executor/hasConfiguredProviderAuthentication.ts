@@ -3,13 +3,17 @@ import {
     ClaudeAuthTokenCredential,
     ClaudeCodeCredential,
     ClaudeOAuthCredential,
-    CodexSessionCredential,
     GrokApiKeyCredential,
     GrokSessionCredential,
+    loadCodexCredential,
 } from "@slopus/rig-providers";
 
 import type { ConfigProvider } from "../config/types.js";
 import { readConfiguredBedrockBearerToken } from "./readConfiguredBedrockBearerToken.js";
+import {
+    loadNativeCodexProviderConfig,
+    resolveNativeCodexCredentialAccess,
+} from "./loadNativeCodexProviderConfig.js";
 
 export async function hasConfiguredProviderAuthentication(options: {
     config: ConfigProvider;
@@ -21,8 +25,18 @@ export async function hasConfiguredProviderAuthentication(options: {
             return readConfiguredBedrockBearerToken(config, env) !== undefined;
         }
         if (config.type === "codex") {
+            const configuredBaseUrl = config.baseUrl ?? env.RIG_CODEX_BASE_URL;
+            const nativeConfiguration =
+                configuredBaseUrl === undefined ? await loadNativeCodexProviderConfig(env) : null;
+            const access = resolveNativeCodexCredentialAccess({
+                ...(config.authFile === undefined ? {} : { authFile: config.authFile }),
+                ...(configuredBaseUrl === undefined ? {} : { configuredBaseUrl }),
+                nativeConfiguration,
+            });
+            if (access.status !== "available") return false;
             return (
-                (await CodexSessionCredential.tryLoad({
+                (await loadCodexCredential({
+                    ...(access.apiKey === undefined ? {} : { apiKey: access.apiKey }),
                     ...(config.authFile === undefined ? {} : { authFile: config.authFile }),
                     env,
                 })) !== null

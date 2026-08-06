@@ -69,6 +69,170 @@ describe("resolveProviderDisabledReasons", () => {
 
         expect(Object.fromEntries(reasons)).toEqual({ turned_off: "not_enabled" });
     });
+
+    it("accepts an API key stored by the native Codex login", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-provider-auth-"));
+        tempDirectories.push(root);
+        await writeFile(
+            join(root, "codex.json"),
+            JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "native" }),
+        );
+
+        const reasons = await resolveProviderDisabledReasons(
+            {
+                codex: { authFile: join(root, "codex.json"), enabled: true, type: "codex" },
+            },
+            {},
+        );
+
+        expect(reasons.has("codex")).toBe(false);
+    });
+
+    it("accepts the bearer token from the active native Codex provider", async () => {
+        const codexHome = await mkdtemp(join(tmpdir(), "rig-codex-home-"));
+        tempDirectories.push(codexHome);
+        await writeFile(
+            join(codexHome, "config.toml"),
+            `
+model_provider = "balancer"
+
+[model_providers.balancer]
+base_url = "https://example.com/codex"
+wire_api = "responses"
+experimental_bearer_token = "provider"
+`,
+        );
+
+        const reasons = await resolveProviderDisabledReasons(
+            { codex: { enabled: true, type: "codex" } },
+            { CODEX_HOME: codexHome },
+        );
+
+        expect(reasons.has("codex")).toBe(false);
+    });
+
+    it("does not fall back when the active native Codex provider uses an unsupported wire API", async () => {
+        const codexHome = await mkdtemp(join(tmpdir(), "rig-codex-home-"));
+        tempDirectories.push(codexHome);
+        await Promise.all([
+            writeFile(
+                join(codexHome, "auth.json"),
+                JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "stored" }),
+            ),
+            writeFile(
+                join(codexHome, "config.toml"),
+                `
+model_provider = "legacy"
+
+[model_providers.legacy]
+base_url = "https://example.net/legacy"
+wire_api = "chat"
+experimental_bearer_token = "legacy"
+`,
+            ),
+        ]);
+
+        const reasons = await resolveProviderDisabledReasons(
+            {
+                claude: { enabled: true, oauthToken: "claude-token", type: "claude" },
+                codex: { enabled: true, type: "codex" },
+            },
+            { CODEX_HOME: codexHome },
+        );
+
+        expect(Object.fromEntries(reasons)).toEqual({ codex: "not_authenticated" });
+    });
+
+    it("ignores native provider errors when Rig explicitly overrides the endpoint", async () => {
+        const codexHome = await mkdtemp(join(tmpdir(), "rig-codex-home-"));
+        tempDirectories.push(codexHome);
+        await Promise.all([
+            writeFile(
+                join(codexHome, "auth.json"),
+                JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "stored" }),
+            ),
+            writeFile(
+                join(codexHome, "config.toml"),
+                `
+model_provider = "legacy"
+
+[model_providers.legacy]
+base_url = "https://example.net/legacy"
+wire_api = "chat"
+`,
+            ),
+        ]);
+
+        const reasons = await resolveProviderDisabledReasons(
+            {
+                codex: {
+                    baseUrl: "https://example.org/rig",
+                    enabled: true,
+                    type: "codex",
+                },
+            },
+            { CODEX_HOME: codexHome },
+        );
+
+        expect(reasons.has("codex")).toBe(false);
+    });
+
+    it("does not expose OpenAI credentials to a native provider that disables OpenAI auth", async () => {
+        const codexHome = await mkdtemp(join(tmpdir(), "rig-codex-home-"));
+        tempDirectories.push(codexHome);
+        await Promise.all([
+            writeFile(
+                join(codexHome, "auth.json"),
+                JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "stored" }),
+            ),
+            writeFile(
+                join(codexHome, "config.toml"),
+                `
+model_provider = "local"
+
+[model_providers.local]
+base_url = "https://example.com/local"
+wire_api = "responses"
+requires_openai_auth = false
+`,
+            ),
+        ]);
+
+        const reasons = await resolveProviderDisabledReasons(
+            { codex: { enabled: true, type: "codex" } },
+            { CODEX_HOME: codexHome, OPENAI_API_KEY: "environment" },
+        );
+
+        expect(reasons.get("codex")).toBe("not_authenticated");
+    });
+
+    it("does not expose OpenAI credentials to a native provider that never opts in", async () => {
+        const codexHome = await mkdtemp(join(tmpdir(), "rig-codex-home-"));
+        tempDirectories.push(codexHome);
+        await Promise.all([
+            writeFile(
+                join(codexHome, "auth.json"),
+                JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "stored" }),
+            ),
+            writeFile(
+                join(codexHome, "config.toml"),
+                `
+model_provider = "local"
+
+[model_providers.local]
+base_url = "https://example.com/local"
+wire_api = "responses"
+`,
+            ),
+        ]);
+
+        const reasons = await resolveProviderDisabledReasons(
+            { codex: { enabled: true, type: "codex" } },
+            { CODEX_HOME: codexHome, OPENAI_API_KEY: "environment" },
+        );
+
+        expect(reasons.get("codex")).toBe("not_authenticated");
+    });
 });
 
 function providersFor(root: string): ConfigProviders {

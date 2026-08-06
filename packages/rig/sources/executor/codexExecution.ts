@@ -1,9 +1,8 @@
 import {
-    CodexApiKeyCredential,
     CodexImageGenerationError,
     CodexProvider,
-    CodexSessionCredential,
     codex_hosted_tools,
+    loadCodexCredential,
 } from "@slopus/rig-providers";
 import {
     builtinModelProfiles,
@@ -13,6 +12,10 @@ import {
 } from "@slopus/rig-execution";
 
 import type { ConfigCodexProvider } from "../config/types.js";
+import {
+    loadNativeCodexProviderConfig,
+    resolveNativeCodexCredentialAccess,
+} from "./loadNativeCodexProviderConfig.js";
 
 export function codexExecution(options: {
     apiKey?: string;
@@ -29,16 +32,31 @@ export function codexExecution(options: {
     resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }): ExecutorProvider {
-    const baseUrl = options.config.baseUrl ?? options.env.RIG_CODEX_BASE_URL;
+    const configuredBaseUrl = options.config.baseUrl ?? options.env.RIG_CODEX_BASE_URL;
     const transport = options.config.transport ?? options.env.RIG_CODEX_TRANSPORT;
-    const loadCredential = async () =>
-        (options.apiKey === undefined
-            ? null
-            : await CodexApiKeyCredential.tryLoad({ apiKey: options.apiKey })) ??
-        (await CodexSessionCredential.tryLoad({
+    const loadNativeConfiguration = async () =>
+        configuredBaseUrl === undefined ? loadNativeCodexProviderConfig(options.env) : null;
+    const loadCredential = async (
+        nativeConfiguration: Awaited<ReturnType<typeof loadNativeConfiguration>>,
+    ) => {
+        const access = resolveNativeCodexCredentialAccess({
+            ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+            ...(options.config.authFile === undefined ? {} : { authFile: options.config.authFile }),
+            ...(configuredBaseUrl === undefined ? {} : { configuredBaseUrl }),
+            nativeConfiguration,
+        });
+        if (access.status === "unsupported_wire_api") {
+            throw new Error(
+                `The selected native Codex provider uses an unsupported wire_api (${access.wireApi}). Rig supports responses only.`,
+            );
+        }
+        if (access.status === "unavailable") return null;
+        return loadCodexCredential({
+            ...(access.apiKey === undefined ? {} : { apiKey: access.apiKey }),
             env: options.env,
             ...(options.config.authFile === undefined ? {} : { authFile: options.config.authFile }),
-        }));
+        });
+    };
     const hostedTools = (capabilities: () => readonly HostedCapability[]) => () => {
         const held = capabilities();
         return held.length === 0
@@ -47,10 +65,12 @@ export function codexExecution(options: {
     };
     const createNative = (
         credential: NonNullable<Awaited<ReturnType<typeof loadCredential>>>,
+        nativeConfiguration: Awaited<ReturnType<typeof loadNativeConfiguration>>,
         capabilities: () => readonly HostedCapability[] = () =>
             options.hostedCapabilitiesForRequest?.() ?? [],
-    ) =>
-        new CodexProvider({
+    ) => {
+        const baseUrl = configuredBaseUrl ?? nativeConfiguration?.baseUrl;
+        return new CodexProvider({
             credential,
             // Web search runs on OpenAI's backend the way the Codex CLI does, rather than through
             // a tool Rig would have to execute.
@@ -66,17 +86,19 @@ export function codexExecution(options: {
                   ? { transport: "websocket" as const }
                   : {}),
         });
+    };
     const native =
         (capabilities?: () => readonly HostedCapability[]) => async (): Promise<CodexProvider> => {
-            const credential = await loadCredential();
+            const nativeConfiguration = await loadNativeConfiguration();
+            const credential = await loadCredential(nativeConfiguration);
             if (credential === null) {
                 throw new Error(
                     "Codex authentication is unavailable. Sign in with Codex or configure an API key.",
                 );
             }
             return capabilities === undefined
-                ? createNative(credential)
-                : createNative(credential, capabilities);
+                ? createNative(credential, nativeConfiguration)
+                : createNative(credential, nativeConfiguration, capabilities);
         };
     const definition: ExecutorProvider = {
         hostedCapabilitiesForRequest: () => options.hostedCapabilitiesForRequest?.() ?? [],
@@ -93,8 +115,10 @@ export function codexExecution(options: {
         imageGeneration: {
             generate: async (request) => {
                 let credential: Awaited<ReturnType<typeof loadCredential>>;
+                let nativeConfiguration: Awaited<ReturnType<typeof loadNativeConfiguration>>;
                 try {
-                    credential = await loadCredential();
+                    nativeConfiguration = await loadNativeConfiguration();
+                    credential = await loadCredential(nativeConfiguration);
                 } catch (error) {
                     throw new ExecutorImageGenerationUnavailableError(
                         "A configured Codex image provider's authentication could not be loaded.",
@@ -107,7 +131,9 @@ export function codexExecution(options: {
                     );
                 }
                 try {
-                    return await createNative(credential).generateImage(request);
+                    return await createNative(credential, nativeConfiguration).generateImage(
+                        request,
+                    );
                 } catch (error) {
                     if (error instanceof CodexImageGenerationError && error.fallbackEligible) {
                         throw new ExecutorImageGenerationUnavailableError(error.message, {

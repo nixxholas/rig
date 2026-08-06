@@ -464,6 +464,15 @@ describe("HappySessionClient", () => {
         expect(harness.abortCalls).toBe(2);
         expect(harness.abortRequests.at(-1)).toBeUndefined();
 
+        const archiveResponse = await socket.requestRpc({
+            method: "remote-1:killSession",
+            params: encodeRemote(sessionKey, {}),
+        });
+        expect(
+            decryptHappyPayload(sessionKey, "dataKey", Buffer.from(archiveResponse, "base64")),
+        ).toEqual({ success: true });
+        expect(harness.snapshot.archived).toBe(true);
+
         await client.close();
         repository.close();
     });
@@ -918,6 +927,10 @@ function fakeSession(submitted: unknown[]): {
                 return snapshot;
             },
             id: "session-1",
+            setArchived: (archived: boolean) => {
+                snapshot.archived = archived;
+                return snapshot;
+            },
             snapshot: () => snapshot,
             submit: (request: { clientSubmissionId: string }) => {
                 submitted.push(request);
@@ -945,7 +958,9 @@ function remoteMessage(id: string, seq: number, content: string): HappyRemoteMes
 }
 
 function deriveBlobKey(key: Uint8Array, variant: "dataKey" | "legacy"): Uint8Array {
-    const root = createHmac("sha512", key).update("Happy Blobs Master Seed").digest();
+    // Match Happy's deriveKey(seed, "Happy Blobs", [path]): the usage label is
+    // the root HMAC key and the session data key is its payload.
+    const root = createHmac("sha512", "Happy Blobs Master Seed").update(key).digest();
     const path = variant === "dataKey" ? "session" : "master";
     return new Uint8Array(
         createHmac("sha512", root.subarray(32))

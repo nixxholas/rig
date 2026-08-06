@@ -667,6 +667,333 @@ describe("HappyMessageMapper", () => {
         });
     });
 
+    it("keeps agent-authored steering notifications inside agent work", () => {
+        const mapper = new HappyMessageMapper();
+        const output = [
+            ...mapper.map(
+                sessionEvent(
+                    "message_submitted",
+                    {
+                        delivery: "run",
+                        displayText: "Analyze the project",
+                        message: {
+                            blocks: [{ text: "Analyze the project", type: "text" }],
+                            id: "user-1",
+                            role: "user",
+                        },
+                        runId: "run-1",
+                    },
+                    80,
+                ),
+            ),
+            ...mapper.map(sessionEvent("run_started", { runId: "run-1" }, 90)),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_event",
+                    {
+                        event: {
+                            iteration: 1,
+                            messageId: "agent-1",
+                            type: "inference_iteration_start",
+                        },
+                        runId: "run-1",
+                    },
+                    100,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "message_submitted",
+                    {
+                        delivery: "steer",
+                        displayText: 'Background work "Quality" completed.',
+                        message: {
+                            blocks: [
+                                {
+                                    text: 'Background work "Quality" completed.',
+                                    type: "text",
+                                },
+                            ],
+                            id: "notification-1",
+                            provenance: "agent",
+                            role: "user",
+                        },
+                        runId: "run-1",
+                        source: "notification",
+                    },
+                    110,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "steering_applied",
+                    { messageIds: ["notification-1"], runId: "run-1" },
+                    120,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_event",
+                    {
+                        event: {
+                            iteration: 2,
+                            messageId: "agent-2",
+                            type: "inference_iteration_start",
+                        },
+                        runId: "run-1",
+                    },
+                    130,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_message",
+                    {
+                        message: {
+                            blocks: [{ text: "Final answer", type: "text" }],
+                            id: "agent-final",
+                            role: "agent",
+                        },
+                        runId: "run-1",
+                    },
+                    140,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "run_finished",
+                    { modelLocked: false, runId: "run-1", stopReason: "stop" },
+                    150,
+                ),
+            ),
+        ];
+
+        const notification = output.find((message) => message.content.id === "notification-1");
+        expect(notification?.content).toMatchObject({
+            role: "agent",
+            turn: "agent-2",
+            ev: {
+                t: "service",
+                text: 'Background work "Quality" completed.',
+            },
+        });
+    });
+
+    it("starts agent-authored notification runs inside agent work", () => {
+        const mapper = new HappyMessageMapper();
+        const output = [
+            ...mapper.map(
+                sessionEvent(
+                    "message_submitted",
+                    {
+                        delivery: "run",
+                        displayText: 'Background work "Security review" completed.',
+                        message: {
+                            blocks: [
+                                {
+                                    text: 'Background work "Security review" completed.',
+                                    type: "text",
+                                },
+                            ],
+                            id: "notification-run-1",
+                            provenance: "agent",
+                            role: "user",
+                        },
+                        runId: "run-2",
+                        source: "notification",
+                    },
+                    200,
+                ),
+            ),
+            ...mapper.map(sessionEvent("run_started", { runId: "run-2" }, 210)),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_event",
+                    {
+                        event: {
+                            iteration: 1,
+                            messageId: "agent-notification-response",
+                            type: "inference_iteration_start",
+                        },
+                        runId: "run-2",
+                    },
+                    220,
+                ),
+            ),
+        ];
+
+        expect(output.map((message) => message.content)).toEqual([
+            expect.objectContaining({
+                role: "agent",
+                turn: "agent-notification-response",
+                ev: {
+                    t: "service",
+                    text: 'Background work "Security review" completed.',
+                },
+            }),
+            expect.objectContaining({
+                role: "agent",
+                turn: "agent-notification-response",
+                ev: { t: "turn-start" },
+            }),
+        ]);
+    });
+
+    it("delivers an agent-authored notification into agent work that already started", () => {
+        const mapper = new HappyMessageMapper();
+        mapper.map(
+            sessionEvent(
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: "Analyze the project",
+                    message: {
+                        blocks: [{ text: "Analyze the project", type: "text" }],
+                        id: "user-1",
+                        role: "user",
+                    },
+                    runId: "run-3",
+                },
+                300,
+            ),
+        );
+        mapper.map(
+            sessionEvent(
+                "agent_event",
+                {
+                    event: {
+                        iteration: 1,
+                        messageId: "agent-3",
+                        type: "inference_iteration_start",
+                    },
+                    runId: "run-3",
+                },
+                310,
+            ),
+        );
+
+        const notified = mapper.map(
+            sessionEvent(
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: 'Background work "Docs" completed.',
+                    message: {
+                        blocks: [{ text: 'Background work "Docs" completed.', type: "text" }],
+                        id: "notification-3",
+                        provenance: "agent",
+                        role: "user",
+                    },
+                    runId: "run-3",
+                    source: "notification",
+                },
+                320,
+            ),
+        );
+
+        expect(notified.map((message) => message.content)).toEqual([
+            expect.objectContaining({
+                ev: { t: "service", text: 'Background work "Docs" completed.' },
+                id: "notification-3",
+                role: "agent",
+                turn: "agent-3",
+            }),
+        ]);
+    });
+
+    it("delivers an agent-authored notification when the run ends before the next iteration", () => {
+        const mapper = new HappyMessageMapper();
+        const buffered = mapper.map(
+            sessionEvent(
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: 'Background work "Docs" completed.',
+                    message: {
+                        blocks: [{ text: 'Background work "Docs" completed.', type: "text" }],
+                        id: "notification-4",
+                        provenance: "agent",
+                        role: "user",
+                    },
+                    runId: "run-4",
+                    source: "notification",
+                },
+                400,
+            ),
+        );
+        mapper.map(sessionEvent("run_started", { runId: "run-4" }, 410));
+
+        const finished = mapper.map(
+            sessionEvent(
+                "run_finished",
+                { modelLocked: false, runId: "run-4", stopReason: "stop" },
+                420,
+            ),
+        );
+
+        expect(buffered).toEqual([]);
+        expect(finished.map((message) => message.content)).toEqual([
+            expect.objectContaining({
+                ev: { t: "service", text: 'Background work "Docs" completed.' },
+                id: "notification-4",
+                role: "agent",
+                turn: "run-4",
+            }),
+        ]);
+        expect(
+            mapper
+                .map(
+                    sessionEvent(
+                        "agent_event",
+                        {
+                            event: {
+                                iteration: 1,
+                                messageId: "agent-4",
+                                type: "inference_iteration_start",
+                            },
+                            runId: "run-4",
+                        },
+                        430,
+                    ),
+                )
+                .map((message) => message.content.ev),
+        ).toEqual([{ t: "turn-start" }]);
+    });
+
+    it("delivers an agent-authored notification when the run is aborted", () => {
+        const mapper = new HappyMessageMapper();
+        mapper.map(
+            sessionEvent(
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: 'Background work "Docs" completed.',
+                    message: {
+                        blocks: [{ text: 'Background work "Docs" completed.', type: "text" }],
+                        id: "notification-5",
+                        provenance: "agent",
+                        role: "user",
+                    },
+                    runId: "run-5",
+                    source: "notification",
+                },
+                500,
+            ),
+        );
+
+        expect(
+            mapper
+                .map(sessionEvent("abort_requested", { runId: "run-5" }, 510))
+                .map((message) => message.content),
+        ).toEqual([
+            expect.objectContaining({
+                ev: { t: "service", text: 'Background work "Docs" completed.' },
+                id: "notification-5",
+                turn: "run-5",
+            }),
+        ]);
+    });
+
     it("does not stop a group for the technical abort that continues steering", () => {
         const mapper = new HappyMessageMapper();
         mapper.map(
