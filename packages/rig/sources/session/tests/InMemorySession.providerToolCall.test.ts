@@ -137,10 +137,18 @@ function assistantMessage(model: string): AssistantMessage {
     return {
         api: "test",
         content: [{ type: "text", text: "Here is what I found." }],
+        role: "assistant",
         model,
         provider: "test",
         stopReason: "stop",
         timestamp: 0,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+        usage: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
+            input: 0,
+            output: 0,
+            totalTokens: 0,
+        },
     };
 }
