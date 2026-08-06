@@ -8,6 +8,10 @@ Master plans are dictated by the user and describe where the product is going, i
 
 All persistent plans must live in `master-plans/` and follow the master-plan rules above. Do not create design documents, implementation plans, slash-command plan artifacts, or planning directories anywhere else in the repository, including `docs/plans/`.
 
+Discussion notes that support or contextualize master plans must live only in
+`master-plans/notes/`. Do not create these notes in the `master-plans/` root,
+in another documentation directory, or anywhere else in the repository.
+
 ## Product direction
 
 Build the best combined coding-agent experience from Codex and Claude Code, with a strong focus on simplicity, thoughtful defaults, and a polished user experience. Prioritize important, widely useful workflows over obscure features or exhaustive parity.
