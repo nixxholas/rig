@@ -69,7 +69,7 @@ describe("reviewAutoPermission", () => {
     });
 
     it.each(["medium", "high"] as const)(
-        "keeps %s-risk actions fail-closed when user evidence is incomplete",
+        "honors a %s-risk reviewer approval when older user evidence was omitted",
         async (risk) => {
             const { reviewer, review } = stubReviewer(
                 {
@@ -83,18 +83,28 @@ describe("reviewAutoPermission", () => {
 
             await expect(
                 reviewAutoPermission({
-                    action: 'running "pnpm test". Access: unrestricted filesystem and network access',
+                    action: 'running "pnpm --filter happy-teams add jose". Access: unrestricted filesystem and network access',
                     args: { sandbox_permissions: "require_escalated" },
-                    messages: [],
+                    messages: [
+                        {
+                            blocks: [
+                                {
+                                    type: "text",
+                                    text: "Implement the feature and install its required dependencies.",
+                                },
+                            ],
+                            id: "current-user-authorization",
+                            role: "user",
+                        },
+                    ],
                     reviewer,
                     toolName: "exec_command",
                 }),
             ).resolves.toEqual({
-                decision: "deny",
-                denialKind: "rejected",
-                reason: "The full user authorization history did not fit in the automatic review.",
+                decision: "allow",
+                reason: "The retained messages authorize this action.",
                 risk,
-                userAuthorization: "low",
+                userAuthorization: "high",
             });
             expect(review).toHaveBeenCalledOnce();
         },

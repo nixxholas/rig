@@ -10,29 +10,23 @@ afterEach(async () => {
 });
 
 describe("Auto reviewer uses the Codex Guardian contract", () => {
-    it("accepts a Codex-shaped approval for an authorized dependency install", async () => {
+    it("accepts a medium-risk approval when long history is omitted", async () => {
+        let reviewerMessages = "";
         const gym = await createGym({
+            files: { "AGENTS_SECURITY.md": "" },
             inference(request, callIndex) {
-                if (
-                    request.context.systemPrompt?.includes(
-                        "judging one planned coding-agent action",
-                    )
-                ) {
-                    expect(request.context.systemPrompt).toContain(
-                        "dangerous or costly-to-reverse actions that pose a risk of irreversible damage",
-                    );
-                    expect(request.context.systemPrompt).not.toContain(
-                        "executing untrusted downloads",
-                    );
+                const messages = JSON.stringify(request.context.messages);
+                if (messages.includes("<proposed_action>")) {
+                    reviewerMessages = messages;
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
                                     outcome: "allow",
-                                    risk_level: "low",
-                                    user_authorization: "medium",
+                                    risk_level: "medium",
+                                    user_authorization: "high",
                                     rationale:
-                                        "Installing locked dependencies is routine local development.",
+                                        "The retained user request explicitly authorizes this bounded dependency install.",
                                 }),
                                 type: "text",
                             },
@@ -63,10 +57,15 @@ describe("Auto reviewer uses the Codex Guardian contract", () => {
         });
         running.add(gym);
 
-        gym.terminal.type("Implement the feature and install its locked dependencies.");
+        gym.terminal.paste(
+            `${"Relevant implementation context.\n".repeat(260)}` +
+                "Implement the feature and install its locked dependencies.",
+        );
+        await gym.terminal.waitForText("[paste #", 30_000);
         gym.terminal.press("enter");
 
         const screen = await gym.terminal.waitForText("INSTALL_COMPLETE", 30_000);
+        expect(reviewerMessages).toContain("[Auto permission review has incomplete user evidence]");
         expect(screen.text).not.toContain("Automatic permission review refused");
         await expect(gym.readFile("install-result.txt")).resolves.toBe("dependencies installed\n");
     }, 120_000);

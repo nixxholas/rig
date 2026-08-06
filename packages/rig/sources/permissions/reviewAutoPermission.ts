@@ -54,11 +54,6 @@ export async function reviewAutoPermission(options: {
         if (deadline.signal.aborted) return withTranscript(timedOutReview());
         const review = parseAutoPermissionReview(response.text);
         if (review?.decision === "allow") {
-            // Routine low-risk work does not depend on historical authorization. Actions with
-            // meaningful impact must still fail closed when that evidence is incomplete.
-            if (response.userEvidenceOmitted && review.risk !== "low") {
-                return withTranscript(incompleteUserEvidenceReview(review.risk));
-            }
             if (!shouldAllowAutoPermissionReview(review)) {
                 return withTranscript({ ...review, decision: "deny", denialKind: "rejected" });
             }
@@ -109,16 +104,6 @@ function timedOutReview(): AutoPermissionReview {
         denialKind: "timed_out",
         reason: "The automatic permission review ran out of time.",
         risk: "medium",
-        userAuthorization: "low",
-    };
-}
-
-function incompleteUserEvidenceReview(risk: AutoPermissionReview["risk"]): AutoPermissionReview {
-    return {
-        decision: "deny",
-        denialKind: "rejected",
-        reason: "The full user authorization history did not fit in the automatic review.",
-        risk,
         userAuthorization: "low",
     };
 }

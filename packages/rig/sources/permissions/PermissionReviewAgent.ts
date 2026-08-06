@@ -12,7 +12,7 @@ export interface PermissionReviewRequest {
 export interface PermissionReviewResponse {
     /** The reviewer's raw final text, still to be parsed into a verdict. */
     text: string;
-    /** True when user authorization history did not fit, which forces a fail-closed result. */
+    /** True when user authorization history did not fit; the reviewer receives an omission marker. */
     userEvidenceOmitted: boolean;
     /**
      * What the reviewer did to reach this verdict, recorded so a decision can be explained after
