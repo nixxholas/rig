@@ -2,6 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { renameSync, rmSync } from "node:fs";
 import {
     access,
+    lstat,
     mkdir,
     mkdtemp,
     readFile,
@@ -32,6 +33,9 @@ import { openSessionDatabase } from "../../persistence/database/openSessionDatab
 import { projects, projectWorkspaces } from "../../persistence/database/schema.js";
 import { PersistentGlobalEventQueue } from "../../global-event/PersistentGlobalEventQueue.js";
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
+import { assertCanWritePath } from "../../agent/context/assertCanWritePath.js";
+import { isProtectedPath } from "../../permissions/index.js";
+import { resolveProtectedPaths } from "../../config/index.js";
 import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
 import type { InMemorySession, InMemorySessionOptions } from "../../session/InMemorySession.js";
@@ -1006,6 +1010,89 @@ describe("projects", () => {
         ).toMatchObject({
             workspaceId: initialized.id,
         });
+    });
+
+    it("replicates configured project files into a workspace and follows root changes", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "sync-source");
+        await writeFile(
+            join(repository, "rig.toml"),
+            [
+                "[workspace]",
+                'sync = [".env"]',
+                'protected_sync = [".env.production"]',
+                'setup_commands = ["cat .env > env-during-setup.txt"]',
+                "",
+            ].join("\n"),
+        );
+        await writeFile(join(repository, ".gitignore"), ".env\n.env.production\n");
+        await git(repository, ["add", "rig.toml", ".gitignore"]);
+        await git(repository, ["commit", "-m", "Configure workspace sync"]);
+        // Gitignored files never reach the checkout, so only sync can provide them.
+        await writeFile(join(repository, ".env"), "KEY=value\n");
+        await writeFile(join(repository, ".env.production"), "SECRET=1\n");
+        const source = fixture.store.create({ cwd: repository });
+
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            name: "Synced Files",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const initialized = await waitForWorkspace(
+            fixture.store,
+            created.projectId,
+            created.id,
+            (workspace) => workspace.status === "ready" || workspace.status === "failed",
+        );
+
+        expect(initialized.status).toBe("ready");
+        await expect(readFile(join(initialized.path, ".env"), "utf8")).resolves.toBe("KEY=value\n");
+        expect((await lstat(join(initialized.path, ".env"))).isSymbolicLink()).toBe(false);
+        await expect(readFile(join(initialized.path, ".env.production"), "utf8")).resolves.toBe(
+            "SECRET=1\n",
+        );
+        await expect(
+            readFile(join(initialized.path, "env-during-setup.txt"), "utf8"),
+        ).resolves.toBe("KEY=value\n");
+
+        // The protected sync file joins the protected paths a session resolves for this
+        // workspace, and the real write boundary refuses to modify it; the unprotected sync file
+        // and ordinary workspace files stay writable.
+        const protectedPaths = resolveProtectedPaths(initialized.path, []);
+        expect(protectedPaths).toContain(".env.production");
+        expect(protectedPaths).not.toContain(".env");
+        const absoluteProtectedPaths = protectedPaths.map((path) => join(initialized.path, path));
+        expect(
+            isProtectedPath(join(initialized.path, ".env.production"), absoluteProtectedPaths),
+        ).toBe(true);
+        await expect(
+            assertCanWritePath(
+                initialized.path,
+                join(initialized.path, ".env.production"),
+                "auto",
+                absoluteProtectedPaths,
+            ),
+        ).rejects.toThrow("protected workspace path");
+        await expect(
+            assertCanWritePath(
+                initialized.path,
+                join(initialized.path, ".env"),
+                "auto",
+                absoluteProtectedPaths,
+            ),
+        ).resolves.toBeUndefined();
+
+        // A change to the root copy reaches the ready workspace. The watch and the replication
+        // are best-effort and debounced, so the root write is repeated until it converges.
+        const deadline = Date.now() + 15_000;
+        let replicated = "";
+        while (Date.now() < deadline) {
+            await writeFile(join(repository, ".env"), "KEY=changed\n");
+            await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+            replicated = await readFile(join(initialized.path, ".env"), "utf8");
+            if (replicated === "KEY=changed\n") break;
+        }
+        expect(replicated).toBe("KEY=changed\n");
     });
 
     it("fails workspace initialization on the first failed setup command", async () => {

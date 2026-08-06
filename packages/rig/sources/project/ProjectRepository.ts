@@ -105,9 +105,12 @@ import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { folderProjectName, projectStorageKey, validateProjectName } from "./projectIdentity.js";
 import { loadConfig } from "../config/loadConfig.js";
 import { runWorkspaceSetupCommands } from "./runWorkspaceSetupCommands.js";
+import { syncWorkspaceFiles } from "./syncWorkspaceFiles.js";
+import { watchWorkspaceSyncPaths } from "./watchWorkspaceSyncPaths.js";
 import { asyncLock, asyncQueue, type AsyncLock } from "../concurrency/index.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
+const WORKSPACE_SYNC_DEBOUNCE_MS = 300;
 const GIT_PROBE_CONCURRENCY = 4;
 const WORKSPACE_INITIALIZATION_CONCURRENCY = 4;
 const MAX_AVATAR_BYTES = 8 * 1024 * 1024;
@@ -196,6 +199,9 @@ export class ProjectRepository {
     readonly #workspacesDirectory: string;
     readonly #workspaceLifecycle = new Map<string, Promise<void>>();
     readonly #workspaceSetupControllers = new Map<string, AbortController>();
+    readonly #workspaceSyncChain = new Map<string, Promise<void>>();
+    readonly #workspaceSyncStops = new Map<string, () => void>();
+    readonly #workspaceSyncTimers = new Map<string, NodeJS.Timeout>();
     #activeInitializations = 0;
     #closed = false;
 
@@ -220,6 +226,9 @@ export class ProjectRepository {
         setImmediate(() => {
             this.#runBackgroundTask(() => this.#collectAvatarGarbage());
         });
+        for (const workspace of this.listWorkspaces()) {
+            if (workspace.status === "ready") this.#scheduleWorkspaceSync(workspace.projectId);
+        }
         for (const project of this.listProjects()) {
             if (project.kind === "regular" && project.initializationStatus === "initializing") {
                 this.scheduleInitialization(project.id);
@@ -466,6 +475,11 @@ export class ProjectRepository {
             controller.abort(new Error("Workspace setup stopped because Rig is closing."));
         }
         this.#workspaceSetupControllers.clear();
+        for (const timer of this.#workspaceSyncTimers.values()) clearTimeout(timer);
+        this.#workspaceSyncTimers.clear();
+        for (const stop of this.#workspaceSyncStops.values()) stop();
+        this.#workspaceSyncStops.clear();
+        this.#workspaceSyncChain.clear();
     }
 
     getProject(projectId: string): Project | undefined {
@@ -1655,6 +1669,24 @@ export class ProjectRepository {
                 cwd: workspace.path,
                 homeDirectory: this.#homeDirectory,
             });
+            const project = this.getProject(workspace.projectId);
+            // The first replication runs before setup commands so they can rely on the shared
+            // files being present. The sync list is read from the project root — the same source
+            // every later sync pass uses — so an uncommitted root configuration change applies.
+            if (project !== undefined) {
+                const rootConfig = await loadConfig({
+                    cwd: project.path,
+                    homeDirectory: this.#homeDirectory,
+                });
+                await syncWorkspaceFiles({
+                    paths: [
+                        ...rootConfig.config.workspace.sync,
+                        ...rootConfig.config.workspace.protectedSync,
+                    ],
+                    projectPath: project.path,
+                    workspacePath: workspace.path,
+                });
+            }
             await runWorkspaceSetupCommands(workspace.path, loaded.config.workspace.setupCommands, {
                 signal: controller.signal,
             });
@@ -1676,6 +1708,100 @@ export class ProjectRepository {
             const changed = workspaceMarkReady(tx, workspace.projectId, workspace.id, this.#now());
             if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
         });
+        this.#scheduleWorkspaceSync(workspace.projectId);
+    }
+
+    /**
+     * Debounces the project's next sync pass, so a burst of file events becomes one replication.
+     */
+    #scheduleWorkspaceSync(projectId: string): void {
+        if (this.#closed) return;
+        clearTimeout(this.#workspaceSyncTimers.get(projectId));
+        const timer = setTimeout(() => {
+            this.#workspaceSyncTimers.delete(projectId);
+            this.#runBackgroundTask(() => this.#queueWorkspaceSyncPass(projectId));
+        }, WORKSPACE_SYNC_DEBOUNCE_MS);
+        timer.unref?.();
+        this.#workspaceSyncTimers.set(projectId, timer);
+    }
+
+    /**
+     * Serializes a project's sync passes so two never copy the same destinations or race over the
+     * watch. Debouncing keeps the queue depth at one: events during a running pass collapse into
+     * a single timer, which queues a single following pass.
+     */
+    async #queueWorkspaceSyncPass(projectId: string): Promise<void> {
+        const previous = this.#workspaceSyncChain.get(projectId) ?? Promise.resolve();
+        const queued = previous
+            .catch(() => undefined)
+            .then(() => this.#runWorkspaceSyncPass(projectId));
+        this.#workspaceSyncChain.set(projectId, queued);
+        try {
+            await queued;
+        } finally {
+            if (this.#workspaceSyncChain.get(projectId) === queued) {
+                this.#workspaceSyncChain.delete(projectId);
+            }
+        }
+    }
+
+    /**
+     * Replicates the project root's configured sync paths to every ready workspace, then re-arms
+     * the watch from the current configuration. Sync is best-effort: one workspace failing to
+     * receive a copy never fails the others or the project, and a project left without ready
+     * workspaces simply stops being watched.
+     */
+    async #runWorkspaceSyncPass(projectId: string): Promise<void> {
+        this.#workspaceSyncStops.get(projectId)?.();
+        this.#workspaceSyncStops.delete(projectId);
+        if (this.#closed) return;
+        const project = this.getProject(projectId);
+        const workspaces = this.listWorkspaces(projectId).filter(
+            (workspace) => workspace.status === "ready",
+        );
+        if (project === undefined || workspaces.length === 0) return;
+        let syncPaths: readonly string[] = [];
+        try {
+            const loaded = await loadConfig({
+                cwd: project.path,
+                homeDirectory: this.#homeDirectory,
+            });
+            syncPaths = [
+                ...new Set([
+                    ...loaded.config.workspace.sync,
+                    ...loaded.config.workspace.protectedSync,
+                ]),
+            ];
+        } catch {
+            // An unreadable configuration syncs nothing, but the configuration files stay
+            // watched below so repairing the file resumes sync without a restart.
+        }
+        if (this.#closed) return;
+        // The watch is armed even with nothing to sync: it also observes the project
+        // configuration files, so a sync list added later is picked up without a restart.
+        this.#workspaceSyncStops.set(
+            projectId,
+            watchWorkspaceSyncPaths({
+                onChange: () => this.#scheduleWorkspaceSync(projectId),
+                projectPath: project.path,
+                syncPaths,
+            }),
+        );
+        for (const workspace of workspaces) {
+            if (this.#closed) return;
+            // Re-read right before copying: a workspace archived while this pass was running
+            // must not have its folder written to, much less recreated.
+            if (this.getWorkspace(projectId, workspace.id)?.status !== "ready") continue;
+            try {
+                await syncWorkspaceFiles({
+                    paths: syncPaths,
+                    projectPath: project.path,
+                    workspacePath: workspace.path,
+                });
+            } catch {
+                // Best-effort replication: the workspace converges on the next pass.
+            }
+        }
     }
 
     #markWorkspaceInitializationFailed(workspace: ProjectWorkspace, error: string): void {
@@ -1697,6 +1823,8 @@ export class ProjectRepository {
             const changed = workspaceCompleteArchive(tx, projectId, workspaceId, now);
             if (changed > 0) this.#publishedWorkspace(projectId, workspaceId);
         });
+        // The next pass stops the watch when this was the project's last ready workspace.
+        this.#scheduleWorkspaceSync(projectId);
     }
 
     #mutate<T>(body: (tx: TX) => T): T {

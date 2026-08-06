@@ -67,6 +67,26 @@ describe("config", () => {
         ).toEqual(["global", "shared", "project"]);
     });
 
+    it("parses and merges workspace sync", () => {
+        expect(
+            parseConfigToml(
+                '[workspace]\nsync = [".env", "config/local"]\nprotected_sync = [".env.production"]\n',
+            ),
+        ).toEqual({
+            workspace: {
+                sync: [".env", "config/local"],
+                protectedSync: [".env.production"],
+            },
+        });
+        const merged = mergeConfigValues(
+            DEFAULT_RIG_CONFIG,
+            { workspace: { sync: ["global-sync"] } },
+            { workspace: { protectedSync: ["project-secret"] } },
+        ).workspace;
+        expect(merged.sync).toEqual(["global-sync"]);
+        expect(merged.protectedSync).toEqual(["project-secret"]);
+    });
+
     it("serializes runtime config read-modify-write operations", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-runtime-config-lock-"));
         const runtimePath = join(root, "runtime.toml");
@@ -612,6 +632,18 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             '[workspace]\nsetup_commands = "pnpm install"\n',
             "workspace.setup_commands must be an array of strings.",
         ],
+        [
+            '[workspace]\nsync = ["../outside"]\n',
+            "workspace.sync must be an array of project-relative paths.",
+        ],
+        [
+            '[workspace]\nsync = ".env"\n',
+            "workspace.sync must be an array of project-relative paths.",
+        ],
+        [
+            '[workspace]\nprotected_sync = ["/etc/hosts"]\n',
+            "workspace.protected_sync must be an array of project-relative paths.",
+        ],
     ] as const)("rejects invalid config: %s", (source, message) => {
         expect(() => parseConfigToml(source)).toThrow(message);
     });
@@ -887,6 +919,8 @@ inference_max_retries = 8
                 },
                 theme: DEFAULT_RIG_CONFIG.theme,
                 workspace: {
+                    sync: [".env"],
+                    protectedSync: [".env.production"],
                     setupCommands: ["pnpm install --frozen-lockfile"],
                 },
             });
@@ -969,6 +1003,8 @@ inference_max_retries = 8
                     'warning = "yellow"',
                     "",
                     "[workspace]",
+                    'sync = [ ".env" ]',
+                    'protected_sync = [ ".env.production" ]',
                     'setup_commands = [ "pnpm install --frozen-lockfile" ]',
                     "",
                 ].join("\n"),

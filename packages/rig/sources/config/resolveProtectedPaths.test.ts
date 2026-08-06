@@ -32,4 +32,31 @@ describe("resolveProtectedPaths", () => {
             "project",
         ]);
     });
+
+    it("protects existing workspace protected sync files", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-protected-sync-"));
+        temporaryDirectories.push(cwd);
+        await Promise.all([
+            writeFile(join(cwd, ".env.production"), "SECRET=1\n"),
+            writeFile(
+                join(cwd, "happy.toml"),
+                '[workspace]\nsync = [".env"]\nprotected_sync = [".env.production", "missing-sync"]\n',
+            ),
+        ]);
+
+        expect(resolveProtectedPaths(cwd, [])).toEqual([".env.production"]);
+    });
+
+    it("prefers rig.toml over happy.toml like the rest of configuration loading", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-protected-precedence-"));
+        temporaryDirectories.push(cwd);
+        await Promise.all([
+            mkdir(join(cwd, "from-rig")),
+            mkdir(join(cwd, "from-happy")),
+            writeFile(join(cwd, "rig.toml"), '[permissions]\nprotected_paths = ["from-rig"]\n'),
+            writeFile(join(cwd, "happy.toml"), '[permissions]\nprotected_paths = ["from-happy"]\n'),
+        ]);
+
+        expect(resolveProtectedPaths(cwd, [])).toEqual(["from-rig"]);
+    });
 });

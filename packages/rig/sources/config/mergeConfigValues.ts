@@ -145,6 +145,12 @@ export function mergeConfigValues(
                 };
             }
         }
+        if (config.workspace?.sync !== undefined) {
+            workspace.sync = config.workspace.sync;
+        }
+        if (config.workspace?.protectedSync !== undefined) {
+            workspace.protectedSync = config.workspace.protectedSync;
+        }
         if (config.workspace?.setupCommands !== undefined) {
             workspace.setupCommands = config.workspace.setupCommands;
         }

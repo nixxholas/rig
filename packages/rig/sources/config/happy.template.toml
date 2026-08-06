@@ -27,6 +27,11 @@
 
 # [workspace]
 # setup_commands = ["pnpm install"]
+# Project files copied into every workspace and re-copied whenever the project root
+# copy changes, such as gitignored .env files. Sync is one-way: the root copy wins.
+# sync = [".env"]
+# Synced like sync, and additionally protected from writing without Full access.
+# protected_sync = [".env.production"]
 
 # [theme]
 # primary = "default"

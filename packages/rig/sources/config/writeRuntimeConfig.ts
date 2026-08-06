@@ -55,6 +55,8 @@ export async function writeRuntimeConfigInsideLock(
             role?: string;
         };
         workspace?: {
+            sync?: readonly string[];
+            protected_sync?: readonly string[];
             setup_commands?: readonly string[];
         };
     } = {};
@@ -149,6 +151,12 @@ export async function writeRuntimeConfigInsideLock(
 
     if (workspace !== undefined) {
         document.workspace = {};
+        if (workspace.sync !== undefined) {
+            document.workspace.sync = workspace.sync;
+        }
+        if (workspace.protectedSync !== undefined) {
+            document.workspace.protected_sync = workspace.protectedSync;
+        }
         if (workspace.setupCommands !== undefined) {
             document.workspace.setup_commands = workspace.setupCommands;
         }

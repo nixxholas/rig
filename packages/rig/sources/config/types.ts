@@ -58,10 +58,16 @@ export interface PartialConfigFeatures {
 }
 
 export interface ConfigWorkspace {
+    /** Project-root paths copied into every workspace and re-copied when the root copy changes. */
+    sync: readonly string[];
+    /** Synced like `sync`, and additionally protected from writing inside workspaces. */
+    protectedSync: readonly string[];
     setupCommands: readonly string[];
 }
 
 export interface PartialConfigWorkspace {
+    sync?: readonly string[];
+    protectedSync?: readonly string[];
     setupCommands?: readonly string[];
 }
 

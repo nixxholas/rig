@@ -77,9 +77,19 @@ What happens, in order:
 worktree/<storage key> <path> <commit>`, then Git's answer is verified — the
    worktree must be at exactly the requested path and belong to the expected
    repository.
-4. **Setup commands run** — `workspace.setup_commands` from the configuration
+4. **Configured sync files are replicated** — every path in `workspace.sync`
+   and `workspace.protected_sync` that exists in the project root is copied
+   into the workspace. This shares files Git cannot provide, such as gitignored
+   `.env` files. While the daemon runs, the project root's copies are watched
+   and re-copied to every ready workspace whenever they change. Sync is
+   one-way and best-effort: the root copy always wins, deletions in the root
+   are not replicated, and a missed event catches up on the next change. Paths
+   in `protected_sync` are additionally write-protected in workspaces, exactly
+   like `permissions.protected_paths`, so sessions cannot modify their copy
+   without Full access.
+5. **Setup commands run** — `workspace.setup_commands` from the configuration
    loaded inside the new workspace (for example `pnpm install --frozen-lockfile`).
-5. The workspace is marked `ready`. A failure at any step marks it `failed`.
+6. The workspace is marked `ready`. A failure at any step marks it `failed`.
 
 Two consequences worth remembering:
 
@@ -252,6 +262,11 @@ cross_workspace = false
 
 [workspace]
 setup_commands = ["pnpm install --frozen-lockfile"]
+# Project files copied into every workspace and re-copied whenever the project root
+# copy changes, such as gitignored .env files. Sync is one-way: the root copy wins.
+sync = [".env"]
+# Synced like sync, and additionally protected from writing without Full access.
+protected_sync = [".env.production"]
 ```
 
 ## Tracking changes

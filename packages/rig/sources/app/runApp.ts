@@ -83,6 +83,8 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         ...new Set([
             ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
             ...(loadedConfig.sources.runtime.values.permissions?.protectedPaths ?? []),
+            ...(loadedConfig.sources.global.values.workspace?.protectedSync ?? []),
+            ...(loadedConfig.sources.runtime.values.workspace?.protectedSync ?? []),
         ]),
     ];
     const agentOptions: CreateSessionRequest = {

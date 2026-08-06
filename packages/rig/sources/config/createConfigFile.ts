@@ -81,11 +81,21 @@ export async function createConfigFile(
                       },
                   }),
             theme: config.theme,
-            ...(config.workspace.setupCommands.length === 0
+            ...(config.workspace.sync.length === 0 &&
+            config.workspace.protectedSync.length === 0 &&
+            config.workspace.setupCommands.length === 0
                 ? {}
                 : {
                       workspace: {
-                          setup_commands: config.workspace.setupCommands,
+                          ...(config.workspace.sync.length === 0
+                              ? {}
+                              : { sync: config.workspace.sync }),
+                          ...(config.workspace.protectedSync.length === 0
+                              ? {}
+                              : { protected_sync: config.workspace.protectedSync }),
+                          ...(config.workspace.setupCommands.length === 0
+                              ? {}
+                              : { setup_commands: config.workspace.setupCommands }),
                       },
                   }),
             ...(config.docker === undefined

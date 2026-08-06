@@ -359,6 +359,8 @@ async function runOwnedLocalProtocolServer(
             ...new Set([
                 ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
                 ...(loadedConfig.sources.runtime.values.permissions?.protectedPaths ?? []),
+                ...(loadedConfig.sources.global.values.workspace?.protectedSync ?? []),
+                ...(loadedConfig.sources.runtime.values.workspace?.protectedSync ?? []),
             ]),
         ];
         if (stopping) return;

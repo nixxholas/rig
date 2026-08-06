@@ -249,13 +249,21 @@ function parseKnownConfigToml(source: string): PartialRigConfig {
         workspaceTable === undefined
             ? undefined
             : (() => {
-                  dropUnknownKeys(workspaceTable, "workspace", ["setup_commands"]);
-                  return readOptionalStringArray(
-                      workspaceTable,
+                  dropUnknownKeys(workspaceTable, "workspace", [
+                      "sync",
+                      "protected_sync",
                       "setup_commands",
-                      "setupCommands",
-                      "workspace.setup_commands",
-                  );
+                  ]);
+                  return {
+                      ...readWorkspaceSyncPaths(workspaceTable, "sync", "sync"),
+                      ...readWorkspaceSyncPaths(workspaceTable, "protected_sync", "protectedSync"),
+                      ...readOptionalStringArray(
+                          workspaceTable,
+                          "setup_commands",
+                          "setupCommands",
+                          "workspace.setup_commands",
+                      ),
+                  };
               })();
 
     return {
@@ -277,6 +285,19 @@ function parseKnownConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(theme).length > 0 ? { theme } : {}),
         ...(workspace !== undefined && Object.keys(workspace).length > 0 ? { workspace } : {}),
     };
+}
+
+function readWorkspaceSyncPaths<TKey extends "sync" | "protectedSync">(
+    table: TomlTable,
+    key: string,
+    outputKey: TKey,
+): Partial<Record<TKey, readonly string[]>> {
+    const value = table[key];
+    if (value === undefined) return {};
+    if (!Value.Check(protectedPathsSchema, value)) {
+        throw new Error(`workspace.${key} must be an array of project-relative paths.`);
+    }
+    return { [outputKey]: value } as unknown as Partial<Record<TKey, readonly string[]>>;
 }
 
 function readPermissionsConfig(

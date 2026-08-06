@@ -64,6 +64,8 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         warning: "yellow",
     },
     workspace: {
+        sync: [],
+        protectedSync: [],
         setupCommands: [],
     },
 };
