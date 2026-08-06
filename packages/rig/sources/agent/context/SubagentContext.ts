@@ -10,6 +10,13 @@ export interface AvailableSubagentModel {
     id: string;
     name: string;
     providerId: string;
+    /**
+     * The backend behind this model, which is what decides the searches it can run itself.
+     *
+     * Unlike the id, this does not change for a named account, so it is what a prompt can say
+     * capabilities from. Absent when the catalog does not know it.
+     */
+    providerType?: string;
 }
 
 export interface DisabledSubagentProvider {

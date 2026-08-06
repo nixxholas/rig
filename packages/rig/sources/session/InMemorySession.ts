@@ -6853,6 +6853,9 @@ export class InMemorySession {
                         id: model.id,
                         name: model.name,
                         providerId: provider.providerId,
+                        ...(provider.providerType === undefined
+                            ? {}
+                            : { providerType: provider.providerType }),
                     })),
                 ),
                 canSpawn: this.#agentMetadata.depth < agentManager.maxDepth,

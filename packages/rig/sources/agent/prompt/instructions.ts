@@ -3,6 +3,7 @@ import type {
     DisabledSubagentProvider,
 } from "../context/SubagentContext.js";
 import type { PermissionMode } from "../../permissions/index.js";
+import { hostedSearchesFor } from "../../runtime/resolveHostedCapabilities.js";
 import type { AnyDefinedTool } from "../types.js";
 
 /** Marks the role section so a child can strip its parent's copy before appending its own. */
@@ -97,9 +98,11 @@ export function createAvailableModelsInstructions(
                             effort === model.defaultEffort ? `${effort} (default)` : effort,
                         )
                         .join(", ");
-                    return `- ${model.providerId}: ${model.name} (\`${model.id}\`) — effort levels: ${efforts}`;
+                    const searches = describeHostedSearches(model.providerType);
+                    return `- ${model.providerId}: ${model.name} (\`${model.id}\`) — effort levels: ${efforts}${searches}`;
                 }),
                 "",
+                ...hostedSearchNote(models),
                 "Every subagent you start needs an explicit model and effort; nothing is inherited. Pick both for the task: the model's default effort, or a lower one, is right for research, review, and other bounded work, and xhigh, max, or ultra is only for work the user asked to run at that effort.",
                 "",
                 "A background subagent notifies you when it finishes, even while you are idle, so never poll it. When there is nothing to do but wait, wait once for a long time — an hour is the normal wait — or simply end your turn. Every wait that times out costs another full model turn over your whole context and tells you nothing.",
@@ -124,6 +127,42 @@ export function createAvailableModelsInstructions(
         );
     }
     return sections.join("\n\n");
+}
+
+
+/** What a model's own backend can search, said on the line that offers the model. */
+function describeHostedSearches(providerType: string | undefined): string {
+    const searches = hostedSearchesFor(providerType);
+    if (searches.length === 0) return "";
+    const named = searches
+        .map((search) => (search === "x_search" ? "X" : "the web"))
+        .join(" and ");
+    return ` — searches ${named} on its own backend`;
+}
+
+/**
+ * How to read the capability noted against each model.
+ *
+ * Worth saying because the alternative is worse than not knowing: an agent that cannot reach X
+ * will otherwise try to fetch an x.com page and be turned away by the site, having spent the turn
+ * finding out. It is stated as the rule rather than as the current answer because the permission
+ * mode can change while this prompt is still cached.
+ */
+function hostedSearchNote(models: readonly AvailableSubagentModel[]): readonly string[] {
+    const searchable = models.filter((model) => hostedSearchesFor(model.providerType).length > 0);
+    if (searchable.length === 0) return [];
+    const reachesX = searchable.some((model) =>
+        hostedSearchesFor(model.providerType).includes("x_search"),
+    );
+    return [
+        [
+            "A model noted as searching on its own backend does the search inside its own response, so it reads pages you have no tool for and returns what it found. This works only while the session is in Auto or Full access; in Read only or Workspace write the search is not offered to it and it will answer without one.",
+            reachesX
+                ? "Delegate to one of these when a task needs the live web, and to a model that searches X when a task needs posts on X. Fetching an x.com page directly does not work — the site refuses it — so a subagent is the way to read X at all."
+                : "Delegate to one of these when a task needs the live web.",
+        ].join(" "),
+        "",
+    ];
 }
 
 export function createBundledDocsInstructions(docsPath: string): string {

@@ -60,6 +60,70 @@ describe("createBundledDocsInstructions", () => {
     });
 });
 
+describe("what a model's own backend can search", () => {
+    const models = [
+        {
+            defaultEffort: "medium",
+            effortLevels: ["low", "medium", "high"],
+            id: "xai/grok-4.5",
+            name: "Grok 4.5",
+            providerId: "grok",
+            providerType: "grok",
+        },
+        {
+            defaultEffort: "medium",
+            effortLevels: ["low", "medium", "high"],
+            id: "openai/gpt-5.6-sol",
+            name: "GPT-5.6 Sol",
+            providerId: "codex",
+            providerType: "codex",
+        },
+        {
+            defaultEffort: "medium",
+            effortLevels: ["low", "medium"],
+            id: "anthropic/sonnet-5",
+            name: "Sonnet 5",
+            providerId: "claude",
+            providerType: "claude",
+        },
+    ];
+
+    /**
+     * Without this an agent has no way to know a search it cannot run itself exists behind another
+     * model, so it reaches for the tool it does have: it fetches an x.com page, the site refuses
+     * it, and the turn is spent finding that out.
+     */
+    it("says which model reaches X, so a task about X is delegated instead of fetched", () => {
+        const instructions = createAvailableModelsInstructions(models) ?? "";
+        expect(instructions).toContain("Grok 4.5 (`xai/grok-4.5`)");
+        expect(instructions).toMatch(/Grok 4\.5.*searches the web and X on its own backend/u);
+        expect(instructions).toContain("a subagent is the way to read X at all");
+    });
+
+    it("does not claim a backend searches when it does not", () => {
+        const instructions = createAvailableModelsInstructions(models) ?? "";
+        const claudeLine = instructions
+            .split("\n")
+            .find((line) => line.includes("anthropic/sonnet-5"));
+        expect(claudeLine).toBeDefined();
+        expect(claudeLine).not.toContain("own backend");
+    });
+
+    it("states the rule rather than the mode of the moment, because the mode can change", () => {
+        const instructions = createAvailableModelsInstructions(models) ?? "";
+        expect(instructions).toContain("only while the session is in Auto or Full access");
+        expect(instructions).toContain("in Read only or Workspace write the search is not offered");
+    });
+
+    it("says nothing about searching when no model can", () => {
+        const instructions =
+            createAvailableModelsInstructions(models.filter((m) => m.providerType === "claude")) ??
+            "";
+        expect(instructions).not.toContain("own backend");
+        expect(instructions).not.toContain("Auto or Full access");
+    });
+});
+
 describe("createAvailableModelsInstructions", () => {
     it("lists selectable models without treating a bare model name as a delegation request", () => {
         const instructions = createAvailableModelsInstructions([
