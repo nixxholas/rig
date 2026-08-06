@@ -15,6 +15,7 @@ import type { BedrockCredential } from "@/vendors/VendorCredential.js";
 import type { AnthropicBedrockTransport } from "@/vendors/bedrock/AnthropicBedrockTransport.js";
 import {
     describeAnthropicBedrockRetry,
+    isAnthropicBedrockConnectionFailure,
     resolveAnthropicBedrockRetryDelay,
     shouldRetryAnthropicBedrock,
     waitForAnthropicBedrockRetry,
@@ -22,6 +23,7 @@ import {
 import {
     classifyAnthropicBedrockError,
     classifyAnthropicBedrockProviderError,
+    describeAnthropicBedrockErrorMessage,
 } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { AnthropicBedrockConnection } from "@/vendors/bedrock/impl/AnthropicBedrockConnection.js";
 import type { AnthropicBedrockClient as CreatedAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
@@ -258,6 +260,7 @@ export class AnthropicBedrockSession extends BaseSession {
             let failedAttempts = 0;
             while (true) {
                 let responseContentStarted = false;
+                let compactionOutputStarted = false;
                 try {
                     attempts += 1;
                     const response = await this.connection.stream(
@@ -265,8 +268,11 @@ export class AnthropicBedrockSession extends BaseSession {
                         ...(options.signal === undefined ? [] : ([options.signal] as const)),
                     );
                     for await (const event of mapAnthropicStream(response, {
+                        // mapAnthropicStream reports output through this callback only for
+                        // compaction blocks; ordinary content is visible in the events below.
                         onOutputStarted: () => {
                             responseContentStarted = true;
+                            compactionOutputStarted = true;
                         },
                         ...(options.signal === undefined ? {} : { signal: options.signal }),
                         tools,
@@ -279,7 +285,18 @@ export class AnthropicBedrockSession extends BaseSession {
                     }
                     return;
                 } catch (error) {
-                    if (responseContentStarted && !isEmptyResponseError(error)) throw error;
+                    // A connection that drops mid-response is replayed through the block_reset
+                    // rollback below, unless compaction output began: compaction is stateful on
+                    // the server and must not be replayed.
+                    const replayableAfterContent =
+                        !compactionOutputStarted && isAnthropicBedrockConnectionFailure(error);
+                    if (
+                        responseContentStarted &&
+                        !isEmptyResponseError(error) &&
+                        !replayableAfterContent
+                    ) {
+                        throw error;
+                    }
                     failedAttempts += 1;
                     if (blockStarted) {
                         yield { type: "block_reset" };
@@ -323,7 +340,7 @@ export class AnthropicBedrockSession extends BaseSession {
                       type: "done",
                       state: "error",
                       kind: classifyAnthropicBedrockError(error),
-                      message: error instanceof Error ? error.message : String(error),
+                      message: describeAnthropicBedrockErrorMessage(error),
                       providerError: classifyAnthropicBedrockProviderError(error, attempts),
                   };
         }

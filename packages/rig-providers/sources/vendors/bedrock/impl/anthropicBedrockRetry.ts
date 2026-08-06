@@ -5,6 +5,31 @@ import { isEmptyResponseError } from "@/core/EmptyResponseError.js";
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 32_000;
 
+const CONNECTION_FAILURE_CODES = new Set([
+    "EAI_AGAIN",
+    "ECONNABORTED",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETDOWN",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "EPIPE",
+    "ETIMEDOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_SOCKET",
+]);
+
+const CONNECTION_FAILURE_MESSAGES = [
+    /^terminated$/iu,
+    /^fetch failed$/iu,
+    /socket hang up/iu,
+    /^premature close$/iu,
+    /other side closed/iu,
+];
+
 export function shouldRetryAnthropicBedrock(
     error: unknown,
     failedAttempts: number,
@@ -12,7 +37,7 @@ export function shouldRetryAnthropicBedrock(
 ): boolean {
     if (failedAttempts > maxRetries) return false;
     if (isEmptyResponseError(error)) return true;
-    if (error instanceof APIConnectionError) return true;
+    if (isAnthropicBedrockConnectionFailure(error)) return true;
     if (!(error instanceof APIError)) return false;
     return (
         error.status === 408 ||
@@ -20,6 +45,38 @@ export function shouldRetryAnthropicBedrock(
         error.status === 429 ||
         (error.status !== undefined && error.status >= 500)
     );
+}
+
+/** Recognizes a dropped or timed-out connection, including undici's raw mid-body stream errors. */
+export function isAnthropicBedrockConnectionFailure(error: unknown): boolean {
+    if (isAbortError(error)) return false;
+    if (error instanceof APIConnectionError) return true;
+    if (hasConnectionFailureCode(error)) return true;
+    const message = error instanceof Error ? error.message : undefined;
+    return (
+        message !== undefined &&
+        CONNECTION_FAILURE_MESSAGES.some((pattern) => pattern.test(message))
+    );
+}
+
+function hasConnectionFailureCode(value: unknown): boolean {
+    const seen = new Set<object>();
+    let current = value;
+    while (typeof current === "object" && current !== null && !seen.has(current)) {
+        seen.add(current);
+        const record = current as { cause?: unknown; code?: unknown };
+        if (typeof record.code === "string" && CONNECTION_FAILURE_CODES.has(record.code)) {
+            return true;
+        }
+        current = record.cause;
+    }
+    return false;
+}
+
+function isAbortError(value: unknown): boolean {
+    if (typeof value !== "object" || value === null) return false;
+    const record = value as { code?: unknown; name?: unknown };
+    return record.name === "AbortError" || record.code === "ABORT_ERR";
 }
 
 export function resolveAnthropicBedrockRetryDelay(

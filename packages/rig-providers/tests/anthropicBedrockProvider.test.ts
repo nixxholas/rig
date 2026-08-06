@@ -12,7 +12,10 @@ import {
     AnthropicBedrockProvider,
     type AnthropicBedrockProviderOptions,
 } from "@/vendors/bedrock/AnthropicBedrockProvider.js";
-import { resolveAnthropicBedrockRetryDelay } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
+import {
+    isAnthropicBedrockConnectionFailure,
+    resolveAnthropicBedrockRetryDelay,
+} from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
 import {
     classifyAnthropicBedrockError,
     classifyAnthropicBedrockProviderError,
@@ -1108,6 +1111,24 @@ describe("AnthropicBedrockProvider", () => {
         ).toBe(5_000);
     });
 
+    it("recognizes connection failures through wrapped and cyclic cause chains", () => {
+        const wrapped = new Error("request failed");
+        Object.assign(wrapped, {
+            code: "SOMETHING_ELSE",
+            cause: Object.assign(new Error("read ETIMEDOUT"), { code: "ETIMEDOUT" }),
+        });
+        expect(isAnthropicBedrockConnectionFailure(wrapped)).toBe(true);
+
+        const cyclic = Object.assign(new Error("request failed"), { code: "SOMETHING_ELSE" });
+        Object.assign(cyclic, { cause: cyclic });
+        expect(isAnthropicBedrockConnectionFailure(cyclic)).toBe(false);
+
+        const abort = Object.assign(new Error("This operation was aborted"), {
+            name: "AbortError",
+        });
+        expect(isAnthropicBedrockConnectionFailure(abort)).toBe(false);
+    });
+
     it("retries a stream that closes before response content", async () => {
         let attempts = 0;
         const credential = await BedrockBearerTokenCredential.tryLoad({
@@ -1180,6 +1201,129 @@ describe("AnthropicBedrockProvider", () => {
         expect(events.filter((event) => event.type === "block_start")).toHaveLength(2);
         expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+    });
+
+    it("retries a stream that drops the connection after response content started", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-midstream-retry-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        if (attempts === 1) return timedOutMidResponseStream();
+                        return streamEvents([
+                            {
+                                type: "message_start",
+                                message: { usage: { input_tokens: 1, output_tokens: 0 } },
+                            },
+                            {
+                                type: "content_block_start",
+                                index: 0,
+                                content_block: { type: "text", text: "" },
+                            },
+                            {
+                                type: "content_block_delta",
+                                index: 0,
+                                delta: { type: "text_delta", text: "recovered" },
+                            },
+                            { type: "content_block_stop", index: 0 },
+                            {
+                                type: "message_delta",
+                                delta: { stop_reason: "end_turn", stop_sequence: null },
+                                usage: { output_tokens: 1 },
+                            },
+                            { type: "message_stop" },
+                        ]);
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "survive the timeout" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(2);
+        const partialIndex = events.findIndex(
+            (event) => event.type === "text_delta" && event.delta === "partial answer",
+        );
+        expect(partialIndex).toBeGreaterThanOrEqual(0);
+        expect(events.slice(partialIndex + 1, partialIndex + 3)).toEqual([
+            { type: "block_reset" },
+            expect.objectContaining({ type: "retrying", attempt: 1 }),
+        ]);
+        expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+    });
+
+    it("reports a readable error when a mid-response connection failure is not retried", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-midstream-exhausted-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        return timedOutMidResponseStream();
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            inferenceMaxRetries: 0,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "time out mid response" }] },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(1);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
+        expect(events.at(-2)).toEqual({ type: "block_reset" });
+        expect(events.at(-1)).toEqual({
+            type: "done",
+            state: "error",
+            kind: "unknown",
+            message:
+                "The network connection to Anthropic Bedrock was lost before the response finished.",
+            providerError: {
+                diagnostics: {
+                    attempts: 1,
+                    code: "ETIMEDOUT",
+                    upstreamMessage: "terminated",
+                },
+                type: "unclassified",
+            },
+        });
     });
 
     it("does not retry a stream that closes after an unexpected compaction block", async () => {
@@ -1696,6 +1840,29 @@ function toSse(events: readonly unknown[]): string {
 
 async function* streamEvents(events: readonly unknown[]) {
     for (const event of events) yield event as never;
+}
+
+async function* timedOutMidResponseStream() {
+    yield* streamEvents([
+        {
+            type: "message_start",
+            message: { usage: { input_tokens: 1, output_tokens: 0 } },
+        },
+        {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+        },
+        {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "partial answer" },
+        },
+    ]);
+    // The exact error undici surfaces when the socket read times out mid-body.
+    throw new TypeError("terminated", {
+        cause: Object.assign(new Error("read ETIMEDOUT"), { code: "ETIMEDOUT" }),
+    });
 }
 
 async function* truncatedCompactionStream() {

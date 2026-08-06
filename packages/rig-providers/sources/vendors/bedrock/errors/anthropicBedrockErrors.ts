@@ -5,6 +5,18 @@ import {
     extractProviderRetryResetAt,
 } from "@/core/extractProviderErrorDiagnostics.js";
 import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
+import { isAnthropicBedrockConnectionFailure } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
+
+/**
+ * Surfaced errors must read like a sentence. Raw transport failures such as undici's
+ * "terminated" get a human message; SDK API errors already carry one.
+ */
+export function describeAnthropicBedrockErrorMessage(error: unknown): string {
+    if (!(error instanceof APIError) && isAnthropicBedrockConnectionFailure(error)) {
+        return "The network connection to Anthropic Bedrock was lost before the response finished.";
+    }
+    return error instanceof Error ? error.message : String(error);
+}
 
 export function classifyAnthropicBedrockError(error: unknown): SessionErrorKind {
     const message = error instanceof Error ? error.message.toLowerCase() : String(error);
