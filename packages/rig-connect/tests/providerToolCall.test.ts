@@ -373,6 +373,63 @@ describe("provider-run tool calls", () => {
         expect(providerCalls(store).map((call) => call.groupId)).toEqual(["group:a1", "group:a1"]);
     });
 
+    /**
+     * A reopened turn has to read in the order it happened: the model searched, then it answered.
+     *
+     * The assistant message identity is allocated before the first output token, so the inference
+     * group opens at a moment earlier than every search made inside it. Placing the message at
+     * that moment rather than at its own puts the answer above the work it was built from — here,
+     * sixty seconds before the search it cites. Live, the search arrives first and reads
+     * correctly, so this is only ever visible after reopening.
+     */
+    it("keeps a search above the answer it informed when the turn is reopened", () => {
+        const store = new ChatStore("session-1");
+        const messages = [
+            { blocks: [{ text: "What is X saying?", type: "text" }], id: "u1", role: "user" },
+            {
+                blocks: [{ text: "People are praising it.", type: "text" }],
+                id: "a1",
+                role: "agent",
+            },
+        ];
+        const base = hello();
+        store.applyHello({
+            ...base,
+            session: { ...base.session, snapshot: { messages } },
+            transcript: {
+                complete: true,
+                messageCreatedAt: { a1: 90, u1: 0 },
+                messages,
+                providerToolCalls: [
+                    {
+                        arguments: '{"query":"Claude Code","mode":"Latest"}',
+                        callId: "xs_call-1",
+                        createdAt: 30,
+                        messageId: "a1",
+                        name: "x_keyword_search",
+                        runId: "run-1",
+                        status: "completed",
+                    },
+                ],
+                turns: [
+                    {
+                        endedAt: 100,
+                        // The inference that produced `a1`, opened before the search ran inside it.
+                        groups: [{ endedAt: 100, id: "a1", startedAt: 10 }],
+                        messageIds: ["u1", "a1"],
+                        outcome: "success",
+                        runId: "run-1",
+                        startedAt: 0,
+                    },
+                ],
+            },
+        } as unknown as SessionStreamHello);
+
+        const kinds = store.elements().map((element) => element.kind);
+        expect(kinds.indexOf("provider_tool_call")).toBeGreaterThanOrEqual(0);
+        expect(kinds.indexOf("provider_tool_call")).toBeLessThan(kinds.indexOf("agent_text"));
+    });
+
     // The next turn must not inherit the last one's unfinished call, or a redelivered event would
     // reopen a row that has already been settled.
     it("does not let a settled search be reopened by a later turn", () => {

@@ -1706,10 +1706,21 @@ export class ChatStore {
                     ? undefined
                     : groupIndexByMessageId.get(containingGroupId);
             const group = (turn.groups ?? []).find((known) => known.id === message.id);
+            /**
+             * When the message happened, not when the inference that produced it opened.
+             *
+             * A message identity is allocated before the first output token, so its group opens
+             * earlier than everything the inference then did. Sorting the message at that moment
+             * puts it above the provider-run searches made inside the same inference — the answer
+             * printed before the work it cites. Belonging to the inference is already carried by
+             * `groupIndex`, which is read from the group rather than from the clock, so the
+             * position here is free to be the truth. The group start remains the fallback for a
+             * message with no durable time of its own.
+             */
             const at =
-                group?.startedAt ??
                 transcript.messageSteeredAt?.[message.id] ??
                 transcript.messageCreatedAt?.[message.id] ??
+                group?.startedAt ??
                 turn.startedAt;
             return [
                 {
