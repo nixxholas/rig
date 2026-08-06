@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { isDeepStrictEqual } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
-import { Executor } from "@slopus/rig-execution";
+import { Executor, parseHostedCapabilities } from "@slopus/rig-execution";
 import { areProviderModelsCompatible, type ProviderUsage } from "@slopus/rig-providers";
 
 import { errorToMessage } from "../errorToMessage.js";
@@ -67,6 +67,7 @@ import type {
     SessionAgentMetadata,
     SessionPartialMessage,
     SessionPermissionReview,
+    SessionProviderToolCall,
     SessionInterruption,
     SessionStatus,
     SessionSummary,
@@ -106,7 +107,13 @@ import { sessionUnreadStateAfterEvent } from "./impl/sessionUnreadStateAfterEven
 import { IDLE_SESSION_ACTIVITY, sessionActivityAfterEvent } from "./sessionActivityAfterEvent.js";
 import { aggregateSessionTokenCount } from "./usage/aggregateSessionTokenCount.js";
 import { sessionTokenCountAfterEvent } from "./usage/sessionTokenCountAfterEvent.js";
-import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
+import type {
+    HostedCapability,
+    Model,
+    ServiceTier,
+    StopReason,
+    Usage,
+} from "@slopus/rig-execution";
 import { createEncryptedAgentTransportScope } from "../executor/createEncryptedAgentTransportScope.js";
 import type {
     DurableUserInputCall,
@@ -585,6 +592,22 @@ function completionFromRunFinished(
 const SUBAGENT_TOKEN_EXHAUSTED_ERROR =
     "The subagent ran out of tokens before returning a response.";
 
+/**
+ * The most of a provider's own arguments worth keeping.
+ *
+ * A search's payload carries its sources, which is what a client renders, but the size of it is
+ * the provider's choice rather than Rig's. Keeping a bounded prefix means one unusual response
+ * cannot grow the session's durable state without limit; the query, which leads the payload, is
+ * never the part that gets cut.
+ */
+const PROVIDER_TOOL_CALL_ARGUMENTS_LIMIT = 8_192;
+
+function boundedProviderToolCallArguments(argumentsJson: string): string {
+    return argumentsJson.length <= PROVIDER_TOOL_CALL_ARGUMENTS_LIMIT
+        ? argumentsJson
+        : argumentsJson.slice(0, PROVIDER_TOOL_CALL_ARGUMENTS_LIMIT);
+}
+
 export class InMemorySession {
     #activeSince: number | undefined;
     readonly events: SessionEventLog;
@@ -662,6 +685,17 @@ export class InMemorySession {
      */
     #runFacts = new Map<string, TranscriptRunFacts>();
     #permissionReviews = new Map<string, SessionPermissionReview>();
+    /**
+     * Provider-run calls that started and have not reported back, keyed by the provider's call id.
+     *
+     * Only the open ones: a call that completed is already durable as its own closing event, and
+     * that event is what every reader is built from. This exists so a turn that ends first can
+     * write the closing event the provider never sent.
+     */
+    #openProviderToolCalls = new Map<
+        string,
+        { arguments: string; createdAt: number; messageId: string; name: string; runId: string }
+    >();
     /** The status a client has already been told about. */
     #reportedStatus: SessionStatus | undefined;
     #reportingStatus = false;
@@ -972,6 +1006,7 @@ export class InMemorySession {
         for (const event of this.events.all()) {
             this.#recordRunFacts(event);
             this.#recordPermissionReview(event);
+            this.#recordProviderToolCall(event);
         }
         if (options.restore?.usage === undefined) {
             this.#usage = this.#sumCommittedUsage();
@@ -3692,6 +3727,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             ...(this.#request.apiKey !== undefined ? { apiKey: this.#request.apiKey } : {}),
             permissionMode: this.#permissionMode,
+            // The subagent creation path overrides this continuation grant before creating a child.
             workflowsEnabled: this.#workflowsEnabled,
             ...(this.#request.docker === undefined ? {} : { docker: this.#request.docker }),
         };
@@ -3837,6 +3873,7 @@ export class InMemorySession {
             const review = this.#permissionReviews.get(toolCallId);
             return review === undefined ? [] : [review];
         });
+        const providerToolCalls = this.events.providerToolCalls(new Set(keptRunIds));
         return window === undefined
             ? undefined
             : {
@@ -3844,6 +3881,7 @@ export class InMemorySession {
                   complete: !this.#transcriptHasEarlier && keptRunIds.length === earlierCount,
                   ...(noticeSlice.truncated ? { noticesTruncated: true } : {}),
                   ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
+                  ...(providerToolCalls.length === 0 ? {} : { providerToolCalls }),
               };
     }
 
@@ -3962,6 +4000,7 @@ export class InMemorySession {
             const review = this.#permissionReviews.get(toolCallId);
             return review === undefined ? [] : [review];
         });
+        const providerToolCalls = this.events.providerToolCalls(new Set(keptRunIds));
         return {
             ...window,
             // Whether this page reaches the newest turn, so a client knows if it
@@ -3969,6 +4008,7 @@ export class InMemorySession {
             complete: first + keptRunIds.length === runIds.length,
             ...(noticeSlice.truncated ? { noticesTruncated: true } : {}),
             ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
+            ...(providerToolCalls.length === 0 ? {} : { providerToolCalls }),
         };
     }
 
@@ -5874,6 +5914,7 @@ export class InMemorySession {
         if (!isTransientInferenceSessionEvent(event)) this.#saveSession();
         this.#recordRunFacts(event);
         this.#recordPermissionReview(event);
+        this.#recordProviderToolCall(event);
         this.#reportContextSize(previousSessionTokenCount);
         this.#reportActivity(event);
     }
@@ -6115,6 +6156,77 @@ export class InMemorySession {
             toolCallId: review.toolCallId,
             userAuthorization: review.userAuthorization,
         });
+    }
+
+    /**
+     * Keeps a durable record of a call the provider ran itself.
+     *
+     * A call is written down the moment it starts, not when it completes, because a turn that
+     * ends first is exactly the case worth keeping: the search already reached the provider's
+     * backend and cannot be recalled, so silence would be the one wrong answer. Its completion
+     * later overwrites the record with the provider's own final arguments.
+     */
+    #recordProviderToolCall(event: SessionEvent): void {
+        if (event.type === "session_reset") {
+            this.#openProviderToolCalls.clear();
+            return;
+        }
+        if (event.type !== "agent_event") return;
+        const inner = event.data.event;
+        if (
+            inner.type !== "server_toolcall_start" &&
+            inner.type !== "server_toolcall_delta" &&
+            inner.type !== "server_toolcall_end"
+        ) {
+            return;
+        }
+        if (inner.callId.length === 0) return;
+        if (inner.type === "server_toolcall_end") {
+            this.#openProviderToolCalls.delete(inner.callId);
+            return;
+        }
+        const open = this.#openProviderToolCalls.get(inner.callId);
+        if (inner.type === "server_toolcall_delta") {
+            // The streamed arguments are the only subject an interrupted call will ever have.
+            if (open === undefined) return;
+            open.arguments = boundedProviderToolCallArguments(open.arguments + inner.delta);
+            return;
+        }
+        const runId = event.data.runId;
+        if (typeof runId !== "string" || runId.length === 0) return;
+        this.#openProviderToolCalls.set(inner.callId, {
+            arguments: "",
+            createdAt: event.createdAt,
+            messageId: inner.messageId,
+            name: inner.name,
+            runId,
+        });
+    }
+
+    /**
+     * Closes every provider-run call the ended run left open.
+     *
+     * The provider never sent a closing event because Rig stopped reading before it could. That
+     * silence is the one thing the transcript must not repeat: the search already reached the
+     * provider's backend, out of Rig's reach, so the closing event is written here instead —
+     * durable, like any other, and marked for what it is.
+     */
+    #closeOpenProviderToolCalls(runId: string): void {
+        for (const [callId, open] of [...this.#openProviderToolCalls]) {
+            if (open.runId !== runId) continue;
+            this.#openProviderToolCalls.delete(callId);
+            this.#append("agent_event", {
+                event: {
+                    arguments: open.arguments,
+                    callId,
+                    incomplete: true,
+                    messageId: open.messageId,
+                    name: open.name,
+                    type: "server_toolcall_end",
+                },
+                runId,
+            });
+        }
     }
 
     #retainPermissionReviewsForMessages(messages: readonly Message[]): void {
@@ -6412,6 +6524,9 @@ export class InMemorySession {
 
     #commitRunFinished(runId: string, result: AgentRunResult): SessionRunCompletion["status"] {
         const stopReason: StopReason = result.stopReason;
+        // Before anything else about how the run ended: a provider-run call cannot outlive the
+        // response that started it, and the provider will not be sending its closing event now.
+        this.#closeOpenProviderToolCalls(runId);
         if (result.stopReason === "error") {
             this.#appendDurableError(runId, result.errorMessage, this.#runtime, {
                 providerError: result.providerError,
@@ -6662,6 +6777,11 @@ export class InMemorySession {
             isSubagent: this.isSubagent(),
             modelId: this.#modelId,
             permissionMode: this.#permissionMode,
+            // The starting mode above builds this runtime's context. This is the live one, asked
+            // for rather than captured, because an executor built here outlives the context: a
+            // switch to an incompatible model keeps the executor and replaces the context, and
+            // every later mode change lands on the replacement.
+            resolvePermissionMode: () => this.#permissionMode,
             providerId: this.#providerId,
             secrets: this.#secrets,
             scheduling: {

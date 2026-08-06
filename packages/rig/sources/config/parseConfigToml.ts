@@ -1,6 +1,7 @@
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { parseHostedCapabilities, type HostedCapability } from "@slopus/rig-execution";
 import { MAX_INFERENCE_MAX_RETRIES } from "./inferenceRetrySettings.js";
 
 import type {
@@ -629,6 +630,13 @@ function readProviderString(id: string, table: TomlTable, key: string): string |
     }
     return value;
 }
+
+/**
+ * Reads which provider-run searches a root agent may declare.
+ *
+ * Absent means every one Rig knows, which is the default. Naming them narrows the set, and an
+ * empty list turns provider-run search off for this provider entirely.
+ */
 
 /**
  * Records every setting in this table that Rig does not recognize. The parse then simply never

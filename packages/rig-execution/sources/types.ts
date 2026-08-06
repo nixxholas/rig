@@ -331,7 +331,17 @@ export type ProviderAssistantMessageEvent =
      */
     | { type: "server_toolcall_start"; callId: string; name: string }
     | { type: "server_toolcall_delta"; callId: string; delta: string }
-    | { type: "server_toolcall_end"; callId: string; name: string; arguments: string }
+    | {
+          type: "server_toolcall_end";
+          callId: string;
+          name: string;
+          arguments: string;
+          /**
+           * The turn ended before the provider reported back. Not that the call was stopped:
+           * nothing can stop one, so this says its outcome is unknown, not that it never ran.
+           */
+          incomplete?: true;
+      }
     | {
           type: "done";
           reason: Extract<StopReason, "stop" | "length" | "toolUse">;

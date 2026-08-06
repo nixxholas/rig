@@ -17,9 +17,10 @@ export interface GrokProviderOptions extends InferenceRetryOptions {
     endpoint?: string;
     /**
      * Tools Grok runs on its own backend, such as `grok_hosted_tools`. Opting in is what gives a
-     * session live web and X results; a session that asks for nothing gets nothing.
+     * session live web and X results; a session that asks for nothing gets nothing. Asked for
+     * once per request, so what the caller may declare can narrow without a new session.
      */
-    hostedTools?: readonly SessionTool[];
+    hostedTools?: () => readonly SessionTool[];
     model?: string;
     /** Identifies this client upstream instead of reproducing the grok-build user agent. */
     userAgent?: string;
@@ -32,7 +33,7 @@ export class GrokProvider extends ResponsesProvider {
 
     readonly credential: GrokCredential;
     readonly endpoint: string;
-    readonly hostedTools: readonly SessionTool[] | undefined;
+    readonly hostedTools: (() => readonly SessionTool[]) | undefined;
     readonly model: string | undefined;
     readonly userAgent: string | undefined;
     readonly #resolveInferenceMaxRetries: () => number;

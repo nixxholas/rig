@@ -158,10 +158,12 @@ export class Executor {
      */
     isolate(label: string): Executor {
         const isolated = new Executor(
-            this.providers.map(({ destroy: _destroy, ...provider }) => ({
-                ...provider,
-                sessionId: `${provider.sessionId ?? provider.id}:${label}`,
-            })),
+            this.providers.map((provider) => {
+                // Each definition decides what it is willing to lend; a capability it runs on its
+                // own backend does not travel into work the person never asked for.
+                const { destroy: _destroy, ...lent } = provider.isolated?.() ?? provider;
+                return { ...lent, sessionId: `${provider.sessionId ?? provider.id}:${label}` };
+            }),
             { environment: this.environment, identity: this.identity },
         );
         isolated.selectProvider(this.selectedProviderId);

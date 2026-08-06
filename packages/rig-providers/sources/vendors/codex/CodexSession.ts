@@ -72,6 +72,11 @@ export interface CodexSessionOptions extends InferenceRetryOptions {
     credential: CodexProviderCredential;
     endpoint: string;
     installationId: string;
+    /**
+     * Tools OpenAI runs on its own backend, asked for once per request so what the caller may
+     * declare can narrow without a new session.
+     */
+    hostedTools?: () => readonly SessionTool[];
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     parallelToolCalls?: boolean;
@@ -87,6 +92,7 @@ export class CodexSession extends BaseSession {
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
     readonly streamIdleTimeoutMs: number;
+    readonly hostedTools: () => readonly SessionTool[];
     readonly tools: readonly SessionTool[];
     readonly transport: CodexTransport;
     readonly userAgent: string;
@@ -122,6 +128,7 @@ export class CodexSession extends BaseSession {
             ((attempt, signal) => waitForCodexRetry(attempt, undefined, signal));
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.tools = options.tools ?? [];
+        this.hostedTools = options.hostedTools ?? (() => []);
         this.transport = options.transport ?? "auto";
         this.userAgent = options.userAgent;
 
@@ -220,10 +227,18 @@ export class CodexSession extends BaseSession {
                       messages: structuredClone([...requested.messages]),
                   };
         if (signal?.aborted) return { status: "cancelled", context: this.context };
+        // Compaction summarizes context that already exists, so it has nothing to search for. It
+        // never adds the hosted tools a turn gets, and it drops any it was handed: declaring one
+        // here would let the provider run work during a summary, and would make a name Rig can
+        // read back as provider-run appear in a request whose replies are only ever a summary.
+        const compactionConfiguration: SessionModelConfiguration = {
+            ...configuration,
+            tools: (configuration.tools ?? []).filter((tool) => tool.type !== "cloud"),
+        };
         if (this.credential.name === "bedrock-bearer-token") {
             return this.compactBedrockContext(
                 context,
-                configuration,
+                compactionConfiguration,
                 model,
                 effort,
                 { ...metadata, implementation: "responses" },
@@ -231,14 +246,14 @@ export class CodexSession extends BaseSession {
             );
         }
         const basePayload = createCodexCompactionRequest(
-            this.createRequest(context, configuration, model, effort),
+            this.createRequest(context, compactionConfiguration, model, effort),
             metadata,
         );
         const contextWindow = getCodexModelProperties(model)?.contextWindow ?? 272_000;
         let fittedContextWindow = contextWindow;
         let payload = fitCodexCompactionRequest(
             basePayload,
-            configuration.tools ?? [],
+            compactionConfiguration.tools ?? [],
             fittedContextWindow,
         );
         let useSse = this.transport === "sse" || (this.transport === "auto" && this.forceSse);
@@ -254,12 +269,12 @@ export class CodexSession extends BaseSession {
                     ? await this.sseConnection.stream({
                           model,
                           request: payload,
-                          tools: configuration.tools ?? [],
+                          tools: compactionConfiguration.tools ?? [],
                           ...(signal === undefined ? {} : { signal }),
                       })
                     : this.websocketConnection.stream({
                           request: payload,
-                          tools: configuration.tools ?? [],
+                          tools: compactionConfiguration.tools ?? [],
                           ...(signal === undefined ? {} : { signal }),
                       });
                 const collected = await collectCodexCompaction(
@@ -316,7 +331,7 @@ export class CodexSession extends BaseSession {
                     fittedContextWindow = Math.floor(fittedContextWindow * 0.9);
                     payload = fitCodexCompactionRequest(
                         basePayload,
-                        configuration.tools ?? [],
+                        compactionConfiguration.tools ?? [],
                         fittedContextWindow,
                     );
                     transportRetries = 0;
@@ -491,13 +506,24 @@ export class CodexSession extends BaseSession {
         this.activeEffort = effort;
         this.activeModel = model;
 
+        // Tools OpenAI runs on its own backend ride alongside the ones Rig executes, asked for
+        // once per request so a permission change lands on the next request rather than the next
+        // session. Compaction deliberately does not get them: it summarizes context that already
+        // exists, so it has nothing to search for.
+        const turnTools = [...(configuration.tools ?? []), ...this.hostedTools()];
+        const turnConfiguration: SessionModelConfiguration = { ...configuration, tools: turnTools };
         const payload = this.createRequest(
             this.context,
-            configuration,
+            turnConfiguration,
             model,
             effort,
             request.serviceTier,
             request.structuredOutput,
+        );
+        // Derived from exactly the tools this request carries, never from a standing list: a name
+        // Rig did not send cannot be work the provider ran.
+        const hostedToolNames = new Set(
+            turnTools.filter((tool) => tool.type === "cloud").map((tool) => tool.name),
         );
         let useSse = this.transport === "sse" || (this.transport === "auto" && this.forceSse);
         let transportRetries = 0;
@@ -513,16 +539,17 @@ export class CodexSession extends BaseSession {
                     ? await this.sseConnection.stream({
                           model,
                           request: payload,
-                          tools: configuration.tools ?? [],
+                          tools: turnTools,
                           ...(request.abort === undefined ? {} : { signal: request.abort }),
                       })
                     : this.websocketConnection.stream({
                           request: payload,
-                          tools: configuration.tools ?? [],
+                          tools: turnTools,
                           ...(request.abort === undefined ? {} : { signal: request.abort }),
                       });
                 const mapped = mapOpenAIResponseStream(responseStream, {
                     failureMessage: `${model} failed to generate a response.`,
+                    hostedToolNames,
                     requireTerminalEvent: true,
                     vendor: "codex",
                     ...(request.abort === undefined ? {} : { signal: request.abort }),

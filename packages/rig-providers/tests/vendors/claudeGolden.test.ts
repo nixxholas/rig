@@ -251,7 +251,7 @@ function collectToolCalls(events: readonly SessionEvent[]): SessionToolCall[] {
                 arguments: "",
                 vendor: event.vendor,
             });
-        } else if (event.type === "tool_call_delta") {
+        } else if (event.type === "toolcall_delta") {
             const current = calls.get(event.callId);
             if (current !== undefined) {
                 calls.set(event.callId, {
@@ -259,7 +259,7 @@ function collectToolCalls(events: readonly SessionEvent[]): SessionToolCall[] {
                     arguments: current.arguments + event.delta,
                 });
             }
-        } else if (event.type === "tool_call_end") {
+        } else if (event.type === "toolcall_end") {
             const current = calls.get(event.callId);
             if (current !== undefined) {
                 calls.set(event.callId, { ...current, arguments: event.arguments });

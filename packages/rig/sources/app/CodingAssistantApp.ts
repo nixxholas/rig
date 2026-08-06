@@ -72,7 +72,7 @@ import {
     createBackgroundTerminalViewer,
     type BackgroundTerminalViewer,
 } from "./createBackgroundTerminalViewer.js";
-import { createSelectionPanel } from "./createSelectionPanel.js";
+import { createSelectionPanel, fitSelectionPanelToViewport } from "./createSelectionPanel.js";
 import { createSecretInputPanel } from "./createSecretInputPanel.js";
 import { createSubagentMonitor, type SubagentMonitor } from "./createSubagentMonitor.js";
 import { createWorkflowMonitor } from "./createWorkflowMonitor.js";
@@ -1735,6 +1735,15 @@ export class CodingAssistantApp implements Component, Focusable {
                 : [];
         const queuedPrompts =
             selectionPanel === undefined ? this.#renderQueuedPrompts(safeWidth) : [];
+        if (selectionPanel !== undefined) {
+            // An inline panel shares the screen with the transcript and footer, so
+            // it may only grow into the rows those do not need.
+            fitSelectionPanelToViewport(
+                selectionPanel,
+                safeWidth,
+                Math.max(8, this.#tui.terminal.rows - 8),
+            );
+        }
         const activityLabel = this.#activityLabel();
         const activity =
             activityLabel !== undefined && this.#shouldRenderActivityAsLastMessage()
@@ -3647,7 +3656,12 @@ export class CodingAssistantApp implements Component, Focusable {
             const active = this.#activeServerToolCalls.get(event.callId);
             if (active !== undefined) active.arguments += event.delta;
         } else if (event.type === "server_toolcall_end") {
-            this.#finishServerToolCall(event.callId, event.name, event.arguments);
+            this.#finishServerToolCall(
+                event.callId,
+                event.name,
+                event.arguments,
+                event.incomplete === true,
+            );
         } else if (event.type === "tool_execution_start") {
             this.#activeToolCallIds.add(event.toolCall.id);
             this.#runningToolCallIds.add(event.toolCall.id);
@@ -4103,24 +4117,6 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     /**
-     * Turns a finished provider-run call into history in the same render that drops its live row,
-     * so the transcript grows by exactly the height the live tail gives up.
-     */
-    #finishServerToolCall(callId: string, name: string | undefined, args: string): void {
-        const active = this.#activeServerToolCalls.get(callId);
-        this.#activeServerToolCalls.delete(callId);
-        const description = describeServerToolCall(
-            name ?? active?.name,
-            args.trim().length === 0 ? (active?.arguments ?? "") : args,
-        );
-        this.#appendEntry({
-            role: "event",
-            title: description.title,
-            text: description.detail,
-        });
-    }
-
-    /**
      * The above-composer indicator is the one place an owner is guaranteed to see that a
      * capability is active, so its disappearance must never be silent: when the last member
      * loses every capability, the same update that drops the live row also writes the history
@@ -4137,6 +4133,33 @@ export class CodingAssistantApp implements Component, Focusable {
         }
         this.#sessionShare = share;
         this.#requestRender();
+    }
+
+    /**
+     * Turns a closed provider-run call into history in the same render that drops its live row,
+     * so the transcript grows by exactly the height the live tail gives up.
+     *
+     * A call marked incomplete was closed by Rig rather than by the provider, because the turn
+     * ended first. That is not the search being stopped — nothing can stop one — so it says which
+     * of the two actually happened.
+     */
+    #finishServerToolCall(
+        callId: string,
+        name: string | undefined,
+        args: string,
+        incomplete: boolean,
+    ): void {
+        const active = this.#activeServerToolCalls.get(callId);
+        this.#activeServerToolCalls.delete(callId);
+        const description = describeServerToolCall(
+            name ?? active?.name,
+            args.trim().length === 0 ? (active?.arguments ?? "") : args,
+        );
+        this.#appendEntry({
+            role: "event",
+            title: incomplete ? description.interrupted : description.title,
+            text: description.detail,
+        });
     }
 
     /**

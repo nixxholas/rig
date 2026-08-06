@@ -221,8 +221,10 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                             delta: serverToolCall.arguments,
                         };
                     }
-                    if (reply.serverToolCallDeltaDelayMs !== undefined) {
-                        await delay(reply.serverToolCallDeltaDelayMs, streamOptions);
+                    const beforeEnd =
+                        reply.serverToolCallEndDelayMs ?? reply.serverToolCallDeltaDelayMs;
+                    if (beforeEnd !== undefined) {
+                        await delay(beforeEnd, streamOptions);
                     }
                     yield {
                         type: "server_toolcall_end",

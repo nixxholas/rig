@@ -9539,7 +9539,6 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("Sent from another terminal");
         expect(rendered).not.toContain("Unsent from the last terminal");
     });
-
     it("shows a provider-run search live and keeps it as history when it finishes", () => {
         const model = defineModel({
             id: "xai/grok-test",

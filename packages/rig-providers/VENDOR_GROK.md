@@ -140,6 +140,20 @@ older client-executed `web_search` function.
 Consistent with the rest of this provider, nothing is injected silently. A caller opts in through
 `GrokProviderOptions.hostedTools`, which `GrokConnection` sends alongside the tools Rig executes.
 
+That opt-in is where Rig's boundary lives, because there is nowhere else for it to live. Every
+other network tool in Rig is a `ToolDefinition` with a schema, a handler, and a permission policy,
+so Rig decides at call time whether it may run. A hosted tool has none of that: it is declared in
+the request and executed during the response, and by the time Rig sees anything the search has
+already happened. Declaring it is the decision.
+
+Rig therefore gates the grant rather than the call. An agent holds a hosted search only because a
+reviewed spawn granted it one, or because the user named it in `providers.grok.hosted_search`, and
+`grokExecution` declares exactly what that agent was granted and nothing else. The rules guarding a
+grant are in `rig/sources/session/hostedCapabilityGrants.ts`: an agent that cannot reach outside
+Rig's sandbox itself cannot grant one, an agent that already holds one cannot pass it on, and an
+agent holding one cannot spawn at all. What an agent ends up declaring is resolved in
+`rig/sources/runtime/resolveHostedCapabilities.ts`.
+
 X search reaches the client as ordinary `custom_tool_call` items named `x_keyword_search` or
 `x_semantic_search`; web search has its own `web_search_call` item. Neither may be mistaken for a
 call Rig must answer, so `mapOpenAIResponseStream` reports them as `server_tool_call_start`,

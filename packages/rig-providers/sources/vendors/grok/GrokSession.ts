@@ -49,8 +49,11 @@ import { GrokSessionCredential } from "@/vendors/grok/GrokSessionCredential.js";
 export interface GrokSessionOptions extends SessionOptions, InferenceRetryOptions {
     credential: GrokCredential;
     endpoint: string;
-    /** Tools Grok runs on its own backend, sent alongside the tools Rig executes. */
-    hostedTools?: readonly SessionTool[];
+    /**
+     * Tools Grok runs on its own backend, sent alongside the tools Rig executes. Asked for once
+     * per request, so what the caller may declare can narrow without a new session.
+     */
+    hostedTools?: () => readonly SessionTool[];
     model?: string;
     /** Identifies this client upstream instead of reproducing the grok-build user agent. */
     userAgent?: string;
@@ -59,7 +62,7 @@ export interface GrokSessionOptions extends SessionOptions, InferenceRetryOption
 export class GrokSession extends BaseSession {
     readonly credential: GrokCredential;
     readonly endpoint: string;
-    readonly hostedTools: readonly SessionTool[];
+    readonly hostedTools: () => readonly SessionTool[];
     readonly model: string | undefined;
     readonly tools: readonly SessionTool[];
 
@@ -82,7 +85,7 @@ export class GrokSession extends BaseSession {
         this.context = { instructions: options.instructions, messages: [] };
         this.turnIndex = 0;
         this.endpoint = options.endpoint;
-        this.hostedTools = options.hostedTools ?? [];
+        this.hostedTools = options.hostedTools ?? (() => []);
         this.model = options.model;
         this.activeModel = options.model;
         this.modelConfigurations = options.modelConfigurations;
@@ -388,8 +391,8 @@ export class GrokSession extends BaseSession {
                 // summary, so it is not grounds for discarding one.
                 if (
                     event.type === "tool_call_start" ||
-                    event.type === "tool_call_delta" ||
-                    event.type === "tool_call_end"
+                    event.type === "toolcall_delta" ||
+                    event.type === "toolcall_end"
                 ) {
                     emittedToolCall = true;
                 }
@@ -477,11 +480,11 @@ export class GrokSession extends BaseSession {
                         event.type === "reasoning_delta" ||
                         event.type === "encrypted_reasoning" ||
                         event.type === "tool_call_start" ||
-                        event.type === "tool_call_delta" ||
-                        event.type === "tool_call_end" ||
-                        event.type === "server_tool_call_start" ||
-                        event.type === "server_tool_call_delta" ||
-                        event.type === "server_tool_call_end"
+                        event.type === "toolcall_delta" ||
+                        event.type === "toolcall_end" ||
+                        event.type === "server_toolcall_start" ||
+                        event.type === "server_toolcall_delta" ||
+                        event.type === "server_toolcall_end"
                     ) {
                         responseContentBegun = true;
                     }

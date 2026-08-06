@@ -5,6 +5,7 @@ import {
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import { ResponsesProvider } from "@/protocol/responses/ResponsesProvider.js";
+import type { SessionTool } from "@/core/SessionTool.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import {
     BEDROCK_DEFAULT_REGION,
@@ -30,6 +31,12 @@ import {
 export interface CodexProviderOptions extends InferenceRetryOptions {
     credential: CodexProviderCredential;
     endpoint?: string;
+    /**
+     * Tools OpenAI runs on its own backend, such as its own `web_search`. Opting in is what gives
+     * a session live results; a session that asks for nothing gets nothing. Asked for once per
+     * request, so what the caller may declare can narrow without a new session.
+     */
+    hostedTools?: () => readonly SessionTool[];
     model?: string;
     /** Enables multi-call batches; Codex v2 uses standard Responses instead of Responses Lite. */
     parallelToolCalls?: boolean;
@@ -48,6 +55,7 @@ export class CodexProvider extends ResponsesProvider {
 
     readonly credential: CodexProviderCredential;
     readonly endpoint: string;
+    readonly hostedTools: (() => readonly SessionTool[]) | undefined;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
     readonly streamIdleTimeoutMs: number;
@@ -66,6 +74,7 @@ export class CodexProvider extends ResponsesProvider {
             process.env.AWS_REGION?.trim() ||
             process.env.AWS_DEFAULT_REGION?.trim() ||
             BEDROCK_DEFAULT_REGION;
+        this.hostedTools = options.hostedTools;
         this.endpoint =
             options.endpoint ??
             (isBedrock
@@ -109,6 +118,7 @@ export class CodexProvider extends ResponsesProvider {
             ...options,
             credential: this.credential,
             endpoint: this.endpoint,
+            ...(this.hostedTools === undefined ? {} : { hostedTools: this.hostedTools }),
             installationId,
             ...(this.model === undefined ? {} : { model: this.model }),
             ...(this.parallelToolCalls === undefined

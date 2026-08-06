@@ -204,7 +204,7 @@ async function* streamExecutorInference(options: {
                 yield { type: "toolcall_start", contentIndex, partial: snapshot() };
                 continue;
             }
-            if (event.type === "tool_call_delta") {
+            if (event.type === "toolcall_delta") {
                 const contentIndex = activeTools.get(event.callId);
                 if (contentIndex === undefined) continue;
                 yield {
@@ -215,7 +215,7 @@ async function* streamExecutorInference(options: {
                 };
                 continue;
             }
-            if (event.type === "tool_call_end") {
+            if (event.type === "toolcall_end") {
                 const contentIndex = activeTools.get(event.callId);
                 const content =
                     contentIndex === undefined ? undefined : partial.content[contentIndex];
@@ -232,15 +232,15 @@ async function* streamExecutorInference(options: {
                 yield { type: "toolcall_end", contentIndex, toolCall, partial: snapshot() };
                 continue;
             }
-            if (event.type === "server_tool_call_start") {
+            if (event.type === "server_toolcall_start") {
                 yield { type: "server_toolcall_start", callId: event.callId, name: event.name };
                 continue;
             }
-            if (event.type === "server_tool_call_delta") {
+            if (event.type === "server_toolcall_delta") {
                 yield { type: "server_toolcall_delta", callId: event.callId, delta: event.delta };
                 continue;
             }
-            if (event.type === "server_tool_call_end") {
+            if (event.type === "server_toolcall_end") {
                 // The provider already ran this call and answered it. It stays out of the
                 // assistant message so the agent loop never tries to execute or complete it.
                 yield {

@@ -145,7 +145,7 @@ export async function* mapAnthropicStream(
                 if (current !== undefined) {
                     current.arguments += event.delta.partial_json;
                     yield {
-                        type: "tool_call_delta",
+                        type: "toolcall_delta",
                         callId: current.callId,
                         delta: event.delta.partial_json,
                     };
@@ -173,7 +173,7 @@ export async function* mapAnthropicStream(
                     input: parseArguments(tool.arguments, tool.input),
                 });
                 yield {
-                    type: "tool_call_end",
+                    type: "toolcall_end",
                     callId: tool.callId,
                     arguments: tool.arguments,
                 };

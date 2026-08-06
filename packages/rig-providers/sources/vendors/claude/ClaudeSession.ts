@@ -604,7 +604,7 @@ export class ClaudeSession extends BaseSession {
                                     arguments: block.arguments + event.delta.partial_json,
                                 });
                                 yield {
-                                    type: "tool_call_delta",
+                                    type: "toolcall_delta",
                                     callId: block.callId,
                                     delta: event.delta.partial_json,
                                 };
@@ -621,7 +621,7 @@ export class ClaudeSession extends BaseSession {
                         const block = activeTools.get(event.index);
                         if (block !== undefined) {
                             yield {
-                                type: "tool_call_end",
+                                type: "toolcall_end",
                                 callId: block.callId,
                                 arguments: block.arguments,
                             };

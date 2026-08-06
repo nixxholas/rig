@@ -1,4 +1,7 @@
+import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
+import { createHostedCitationFilter } from "./stripHostedCitationMarkers.js";
 
 import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionToolCall } from "@/core/SessionContext.js";
@@ -51,8 +54,6 @@ export async function* mapOpenAIResponseStream(
         failureMessage: string;
         requireTerminalEvent?: boolean;
         vendor?: "codex" | "grok" | "responses";
-        /** Names of the tools this request declared for the client to execute. */
-        clientToolNames?: ReadonlySet<string>;
         /**
          * Names of the tools this request asked the provider to run on its own backend. Empty or
          * absent means nothing ran upstream, so every tool call is one the client must answer.
@@ -62,6 +63,8 @@ export async function* mapOpenAIResponseStream(
 ): AsyncGenerator<SessionEvent, OpenAIResponseRunResult> {
     const activeItems = new Map<number, ActiveOutputItem>();
     let assistantText = "";
+    // Hosted search leaves citation markers in the prose that only OpenAI's backend can resolve.
+    const stripCitations = createHostedCitationFilter();
     let encryptedReasoning: string | undefined;
     let sawToolUse = false;
     const toolCalls: SessionToolCall[] = [];
@@ -112,7 +115,7 @@ export async function* mapOpenAIResponseStream(
                 };
                 if (event.item.arguments.length > 0) {
                     yield {
-                        type: "tool_call_delta",
+                        type: "toolcall_delta",
                         callId: event.item.call_id,
                         delta: event.item.arguments,
                     };
@@ -128,13 +131,13 @@ export async function* mapOpenAIResponseStream(
                     argumentsJson: event.item.input,
                 });
                 yield {
-                    type: "server_tool_call_start",
+                    type: "server_toolcall_start",
                     callId: event.item.call_id,
                     name: event.item.name,
                 };
                 if (event.item.input.length > 0) {
                     yield {
-                        type: "server_tool_call_delta",
+                        type: "server_toolcall_delta",
                         callId: event.item.call_id,
                         delta: event.item.input,
                     };
@@ -161,7 +164,7 @@ export async function* mapOpenAIResponseStream(
                 };
                 if (event.item.input.length > 0) {
                     yield {
-                        type: "tool_call_delta",
+                        type: "toolcall_delta",
                         callId: event.item.call_id,
                         delta: event.item.input,
                     };
@@ -186,7 +189,7 @@ export async function* mapOpenAIResponseStream(
                     vendor: responseToolVendor(options.vendor, "tool_search_call"),
                 };
                 yield {
-                    type: "tool_call_delta",
+                    type: "toolcall_delta",
                     callId: event.item.call_id,
                     delta: argumentsJson,
                 };
@@ -199,7 +202,7 @@ export async function* mapOpenAIResponseStream(
                         callId,
                         name,
                     });
-                    yield { type: "server_tool_call_start", callId, name };
+                    yield { type: "server_toolcall_start", callId, name };
                 }
             }
             continue;
@@ -227,8 +230,12 @@ export async function* mapOpenAIResponseStream(
             const activeItem = activeItems.get(event.output_index);
             if (activeItem?.type !== "message") continue;
             activeItem.receivedTextDelta = true;
-            assistantText += event.delta;
-            yield { type: "text_delta", delta: event.delta };
+            const delta = stripCitations(event.delta);
+            assistantText += delta;
+            // A delta that was nothing but a marker is not a pause in the answer; saying so would
+            // put an empty block in the transcript.
+            if (delta.length === 0) continue;
+            yield { type: "text_delta", delta };
             continue;
         }
 
@@ -237,7 +244,7 @@ export async function* mapOpenAIResponseStream(
             if (activeItem?.type !== "function_call" || activeItem.callId === undefined) continue;
             activeItem.argumentsJson = (activeItem.argumentsJson ?? "") + event.delta;
             yield {
-                type: "tool_call_delta",
+                type: "toolcall_delta",
                 callId: activeItem.callId,
                 delta: event.delta,
             };
@@ -250,7 +257,7 @@ export async function* mapOpenAIResponseStream(
             if (activeItem.type === "server_tool_call") {
                 activeItem.argumentsJson = (activeItem.argumentsJson ?? "") + event.delta;
                 yield {
-                    type: "server_tool_call_delta",
+                    type: "server_toolcall_delta",
                     callId: activeItem.callId,
                     delta: event.delta,
                 };
@@ -259,7 +266,7 @@ export async function* mapOpenAIResponseStream(
             if (activeItem.type !== "custom_tool_call") continue;
             activeItem.argumentsJson = (activeItem.argumentsJson ?? "") + event.delta;
             yield {
-                type: "tool_call_delta",
+                type: "toolcall_delta",
                 callId: activeItem.callId,
                 delta: event.delta,
             };
@@ -275,9 +282,11 @@ export async function* mapOpenAIResponseStream(
             }
             if (event.item.type === "message") {
                 if (activeItem?.receivedTextDelta !== true) {
-                    assistantText += event.item.content
-                        .map((part) => (part.type === "output_text" ? part.text : part.refusal))
-                        .join("");
+                    assistantText += stripCitations(
+                        event.item.content
+                            .map((part) => (part.type === "output_text" ? part.text : part.refusal))
+                            .join(""),
+                    );
                 }
             }
             const serverToolName =
@@ -289,10 +298,10 @@ export async function* mapOpenAIResponseStream(
                     activeItem?.callId ?? serverToolCallId(event.item, event.output_index);
                 const argumentsJson = serverToolCallArguments(event.item);
                 if (activeItem === undefined) {
-                    yield { type: "server_tool_call_start", callId, name: serverToolName };
+                    yield { type: "server_toolcall_start", callId, name: serverToolName };
                 }
                 yield {
-                    type: "server_tool_call_end",
+                    type: "server_toolcall_end",
                     callId,
                     name: serverToolName,
                     arguments: argumentsJson,
@@ -318,7 +327,7 @@ export async function* mapOpenAIResponseStream(
                     };
                     if (event.item.arguments.length > 0) {
                         yield {
-                            type: "tool_call_delta",
+                            type: "toolcall_delta",
                             callId: event.item.call_id,
                             delta: event.item.arguments,
                         };
@@ -335,7 +344,7 @@ export async function* mapOpenAIResponseStream(
                     vendor: responseToolVendor(options.vendor, "function_call"),
                 });
                 yield {
-                    type: "tool_call_end",
+                    type: "toolcall_end",
                     callId: event.item.call_id,
                     arguments: event.item.arguments,
                     ...(isIncompleteOutputItem(event.item) ? { incomplete: true } : {}),
@@ -358,7 +367,7 @@ export async function* mapOpenAIResponseStream(
                     };
                     if (event.item.input.length > 0) {
                         yield {
-                            type: "tool_call_delta",
+                            type: "toolcall_delta",
                             callId: event.item.call_id,
                             delta: event.item.input,
                         };
@@ -375,7 +384,7 @@ export async function* mapOpenAIResponseStream(
                     vendor: responseToolVendor(options.vendor, "custom_tool_call"),
                 });
                 yield {
-                    type: "tool_call_end",
+                    type: "toolcall_end",
                     callId: event.item.call_id,
                     arguments: event.item.input,
                     ...(isIncompleteOutputItem(event.item) ? { incomplete: true } : {}),
@@ -397,7 +406,7 @@ export async function* mapOpenAIResponseStream(
                         vendor: responseToolVendor(options.vendor, "tool_search_call"),
                     };
                     yield {
-                        type: "tool_call_delta",
+                        type: "toolcall_delta",
                         callId,
                         delta: argumentsJson,
                     };
@@ -409,7 +418,7 @@ export async function* mapOpenAIResponseStream(
                     vendor: responseToolVendor(options.vendor, "tool_search_call"),
                 });
                 yield {
-                    type: "tool_call_end",
+                    type: "toolcall_end",
                     callId,
                     arguments: argumentsJson,
                 };
@@ -458,7 +467,7 @@ export async function* mapOpenAIResponseStream(
                     vendor: responseToolVendor(options.vendor, vendorType),
                 });
                 yield {
-                    type: "tool_call_end",
+                    type: "toolcall_end",
                     callId: activeItem.callId,
                     arguments: argumentsJson,
                     incomplete: true,
@@ -538,7 +547,7 @@ export async function* mapOpenAIResponseStream(
                     vendor: responseToolVendor(options.vendor, vendorType),
                 });
                 yield {
-                    type: "tool_call_end",
+                    type: "toolcall_end",
                     callId: activeItem.callId,
                     arguments: argumentsJson,
                 };
@@ -614,10 +623,7 @@ function* settleServerToolCalls(
     activeItems: Map<number, ActiveOutputItem>,
     terminalOutput: readonly unknown[],
     finished: Set<string>,
-    options: {
-        clientToolNames?: ReadonlySet<string> | undefined;
-        hostedToolNames?: ReadonlySet<string> | undefined;
-    },
+    options: { hostedToolNames?: ReadonlySet<string> | undefined },
 ): Generator<SessionEvent> {
     for (const [outputIndex, activeItem] of activeItems) {
         if (
@@ -638,7 +644,7 @@ function* settleServerToolCalls(
                 ? undefined
                 : emptyToUndefined(serverToolCallArguments(terminal));
         yield {
-            type: "server_tool_call_end",
+            type: "server_toolcall_end",
             callId,
             name: activeItem.name,
             arguments: settled ?? activeItem.argumentsJson ?? "",
@@ -652,9 +658,9 @@ function* settleServerToolCalls(
         if (name === undefined) continue;
         const callId = serverToolCallId(item, terminalIndex);
         if (finished.has(callId)) continue;
-        yield { type: "server_tool_call_start", callId, name };
+        yield { type: "server_toolcall_start", callId, name };
         yield {
-            type: "server_tool_call_end",
+            type: "server_toolcall_end",
             callId,
             name,
             arguments: serverToolCallArguments(item),
@@ -670,32 +676,32 @@ function emptyToUndefined(value: string): string | undefined {
 /**
  * Names the hosted tool behind an output item the provider executed itself.
  *
- * Two shapes reach us. A hosted search with its own item type is unambiguous. Grok's X search
- * instead reports its backend sub-calls as ordinary custom tool calls, which look exactly like a
- * call the client must answer, so classification rests on two facts that are true only of a
- * hosted call. The request must have asked for hosted tools at all: nothing runs upstream that
- * was never enabled, which also keeps compaction, which sends none, entirely out of this path.
- * Beyond that, the provider marks its own search calls with a reserved call-id prefix, which is
- * the one signal that stays right even if a client tool happens to share a backend sub-call's
- * name. Absent that marker an undeclared name is the fallback, so a sub-call named in some way we
- * have not seen is still not mistaken for work the client owes an answer. Function calls never
- * qualify, since an undeclared function name is a model mistake the model needs to hear about.
+ * Two shapes reach us, and each has to be positively recognized. A hosted search with its own
+ * item type is unambiguous. Grok's X search instead reports its backend sub-calls as ordinary
+ * custom tool calls, which look exactly like a call the client must answer, so classification
+ * rests on two facts that are true only of a hosted call: the request asked for hosted tools at
+ * all — nothing runs upstream that was never enabled, which also keeps compaction, which sends
+ * none, entirely out of this path — and the provider marked the call with its reserved call-id
+ * prefix.
+ *
+ * Nothing else qualifies. A name simply missing from the client's tools is not evidence of
+ * anything: a model that invents a tool name is making a mistake it needs to hear about, and
+ * silently reporting the invention as work the provider already did would leave the model waiting
+ * for an answer to a call Rig deliberately never executes.
  */
 function serverExecutedItemName(
     item: unknown,
-    options: {
-        clientToolNames?: ReadonlySet<string> | undefined;
-        hostedToolNames?: ReadonlySet<string> | undefined;
-    },
+    options: { hostedToolNames?: ReadonlySet<string> | undefined },
 ): string | undefined {
     if (options.hostedToolNames === undefined || options.hostedToolNames.size === 0) {
         return undefined;
     }
-    const { type, name, call_id } = asOutputItem(item);
+    const parsed = asOutputItem(item);
+    if (parsed === undefined) return undefined;
+    const { type, name, call_id } = parsed;
     if (type === "web_search_call") return "web_search";
     if (type !== "custom_tool_call" || name === undefined) return undefined;
-    if (call_id?.startsWith(HOSTED_SEARCH_CALL_PREFIX) === true) return name;
-    return options.clientToolNames?.has(name) === true ? undefined : name;
+    return call_id?.startsWith(HOSTED_SEARCH_CALL_PREFIX) === true ? name : undefined;
 }
 
 /**
@@ -704,26 +710,45 @@ function serverExecutedItemName(
  * collide under one empty identifier.
  */
 function serverToolCallId(item: unknown, outputIndex: number): string {
-    const { call_id, id } = asOutputItem(item);
-    return call_id ?? id ?? `server_tool_call_${outputIndex}`;
+    const parsed = asOutputItem(item);
+    return parsed?.call_id ?? parsed?.id ?? `server_tool_call_${outputIndex}`;
 }
 
 function serverToolCallArguments(item: unknown): string {
-    const { input, action } = asOutputItem(item);
-    if (typeof input === "string") return input;
-    return action === undefined ? "" : JSON.stringify(action);
+    const parsed = asOutputItem(item);
+    if (parsed?.input !== undefined) return parsed.input;
+    return parsed?.action === undefined ? "" : JSON.stringify(parsed.action);
 }
 
-/** The few fields a hosted call carries, across the item shapes that can hold one. */
-function asOutputItem(item: unknown): {
-    type?: string;
-    name?: string;
-    id?: string;
-    call_id?: string;
-    input?: string;
-    action?: unknown;
-} {
-    return item as { type?: string };
+/**
+ * The few fields a hosted call carries, across the item shapes that can hold one. Every item
+ * carries more than this; only these decide whether the provider ran the call itself.
+ */
+const outputItemSchema = Type.Object(
+    {
+        type: Type.Optional(Type.String()),
+        name: Type.Optional(Type.String()),
+        id: Type.Optional(Type.String()),
+        call_id: Type.Optional(Type.String()),
+        input: Type.Optional(Type.String()),
+        action: Type.Optional(Type.Unknown()),
+    },
+    { additionalProperties: true },
+);
+type OutputItem = Static<typeof outputItemSchema>;
+
+/**
+ * Reads the deciding fields off an output item, or nothing when the item does not carry them as
+ * the protocol describes.
+ *
+ * Casting the payload instead would let a mistyped field travel as a name or an identifier the
+ * rest of this file believes is a string, and those reach the durable session log. An item this
+ * refuses is simply one nothing here can classify, which every caller already treats as a call
+ * the client owes an answer for — a visibly stalled tool rather than a run that quietly finishes
+ * while the model waits.
+ */
+function asOutputItem(item: unknown): OutputItem | undefined {
+    return Value.Check(outputItemSchema, item) ? item : undefined;
 }
 
 function responseToolVendor(

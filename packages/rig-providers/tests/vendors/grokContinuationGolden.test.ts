@@ -170,12 +170,12 @@ describe("Grok continuation goldens", () => {
                 vendor: { provider: "grok", type: "function_call" },
             },
             {
-                type: "tool_call_delta",
+                type: "toolcall_delta",
                 callId: "call-1",
                 delta: '{"target_directory":"."}',
             },
             {
-                type: "tool_call_end",
+                type: "toolcall_end",
                 callId: "call-1",
                 arguments: '{"target_directory":"."}',
             },
@@ -271,12 +271,12 @@ describe("Grok continuation goldens", () => {
                 vendor: { provider: "grok", type: "custom_tool_call" },
             },
             {
-                type: "tool_call_delta",
+                type: "toolcall_delta",
                 callId: "call-partial",
                 delta: "*** Begin Patch",
             },
             {
-                type: "tool_call_end",
+                type: "toolcall_end",
                 callId: "call-partial",
                 arguments: "*** Begin Patch",
                 incomplete: true,
@@ -325,7 +325,7 @@ describe("Grok continuation goldens", () => {
         );
 
         expect(events).toContainEqual({
-            type: "tool_call_end",
+            type: "toolcall_end",
             callId: "call-function-partial",
             arguments: '{"cmd":"printf',
             incomplete: true,

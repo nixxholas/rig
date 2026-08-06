@@ -44,6 +44,13 @@ export interface GymInferenceResponse {
     }[];
     /** Pauses before and after a hosted call's argument delta, keeping its live row observable. */
     serverToolCallDeltaDelayMs?: number;
+    /**
+     * Holds a hosted call open after its arguments arrived and before it completes.
+     *
+     * The provider is still working upstream at that point, which is the only window in which a
+     * hosted call can be interrupted. Replaces the delay after the delta when both are set.
+     */
+    serverToolCallEndDelayMs?: number;
     stopReason?: StopReason;
     thinkingDeltaChunkSize?: number;
     thinkingDeltaDelayMs?: number;

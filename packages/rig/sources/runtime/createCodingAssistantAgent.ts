@@ -34,7 +34,7 @@ import { createExecutor } from "../executor/createExecutor.js";
 import { createGymProviderFromEnvironment } from "../executor/createGymProviderFromEnvironment.js";
 import { getBedrockModelRoute } from "../executor/getBedrockModelRoute.js";
 import { modelOpenaiGpt56Sol } from "@slopus/rig-execution";
-import type { ServiceTier } from "@slopus/rig-execution";
+import type { HostedCapability, ServiceTier } from "@slopus/rig-execution";
 import { routeProviderThroughGym } from "../executor/routeProviderThroughGym.js";
 import { goalTools } from "../tools/goals/index.js";
 import type { WorkflowContext } from "../workflows/index.js";
@@ -90,6 +90,12 @@ export interface CreateCodingAssistantAgentOptions {
     providers?: ConfigProviders;
     providerUsage?: ProviderUsageContext;
     resolveInferenceMaxRetries?: () => number;
+    /**
+     * The session's own permission mode. Supplied so a decision made per request reads the live
+     * session rather than the context this runtime happens to have been built with, which a model
+     * switch replaces while keeping the executor.
+     */
+    resolvePermissionMode?: () => PermissionMode | undefined;
     serviceTier?: ServiceTier;
     startDate?: string;
     secrets?: SessionSecretContext;
@@ -223,6 +229,9 @@ export function createCodingAssistantAgent(
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 env,
                 ...(options.identity === undefined ? {} : { identity: options.identity }),
+                ...(options.resolvePermissionMode === undefined
+                    ? {}
+                    : { resolvePermissionMode: options.resolvePermissionMode }),
                 ...(options.onAccountUsage === undefined
                     ? {}
                     : { onAccountUsage: options.onAccountUsage }),
@@ -281,7 +290,6 @@ export function createCodingAssistantAgent(
     }
     const geminiApiKey = resolveGeminiApiKey(env);
     const baseTools = selectToolsForModel({
-        ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
         imageGeneration:
             nativeProvider instanceof Executor ? imageGenerationProviders(nativeProvider) : [],
         model,
@@ -321,6 +329,7 @@ export function createCodingAssistantAgent(
     const toolsWithoutGoals = [
         ...baseTools,
         ...selectCommonToolsForModel({
+            ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
             hasWorkspaceContext: options.workspaces !== undefined,
             isSubagent: options.isSubagent === true,
         }),

@@ -1648,7 +1648,7 @@ describe("AnthropicBedrockProvider", () => {
                         name: "Read",
                         vendor: { type: "claude_tool_use" },
                     }),
-                    expect.objectContaining({ type: "tool_call_end" }),
+                    expect.objectContaining({ type: "toolcall_end" }),
                     {
                         type: "token_usage",
                         usage: {

@@ -11,6 +11,14 @@ export interface ExecutorProvider {
     ) => ProfilePromptContext | Promise<ProfilePromptContext>;
     id: string;
     imageGeneration?: ExecutorImageGeneration;
+    /**
+     * This definition as it may be lent to an isolate, when that differs.
+     *
+     * An isolate is a side channel: an auxiliary query the person never asked for and never sees.
+     * A provider-run capability is not Rig's to lend into one, because Rig cannot intercept, show,
+     * or account for what it does. A definition that has none needs nothing here.
+     */
+    isolated?: () => ExecutorProvider;
     native: BaseProvider | ((profile: ExecutorModelProfile) => Promise<BaseProvider>);
     nativeKey?: (profile: ExecutorModelProfile) => string;
     profiles: readonly ExecutorModelProfile[];

@@ -707,9 +707,30 @@ export interface ExecCommandToolCallPresentation {
     readonly type: "exec_command";
 }
 
+/** One page a search consulted. */
+export interface SearchSource {
+    readonly url: string;
+    readonly title?: string;
+}
+
+/** A search of the world outside the workspace, whoever ran it. */
+export interface SearchToolCallPresentation {
+    readonly type: "search";
+    readonly target: "web" | "x";
+    readonly query: string;
+}
+
+export interface SearchToolResultPresentation {
+    readonly type: "search";
+    readonly target: "web" | "x";
+    readonly query: string;
+    readonly sources: readonly SearchSource[];
+}
+
 export type ToolCallPresentation =
     | ExecCommandToolCallPresentation
-    | ExplorationToolCallPresentation;
+    | ExplorationToolCallPresentation
+    | SearchToolCallPresentation;
 
 export type FileDiffKind = "add" | "delete" | "update";
 export type FileDiffLineKind = "add" | "context" | "delete";
@@ -759,7 +780,8 @@ export type ToolResultPresentation =
     | BackgroundTerminalInteractionPresentation
     | ExecCommandResultPresentation
     | ExplorationToolCallPresentation
-    | FileDiffToolResultPresentation;
+    | FileDiffToolResultPresentation
+    | SearchToolResultPresentation;
 
 export type AgentBlock = ContentBlock | ThinkingBlock | ToolCallBlock | ToolResultBlock;
 
@@ -1249,6 +1271,7 @@ export interface ProtocolSession {
     modelId: string;
     providerId: string;
     permissionMode: string;
+    hostedCapabilities?: readonly string[];
     effort?: string;
     serviceTier?: string;
     secretIds?: readonly string[];
@@ -1339,9 +1362,29 @@ export interface SessionTranscriptWindow {
     /** True when this bounded window omitted older service notices in its position range. */
     noticesTruncated?: boolean;
     permissionReviews?: readonly PermissionReviewState[];
+    /** Calls the provider ran itself during the assistant messages in this page. */
+    providerToolCalls?: readonly ProviderToolCallRecord[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
+}
+
+/**
+ * A call the provider ran on its own backend, as the daemon durably recorded it.
+ *
+ * Rig never executes one, so it is deliberately not part of the assistant message and this is the
+ * only place a reopened session can learn that the model reached the network at all.
+ */
+export interface ProviderToolCallRecord {
+    arguments: string;
+    callId: string;
+    createdAt: number;
+    /** The assistant message it accompanied, which is where a rebuilt transcript puts it back. */
+    messageId: string;
+    name: string;
+    runId: string;
+    /** `interrupted` means the turn ended before the provider reported back. */
+    status: "completed" | "interrupted";
 }
 
 export interface SessionStreamHello {
@@ -1553,6 +1596,15 @@ export type AgentLoopEvent =
           messageId: string;
           toolCall: { arguments?: unknown; id: string; name: string };
       }
+    | { type: "server_toolcall_start"; callId: string; messageId: string; name: string }
+    | { type: "server_toolcall_delta"; callId: string; delta: string; messageId: string }
+    | {
+          type: "server_toolcall_end";
+          arguments: string;
+          callId: string;
+          messageId: string;
+          name: string;
+      }
     | { type: "tool_execution_start"; toolCall: ToolCallBlock }
     | { type: "tool_execution_progress"; display: string; toolCallId: string }
     | { type: "tool_execution_status"; status: string; toolCallId: string }
@@ -1679,6 +1731,7 @@ export interface SessionSummary {
     /** Absent for a session with no place in an ordered list, such as a subagent. */
     orderKey?: string;
     permissionMode: string;
+    hostedCapabilities?: readonly string[];
     effort?: string;
     serviceTier?: string;
     status: SessionStatus;

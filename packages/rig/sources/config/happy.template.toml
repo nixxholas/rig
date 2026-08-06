@@ -102,6 +102,16 @@
 # base_url = "https://api.x.ai/v1"
 # include_models = ["xai/grok-build"]
 # exclude_models = []
+#
+# Searches Grok runs on its own backend. A Grok agent at the top of a session has both of them
+# already: choosing Grok is choosing its backend, and this is what that backend is for. Any other
+# agent reaches them by spawning a subagent to do the searching, where Rig reviews the decision.
+#
+# Naming them here narrows that default rather than enabling it, so an empty list is how you turn
+# provider-run search off entirely. Grok performs the search inside its own response, so Rig never
+# sees a call it could show you or stop, and cannot tell you what was searched for or what came
+# back. Either way it applies only while the session is in Auto or Full access.
+# hosted_search = ["x_search"]
 
 # [providers.bedrock]
 # type = "bedrock"

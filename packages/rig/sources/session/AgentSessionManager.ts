@@ -34,6 +34,7 @@ import type {
     AgentSessionTransferSchedule,
 } from "../agent/context/WorkspaceContext.js";
 import type { Message } from "../agent/types.js";
+import { modelSupportsHostedCapabilities, type HostedCapability } from "@slopus/rig-execution";
 import type { PermissionMode } from "../permissions/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
@@ -305,6 +306,10 @@ export class AgentSessionManager {
             projectId,
             trackUnread: true,
             workspaceId: workspace.id,
+            // Dropped rather than carried, for the reason a spawn writes it fresh: a hosted search
+            // was approved once, for one agent and one task. A delegated session is a new
+            // conversation someone will talk to, so inheriting the grant here would spend that
+            // one approval somewhere nobody pointed it.
             ...(selection.providerId === undefined ? {} : { providerId: selection.providerId }),
             ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
             ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
@@ -844,20 +849,48 @@ export class AgentSessionManager {
         if (parent === undefined) {
             throw new Error("The parent session is no longer available.");
         }
-        if (
-            request.encryptedPrompt !== undefined &&
-            (parent.encryptedAgentTransportScope() === undefined ||
-                request.providerId !== undefined ||
-                (request.modelId !== undefined && !isCodexV2CollaborationModel(request.modelId)))
-        ) {
-            throw new Error(
-                "Native encrypted collaboration only works within the current compatible provider and region. Use `rig.spawn_agent` and provide the task normally when selecting or crossing a model, provider, or region.",
-            );
-        }
         const selection = this.#resolveSubagentSelection(parent, request);
         let parentRequest = selection.parentRequest;
         const childModelId = selection.modelId;
         const childProviderId = selection.providerId;
+
+        // Both checks below judge the child that will actually be built, not the one that was
+        // asked for. A spawn naming only a model resolves its provider from recent successful
+        // routing, so a request that looks compatible before resolution can still land elsewhere.
+        // The parent's own request is read only when a check actually runs, because a spawn that
+        // asks for neither has to stay refusable on depth and capacity alone — those answers come
+        // from the tree, and asking the parent to describe itself first would make them depend on
+        // a parent that has nothing to describe yet.
+        const resolveEffectiveChild = () => {
+            parentRequest ??= parent.requestForSubagent();
+            return {
+                modelId: childModelId ?? parentRequest.modelId,
+                providerId: childProviderId ?? parentRequest.providerId,
+            };
+        };
+
+        if (request.encryptedPrompt !== undefined) {
+            const { modelId: effectiveModelId, providerId: effectiveProviderId } =
+                resolveEffectiveChild();
+            // A scope is the provider that issued it — `createEncryptedAgentTransportScope`
+            // returns that provider's own id — so equal ids mean the same provider and therefore
+            // the same type. That leaves only the model to check: the parent holds a scope at all
+            // only when it is a Codex collaboration model, and the child has to be one too for the
+            // ciphertext to be readable where it lands. If that scope ever regains structure this
+            // comparison silently refuses every native spawn, which is what the two-account test
+            // beside this one is for.
+            const parentScope = parent.encryptedAgentTransportScope();
+            if (
+                parentScope === undefined ||
+                effectiveProviderId !== parentScope ||
+                effectiveModelId === undefined ||
+                !isCodexV2CollaborationModel(effectiveModelId)
+            ) {
+                throw new Error(
+                    "Native encrypted collaboration only works within the current compatible provider and region. Use `rig.spawn_agent` and provide the task normally when selecting or crossing a model, provider, or region.",
+                );
+            }
+        }
 
         const parentMetadata = parent.agentMetadata();
         const depth = parentMetadata.depth + 1;
@@ -900,6 +933,8 @@ export class AgentSessionManager {
                 ...(childProviderId === undefined ? {} : { providerId: childProviderId }),
                 ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
                 ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
+                // Always written, never inherited. A capability the parent holds says nothing
+                // about this child, whose grant was reviewed on its own spawn or not at all.
             };
             const configuredChildRequest =
                 request.workspaceId !== undefined &&

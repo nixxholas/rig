@@ -202,7 +202,7 @@ export class AnthropicBedrockSession extends BaseSession {
                     vendor: event.vendor,
                 });
             }
-            if (event.type === "tool_call_delta") {
+            if (event.type === "toolcall_delta") {
                 const call = toolCalls.get(event.callId);
                 if (call !== undefined) {
                     toolCalls.set(event.callId, {
@@ -211,7 +211,7 @@ export class AnthropicBedrockSession extends BaseSession {
                     });
                 }
             }
-            if (event.type === "tool_call_end") {
+            if (event.type === "toolcall_end") {
                 const call = toolCalls.get(event.callId);
                 if (call !== undefined) {
                     toolCalls.set(event.callId, { ...call, arguments: event.arguments });
@@ -388,7 +388,7 @@ function isAnthropicResponseContentEvent(event: SessionEvent): boolean {
         event.type === "text_delta" ||
         event.type === "reasoning_delta" ||
         event.type === "tool_call_start" ||
-        event.type === "tool_call_delta" ||
-        event.type === "tool_call_end"
+        event.type === "toolcall_delta" ||
+        event.type === "toolcall_end"
     );
 }

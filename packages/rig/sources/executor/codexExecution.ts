@@ -3,11 +3,13 @@ import {
     CodexImageGenerationError,
     CodexProvider,
     CodexSessionCredential,
+    codex_hosted_tools,
 } from "@slopus/rig-providers";
 import {
     builtinModelProfiles,
     ExecutorImageGenerationUnavailableError,
     type ExecutorProvider,
+    type HostedCapability,
 } from "@slopus/rig-execution";
 
 import type { ConfigCodexProvider } from "../config/types.js";
@@ -16,6 +18,13 @@ export function codexExecution(options: {
     apiKey?: string;
     config: ConfigCodexProvider;
     env: NodeJS.ProcessEnv;
+    /**
+     * The searches to declare on the request being built, asked once per request.
+     *
+     * Only the answer given while the request is being built can be enforced: OpenAI runs the
+     * search inside its own response, so nothing about it can be taken back afterwards.
+     */
+    hostedCapabilitiesForRequest?: () => readonly HostedCapability[];
     id: string;
     resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
@@ -30,9 +39,22 @@ export function codexExecution(options: {
             env: options.env,
             ...(options.config.authFile === undefined ? {} : { authFile: options.config.authFile }),
         }));
-    const createNative = (credential: NonNullable<Awaited<ReturnType<typeof loadCredential>>>) =>
+    const hostedTools = (capabilities: () => readonly HostedCapability[]) => () => {
+        const held = capabilities();
+        return held.length === 0
+            ? []
+            : codex_hosted_tools.filter((tool) => (held as readonly string[]).includes(tool.name));
+    };
+    const createNative = (
+        credential: NonNullable<Awaited<ReturnType<typeof loadCredential>>>,
+        capabilities: () => readonly HostedCapability[] = () =>
+            options.hostedCapabilitiesForRequest?.() ?? [],
+    ) =>
         new CodexProvider({
             credential,
+            // Web search runs on OpenAI's backend the way the Codex CLI does, rather than through
+            // a tool Rig would have to execute.
+            hostedTools: hostedTools(capabilities),
             parallelToolCalls: true,
             ...(options.resolveInferenceMaxRetries === undefined
                 ? {}

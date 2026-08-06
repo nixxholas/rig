@@ -225,6 +225,10 @@ enabled = true
         });
     });
 
+    it("leaves hosted search unset rather than empty when it is not configured", () => {
+        expect(parseConfigToml("[providers.grok]\n").providers?.grok).toEqual({ type: "grok" });
+    });
+
     it("rejects a non-boolean provider default", () => {
         expect(() => parseConfigToml('[providers]\ndefault_enable = "false"\n')).toThrow(
             "providers.default_enable must be a boolean.",

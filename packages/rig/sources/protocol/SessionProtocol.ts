@@ -8,7 +8,14 @@ import type {
 } from "../agent/index.js";
 import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
-import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
+import type {
+    HostedCapability,
+    Model,
+    ProviderError,
+    ServiceTier,
+    StopReason,
+    Usage,
+} from "@slopus/rig-execution";
 import {
     MAX_INFERENCE_MAX_RETRIES,
     type ProviderModelCompatibilityType,
@@ -310,6 +317,34 @@ export interface SessionPermissionReview {
     userAuthorization: "unknown" | "low" | "medium" | "high";
 }
 
+/**
+ * A call the provider ran on its own backend during an assistant message.
+ *
+ * Kept beside the messages rather than inside one. Rig never executes a provider-run call, so it
+ * is deliberately not a block of the assistant message: putting it there would offer the agent
+ * loop a call to complete and the model a result to wait for. But it is the only evidence that
+ * the model reached the network, so it has to be durable in its own right or reopening a session
+ * would leave an answer citing sources it has no visible reason to know.
+ */
+export interface SessionProviderToolCall {
+    /** Provider-owned call identity. */
+    callId: string;
+    createdAt: number;
+    /** The assistant message it accompanied, which is where a rebuilt transcript puts it back. */
+    messageId: string;
+    /** The run this call happened in, and is retained or dropped with, as its turn is. */
+    runId: string;
+    /** Raw provider tool name, humanized for display by whatever renders it. */
+    name: string;
+    /** The provider's own final arguments, which is where a search's sources live. */
+    arguments: string;
+    /**
+     * `interrupted` means the turn ended before the provider reported back, not that the call was
+     * stopped. Nothing can stop one; it runs where Rig has no reach.
+     */
+    status: "completed" | "interrupted";
+}
+
 export interface ProtocolSession {
     id: string;
     /** What the session is doing at this moment. */
@@ -330,6 +365,11 @@ export interface ProtocolSession {
     draftUpdatedAt?: number;
     providerId: string;
     permissionMode: PermissionMode;
+    /**
+     * Provider-executed searches this session holds, granted at spawn or by configuration.
+     * Absent means none, which is what a session stored before capabilities existed reports.
+     */
+    hostedCapabilities?: readonly HostedCapability[];
     modelId: string;
     /** Absent for a session with no place in an ordered list, such as a subagent. */
     orderKey?: string;
@@ -455,6 +495,8 @@ export interface SessionTranscriptWindow {
     noticesTruncated?: boolean;
     /** Resolved permission facts for tool calls contained in this page. */
     permissionReviews?: readonly SessionPermissionReview[];
+    /** Calls the provider ran itself during the assistant messages in this page. */
+    providerToolCalls?: readonly SessionProviderToolCall[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
@@ -590,6 +632,8 @@ export interface SessionSummary {
      */
     orderKey?: string;
     permissionMode: PermissionMode;
+    /** Provider-executed searches this session holds. Absent means none. */
+    hostedCapabilities?: readonly HostedCapability[];
     effort?: string;
     serviceTier?: ServiceTier;
     environment?: SessionExecutionEnvironment;
@@ -636,6 +680,11 @@ export interface CreateSessionRequest {
     modelId?: string;
     providerId?: string;
     permissionMode?: PermissionMode;
+    /**
+     * Provider-executed searches to give the new session. These are not reviewable once held, so
+     * a caller sets them only where the grant itself was authorized.
+     */
+    hostedCapabilities?: readonly HostedCapability[];
     secretIds?: readonly string[];
     workflowsEnabled?: boolean;
     docker?: DockerExecutionConfig;

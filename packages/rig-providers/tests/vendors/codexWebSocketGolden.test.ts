@@ -1228,7 +1228,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             events.push(event);
         }
 
-        const toolDelta = events.findIndex((event) => event.type === "tool_call_delta");
+        const toolDelta = events.findIndex((event) => event.type === "toolcall_delta");
         const reset = events.findIndex((event) => event.type === "block_reset");
         expect(toolDelta).toBeGreaterThanOrEqual(0);
         expect(reset).toBeGreaterThan(toolDelta);
@@ -1345,7 +1345,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             vendor: { provider: "codex", type: "custom_tool_call" },
         });
         expect(first).toContainEqual({
-            type: "tool_call_end",
+            type: "toolcall_end",
             callId: "custom-call",
             arguments: "text(true);",
         });

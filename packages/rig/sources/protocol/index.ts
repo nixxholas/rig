@@ -394,6 +394,7 @@ export type {
     SessionInterruptionReason,
     SessionPartialMessage,
     SessionPermissionReview,
+    SessionProviderToolCall,
     SessionReadResponse,
     SessionStateResponse,
     SessionStreamHello,
