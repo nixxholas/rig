@@ -1,5 +1,12 @@
 # Master plan 13: Plugins
 
+> **Superseded.** A plugin is now three ordinary things: a worklet for the
+> background compute and its tools, an applet for the interface, and skills for
+> what agents should know. See [`17-worklets.md`](17-worklets.md), which is
+> where the work goes. Keep this plan as the record of what a plugin was meant
+> to do — it is still the best description of the surface we eventually want —
+> but do not start plugin work from it.
+
 ## Big picture
 
 Anyone — a person or an agent — should be able to write a bit of code that runs
