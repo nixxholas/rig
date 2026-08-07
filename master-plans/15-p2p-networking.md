@@ -157,6 +157,33 @@ configuration rule: account routing remains transparent to models and its
 routing topology remains configuration, while the master Rig gains an API for
 securely provisioning the joined daemon's credential material.
 
+## Human profiles and message identity
+
+Several people may use one main Rig and reach the same secondary Rig. Messages
+therefore carry an optional `identity` field. It is the stable ID of the human
+profile that sent the message, or `null` when there is no profile and the
+message belongs only to the current local user.
+
+A person must create a profile before sending work to a remote Rig. The profile
+has a stable cuid2 generated once by the main Rig, a human-readable name, and an
+optional photo that may be chosen in Happy. Profiles are not accounts and do
+not add a separate Rig login flow.
+
+The main Rig owns its profiles permanently. When one of its profiles first
+reaches a secondary, the main Rig registers that same profile ID on the
+secondary and keeps the profile synchronized there. The authenticated parent
+Rig is the authority for the profile: another Rig cannot create, replace, or
+claim it, and the secondary does not mint a different local ID for it. The
+transport connection identifies the parent Rig; the message identity identifies
+the person using that Rig.
+
+Messages sent into remote work carry the selected profile identity. Messages
+and state synchronized back from that Rig preserve the same identity. Profiles
+are synchronized as entities alongside messages, so `rig-connect` can resolve a
+message identity to its current name and photo without embedding the whole
+profile in every message. Happy can then show which person sent each message
+even when several people share the same main Rig.
+
 ## Cross-Rig agents and continuity
 
 When integrated communication is enabled, the main Rig connects its secondaries
@@ -197,9 +224,13 @@ or initiate work on the main Rig and local work survives disconnection.
 Fifth, add master-controlled distribution of configuration, Happy
 authorization, credentials, prompts, skills, plugins, and capability settings.
 
+Sixth, add parent-owned human profiles, require a profile for remote work,
+replicate profiles to secondaries, carry the profile identity on messages, and
+resolve those identities through `rig-connect`.
+
 Finally, add optional integrated agent communication, authenticated channels
-between secondaries, Agent-ID discovery and route caching, and reconnection that
-restores the distributed view without coupling the survival of local work.
+between secondaries, Agent-ID discovery and route caching, and reconnection
+that restores the distributed view without coupling the survival of local work.
 
 ## What done looks like
 
@@ -224,6 +255,9 @@ restores the distributed view without coupling the survival of local work.
   learning about or messaging agents on the main Rig.
 - The master can distribute configuration and optionally provision compute
   credentials without putting secrets in invitations, status, or logs.
+- Several people can share one main Rig, create stable named profiles with
+  optional photos, and send remote messages that retain the correct profile
+  identity on every secondary and in `rig-connect`.
 - Integrated mode can create authenticated, capability-scoped channels between
   secondaries and let agents communicate across machines by Agent ID.
 - Agent IDs contain no node address; discovery finds and caches a route instead.

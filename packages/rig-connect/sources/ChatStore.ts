@@ -38,6 +38,7 @@ import type {
     Usage,
     UserInputRequest,
     UserMessage,
+    RigProfile,
     WorkflowRun,
     WorkflowRunUpdate,
 } from "./protocol.js";
@@ -100,6 +101,7 @@ export class ChatStore {
     #openTurnIds: string[] = [];
     /** Elements by id, so a delta reaches its element without scanning the list. */
     #byId = new Map<string, ChatElement>();
+    #profilesById = new Map<string, RigProfile>();
     /** In-flight tool calls by the daemon's tool-call id. */
     #toolCallElementIds = new Map<string, string>();
     #permissionReviewsByToolCallId = new Map<string, PermissionReviewState>();
@@ -492,6 +494,7 @@ export class ChatStore {
         mutationId: string,
         text: string,
         createdAt: number,
+        identity: string | null,
     ): { deltas: readonly ChatDelta[]; undo: () => void } {
         const elementId = `message:${mutationId}`;
         if (this.#byId.has(elementId)) return { deltas: [], undo: () => undefined };
@@ -502,6 +505,7 @@ export class ChatStore {
             {
                 blocks: [{ text, type: "text" }],
                 id: mutationId,
+                identity,
                 role: "user",
             },
             createdAt,
@@ -526,6 +530,7 @@ export class ChatStore {
         mutationId: string,
         text: string,
         createdAt: number,
+        identity: string | null,
     ): { deltas: readonly ChatDelta[]; undo: () => void } {
         const elementId = `message:${mutationId}`;
         if (this.#byId.has(elementId)) return { deltas: [], undo: () => undefined };
@@ -537,6 +542,7 @@ export class ChatStore {
                 blocks: [{ text, type: "text" }],
                 contextOnly: true,
                 id: mutationId,
+                identity,
                 role: "user",
             },
             createdAt,
@@ -2508,6 +2514,12 @@ export class ChatStore {
             id: `message:${message.id}`,
             kind: "user_message",
             messageId: message.id,
+            identity: message.identity ?? null,
+            ...(message.identity === undefined || message.identity === null
+                ? {}
+                : this.#profilesById.get(message.identity) === undefined
+                  ? {}
+                  : { profile: this.#profilesById.get(message.identity)! }),
             ...(source === undefined ? {} : { source }),
             ...(steering === undefined ? {} : steering),
             text: textOf(message.blocks),
@@ -2520,6 +2532,27 @@ export class ChatStore {
             ...(attachments.length === 0 ? {} : { attachments }),
         };
         this.#append(element);
+    }
+
+    applyProfiles(profiles: readonly RigProfile[]): readonly ChatDelta[] {
+        const nextProfiles = new Map(profiles.map((profile) => [profile.id, profile]));
+        const before = this.#revision;
+        this.#profilesById = nextProfiles;
+        for (const element of this.#elements) {
+            if (element.kind !== "user_message" || element.identity === null) continue;
+            const profile = nextProfiles.get(element.identity);
+            if (element.profile === profile) continue;
+            if (profile === undefined) {
+                if (element.profile === undefined) continue;
+                const { profile: _profile, ...withoutProfile } = element;
+                this.#replace(element.id, withoutProfile);
+            } else {
+                this.#update(element.id, { profile });
+            }
+        }
+        return this.#revision === before
+            ? []
+            : [{ elements: this.elements(), type: "elements_changed" }];
     }
 
     #steeringTiming(

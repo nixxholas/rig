@@ -68,6 +68,10 @@ export interface UserMessageElement extends BaseChatElement {
     kind: "user_message";
     /** Durable source identity; consumers never need to parse the element id. */
     messageId: string;
+    /** Stable human profile identity, or null for an unattributed local message. */
+    identity: string | null;
+    /** Current profile entity when it has been loaded. */
+    profile?: import("./protocol.js").RigProfile;
     /** Whether this bubble is still queued to steer the active run. */
     delivery: "pending_steering" | "sent";
     /** This message is background context for the next actionable group. */

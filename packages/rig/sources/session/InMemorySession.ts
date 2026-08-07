@@ -4300,6 +4300,7 @@ export class InMemorySession {
                 blocks: [{ text: request.text, type: "text" }],
                 contextOnly: true,
                 id: messageId,
+                identity: request.identity ?? null,
                 role: "user",
             };
             const pending: PersistedPendingContextMessage = {
@@ -4377,6 +4378,7 @@ export class InMemorySession {
             role: "user",
             id: request.clientSubmissionId ?? createId(),
             blocks,
+            identity: request.identity ?? null,
             ...(request.agentSource === undefined ? {} : { agentSource: request.agentSource }),
             ...(options.source === "notification" || request.provenance === "agent"
                 ? { provenance: "agent" as const }
@@ -4391,6 +4393,7 @@ export class InMemorySession {
         const visibleMessage: UserMessage = {
             role: "user",
             id: userMessage.id,
+            identity: userMessage.identity ?? null,
             ...(request.agentSource === undefined ? {} : { agentSource: request.agentSource }),
             ...(options.source === "notification" || request.provenance === "agent"
                 ? { provenance: "agent" as const }
@@ -4541,6 +4544,7 @@ export class InMemorySession {
             role: "user",
             id: request.clientSubmissionId ?? createId(),
             blocks,
+            identity: request.identity ?? null,
         };
 
         const agent = this.#ensureRuntime().agent;

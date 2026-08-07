@@ -46,6 +46,20 @@ export const p2pPeerPairings = sqliteTable("p2p_peer_pairings", {
     expiresAtMs: integer("expires_at_ms").notNull(),
 });
 
+export const rigProfiles = sqliteTable(
+    "rig_profiles",
+    {
+        id: text("id").notNull().primaryKey(),
+        parentInstanceId: text("parent_instance_id").notNull(),
+        name: text("name").notNull(),
+        photoJson: text("photo_json"),
+        version: integer("version").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [index("rig_profiles_parent_instance").on(table.parentInstanceId, table.id)],
+);
+
 export const projectAvatarAssets = sqliteTable("project_avatar_assets", {
     hash: text("hash").primaryKey(),
     mediaType: text("media_type").notNull(),

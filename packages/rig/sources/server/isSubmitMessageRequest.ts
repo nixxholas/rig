@@ -1,4 +1,6 @@
 import type { SubmitMessageRequest } from "../protocol/index.js";
+import { rigProfileIdentitySchema } from "../protocol/index.js";
+import { Value } from "@sinclair/typebox/value";
 
 export function isSubmitMessageRequest(value: unknown): value is SubmitMessageRequest {
     if (
@@ -10,6 +12,12 @@ export function isSubmitMessageRequest(value: unknown): value is SubmitMessageRe
     )
         return false;
     const request = value as Record<string, unknown>;
+    if (
+        request.identity !== undefined &&
+        !Value.Check(rigProfileIdentitySchema, request.identity)
+    ) {
+        return false;
+    }
     if (
         request.clientSubmissionId !== undefined &&
         (typeof request.clientSubmissionId !== "string" ||

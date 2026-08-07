@@ -49,6 +49,11 @@ import type {
     InstallPluginRequest,
     InstallPluginResponse,
     P2pStatus,
+    CreateRigProfileRequest,
+    ListRigProfilesResponse,
+    ReplicateRigProfileRequest,
+    RigProfileResponse,
+    UpdateRigProfileRequest,
     GitStateResponse,
     GitWatchResponse,
     GoalSessionResponse,
@@ -98,6 +103,7 @@ import type {
     StopWorkflowResponse,
     SubagentSummary,
     SubmitMessageResponse,
+    SubmitMessageRequest,
     SubmitContextMessageResponse,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
@@ -129,11 +135,20 @@ import {
     SESSION_DRAFT_MAX_LENGTH,
     submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
+    createRigProfileRequestSchema,
+    replicateRigProfileRequestSchema,
+    rigProfileIdSchema,
+    updateRigProfileRequestSchema,
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
 import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
 import { HappyCloudPersistenceError } from "../persistence/happy-cloud/HappyCloudPersistenceError.js";
+import {
+    normalizeRigProfilePhoto,
+    type RigProfileStore,
+    validateRigProfilePhoto,
+} from "../profiles/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { ProjectRegistrationError } from "../project/ProjectRepository.js";
@@ -286,6 +301,7 @@ import {
     type P2pPairingState,
 } from "../protocol/index.js";
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
+import type { PrepareP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
 
 export interface ProtocolHttpServerOptions {
@@ -304,6 +320,8 @@ export interface ProtocolHttpServerOptions {
     p2pNode?: () => DaemonConfig["p2p"];
     p2pStatus?: () => P2pStatus;
     canP2pPeerConfigure?: (peerId: string) => boolean;
+    profiles?: RigProfileStore;
+    prepareP2pRequest?: PrepareP2pHttpRequest;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
@@ -368,6 +386,8 @@ export function createProtocolHttpServer(
         p2pNode: options.p2pNode,
         p2pStatus: options.p2pStatus,
         canP2pPeerConfigure: options.canP2pPeerConfigure,
+        profiles: options.profiles,
+        prepareP2pRequest: options.prepareP2pRequest,
         happyCloud: options.happyCloud,
         onDaemonConfigChange: options.onDaemonConfigChange,
         onReloadHappy: options.onReloadHappy,
@@ -465,6 +485,8 @@ interface ProtocolServerRuntimeConfig {
     p2pPairing: P2pPairingServiceContract | undefined;
     p2pNode: (() => DaemonConfig["p2p"]) | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
+    profiles: RigProfileStore | undefined;
+    prepareP2pRequest: PrepareP2pHttpRequest | undefined;
     happyCloud: HappyCloudServiceContract | undefined;
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
@@ -567,6 +589,7 @@ async function handleRequest(
             p2pPeerRoute.path,
             request,
             response,
+            runtimeConfig.prepareP2pRequest,
         );
         return;
     }
@@ -586,6 +609,156 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "p2p-status") {
         sendJson<P2pStatus>(response, 200, runtimeConfig.p2pStatus?.() ?? { transports: [] });
+        return;
+    }
+    if (route.name === "profiles" || route.name === "profile") {
+        const profiles = runtimeConfig.profiles;
+        if (profiles === undefined) {
+            sendJson(response, 503, { error: "Rig profiles are unavailable." });
+            return;
+        }
+        const authenticatedPeerId = p2pPeerId(request);
+        if (
+            authenticatedPeerId !== undefined &&
+            runtimeConfig.canP2pPeerConfigure?.(authenticatedPeerId) !== true
+        ) {
+            sendJson(response, 403, {
+                error: "Only this secondary Rig's primary may access parent-owned profiles.",
+            });
+            return;
+        }
+        if (request.method === "GET" && route.name === "profiles") {
+            const visible =
+                authenticatedPeerId === undefined
+                    ? profiles.list()
+                    : profiles
+                          .list()
+                          .filter((profile) => profile.parentInstanceId === authenticatedPeerId);
+            sendJson<ListRigProfilesResponse>(response, 200, { profiles: [...visible] });
+            return;
+        }
+        if (request.method === "GET" && route.name === "profile") {
+            const profile = profiles.get(route.profileId);
+            if (
+                profile === undefined ||
+                (authenticatedPeerId !== undefined &&
+                    profile.parentInstanceId !== authenticatedPeerId)
+            ) {
+                sendJson(response, 404, { error: "Rig profile not found." });
+                return;
+            }
+            sendJson<RigProfileResponse>(response, 200, { profile });
+            return;
+        }
+        if (request.method === "POST" && route.name === "profiles") {
+            if (
+                authenticatedPeerId !== undefined ||
+                runtimeConfig.p2pNode?.().role === "secondary"
+            ) {
+                sendJson(response, 403, {
+                    error: "Profiles are created by their primary Rig.",
+                });
+                return;
+            }
+            const body = await readJson<unknown>(request, 34 * 1024 * 1024);
+            if (!Value.Check(createRigProfileRequestSchema, body)) {
+                sendJson(response, 400, { error: "The Rig profile is invalid." });
+                return;
+            }
+            try {
+                const input = body as CreateRigProfileRequest;
+                const photo =
+                    input.photo === undefined
+                        ? undefined
+                        : await normalizeRigProfilePhoto(input.photo);
+                sendJson<RigProfileResponse>(response, 201, {
+                    profile: profiles.create({
+                        name: input.name,
+                        ...(photo === undefined ? {} : { photo }),
+                    }),
+                });
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                sendJson(response, 400, { error: errorToMessage(error) });
+            }
+            return;
+        }
+        if (request.method === "PATCH" && route.name === "profile") {
+            if (
+                authenticatedPeerId !== undefined ||
+                runtimeConfig.p2pNode?.().role === "secondary"
+            ) {
+                sendJson(response, 403, {
+                    error: "Only a profile's primary Rig may change it.",
+                });
+                return;
+            }
+            const body = await readJson<unknown>(request, 34 * 1024 * 1024);
+            if (!Value.Check(updateRigProfileRequestSchema, body)) {
+                sendJson(response, 400, { error: "The Rig profile update is invalid." });
+                return;
+            }
+            try {
+                const input = body as UpdateRigProfileRequest;
+                const photo =
+                    input.photo === undefined || input.photo === null
+                        ? input.photo
+                        : await normalizeRigProfilePhoto(input.photo);
+                const profile = profiles.update(route.profileId, {
+                    ...(input.name === undefined ? {} : { name: input.name }),
+                    ...(photo === undefined ? {} : { photo }),
+                });
+                if (profile === undefined) {
+                    sendJson(response, 404, { error: "Rig profile not found." });
+                    return;
+                }
+                sendJson<RigProfileResponse>(response, 200, { profile });
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                sendJson(response, 400, { error: errorToMessage(error) });
+            }
+            return;
+        }
+        if (request.method === "PUT" && route.name === "profile") {
+            if (authenticatedPeerId === undefined) {
+                sendJson(response, 403, {
+                    error: "A replicated profile must arrive from its authenticated parent Rig.",
+                });
+                return;
+            }
+            const body = await readJson<unknown>(request, 512 * 1024);
+            if (!Value.Check(replicateRigProfileRequestSchema, body)) {
+                sendJson(response, 400, { error: "The replicated Rig profile is invalid." });
+                return;
+            }
+            const input = body as ReplicateRigProfileRequest;
+            if (input.profile.id !== route.profileId) {
+                sendJson(response, 400, {
+                    error: "The replicated Rig profile identity does not match its route.",
+                });
+                return;
+            }
+            if (input.profile.photo !== undefined) {
+                try {
+                    await validateRigProfilePhoto(input.profile.photo);
+                } catch {
+                    sendJson(response, 400, {
+                        error: "The replicated Rig profile photo is invalid.",
+                    });
+                    return;
+                }
+            }
+            try {
+                sendJson<RigProfileResponse>(response, 200, {
+                    profile: profiles.replicate(input.profile, authenticatedPeerId),
+                });
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                sendJson(response, 409, { error: errorToMessage(error) });
+            }
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
         return;
     }
     if (route.name === "p2p-invitations") {
@@ -2277,6 +2450,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message settings are invalid." });
             return;
         }
+        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
         const broadcast = body as BroadcastMessageRequest;
         const allTargets = broadcast.all === true ? store.list({ limit: 501 }) : undefined;
         if (allTargets !== undefined && allTargets.length > 500) {
@@ -3144,6 +3318,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
+        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -3177,6 +3352,7 @@ async function handleRequest(
             });
             return;
         }
+        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted?.data.delivery === "context") {
@@ -3253,6 +3429,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
+        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
         try {
             sendJson<SteerMessageResponse>(response, 202, session.steer(body));
         } catch (error) {
@@ -3942,6 +4119,7 @@ function matchRoute(pathname: string):
               | "messages"
               | "models"
               | "presence"
+              | "profiles"
               | "plugin-catalog"
               | "folders"
               | "plugins"
@@ -3966,6 +4144,7 @@ function matchRoute(pathname: string):
           pairingId: string;
           sessionId?: undefined;
       }
+    | { name: "profile"; profileId: string; sessionId?: undefined }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
     | {
           name: "applet-context" | "applet-open" | "applet-revert" | "applet-versions";
@@ -4157,6 +4336,15 @@ function matchRoute(pathname: string):
     if (pathname === "/messages") return { name: "messages" };
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/presence") return { name: "presence" };
+    if (pathname === "/profiles") return { name: "profiles" };
+    const profile = /^\/profiles\/([^/]+)$/u.exec(pathname);
+    if (
+        profile !== null &&
+        profile[1] !== undefined &&
+        Value.Check(rigProfileIdSchema, profile[1])
+    ) {
+        return { name: "profile", profileId: profile[1] };
+    }
     if (pathname === "/plugins") return { name: "plugins" };
     if (pathname === "/plugin-catalogs/github") return { name: "plugin-catalog" };
     if (pathname === "/folders") return { name: "folders" };
@@ -5027,6 +5215,8 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "happy-reload") return request.method === "POST";
     if (route.name === "happy-cloud-commands") return request.method === "POST";
     if (route.name === "plugins") return request.method === "POST";
+    if (route.name === "profiles") return request.method === "POST";
+    if (route.name === "profile") return request.method === "PATCH" || request.method === "PUT";
     if (route.name === "plugin-catalog") return false;
     if (route.name === "plugin-uninstall") return request.method === "DELETE";
     if (route.name === "plugin-app-tool-call" || route.name === "plugin-app-storage") {
@@ -5554,4 +5744,48 @@ function authorizeP2pConfigurationRequest(
         error: "Only this secondary Rig's primary may change its configuration.",
     });
     return false;
+}
+
+function p2pPeerId(request: IncomingMessage): string | undefined {
+    const value = request.headers["x-rig-p2p-peer"];
+    return typeof value === "string" ? value : undefined;
+}
+
+function authorizeMessageProfile(
+    request: IncomingMessage,
+    response: ServerResponse,
+    runtimeConfig: ProtocolServerRuntimeConfig,
+    body: Pick<SubmitMessageRequest, "identity">,
+): boolean {
+    const peerId = p2pPeerId(request);
+    const profileId = body.identity ?? null;
+    if (peerId !== undefined) {
+        if (profileId === null) {
+            sendJson(response, 400, {
+                code: "profile_required",
+                error: "A registered human profile is required to send to a remote Rig.",
+            });
+            return false;
+        }
+        if (
+            runtimeConfig.canP2pPeerConfigure?.(peerId) !== true ||
+            runtimeConfig.profiles?.owns(profileId, peerId) !== true
+        ) {
+            sendJson(response, 403, {
+                code: "profile_not_owned",
+                error: "That human profile is not registered to the authenticated primary Rig.",
+            });
+            return false;
+        }
+        return true;
+    }
+    if (profileId === null) return true;
+    if (runtimeConfig.profiles?.isLocal(profileId) !== true) {
+        sendJson(response, 403, {
+            code: "profile_not_owned",
+            error: "That human profile is not owned by this Rig.",
+        });
+        return false;
+    }
+    return true;
 }

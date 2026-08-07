@@ -111,6 +111,8 @@ export interface UserMessage {
     role: "user";
     id: string;
     blocks: readonly ContentBlock[];
+    /** Stable human profile identity, or null for an unattributed local message. */
+    identity?: string | null;
     /** Background context that waits for the next actionable user message. */
     contextOnly?: true;
     /** Durable origin for non-human messages that use a user-role provider input shape. */

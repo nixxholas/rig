@@ -29,6 +29,7 @@ describe("InMemorySession", () => {
                 message: {
                     contextOnly: true,
                     id: "context-note-1",
+                    identity: null,
                     role: "user",
                 },
                 runId: "context:context-note-1",
@@ -40,6 +41,25 @@ describe("InMemorySession", () => {
         expect(
             session.events.since(undefined)?.filter((event) => event.type === "run_started"),
         ).toEqual([]);
+    });
+
+    it("persists human profile identity on submitted, steering, and context messages", () => {
+        const profileId = "aprofile000000000000000003";
+        const session = new InMemorySessionStore().create({ cwd: "/tmp/rig-profile-message" });
+
+        session.submit({ identity: profileId, text: "Run this remotely." });
+        session.steer({ identity: profileId, text: "And keep this attribution." });
+        session.submitContext({
+            identity: profileId,
+            text: "This context has the same author.",
+        });
+
+        const identities = session.events
+            .since(undefined)
+            ?.filter((event) => event.type === "message_submitted")
+            .map((event) => event.data.message.identity);
+        expect(identities).toEqual([profileId, profileId, profileId]);
+        void session.abort();
     });
 
     it("keeps visible-only restored errors out of persisted model context", () => {

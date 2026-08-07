@@ -1,4 +1,29 @@
 export type { EventId } from "./EventId.js";
+export {
+    createRigProfileRequestSchema,
+    listRigProfilesResponseSchema,
+    replicateRigProfileRequestSchema,
+    rigProfileChangedEventSchema,
+    rigProfileIdentitySchema,
+    rigProfileIdSchema,
+    rigProfileNameSchema,
+    rigProfilePhotoInputSchema,
+    rigProfilePhotoSchema,
+    rigProfileResponseSchema,
+    rigProfileSchema,
+    updateRigProfileRequestSchema,
+    type CreateRigProfileRequest,
+    type ListRigProfilesResponse,
+    type ReplicateRigProfileRequest,
+    type RigProfile,
+    type RigProfileChangedEvent,
+    type RigProfileId,
+    type RigProfileIdentity,
+    type RigProfilePhoto,
+    type RigProfilePhotoInput,
+    type RigProfileResponse,
+    type UpdateRigProfileRequest,
+} from "./ProfileProtocol.js";
 export { PROJECT_ERROR_MAX_LENGTH } from "./ProjectProtocol.js";
 export {
     rigCliInstallationInspectionSchema,

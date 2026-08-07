@@ -28,6 +28,7 @@ import {
 import type { Folder, FolderEvent } from "./FolderProtocol.js";
 import type { HappyCloudChangedEvent } from "./HappyCloudProtocol.js";
 import type { P2pStatusChangedEvent } from "./P2pProtocol.js";
+import type { RigProfileChangedEvent } from "./ProfileProtocol.js";
 
 export type ProjectKind = "regular" | "home";
 export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
@@ -630,6 +631,7 @@ export interface ComputePreparationEvent {
 export type GlobalLiveEvent =
     | HappyCloudChangedEvent
     | P2pStatusChangedEvent
+    | RigProfileChangedEvent
     | PluginsChangedEvent
     | PresenceChangedEvent
     | SlotsChangedEvent
@@ -668,6 +670,7 @@ export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDeliver
 export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
     return (
         event.type === "plugins_changed" ||
+        event.type === "profile_changed" ||
         event.type === "p2p_status_changed" ||
         event.type === "happy_cloud_changed" ||
         event.type === "presence_changed" ||

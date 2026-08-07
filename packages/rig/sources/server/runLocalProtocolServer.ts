@@ -72,6 +72,11 @@ import {
 } from "../p2p/index.js";
 import { createServeP2pHttpRequest } from "./createServeP2pHttpRequest.js";
 import { createServeP2pTunnel } from "./createServeP2pTunnel.js";
+import {
+    P2pProfileReplicator,
+    replicateProfileForP2pRequest,
+    RigProfileStore,
+} from "../profiles/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -140,6 +145,8 @@ async function runOwnedLocalProtocolServer(
     let worklets: WorkletManager | undefined;
     let p2pNetwork: P2pNetwork | undefined;
     let p2pPairingService: P2pPairingService | undefined;
+    let p2pProfileReplicator: P2pProfileReplicator | undefined;
+    let rigProfiles: RigProfileStore | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -644,13 +651,27 @@ async function runOwnedLocalProtocolServer(
             },
         );
         if (p2pIdentity !== undefined) {
+            rigProfiles = new RigProfileStore({
+                database: activeStore,
+                localInstanceId: p2pIdentity.instanceId,
+                publish: (event) => {
+                    activeStore.globalEventQueue.publishLive(event);
+                    activeStore.liveEvents.publish(event);
+                    p2pProfileReplicator?.syncProfile(event.data.profileId, event.data.version);
+                },
+            });
+        }
+        if (p2pIdentity !== undefined) {
             try {
                 const irohSecret = await loadOrCreateIrohSecretKey(paths.irohSecretKeyPath);
                 p2pPairingService = new P2pPairingService({
                     config: loadedConfig.config.p2p.iroh,
                     identity: p2pIdentity,
                     name: () => p2pNode.name,
-                    onPeerTrusted: (peer) => p2pNetwork?.addTrustedPeer(peer),
+                    onPeerTrusted: (peer) => {
+                        p2pNetwork?.addTrustedPeer(peer);
+                        p2pProfileReplicator?.peerChanged(peer.instanceId);
+                    },
                     peerTrustStore: p2pPeerTrustStore,
                     setPrimaryIfUnset: setP2pPrimaryIfUnset,
                     stableIrohEndpointId: irohSecret.public().toString(),
@@ -700,12 +721,30 @@ async function runOwnedLocalProtocolServer(
             serveRequest: createServeP2pHttpRequest({
                 allowRequest: (peerId, request) =>
                     loadedConfig.config.p2p.exposeApi ||
-                    (canP2pPeerConfigure(peerId) && isP2pConfigurationPath(request.path)),
+                    (canP2pPeerConfigure(peerId) &&
+                        (isP2pConfigurationPath(request.path) || isP2pProfilePath(request.path))),
                 socketPath,
                 token,
             }),
             serveTunnel: createServeP2pTunnel({ socketPath, token }),
         });
+        if (rigProfiles !== undefined && p2pIdentity !== undefined) {
+            p2pProfileReplicator = new P2pProfileReplicator({
+                listPeerIds: () => p2pPeerTrustStore.peers().map((peer) => peer.instanceId),
+                localInstanceId: p2pIdentity.instanceId,
+                network: p2pNetwork,
+                onError: (peerId, error) => {
+                    daemonLog.record(
+                        "warning",
+                        "p2p_profile_replication_failed",
+                        "Rig could not synchronize a human profile with a secondary Rig.",
+                        { error: errorToMessage(error), peerId },
+                    );
+                },
+                profiles: rigProfiles,
+            });
+            p2pProfileReplicator.syncAll({ recheckTargets: true });
+        }
         const irohStatus = p2pNetwork
             .status()
             .transports.find(
@@ -725,6 +764,7 @@ async function runOwnedLocalProtocolServer(
         }
         shutdown.register("p2p", async () => {
             await p2pPairingService?.close();
+            await p2pProfileReplicator?.close();
             await p2pNetwork?.close();
         });
         const startedPluginManager = (pluginManager = new PluginManager({
@@ -845,6 +885,20 @@ async function runOwnedLocalProtocolServer(
                 ...(p2pPairingService === undefined ? {} : { p2pPairing: p2pPairingService }),
                 p2pNode: () => ({ ...p2pNode }),
                 p2pStatus: () => p2pNetwork?.status() ?? { transports: [] },
+                ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
+                ...(rigProfiles === undefined || p2pNetwork === undefined
+                    ? {}
+                    : {
+                          prepareP2pRequest: ({ body, path, peerId, signal }) =>
+                              replicateProfileForP2pRequest({
+                                  body,
+                                  network: p2pNetwork!,
+                                  path,
+                                  peerId,
+                                  profiles: rigProfiles!,
+                                  signal,
+                              }),
+                      }),
                 canP2pPeerConfigure,
                 plugins,
                 ...(worklets === undefined ? {} : { worklets }),
@@ -984,6 +1038,11 @@ function isP2pConfigurationPath(path: string): boolean {
         pathname === "/config/instructions" ||
         pathname === "/config/security"
     );
+}
+
+function isP2pProfilePath(path: string): boolean {
+    const pathname = new URL(path, "http://rig.local").pathname;
+    return pathname === "/profiles" || /^\/profiles\/[a-z][a-z0-9]+$/u.test(pathname);
 }
 
 async function writeRegistry(path: string, payload: unknown): Promise<void> {

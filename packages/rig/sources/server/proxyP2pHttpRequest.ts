@@ -8,6 +8,14 @@ import {
     type P2pNetwork,
 } from "../p2p/index.js";
 import { selectP2pRequestHeaders } from "./p2pHttpHeaders.js";
+import { P2pProfileReplicationError } from "../profiles/index.js";
+
+export type PrepareP2pHttpRequest = (input: {
+    body: Uint8Array;
+    path: string;
+    peerId: string;
+    signal: AbortSignal;
+}) => Promise<void>;
 
 export async function proxyP2pHttpRequest(
     network: P2pNetwork,
@@ -15,6 +23,7 @@ export async function proxyP2pHttpRequest(
     path: string,
     request: IncomingMessage,
     response: ServerResponse,
+    prepare?: PrepareP2pHttpRequest,
 ): Promise<void> {
     if (isP2pPath(path)) {
         sendJsonError(response, 403, "P2P routes cannot be forwarded through another peer.");
@@ -26,6 +35,12 @@ export async function proxyP2pHttpRequest(
     response.once("close", abort);
     try {
         const body = await readBody(request);
+        await prepare?.({
+            body,
+            path,
+            peerId,
+            signal: controller.signal,
+        });
         const head = {
             headers: selectP2pRequestHeaders(request.headers),
             method: request.method ?? "GET",
@@ -59,6 +74,8 @@ export async function proxyP2pHttpRequest(
         if (controller.signal.aborted) return;
         if (error instanceof P2pRequestBodyTooLargeError) {
             sendJsonError(response, 413, "Request body is larger than the P2P limit.");
+        } else if (error instanceof P2pProfileReplicationError) {
+            sendJsonError(response, error.status, error.message);
         } else if (!response.headersSent) {
             sendJsonError(response, 502, "The peer could not complete the request.");
         } else {

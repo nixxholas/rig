@@ -701,11 +701,24 @@ describe("connectRig mutations", () => {
     it("shows a sent message synchronously and reuses one session stream", async () => {
         const stream = streamResponse();
         const calls: { init?: RequestInit; url: URL }[] = [];
+        const profile = {
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name: "Steve",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 1,
+            version: 1,
+        };
         const fetch = vi.fn((input: string | URL | Request, init?: RequestInit) => {
             const url = new URL(String(input));
             calls.push({ ...(init === undefined ? {} : { init }), url });
             if (url.pathname === "/events/live") {
                 return Promise.resolve(stream.response);
+            }
+            if (url.pathname === "/profiles") {
+                return Promise.resolve(
+                    new Response(JSON.stringify({ profiles: [profile] }), { status: 200 }),
+                );
             }
             if (url.pathname.endsWith("/state")) {
                 return Promise.resolve(
@@ -735,10 +748,14 @@ describe("connectRig mutations", () => {
         try {
             stream.write(liveHello());
             await settle();
-            const mutationId = rig.sendMessage("session-1", "Visible now");
+            const mutationId = rig.sendMessage("session-1", {
+                identity: profile.id,
+                text: "Visible now",
+            });
 
             expect(typeof mutationId).toBe("string");
             expect(first.elements().at(-1)).toMatchObject({
+                identity: profile.id,
                 kind: "user_message",
                 messageId: mutationId,
                 text: "Visible now",
@@ -748,10 +765,13 @@ describe("connectRig mutations", () => {
             const sent = calls.find((call) => call.url.pathname.endsWith("/messages"));
             expect(JSON.parse(String(sent?.init?.body))).toMatchObject({
                 clientSubmissionId: mutationId,
+                identity: profile.id,
                 mutationId,
                 text: "Visible now",
             });
-            expect((sent?.init?.headers as Record<string, string>)["if-match"]).toBe(
+            await settle();
+            expect(first.elements().at(-1)).toMatchObject({ profile });
+            expect((sent!.init!.headers as Record<string, string>)["if-match"]).toBe(
                 '"01900000-0000-7000-8000-000000000001"',
             );
         } finally {
@@ -2269,6 +2289,121 @@ describe("connectRig mutations", () => {
             expect(frames.every((frame) => frame.length <= 1)).toBe(true);
         } finally {
             connection.close();
+            rig.close();
+        }
+    });
+
+    it("recovers the shared profile cache after a transient read failure", async () => {
+        const stream = streamResponse();
+        const profile = {
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name: "Steve",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 1,
+            version: 1,
+        };
+        let profileReads = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/profiles") {
+                    profileReads += 1;
+                    return Promise.resolve(
+                        profileReads === 1
+                            ? new Response(JSON.stringify({ error: "temporary" }), { status: 503 })
+                            : new Response(JSON.stringify({ profiles: [profile] }), {
+                                  status: 200,
+                              }),
+                    );
+                }
+                return Promise.resolve(new Response("{}", { status: 404 }));
+            },
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        const changes: (readonly (typeof profile)[])[] = [];
+        const errors: unknown[] = [];
+        const connection = rig.connectProfiles({
+            onChange: (profiles) => changes.push(profiles),
+            onError: (error) => errors.push(error),
+        });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            expect(profileReads).toBe(2);
+            expect(errors).toHaveLength(1);
+            expect(connection.profiles()).toEqual([profile]);
+            expect(changes).toEqual([[profile]]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("resolves identities when a session opens after profiles already loaded", async () => {
+        const stream = streamResponse();
+        const profile = {
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name: "Steve",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 1,
+            version: 1,
+        };
+        const state = sessionState();
+        state.session!.snapshot.messages = [
+            {
+                blocks: [{ text: "Hi from Steve", type: "text" }],
+                id: "message-profiled",
+                identity: profile.id,
+                role: "user",
+            },
+        ];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/profiles") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ profiles: [profile] }), { status: 200 }),
+                    );
+                }
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(new Response(JSON.stringify(state), { status: 200 }));
+                }
+                return Promise.resolve(new Response("{}", { status: 404 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        const profiles = rig.connectProfiles({ onChange: () => undefined });
+        let session: ReturnType<typeof rig.connectSession> | undefined;
+        try {
+            stream.write(liveHello());
+            await settle();
+            expect(profiles.profiles()).toEqual([profile]);
+
+            session = rig.connectSession({
+                onChange: () => undefined,
+                sessionId: "session-1",
+            });
+            await settle();
+
+            expect(session.elements()[0]).toMatchObject({
+                identity: profile.id,
+                kind: "user_message",
+                profile,
+                text: "Hi from Steve",
+            });
+        } finally {
+            session?.close();
+            profiles.close();
             rig.close();
         }
     });

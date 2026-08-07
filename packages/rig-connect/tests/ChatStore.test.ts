@@ -115,6 +115,58 @@ function runOneTurn(store: ChatStore): ChatDelta[] {
 }
 
 describe("ChatStore", () => {
+    it("resolves message identities and preserves unrelated element references", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const firstProfileId = "aprofile000000000000000001";
+        const secondProfileId = "aprofile000000000000000002";
+        for (const [id, identity, text] of [
+            ["message-1", firstProfileId, "From Steve"],
+            ["message-2", secondProfileId, "From Ada"],
+            ["message-3", null, "Local"],
+        ] as const) {
+            store.apply(
+                event("message_submitted", {
+                    delivery: "run",
+                    message: {
+                        blocks: [{ text, type: "text" }],
+                        id,
+                        identity,
+                        role: "user",
+                    },
+                    runId: "run-1",
+                }),
+            );
+        }
+        const before = store.elements();
+        const unrelated = before[1];
+        const local = before[2];
+        const profile = {
+            createdAt: 1,
+            id: firstProfileId,
+            name: "Steve",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 1,
+            version: 1,
+        };
+
+        expect(store.applyProfiles([profile])).toHaveLength(1);
+        expect(store.elements()[0]).toMatchObject({
+            identity: firstProfileId,
+            profile,
+        });
+        expect(store.elements()[1]).toBe(unrelated);
+        expect(store.elements()[2]).toBe(local);
+
+        const firstResolved = store.elements()[0];
+        const renamed = { ...profile, name: "Steve Korshakov", updatedAt: 2, version: 2 };
+        store.applyProfiles([renamed]);
+        expect(store.elements()[0]).not.toBe(firstResolved);
+        expect(store.elements()[0]).toMatchObject({ profile: renamed });
+        expect(store.elements()[1]).toBe(unrelated);
+        expect(store.elements()[2]).toBe(local);
+    });
+
     it("rebuilds a tail context anchor without restoring a live turn", () => {
         const message = {
             blocks: [{ text: "Use the blue database.", type: "text" as const }],

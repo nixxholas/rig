@@ -21,6 +21,7 @@ import {
     discoverPluginCatalogRequestSchema as daemonDiscoverPluginCatalogRequestSchema,
     discoverPluginCatalogResponseSchema as daemonDiscoverPluginCatalogResponseSchema,
     installPluginRequestSchema as daemonInstallPluginRequestSchema,
+    rigProfileSchema as daemonRigProfileSchema,
     rigCliInstallationInspectionSchema as daemonRigCliInstallationInspectionSchema,
     rigDaemonInstallationDiscoverySchema as daemonRigDaemonInstallationDiscoverySchema,
     rigDataEpochSchema as daemonRigDataEpochSchema,
@@ -46,6 +47,7 @@ import {
     githubPluginCatalogSchema,
     installPluginRequestSchema,
     moveFolderRequestSchema,
+    rigProfileSchema,
     projectWorkspaceSchema,
     setSessionFolderRequestSchema,
     systemNoticePayloadSchema,
@@ -96,6 +98,22 @@ type _SystemNoticePayload = Assignable<local.SystemNoticePayload, daemon.SystemN
 type _DaemonServiceNotice = Assignable<daemon.ServiceNotice, local.ServiceNotice>;
 type _DaemonSystemNoticePayload = Assignable<daemon.SystemNoticePayload, local.SystemNoticePayload>;
 type _SystemMessage = Assignable<local.SystemMessage, daemonAgent.SystemMessage>;
+type _UserMessage = Assignable<local.UserMessage, daemonAgent.UserMessage>;
+type _DaemonUserMessage = Assignable<daemonAgent.UserMessage, local.UserMessage>;
+type _RigProfile = Assignable<local.RigProfile, daemon.RigProfile>;
+type _DaemonRigProfile = Assignable<daemon.RigProfile, local.RigProfile>;
+type _CreateRigProfileRequest = Assignable<
+    local.CreateRigProfileRequest,
+    daemon.CreateRigProfileRequest
+>;
+type _UpdateRigProfileRequest = Assignable<
+    local.UpdateRigProfileRequest,
+    daemon.UpdateRigProfileRequest
+>;
+type _RigProfileChangedEvent = Assignable<
+    local.RigProfileChangedEvent,
+    daemon.RigProfileChangedEvent
+>;
 type _TranscriptNotice = Assignable<local.SessionTranscriptNotice, daemon.SessionTranscriptNotice>;
 type ApplicationReadEventType =
     | "session_updated"
@@ -577,6 +595,24 @@ describe("protocol conformance", () => {
                 source: { ...source, plugin: { ...entry, version: "1.2" } },
             }),
         );
+    });
+
+    it("decodes the same parent-owned human profile", () => {
+        const profile = {
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name: "Steve 🧑‍💻",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 2,
+            version: 3,
+        };
+
+        expect(Value.Decode(rigProfileSchema, profile)).toEqual(profile);
+        expect(Value.Decode(daemonRigProfileSchema, profile)).toEqual(profile);
+        for (const schema of [rigProfileSchema, daemonRigProfileSchema]) {
+            expect(Value.Check(schema, { ...profile, name: "" })).toBe(false);
+            expect(Value.Check(schema, { ...profile, parentInstanceId: "not a cuid" })).toBe(false);
+        }
     });
 
     it("rejects compute error detail beyond the daemon's canonical bound", () => {

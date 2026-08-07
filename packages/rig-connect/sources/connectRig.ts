@@ -94,6 +94,10 @@ import type {
     CreateP2pInvitationResponse,
     JoinP2pInvitationResponse,
     P2pPairingState,
+    CreateRigProfileRequest,
+    RigProfile,
+    RigProfileResponse,
+    UpdateRigProfileRequest,
 } from "./protocol.js";
 import {
     HAPPY_CLOUD_CONTRACT_VERSION,
@@ -105,6 +109,12 @@ import {
     happyCloudStatusSchema,
     p2pStatusChangedEventSchema,
     p2pStatusSchema,
+    createRigProfileRequestSchema,
+    listRigProfilesResponseSchema,
+    rigProfileIdSchema,
+    rigProfileChangedEventSchema,
+    rigProfileResponseSchema,
+    updateRigProfileRequestSchema,
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
     p2pPairingStateSchema,
@@ -138,6 +148,7 @@ const GIT_WATCH_RETRY_MS = 5_000;
 const MAXIMUM_PLUGIN_APP_REQUEST_BYTES = 1024 * 1024;
 const MAXIMUM_PLUGIN_APP_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAXIMUM_PLUGIN_ICON_BYTES = 4 * 1024 * 1024;
+const MAXIMUM_PROFILE_RESPONSE_BYTES = 20 * 1024 * 1024;
 const pluginAppToolResponseSchema = Type.Object(
     { result: Type.Unknown() },
     { additionalProperties: false },
@@ -344,6 +355,17 @@ export interface RigP2pConnection {
     status: () => P2pStatus | undefined;
 }
 
+export interface RigProfilesSubscriptionOptions {
+    onChange: (profiles: readonly RigProfile[]) => void;
+    onError?: (error: unknown) => void;
+}
+
+export interface RigProfilesConnection {
+    close: () => void;
+    /** Empty until the first authoritative profile snapshot has loaded. */
+    profiles: () => readonly RigProfile[];
+}
+
 export interface RigInboxSubscriptionOptions {
     onChange: (items: readonly InboxItem[], state: InboxState) => void;
     onDelta?: (delta: InboxDelta) => void;
@@ -513,6 +535,12 @@ export interface RigTimelineConnection {
 export interface SendMessageInput {
     content?: readonly ContentBlock[];
     displayText?: string;
+    identity?: string | null;
+    text: string;
+}
+
+export interface SendContextMessageInput {
+    identity?: string | null;
     text: string;
 }
 
@@ -705,6 +733,18 @@ export interface RigConnection {
     connectHappyCloud: (options: RigHappyCloudSubscriptionOptions) => RigHappyCloudConnection;
     /** Follows authenticated P2P transports and trusted peer reachability. */
     connectP2p: (options: RigP2pSubscriptionOptions) => RigP2pConnection;
+    /** Follows the human profiles whose identities appear on messages. */
+    connectProfiles: (options: RigProfilesSubscriptionOptions) => RigProfilesConnection;
+    listProfiles: (options?: { signal?: AbortSignal }) => Promise<readonly RigProfile[]>;
+    createProfile: (
+        request: CreateRigProfileRequest,
+        options?: { signal?: AbortSignal },
+    ) => Promise<RigProfile>;
+    updateProfile: (
+        profileId: string,
+        request: UpdateRigProfileRequest,
+        options?: { signal?: AbortSignal },
+    ) => Promise<RigProfile>;
     createP2pInvitation: () => Promise<CreateP2pInvitationResponse>;
     joinP2pInvitation: (invitation: string) => Promise<JoinP2pInvitationResponse>;
     getP2pPairing: (id: string) => Promise<P2pPairingState>;
@@ -777,7 +817,10 @@ export interface RigConnection {
     /** Clears a chat's unread state, the way focusing a terminal on it does. */
     markSessionRead: (sessionId: string) => MutationId;
     sendMessage: (sessionId: string, message: string | SendMessageInput) => MutationId;
-    sendContextMessage: (sessionId: string, text: string) => MutationId;
+    sendContextMessage: (
+        sessionId: string,
+        message: string | SendContextMessageInput,
+    ) => MutationId;
     stopRun: (sessionId: string) => MutationId;
     switchModel: (sessionId: string, selection: string | ModelSelection) => MutationId;
     setEffort: (sessionId: string, effort?: string) => MutationId;
@@ -1004,6 +1047,23 @@ interface P2pEntry {
     subscribers: Set<P2pSubscriber>;
 }
 
+interface ProfilesSubscriber extends RigProfilesSubscriptionOptions {
+    closed: boolean;
+}
+
+interface ProfilesEntry {
+    controller: AbortController;
+    detachRoot: () => void;
+    lastLoadError?: unknown;
+    loaded: boolean;
+    loading?: Promise<void>;
+    profiles: readonly RigProfile[];
+    recoveryScheduled: boolean;
+    reloadPending: boolean;
+    started: boolean;
+    subscribers: Set<ProfilesSubscriber>;
+}
+
 interface MutationRequest {
     body?: unknown;
     headers?: Readonly<Record<string, string>>;
@@ -1076,6 +1136,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let groupsEntry: GroupEntry | undefined;
     let happyCloudEntry: HappyCloudEntry | undefined;
     let p2pEntry: P2pEntry | undefined;
+    let profilesEntry: ProfilesEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
     let folderEntry: FolderEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
@@ -1123,6 +1184,32 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         for (const subscriber of [...entry.subscribers]) {
             if (!subscriber.closed) subscriber.onChange(entry.status);
         }
+    };
+
+    const publishProfiles = (entry: ProfilesEntry): void => {
+        if (closed || !entry.loaded) return;
+        for (const subscriber of [...entry.subscribers]) {
+            if (!subscriber.closed) subscriber.onChange(entry.profiles);
+        }
+    };
+
+    const applyProfiles = (entry: ProfilesEntry, incoming: readonly RigProfile[]): boolean => {
+        const wasLoaded = entry.loaded;
+        const previous = new Map(entry.profiles.map((profile) => [profile.id, profile]));
+        const next = incoming.map((profile) => {
+            const current = previous.get(profile.id);
+            return current?.version === profile.version ? current : profile;
+        });
+        const changed =
+            next.length !== entry.profiles.length ||
+            next.some((profile, index) => profile !== entry.profiles[index]);
+        entry.loaded = true;
+        if (changed) entry.profiles = next;
+        if (!wasLoaded || changed) publishProfiles(entry);
+        for (const session of sessionEntries.values()) {
+            publishSession(session, session.store.applyProfiles(entry.profiles));
+        }
+        return true;
     };
 
     const publishInbox = (deltas: readonly InboxDelta[]): void => {
@@ -1826,6 +1913,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 ],
             ]),
         }));
+        ensureProfilesForSession(entry);
         queueGitWatchSync();
     };
 
@@ -2178,6 +2266,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (p2pEntry !== undefined && p2pEntry.started) {
                         void loadP2p(p2pEntry);
                     }
+                    if (profilesEntry !== undefined && profilesEntry.started) {
+                        void loadProfiles(profilesEntry);
+                    }
                     if (groupsEntry !== undefined) {
                         publishGroups(groupsEntry, groupsEntry.store.setConnection("live"));
                     }
@@ -2207,6 +2298,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (p2pEntry !== undefined && p2pEntry.started) {
                     void loadP2p(p2pEntry);
+                }
+                if (profilesEntry !== undefined && profilesEntry.started) {
+                    void loadProfiles(profilesEntry);
                 }
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
@@ -2263,6 +2357,22 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     return;
                 }
                 rememberGlobalIdentity(event);
+                if (event.type === "profile_changed") {
+                    const entry = profilesEntry;
+                    if (entry === undefined || !entry.started) return;
+                    try {
+                        Value.Decode(rigProfileChangedEventSchema, event);
+                    } catch {
+                        for (const subscriber of [...entry.subscribers]) {
+                            subscriber.onError?.(
+                                new Error("Rig sent an invalid human profile update."),
+                            );
+                        }
+                        return;
+                    }
+                    void loadProfiles(entry);
+                    return;
+                }
                 if (event.type === "p2p_status_changed") {
                     const entry = p2pEntry;
                     if (entry === undefined || !entry.started) return;
@@ -2396,6 +2506,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                               }),
                     }),
                 );
+                if (session !== undefined) ensureProfilesForSession(session);
                 if (inboxEntry !== undefined) publishInbox(inboxEntry.store.apply(event));
                 for (const entry of [...timelineEntries.values()]) {
                     if (entry.started) publishTimeline(entry, entry.store.apply(event));
@@ -2694,6 +2805,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             p2pEntry.controller.abort();
             p2pEntry.detachRoot();
             p2pEntry = undefined;
+        }
+        if (
+            profilesEntry !== undefined &&
+            profilesEntry.subscribers.size === 0 &&
+            sessionEntries.size === 0
+        ) {
+            profilesEntry.controller.abort();
+            profilesEntry.detachRoot();
+            profilesEntry = undefined;
         }
         if (
             groupsEntry !== undefined &&
@@ -3637,6 +3757,229 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
+    const createProfilesEntry = (): ProfilesEntry => {
+        if (profilesEntry !== undefined) return profilesEntry;
+        const linked = linkedController(rootController.signal);
+        profilesEntry = {
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            loaded: false,
+            profiles: [],
+            recoveryScheduled: false,
+            reloadPending: false,
+            started: false,
+            subscribers: new Set(),
+        };
+        return profilesEntry;
+    };
+
+    const readProfiles = async (signal: AbortSignal): Promise<readonly RigProfile[]> => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const response = await request(endpointUrl(options.endpoint, "profiles"), {
+            headers: {
+                accept: "application/json",
+                authorization: `Bearer ${options.token}`,
+            },
+            signal,
+        });
+        const bytes = await readBoundedResponseBytes(
+            response,
+            MAXIMUM_PROFILE_RESPONSE_BYTES,
+            "human profile data",
+        );
+        const text = new TextDecoder().decode(bytes);
+        let data: unknown;
+        try {
+            data = text.length === 0 ? undefined : (JSON.parse(text) as unknown);
+        } catch {
+            data = text;
+        }
+        if (!response.ok) {
+            throw new MutationHttpError(
+                response.status,
+                humanMutationError(data, response.status),
+                undefined,
+                data,
+            );
+        }
+        try {
+            return Value.Decode(listRigProfilesResponseSchema, data).profiles;
+        } catch {
+            throw new Error("Rig returned an invalid human profile list.");
+        }
+    };
+
+    const loadProfiles = (entry: ProfilesEntry): Promise<void> => {
+        if (entry.loading !== undefined) {
+            entry.reloadPending = true;
+            return entry.loading;
+        }
+        let shouldRecover = false;
+        const loading = readProfiles(entry.controller.signal).then((profiles) => {
+            if (entry.controller.signal.aborted || profilesEntry !== entry) return;
+            delete entry.lastLoadError;
+            applyProfiles(entry, profiles);
+        });
+        entry.loading = loading;
+        void loading
+            .catch((error: unknown) => {
+                if (entry.controller.signal.aborted || profilesEntry !== entry) return;
+                entry.lastLoadError = error;
+                for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                shouldRecover = true;
+            })
+            .finally(() => {
+                if (entry.loading === loading) delete entry.loading;
+                if (entry.controller.signal.aborted || profilesEntry !== entry) return;
+                if (entry.reloadPending) {
+                    entry.reloadPending = false;
+                    void loadProfiles(entry);
+                } else if (shouldRecover) {
+                    scheduleProfilesRecovery(entry);
+                }
+            });
+        return loading;
+    };
+
+    const scheduleProfilesRecovery = (entry: ProfilesEntry): void => {
+        if (entry.recoveryScheduled || entry.controller.signal.aborted) return;
+        entry.recoveryScheduled = true;
+        void wait(MAXIMUM_MUTATION_RETRY_MS, entry.controller.signal).then(() => {
+            entry.recoveryScheduled = false;
+            if (entry.controller.signal.aborted || profilesEntry !== entry) return;
+            const neededBySession = [...sessionEntries.values()].some((session) =>
+                session.store
+                    .elements()
+                    .some(
+                        (element) => element.kind === "user_message" && element.identity !== null,
+                    ),
+            );
+            if (entry.subscribers.size > 0 || neededBySession) void loadProfiles(entry);
+        });
+    };
+
+    const startProfilesEntry = (entry: ProfilesEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (!liveStreamOpen) return;
+        void loadProfiles(entry);
+    };
+
+    const ensureProfilesForSession = (entry: SessionEntry): void => {
+        const attributed = entry.store
+            .elements()
+            .some((element) => element.kind === "user_message" && element.identity !== null);
+        if (!attributed) return;
+        const profiles = createProfilesEntry();
+        if (profiles.loaded) {
+            publishSession(entry, entry.store.applyProfiles(profiles.profiles));
+        }
+        startProfilesEntry(profiles);
+    };
+
+    const connectProfiles: RigConnection["connectProfiles"] = (subscription) => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createProfilesEntry();
+        const subscriber: ProfilesSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        if (entry.loaded) subscriber.onChange(entry.profiles);
+        if (entry.lastLoadError !== undefined) subscriber.onError?.(entry.lastLoadError);
+        startProfilesEntry(entry);
+        return {
+            profiles: () => (subscriber.closed ? [] : entry.profiles),
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                releaseUnusedEntries();
+            },
+        };
+    };
+
+    const listProfiles: RigConnection["listProfiles"] = async (operationOptions = {}) => {
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            const profiles = await readProfiles(operation.signal);
+            const entry = profilesEntry;
+            if (entry !== undefined) applyProfiles(entry, profiles);
+            return profiles;
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const requestProfileMutation = async (
+        path: string,
+        method: "PATCH" | "POST",
+        body: unknown,
+        signal: AbortSignal | undefined,
+    ): Promise<RigProfile> => {
+        const operation = combinedSignal(rootController.signal, signal);
+        try {
+            const response = await requestJson(path, {
+                body: JSON.stringify(body),
+                headers: { "content-type": "application/json" },
+                method,
+                signal: operation.signal,
+            });
+            if (response.status >= 400) {
+                throw new MutationHttpError(
+                    response.status,
+                    humanMutationError(response.data, response.status),
+                    undefined,
+                    response.data,
+                );
+            }
+            let profile: RigProfileResponse;
+            try {
+                profile = Value.Decode(rigProfileResponseSchema, response.data);
+            } catch {
+                throw new Error("Rig returned an invalid human profile.");
+            }
+            const entry = createProfilesEntry();
+            const withoutProfile = entry.profiles.filter(
+                (candidate) => candidate.id !== profile.profile.id,
+            );
+            applyProfiles(
+                entry,
+                [...withoutProfile, profile.profile].sort((first, second) =>
+                    first.id.localeCompare(second.id),
+                ),
+            );
+            startProfilesEntry(entry);
+            return profile.profile;
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const createProfile: RigConnection["createProfile"] = (profile, operationOptions = {}) => {
+        if (!Value.Check(createRigProfileRequestSchema, profile)) {
+            return Promise.reject(new Error("The human profile is invalid."));
+        }
+        return requestProfileMutation("profiles", "POST", profile, operationOptions.signal);
+    };
+
+    const updateProfile: RigConnection["updateProfile"] = (
+        profileId,
+        profile,
+        operationOptions = {},
+    ) => {
+        if (!Value.Check(rigProfileIdSchema, profileId)) {
+            return Promise.reject(new Error("The human profile ID is invalid."));
+        }
+        if (!Value.Check(updateRigProfileRequestSchema, profile)) {
+            return Promise.reject(new Error("The human profile update is invalid."));
+        }
+        return requestProfileMutation(
+            `profiles/${encodeURIComponent(profileId)}`,
+            "PATCH",
+            profile,
+            operationOptions.signal,
+        );
+    };
+
     const getHappyCloudStatus: RigConnection["getHappyCloudStatus"] = (operationOptions = {}) =>
         requestHappyCloud(
             "happy-cloud/status",
@@ -4159,7 +4502,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 const undos: (() => void)[] = [];
                 const entry = sessionEntries.get(sessionId);
                 if (entry !== undefined) {
-                    const changed = entry.store.applyOptimisticMessage(id, input.text, now());
+                    const changed = entry.store.applyOptimisticMessage(
+                        id,
+                        input.text,
+                        now(),
+                        input.identity ?? null,
+                    );
+                    if (input.identity !== undefined && input.identity !== null) {
+                        ensureProfilesForSession(entry);
+                    }
                     undos.push(changed.undo);
                     if (publish) publishSession(entry, changed.deltas);
                 }
@@ -4182,6 +4533,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         ...(input.displayText === undefined
                             ? {}
                             : { displayText: input.displayText }),
+                        ...(input.identity === undefined || input.identity === null
+                            ? {}
+                            : { identity: input.identity }),
                         ...(expectedRunId === undefined ? {} : { expectedRunId }),
                         mutationId: id,
                         text: input.text,
@@ -4198,7 +4552,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return enqueue(mutation);
     };
 
-    const sendContextMessage = (sessionId: string, text: string): MutationId => {
+    const sendContextMessage = (
+        sessionId: string,
+        message: string | SendContextMessageInput,
+    ): MutationId => {
+        const input = typeof message === "string" ? { text: message } : message;
         const id = nextMutationId();
         const key = sessionKey(sessionId);
         let expectedEventId: string | undefined;
@@ -4214,7 +4572,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 const undos: (() => void)[] = [];
                 const entry = sessionEntries.get(sessionId);
                 if (entry !== undefined) {
-                    const changed = entry.store.applyOptimisticContextMessage(id, text, now());
+                    const changed = entry.store.applyOptimisticContextMessage(
+                        id,
+                        input.text,
+                        now(),
+                        input.identity ?? null,
+                    );
+                    if (input.identity !== undefined && input.identity !== null) {
+                        ensureProfilesForSession(entry);
+                    }
                     undos.push(changed.undo);
                     if (publish) publishSession(entry, changed.deltas);
                 }
@@ -4232,8 +4598,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 return {
                     body: {
                         clientSubmissionId: id,
+                        ...(input.identity === undefined || input.identity === null
+                            ? {}
+                            : { identity: input.identity }),
                         mutationId: id,
-                        text,
+                        text: input.text,
                     },
                     headers: ifMatchHeader(expectedEventId),
                     method: "POST",
@@ -5131,6 +5500,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             p2pEntry?.detachRoot();
             p2pEntry?.subscribers.clear();
             p2pEntry = undefined;
+            profilesEntry?.controller.abort();
+            profilesEntry?.detachRoot();
+            profilesEntry?.subscribers.clear();
+            profilesEntry = undefined;
             if (providerUsageEntry !== undefined) {
                 if (providerUsageEntry.timer !== undefined) {
                     clearTimeout(providerUsageEntry.timer);
@@ -5172,6 +5545,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectGroups,
         connectHappyCloud,
         connectP2p,
+        connectProfiles,
         connectInbox,
         connectPlugins,
         connectWorklets,
@@ -5180,6 +5554,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectTerminalPresence,
         connectTimeline,
         createP2pInvitation,
+        createProfile,
         createWorkspace,
         createSession,
         detachSecret,
@@ -5192,6 +5567,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         getP2pPairing,
         joinP2pInvitation,
         folders,
+        listProfiles,
         projects,
         readBackgroundProcess,
         readPluginLog,
@@ -5217,6 +5593,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         stopWorkflow,
         switchModel,
         uninstallPlugin,
+        updateProfile,
     };
 }
 
@@ -5404,11 +5781,12 @@ async function readResponseBody(response: Response): Promise<unknown> {
 async function readBoundedResponseBytes(
     response: Response,
     maximumBytes: number,
+    description = "plugin data",
 ): Promise<Uint8Array> {
     const declaredLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
         await response.body?.cancel().catch(() => undefined);
-        throw new Error("Rig returned more plugin data than the host can accept.");
+        throw new Error(`Rig returned more ${description} than the host can accept.`);
     }
     if (response.body === null) return new Uint8Array();
     const reader = response.body.getReader();
@@ -5421,7 +5799,7 @@ async function readBoundedResponseBytes(
             length += value.byteLength;
             if (length > maximumBytes) {
                 await reader.cancel().catch(() => undefined);
-                throw new Error("Rig returned more plugin data than the host can accept.");
+                throw new Error(`Rig returned more ${description} than the host can accept.`);
             }
             chunks.push(value);
         }

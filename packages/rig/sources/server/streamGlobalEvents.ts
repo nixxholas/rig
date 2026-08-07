@@ -189,6 +189,9 @@ function liveEventKey(event: GlobalLiveEvent): string {
     ) {
         return event.type;
     }
+    if (event.type === "profile_changed") {
+        return `${event.type}:${event.data.profileId}`;
+    }
     if ("sessionId" in event) return `${event.type}:session:${event.sessionId}`;
     const scope =
         "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;

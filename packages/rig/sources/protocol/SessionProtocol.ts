@@ -39,6 +39,7 @@ import type {
 } from "../external-tools/index.js";
 import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { ScheduledMessage } from "../scheduling/index.js";
+import { rigProfileIdentitySchema } from "./ProfileProtocol.js";
 
 export type SessionStatus =
     | "idle"
@@ -854,6 +855,8 @@ export interface SubmitMessageRequest {
     debug?: boolean;
     displayText?: string;
     interactive?: boolean;
+    /** Stable human profile identity. Local unattributed messages use null. */
+    identity?: string | null;
     /** Replaces the external function set for this and subsequent runs when present. */
     externalTools?: readonly ExternalToolDefinition[];
     /** Replaces the integration-owned durable skill set when present. */
@@ -882,6 +885,7 @@ export interface SubmitMessageRequest {
 export const submitContextMessageRequestSchema = Type.Object(
     {
         clientSubmissionId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        identity: Type.Optional(rigProfileIdentitySchema),
         mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         text: Type.String({ minLength: 1 }),
     },
