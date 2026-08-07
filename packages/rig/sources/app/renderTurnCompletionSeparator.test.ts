@@ -8,8 +8,8 @@ describe("renderTurnCompletionSeparator", () => {
         const rendered = stripAnsi(renderTurnCompletionSeparator(65_000, 40));
         expect(rendered).toContain("Worked for 1m 5s");
         expect(rendered).toHaveLength(40);
-        expect(stripAnsi(renderTurnCompletionSeparator(0, 12))).toBe("────────────");
-        expect(stripAnsi(renderTurnCompletionSeparator(60_000, 12))).toBe("────────────");
+        expect(stripAnsi(renderTurnCompletionSeparator(0, 20))).toContain("Worked for 0s");
+        expect(stripAnsi(renderTurnCompletionSeparator(60_000, 24))).toContain("Worked for 1m 0s");
         expect(stripAnsi(renderTurnCompletionSeparator(3_723_000, 24))).toHaveLength(24);
     });
 

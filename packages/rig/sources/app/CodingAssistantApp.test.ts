@@ -5457,11 +5457,7 @@ describe("CodingAssistantApp", () => {
         const renderedLines = app.render(80).map(stripAnsi);
         const userLineIndex = renderedLines.findIndex((line) => line.includes("› first"));
         const answerLineIndex = renderedLines.findIndex((line) => line.includes("• answer"));
-        const separatorLineIndex = renderedLines.findIndex((line) =>
-            line.includes(
-                "────────────────────────────────────────────────────────────────────────────────",
-            ),
-        );
+        const separatorLineIndex = renderedLines.findIndex((line) => line.includes("Worked for"));
 
         expect(userLineIndex).toBeGreaterThan(0);
         expect(answerLineIndex).toBeGreaterThan(userLineIndex);
@@ -7877,15 +7873,13 @@ describe("CodingAssistantApp", () => {
         await app.waitForIdle();
 
         const rendered = stripAnsi(app.render(80).join("\n"));
-        const separator =
-            "────────────────────────────────────────────────────────────────────────────────";
         expect(streamCalls).toBe(3);
         expect(rendered).toContain("• Ran printf tool-1");
         expect(rendered).toContain("└ tool-1");
         expect(rendered).toContain("• Ran printf tool-2");
         expect(rendered).toContain("└ tool-2");
-        expect(rendered.match(new RegExp(separator, "gu"))).toHaveLength(1);
-        expect(rendered.indexOf("• after tools")).toBeLessThan(rendered.indexOf(separator));
+        expect(rendered.match(/Worked for/gu)).toHaveLength(1);
+        expect(rendered.indexOf("• after tools")).toBeLessThan(rendered.indexOf("Worked for"));
     });
 
     it("places completion directly after the tool result when there is no final text", async () => {
@@ -8541,7 +8535,7 @@ describe("CodingAssistantApp", () => {
 
         const rendered = stripAnsi(app.render(100).join("\n"));
         expect(rendered).toContain("STEERED_TASK_COMPLETE");
-        expect(rendered).not.toContain("Worked for");
+        expect(rendered).toContain("Worked for 5s");
     });
 
     it("renders completed thinking blocks as transcript text", async () => {
@@ -9216,11 +9210,7 @@ describe("CodingAssistantApp", () => {
         expect(lines.length).toBeGreaterThan(8);
         expect(rendered).toContain("› first");
         expect(rendered).toContain("• answer 4");
-        expect(
-            rendered.match(
-                /────────────────────────────────────────────────────────────────────────────────/gu,
-            ),
-        ).toHaveLength(4);
+        expect(rendered.match(/Worked for/gu)).toHaveLength(4);
 
         const resized = stripAnsi(app.render(48).join("\n"));
         expect(resized).toContain("██████╗");

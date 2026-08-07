@@ -11,9 +11,6 @@ export function renderTurnCompletionSeparator(
     usageSummary?: string,
 ): string {
     const safeWidth = Math.max(1, width);
-    if (elapsedMs <= 60_000 && usageSummary === undefined) {
-        return `${DIM}${"─".repeat(safeWidth)}${RESET}`;
-    }
     const details = [`Worked for ${formatActivityElapsedTime(elapsedMs)}`];
     if (usageSummary !== undefined) details.push(usageSummary);
     const label = `─ ${details.join(" · ")} ─`;

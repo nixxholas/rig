@@ -50,7 +50,14 @@ describe("text-only completion preserves composer height", () => {
         const completedComposerRow = completed.rows.findIndex((row) =>
             row.includes("Ask Rig to do anything"),
         );
+        const completedResponseRow = completed.rows.findIndex((row) =>
+            row.includes("TEXT_ONLY_HEIGHT_HANDOFF"),
+        );
+        const workedRow = completed.rows.findIndex((row) => row.includes("Worked for"));
 
+        expect(completedResponseRow).toBeLessThan(workedRow);
+        expect(workedRow).toBeLessThan(completedComposerRow);
+        expect(completed.text.match(/Worked for/gu)).toHaveLength(1);
         expect(completedComposerRow).toBe(activeComposerRow);
         expect(completed.scroll.atBottom).toBe(true);
         expect(completed.text).not.toContain("�");
