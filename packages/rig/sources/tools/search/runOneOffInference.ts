@@ -5,7 +5,12 @@ import type { BaseProvider, SessionEvent, SessionTool } from "@slopus/rig-provid
 
 import type { OneOffInferenceRoute } from "./OneOffInferenceRoute.js";
 
-const DEFAULT_ONE_OFF_INFERENCE_TIMEOUT_MS = 60_000;
+/**
+ * A search is a reasoning model running several rounds of queries before it writes an answer, so
+ * a minute does not separate a slow search from a stuck one — it mostly cuts off work that was
+ * about to succeed. The other bounded side calls in Rig already allow minutes.
+ */
+const DEFAULT_ONE_OFF_INFERENCE_TIMEOUT_MS = 5 * 60 * 1000;
 
 export interface OneOffInferenceResult {
     durationMs: number;

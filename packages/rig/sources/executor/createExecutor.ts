@@ -1,7 +1,13 @@
 import { release } from "node:os";
 
 import type { ProviderUsage } from "@slopus/rig-providers";
-import { Executor, type ExecutorProvider, type Identity } from "@slopus/rig-execution";
+import {
+    Executor,
+    modelOpenaiGpt56Luna,
+    modelOpenaiGpt56Terra,
+    type ExecutorProvider,
+    type Identity,
+} from "@slopus/rig-execution";
 
 import type { AgentContext } from "../agent/context/AgentContext.js";
 import type { ConfigProvider, ConfigProviders } from "../config/types.js";
@@ -35,6 +41,7 @@ export function createExecutor(options: CreateExecutorOptions): CreateExecutorRe
     const definitions: ExecutorProvider[] = [];
     const missingCredentials = new Map<string, string>();
     const searchRoutes: SearchInferenceRoutes = {
+        bedrockRoutes: [],
         claudeRoutes: [],
         codexRoutes: [],
         grokRoutes: [],
@@ -57,6 +64,12 @@ export function createExecutor(options: CreateExecutorOptions): CreateExecutorRe
             options.allowEmptyModels === undefined ? {} : { allowEmpty: options.allowEmptyModels },
         );
         definitions.push(filtered);
+        if (config.type === "bedrock") {
+            const bedrockRoute = bedrockSearchRoute(filtered, config.searchModelId);
+            if (bedrockRoute !== undefined) {
+                searchRoutes.bedrockRoutes = [...searchRoutes.bedrockRoutes, bedrockRoute];
+            }
+        }
         const route = firstVisibleRoute(filtered);
         if (route !== undefined) {
             if (config.type === "claude") {
@@ -92,6 +105,35 @@ export function createExecutor(options: CreateExecutorOptions): CreateExecutorRe
 function firstVisibleRoute(provider: ExecutorProvider): OneOffInferenceRoute | undefined {
     const profile = provider.profiles.find((candidate) => candidate.hidden !== true);
     return profile === undefined ? undefined : { profile, provider };
+}
+
+/**
+ * Bedrock's hosted search belongs to its GPT models: they are the ones served over the Responses
+ * endpoint, while its Anthropic models go over the plain Messages transport and cannot reach it.
+ *
+ * These are the fallback when the configuration file does not name a search model. Search is a
+ * bounded query-and-summarize call that does not need a frontier model, and both of these are
+ * offered in every region where Web Search runs, so the tool answers with the same model wherever
+ * it is configured.
+ */
+const BEDROCK_SEARCH_MODEL_IDS = [modelOpenaiGpt56Luna.id, modelOpenaiGpt56Terra.id] as const;
+
+function bedrockSearchRoute(
+    provider: ExecutorProvider,
+    configuredModelId: string | undefined,
+): OneOffInferenceRoute | undefined {
+    // A configured model is a decision the user already made, so it is used as written or not at
+    // all. Falling back to a different model would answer their search from somewhere they did not
+    // ask for, which is worse than the tool being absent.
+    const modelIds =
+        configuredModelId === undefined ? BEDROCK_SEARCH_MODEL_IDS : [configuredModelId];
+    for (const modelId of modelIds) {
+        const profile = provider.profiles.find(
+            (candidate) => candidate.hidden !== true && candidate.id === modelId,
+        );
+        if (profile !== undefined) return { profile, provider };
+    }
+    return undefined;
 }
 
 function configuredExecutor(

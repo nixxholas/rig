@@ -214,6 +214,7 @@ export function createCodingAssistantAgent(
         throw new Error(`Unknown or disabled inference provider '${providerId}'.`);
     }
     let searchRoutes: SearchInferenceRoutes = {
+        bedrockRoutes: [],
         claudeRoutes: [],
         codexRoutes: [],
         grokRoutes: [],

@@ -3,6 +3,7 @@ import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-executi
 
 import type { AnyDefinedTool } from "../../../agent/types.js";
 import { assembleSearchTools } from "../assembleSearchTools.js";
+import { createBedrockWebSearchTool } from "../BedrockWebSearch.js";
 import { createClaudeWebSearchTool } from "../ClaudeWebSearch.js";
 import { createCodexWebSearchTool } from "../CodexWebSearch.js";
 import { createGrokWebSearchTool } from "../GrokWebSearch.js";
@@ -10,6 +11,7 @@ import { createGrokXSearchTool } from "../GrokXSearch.js";
 import type { OneOffInferenceRoute, SearchProviderRoutes } from "../OneOffInferenceRoute.js";
 
 const searchFactories: readonly ((options: SearchProviderRoutes) => AnyDefinedTool)[] = [
+    createBedrockWebSearchTool,
     createClaudeWebSearchTool,
     createCodexWebSearchTool,
     createGrokWebSearchTool,
@@ -52,6 +54,7 @@ describe("search tools", () => {
 
     it("keeps every vendor definition independent and always includes web_fetch", () => {
         const tools = assembleSearchTools({
+            bedrockRoutes: [route("bedrock")],
             claudeRoutes: [route("claude")],
             codexRoutes: [route("codex")],
             grokRoutes: [route("grok")],
@@ -61,6 +64,7 @@ describe("search tools", () => {
             "web_fetch",
             "claude_web_search",
             "codex_web_search",
+            "bedrock_web_search",
             "grok_web_search",
             "grok_x_search",
         ]);

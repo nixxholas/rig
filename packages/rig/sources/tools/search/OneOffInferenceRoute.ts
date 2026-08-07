@@ -7,6 +7,7 @@ export interface OneOffInferenceRoute {
 }
 
 export interface SearchInferenceRoutes {
+    bedrockRoutes: readonly OneOffInferenceRoute[];
     claudeRoutes: readonly OneOffInferenceRoute[];
     codexRoutes: readonly OneOffInferenceRoute[];
     grokRoutes: readonly OneOffInferenceRoute[];

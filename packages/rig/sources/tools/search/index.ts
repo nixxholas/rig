@@ -1,4 +1,5 @@
 export { assembleSearchTools } from "./assembleSearchTools.js";
+export { createBedrockWebSearchTool } from "./BedrockWebSearch.js";
 export { createClaudeWebSearchTool } from "./ClaudeWebSearch.js";
 export { createCodexWebSearchTool } from "./CodexWebSearch.js";
 export { createGeminiWebSearchTool } from "./GeminiWebSearch.js";

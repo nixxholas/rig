@@ -103,9 +103,12 @@ interface ConfigProviderBase {
 }
 
 export interface ConfigBedrockProvider extends ConfigProviderBase {
+    bearerToken?: string;
     bearerTokenEnvVar?: string;
     modelOverrides?: BedrockModelOverrides;
     region?: string;
+    /** Model that answers `bedrock_web_search`. Bedrock hosts Web Search only on its GPT models. */
+    searchModelId?: string;
     type: "bedrock";
 }
 

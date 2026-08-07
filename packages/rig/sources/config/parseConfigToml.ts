@@ -598,22 +598,28 @@ function readProviders(
         }
 
         dropUnknownKeys(rawProvider, `providers.${id}`, [
+            "bearer_token",
             "bearer_token_env_var",
             "enabled",
             "exclude_models",
             "include_models",
             "model_overrides",
             "region",
+            "search_model",
             "type",
         ]);
+        const bearerToken = readProviderString(id, rawProvider, "bearer_token");
         const bearerTokenEnvVar = readProviderString(id, rawProvider, "bearer_token_env_var");
         const modelOverrides = readBedrockModelOverrides(id, rawProvider);
         const region = readProviderString(id, rawProvider, "region");
+        const searchModelId = readProviderString(id, rawProvider, "search_model");
         providers[id] = {
             ...common,
+            ...(bearerToken === undefined ? {} : { bearerToken }),
             ...(bearerTokenEnvVar === undefined ? {} : { bearerTokenEnvVar }),
             ...(modelOverrides === undefined ? {} : { modelOverrides }),
             ...(region === undefined ? {} : { region }),
+            ...(searchModelId === undefined ? {} : { searchModelId }),
             type,
         };
     }

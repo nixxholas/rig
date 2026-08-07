@@ -61,6 +61,7 @@ function serializeProviderFields(provider: PartialConfigProvider): Record<string
         };
     }
     return {
+        ...(provider.bearerToken === undefined ? {} : { bearer_token: provider.bearerToken }),
         ...(provider.bearerTokenEnvVar === undefined
             ? {}
             : { bearer_token_env_var: provider.bearerTokenEnvVar }),
@@ -68,5 +69,6 @@ function serializeProviderFields(provider: PartialConfigProvider): Record<string
             ? {}
             : { model_overrides: provider.modelOverrides }),
         ...(provider.region === undefined ? {} : { region: provider.region }),
+        ...(provider.searchModelId === undefined ? {} : { search_model: provider.searchModelId }),
     };
 }

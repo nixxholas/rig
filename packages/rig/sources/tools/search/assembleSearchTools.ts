@@ -1,4 +1,5 @@
 import type { AnyDefinedTool } from "../../agent/types.js";
+import { createBedrockWebSearchTool } from "./BedrockWebSearch.js";
 import { createClaudeWebSearchTool } from "./ClaudeWebSearch.js";
 import { createCodexWebSearchTool } from "./CodexWebSearch.js";
 import { createGeminiWebSearchTool } from "./GeminiWebSearch.js";
@@ -9,6 +10,7 @@ import { createWebFetchTool } from "./web_fetch.js";
 
 /** Builds the fixed ordinary search-tool array from configured provider routes. */
 export function assembleSearchTools(options: {
+    bedrockRoutes: readonly OneOffInferenceRoute[];
     claudeRoutes: readonly OneOffInferenceRoute[];
     codexRoutes: readonly OneOffInferenceRoute[];
     currentRoute?: OneOffInferenceRoute;
@@ -34,6 +36,14 @@ export function assembleSearchTools(options: {
             : [
                   createCodexWebSearchTool({
                       routes: options.codexRoutes,
+                      ...(currentProviderId === undefined ? {} : { currentProviderId }),
+                  }),
+              ]),
+        ...(options.bedrockRoutes.length === 0
+            ? []
+            : [
+                  createBedrockWebSearchTool({
+                      routes: options.bedrockRoutes,
                       ...(currentProviderId === undefined ? {} : { currentProviderId }),
                   }),
               ]),

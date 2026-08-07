@@ -498,7 +498,9 @@ base_url = "https://grok.example/v1"
 [providers.eu_bedrock]
 type = "bedrock"
 region = "eu-west-1"
+bearer_token = "literal-bedrock-token"
 bearer_token_env_var = "WORK_BEDROCK_TOKEN"
+search_model = "openai/gpt-5.6-terra"
 
 [providers.eu_bedrock.model_overrides]
 "openai/gpt-5.6-sol" = { endpoint = "https://mantle.example/openai/v1", region = "us-east-1", transport = "mantle" }
@@ -507,6 +509,7 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             providers: {
                 codex: { enabled: false, type: "codex" },
                 eu_bedrock: {
+                    bearerToken: "literal-bedrock-token",
                     bearerTokenEnvVar: "WORK_BEDROCK_TOKEN",
                     modelOverrides: {
                         "openai/gpt-5.6-sol": {
@@ -516,6 +519,7 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
                         },
                     },
                     region: "eu-west-1",
+                    searchModelId: "openai/gpt-5.6-terra",
                     type: "bedrock",
                 },
                 work_claude: {

@@ -951,6 +951,9 @@ describe("createCodingAssistantAgent", () => {
         expect(runtime.executor.id).toBe("bedrock");
         expect(runtime.agent.model.id).toBe(modelAnthropicFable5.id);
         expect(runtime.agent.tools.map((tool) => tool.name)).toContain("Bash");
+        // Bedrock's hosted search is an ordinary tool, so an Anthropic model reaches it too even
+        // though its own transport has no search of its own.
+        expect(runtime.agent.tools.map((tool) => tool.name)).toContain("bedrock_web_search");
     });
 
     it("uses plaintext multi-agent v1 tools for Bedrock OpenAI models", () => {
@@ -1001,6 +1004,7 @@ describe("createCodingAssistantAgent", () => {
             "web_fetch",
             "claude_web_search",
             "codex_web_search",
+            "bedrock_web_search",
             "grok_web_search",
             "grok_x_search",
             "attach",

@@ -112,7 +112,12 @@
 # type = "bedrock"
 # enabled = true
 # region = "us-east-1"
+# The token itself, or the name of the variable holding it. The token written here wins.
+# bearer_token = "your-amazon-bedrock-api-key"
 # bearer_token_env_var = "AWS_BEARER_TOKEN_BEDROCK"
+# Model that answers bedrock_web_search. Bedrock hosts Web Search on its GPT models, in
+# us-east-1, us-east-2, and us-west-2 only. Defaults to GPT-5.6 Luna.
+# search_model = "openai/gpt-5.6-luna"
 # include_models = ["openai/gpt-5.6-sol"]
 # exclude_models = []
 
