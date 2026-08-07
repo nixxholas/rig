@@ -35,6 +35,7 @@ import type {
     Model,
     ProfileProviderType,
     ProfilePromptContext,
+    RawQueryOptions,
     ServiceTier,
     StreamOptions,
 } from "@/types.js";
@@ -171,6 +172,48 @@ export class Executor {
             profiles: this.profiles,
             ...(systemPrompt === undefined ? {} : { systemPrompt }),
         });
+    }
+
+    /**
+     * Asks one bounded question on the bare vendor provider.
+     *
+     * Everything the Executor normally contributes is deliberately absent: no model base prompt,
+     * no environment description, no tools, and no share of the conversation the agent is holding.
+     * The vendor session created here is its own, so this neither waits behind the agent's
+     * inference nor disturbs the history that session has cached. The provider is resolved through
+     * the same path agent inference uses, so it carries the same credentials and configuration.
+     */
+    async rawQuery(options: RawQueryOptions): Promise<string> {
+        if (this.forceClosed) throw new Error("The executor is closed.");
+        const profile = this.profile({ modelId: options.model.id, providerId: this.id });
+        const provider = this.providersById.get(profile.providerId)!;
+        const native = await this.resolveNative(provider, profile);
+        const session = await native.session(options.sessionId, {
+            instructions: options.instructions,
+            tools: [],
+        });
+        try {
+            let text = "";
+            for await (const event of session.run({
+                context: { messages: [{ role: "user", content: options.prompt }] },
+                effort: "off",
+                model: profile.id,
+                ...(options.signal === undefined ? {} : { abort: options.signal }),
+            })) {
+                if (event.type === "text_delta") text += event.delta;
+                if (event.type === "block_reset") text = "";
+                if (event.type !== "done") continue;
+                // A failed or cancelled response carries no answer. Reporting the provider's own
+                // failure is what keeps a broken title from looking like a malformed one.
+                if (event.state === "error") throw new Error(event.message);
+                if (event.state === "cancelled") {
+                    throw new Error("The provider cancelled the response.");
+                }
+            }
+            return text.trim();
+        } finally {
+            await session.destroy();
+        }
     }
 
     stream(model: Model, context: Context, streamOptions?: StreamOptions): InferenceStream {

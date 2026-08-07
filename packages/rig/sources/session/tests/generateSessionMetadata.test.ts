@@ -5,74 +5,84 @@ import {
     defineModel,
     defineProvider,
     type AssistantMessage,
-    type StreamOptions,
+    type RawQueryOptions,
 } from "@slopus/rig-execution";
 import { generateSessionMetadata, parseSessionMetadata } from "../generateSessionMetadata.js";
 
+function assistantMessage(text: string, model: string, provider: string): AssistantMessage {
+    return {
+        api: "test",
+        content: text.length === 0 ? [] : [{ text, type: "text" }],
+        model,
+        provider,
+        role: "assistant",
+        stopReason: "stop",
+        timestamp: 1,
+        usage: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
+            input: 0,
+            output: 0,
+            totalTokens: 0,
+        },
+    };
+}
+
 describe("parseSessionMetadata", () => {
-    it("accepts only the strict bounded title and recap object", () => {
+    it("reads the tagged answer out of whatever else the model said", () => {
         expect(
             parseSessionMetadata(
-                '{"title":"Delayed session metadata","recap":"The user added delayed metadata. The implementation is complete."}',
+                "Sure! Here is the metadata:\n" +
+                    "<title>Delayed session metadata</title>\n" +
+                    "<recap>The user added delayed metadata. The implementation is complete.</recap>\n" +
+                    "Let me know if you want another one.",
             ),
         ).toEqual({
             recap: "The user added delayed metadata. The implementation is complete.",
             title: "Delayed session metadata",
         });
-
-        expect(() => parseSessionMetadata("```json\n{}\n```")).toThrow("invalid JSON");
-        expect(() => parseSessionMetadata('{"title":"One","recap":"Valid recap."}')).toThrow(
-            "2 to 6 words",
-        );
-        expect(() =>
-            parseSessionMetadata('{"title":"Valid title","recap":"One. Two. Three."}'),
-        ).toThrow("at most 2 sentences");
-        expect(() =>
-            parseSessionMetadata('{"title":"Valid title","recap":"Valid recap.","extra":"no"}'),
-        ).toThrow("only string title and recap");
     });
 
-    it("forwards the stored session start date to metadata inference", async () => {
+    it("shortens an oversized answer instead of throwing the whole title away", () => {
+        const parsed = parseSessionMetadata(
+            `<title>${"Word ".repeat(12).trim()}</title><recap>One. Two. Three.</recap>`,
+        );
+
+        expect(parsed.title).toBe("Word Word Word Word Word Word");
+        expect(parsed.recap).toBe("One. Two.");
+    });
+
+    it("refuses an answer that named nothing", () => {
+        expect(() => parseSessionMetadata("I could not think of a title.")).toThrow(
+            "must contain a title and a recap",
+        );
+        expect(() => parseSessionMetadata("<title>Only a title</title>")).toThrow(
+            "must contain a title and a recap",
+        );
+    });
+
+    it("asks the bare provider for the title, carrying the stored session start date", async () => {
         const model = defineModel({
             defaultThinkingLevel: "off",
             id: "openai/gpt-5.4",
             name: "Metadata model",
             thinkingLevels: ["off"],
         });
-        let observedOptions: StreamOptions | undefined;
-        const message: AssistantMessage = {
-            api: "test",
-            content: [
-                {
-                    text: '{"title":"Stable session date","recap":"The stored session date was forwarded."}',
-                    type: "text",
+        let observed: RawQueryOptions | undefined;
+        const provider = {
+            ...defineProvider({
+                id: "codex",
+                models: [model],
+                stream() {
+                    throw new Error("Naming a chat must not run coding-agent inference.");
                 },
-            ],
-            model: model.id,
-            provider: "codex",
-            role: "assistant",
-            stopReason: "stop",
-            timestamp: 1,
-            usage: {
-                cacheRead: 0,
-                cacheWrite: 0,
-                cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
-                input: 0,
-                output: 0,
-                totalTokens: 0,
+            }),
+            rawQuery: async (options: RawQueryOptions) => {
+                observed = options;
+                return "<title>Stable session date</title><recap>The stored session date was forwarded.</recap>";
             },
         };
-        const provider = defineProvider({
-            id: "codex",
-            models: [model],
-            stream(_model, _context, options) {
-                observedOptions = options;
-                return createInferenceStream(async function* () {
-                    yield { message, reason: "stop", type: "done" };
-                    return message;
-                });
-            },
-        });
 
         await generateSessionMetadata({
             modelId: model.id,
@@ -82,22 +92,13 @@ describe("parseSessionMetadata", () => {
             transcript: "User: Keep the date stable.",
         });
 
-        expect(observedOptions).toMatchObject({
-            sessionId: "session-1:title",
-            startDate: "2024-01-02",
-            structuredOutput: {
-                name: "session_metadata",
-                schema: {
-                    additionalProperties: false,
-                    properties: {
-                        recap: { type: "string" },
-                        title: { type: "string" },
-                    },
-                    required: ["title", "recap"],
-                    type: "object",
-                },
-            },
-        });
+        expect(observed?.sessionId).toBe("session-1:title");
+        expect(observed?.startDate).toBe("2024-01-02");
+        expect(observed?.model.id).toBe(model.id);
+        // The instructions are the naming task and nothing else: no coding agent, no environment.
+        expect(observed?.instructions).toContain("<title>");
+        expect(observed?.instructions).not.toContain("software engineering");
+        expect(observed?.prompt).toContain("User: Keep the date stable.");
     });
 
     it("names the session with a cheap model from the session model's own family", async () => {
@@ -124,39 +125,19 @@ describe("parseSessionMetadata", () => {
             }),
         ];
         const observed: string[] = [];
-        const provider = defineProvider({
-            id: "bedrock",
-            models,
-            stream(model) {
-                observed.push(model.id);
-                const message: AssistantMessage = {
-                    api: "test",
-                    content: [
-                        {
-                            text: '{"title":"Metadata stays in family","recap":"The title model matched the session family."}',
-                            type: "text",
-                        },
-                    ],
-                    model: model.id,
-                    provider: "bedrock",
-                    role: "assistant",
-                    stopReason: "stop",
-                    timestamp: 1,
-                    usage: {
-                        cacheRead: 0,
-                        cacheWrite: 0,
-                        cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
-                        input: 0,
-                        output: 0,
-                        totalTokens: 0,
-                    },
-                };
-                return createInferenceStream(async function* () {
-                    yield { message, reason: "stop", type: "done" };
-                    return message;
-                });
+        const provider = {
+            ...defineProvider({
+                id: "bedrock",
+                models,
+                stream() {
+                    throw new Error("Naming a chat must not run coding-agent inference.");
+                },
+            }),
+            rawQuery: async (options: RawQueryOptions) => {
+                observed.push(options.model.id);
+                return "<title>Metadata stays in family</title><recap>The title model matched the session family.</recap>";
             },
-        });
+        };
 
         await generateSessionMetadata({
             modelId: "anthropic/fable-5",
@@ -168,39 +149,30 @@ describe("parseSessionMetadata", () => {
         expect(observed).toEqual(["anthropic/sonnet-5"]);
     });
 
-    it("closes its isolated provider even when inference fails synchronously", async () => {
+    it("reports a provider failure as itself rather than as an unreadable answer", async () => {
         const model = defineModel({
             defaultThinkingLevel: "off",
             id: "openai/gpt-5.6-sol",
             name: "Sol",
             thinkingLevels: ["off"],
         });
-        let isolatedCloseCount = 0;
-        let mainStreamCount = 0;
-        const isolated = defineProvider({
-            close() {
-                isolatedCloseCount += 1;
-            },
+        // A failed response carries no text at all, which is exactly how a real provider failure
+        // used to reach the parser and be reported as malformed output.
+        const failed: AssistantMessage = {
+            ...assistantMessage("", model.id, "codex"),
+            errorMessage: "The account is out of capacity.",
+            stopReason: "error",
+        };
+        const provider = defineProvider({
             id: "codex",
             models: [model],
             stream() {
-                throw new Error("metadata inference failed");
+                return createInferenceStream(async function* () {
+                    yield { error: failed, reason: "error", type: "error" };
+                    return failed;
+                });
             },
         });
-        const provider = {
-            ...defineProvider({
-                id: "codex",
-                models: [model],
-                stream() {
-                    mainStreamCount += 1;
-                    throw new Error("main provider must not run metadata");
-                },
-            }),
-            isolate(label: string) {
-                expect(label).toBe("title");
-                return isolated;
-            },
-        };
 
         await expect(
             generateSessionMetadata({
@@ -209,44 +181,25 @@ describe("parseSessionMetadata", () => {
                 sessionId: "session-1",
                 transcript: "User: Name this chat.",
             }),
-        ).rejects.toThrow("metadata inference failed");
-
-        expect(mainStreamCount).toBe(0);
-        expect(isolatedCloseCount).toBe(1);
+        ).rejects.toThrow("The account is out of capacity.");
     });
 
-    it("settles cancellation even when an isolated provider ignores its abort signal", async () => {
+    it("settles cancellation even when the provider ignores its abort signal", async () => {
         const model = defineModel({
             defaultThinkingLevel: "off",
             id: "openai/gpt-5.6-sol",
             name: "Sol",
             thinkingLevels: ["off"],
         });
-        let isolatedCloseCount = 0;
-        let isolatedForceCloseCount = 0;
-        const isolatedBase = defineProvider({
-            close() {
-                isolatedCloseCount += 1;
-            },
-            id: "codex",
-            models: [model],
-            stream() {
-                return createInferenceStream(async function* () {
-                    await new Promise<void>(() => {});
-                    throw new Error("unreachable");
-                });
-            },
-        });
-        const isolated = {
-            ...isolatedBase,
-            forceClose() {
-                isolatedForceCloseCount += 1;
-                return Promise.reject(new Error("Expected teardown failure."));
-            },
-        };
         const provider = {
-            ...isolated,
-            isolate: () => isolated,
+            ...defineProvider({
+                id: "codex",
+                models: [model],
+                stream() {
+                    throw new Error("Naming a chat must not run coding-agent inference.");
+                },
+            }),
+            rawQuery: () => new Promise<string>(() => {}),
         };
         const controller = new AbortController();
         const metadata = generateSessionMetadata({
@@ -260,8 +213,5 @@ describe("parseSessionMetadata", () => {
         controller.abort();
 
         await expect(metadata).rejects.toThrow("cancelled");
-        await Promise.resolve();
-        expect(isolatedForceCloseCount).toBe(1);
-        expect(isolatedCloseCount).toBe(0);
     });
 });

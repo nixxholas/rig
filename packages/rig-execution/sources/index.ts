@@ -4,6 +4,7 @@ export type { Identity } from "@/Identity.js";
 export { builtinModelProfiles } from "@/builtinModelProfiles.js";
 export { createInferenceStream } from "@/createInferenceStream.js";
 export { createExecutorInferenceStream } from "@/createExecutorInferenceStream.js";
+export { rawQueryFromStream } from "@/rawQueryFromStream.js";
 export { createExecutorModelProfiles } from "@/createExecutorModelProfiles.js";
 export { parseOpenAIToolArguments } from "@/parseOpenAIToolArguments.js";
 export {

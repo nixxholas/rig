@@ -277,9 +277,7 @@ function inferenceFixture() {
             const metadata = options?.sessionId?.endsWith(":title") === true;
             const message = assistantMessage(
                 model.id,
-                metadata
-                    ? JSON.stringify({ recap: "Test recap.", title: "Generated title" })
-                    : "Done",
+                metadata ? "<title>Generated title</title>\n<recap>Test recap.</recap>" : "Done",
                 metadata ? 0 : 11,
             );
             return createInferenceStream(async function* () {

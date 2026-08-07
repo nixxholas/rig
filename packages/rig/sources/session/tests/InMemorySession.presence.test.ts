@@ -61,7 +61,12 @@ function installGymInference(
         if (request.options.sessionId?.endsWith(":title") === true) {
             return new Response(
                 JSON.stringify({
-                    content: [{ text: JSON.stringify({ title: "Presence" }), type: "text" }],
+                    content: [
+                        {
+                            text: "<title>Presence</title>\n<recap>Presence test.</recap>",
+                            type: "text",
+                        },
+                    ],
                     stopReason: "stop",
                 }),
                 { headers: { "content-type": "application/json" }, status: 200 },

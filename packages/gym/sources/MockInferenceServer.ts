@@ -103,10 +103,10 @@ export class MockInferenceServer {
                       content: [
                           {
                               type: "text" as const,
-                              text: JSON.stringify({
-                                  title: "Gym session",
-                                  recap: "The user worked with Rig in the Gym environment.",
-                              }),
+                              text: [
+                                  "<title>Gym session</title>",
+                                  "<recap>The user worked with Rig in the Gym environment.</recap>",
+                              ].join("\n"),
                           },
                       ],
                       stopReason: "stop" as const,

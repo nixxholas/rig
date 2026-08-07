@@ -1329,10 +1329,10 @@ function errorStream(errorMessage: string): InferenceStream {
 
 function metadataResponseStream(): InferenceStream {
     return responseStream(
-        JSON.stringify({
-            recap: "The session metadata reflects the visible conversation.",
-            title: "Generated Session Title",
-        }),
+        [
+            "<title>Generated Session Title</title>",
+            "<recap>The session metadata reflects the visible conversation.</recap>",
+        ].join("\n"),
     );
 }
 

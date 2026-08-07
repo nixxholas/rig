@@ -210,6 +210,8 @@ const MAX_RETAINED_DURABLE_WAITS = 1_000;
 const MAX_RETAINED_SETTLED_SCHEDULED_MESSAGES = 1_000;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
 const SESSION_METADATA_TIMEOUT_MS = 30_000;
+/** How many failed attempts to name a chat are made before leaving it unnamed for good. */
+const SESSION_METADATA_MAX_FAILURES = 3;
 const WORKSPACE_READINESS_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 
 export interface PersistedSessionMessage {
@@ -606,7 +608,9 @@ export class InMemorySession {
     #lifetimeTotalTokens = 0;
     #lastSessionRunId: string | undefined;
     #metadataController: AbortController | undefined;
+    #metadataFailures = 0;
     #metadataInitialAttempted = false;
+    #metadataNamed = false;
     #metadataRefinementAttempted = false;
     #metadataRevision = 0;
     #metadataRunId: string | undefined;
@@ -847,9 +851,13 @@ export class InMemorySession {
         this.#titleStatus =
             options.restore?.titleStatus ??
             (this.#agentMetadata.description !== undefined ? "ready" : "idle");
-        this.#metadataInitialAttempted =
-            this.#metadataUpdatedAt !== undefined || this.#titleStatus === "error";
+        this.#metadataInitialAttempted = this.#metadataUpdatedAt !== undefined;
+        this.#metadataNamed = this.#metadataUpdatedAt !== undefined;
         this.#metadataRefinementAttempted = this.#metadataRunId !== undefined;
+        // The attempts a chat gets belong to the session that spends them. A restored chat whose
+        // naming already failed keeps that outcome instead of asking the provider again every time
+        // it is loaded.
+        if (this.#titleStatus === "error") this.#metadataFailures = SESSION_METADATA_MAX_FAILURES;
         this.#totalTokens = options.restore?.totalTokens ?? 0;
         this.#taskList = new SessionTaskList(options.restore?.tasks, options.restore?.nextTaskId);
         this.#tools = options.restore?.tools ?? [];
@@ -7049,7 +7057,9 @@ export class InMemorySession {
 
     #invalidateSessionMetadata(): void {
         this.#clearMetadataSettlement();
+        this.#metadataFailures = 0;
         this.#metadataInitialAttempted = false;
+        this.#metadataNamed = false;
         this.#metadataRefinementAttempted = false;
         this.#metadataRunId = undefined;
         this.#metadataUpdatedAt = undefined;
@@ -7086,7 +7096,8 @@ export class InMemorySession {
     }
 
     #metadataGenerationTarget(): MetadataGenerationTarget | undefined {
-        if (this.#metadataRunId !== undefined || this.#titleStatus === "error") return undefined;
+        if (this.#metadataRunId !== undefined) return undefined;
+        if (this.#metadataFailures >= SESSION_METADATA_MAX_FAILURES) return undefined;
         if (this.#currentWorkspaceRunReadiness().state !== "ready") return undefined;
         const submittedRunIds = new Set(
             (this.events.since(undefined) ?? []).flatMap((event) =>
@@ -7174,7 +7185,12 @@ export class InMemorySession {
                 status: this.#titleStatus,
                 title: metadata.title,
             });
-            if (target.kind === "initial" && this.#workspaceId !== undefined) {
+            // The workspace takes the name of its first chat, once, when that name first arrives.
+            // Which attempt produced it does not matter: an initial attempt that failed must not
+            // leave the workspace unnamed for good.
+            const named = this.#metadataNamed;
+            this.#metadataNamed = true;
+            if (!named && this.#workspaceId !== undefined) {
                 try {
                     this.#onInitialTitle?.({
                         projectId: this.#projectId,
@@ -7191,6 +7207,12 @@ export class InMemorySession {
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (controller.signal.aborted || revision !== this.#metadataRevision) return;
+            // Naming can fail for reasons that pass: a busy account, an overloaded model, a
+            // response that arrived empty. The attempt is released so the next settlement can try
+            // again, and the failure count is what eventually ends the attempts.
+            this.#metadataFailures += 1;
+            if (target.kind === "initial") this.#metadataInitialAttempted = false;
+            else this.#metadataRefinementAttempted = false;
             this.#titleStatus = "error";
             this.#titleError = errorToMessage(error);
             this.#append("session_title_changed", {

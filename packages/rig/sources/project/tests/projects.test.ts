@@ -583,7 +583,7 @@ describe("projects", () => {
             stream(_model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) {
                     return transferResponseStream(
-                        JSON.stringify({ recap: "Transfer test.", title: "Transfer test" }),
+                        "<title>Transfer test</title>\n<recap>Transfer test.</recap>",
                     );
                 }
                 response += 1;
@@ -666,7 +666,7 @@ describe("projects", () => {
             stream(_model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) {
                     return transferResponseStream(
-                        JSON.stringify({ recap: "Transfer test.", title: "Transfer test" }),
+                        "<title>Transfer test</title>\n<recap>Transfer test.</recap>",
                     );
                 }
                 started.resolve();
@@ -849,7 +849,7 @@ describe("projects", () => {
             stream(_model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) {
                     return transferResponseStream(
-                        JSON.stringify({ recap: "Transfer test.", title: "Transfer test" }),
+                        "<title>Transfer test</title>\n<recap>Transfer test.</recap>",
                     );
                 }
                 started.resolve();

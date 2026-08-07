@@ -568,7 +568,131 @@ describe("Executor", () => {
 
         expect(native.sessions[0]?.destroyed).toBe(true);
     });
+
+    it("asks a bounded question on the bare provider without the coding agent or its session", async () => {
+        const native = new AnsweringProvider("<title>Named from the bare provider</title>");
+        const executor = new Executor(
+            [
+                {
+                    id: "codex",
+                    native,
+                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
+                    sessionId: "conversation",
+                },
+            ],
+            { environment: TEST_ENVIRONMENT },
+        );
+        await collect(
+            executor.run({
+                context: { messages: [{ role: "user", content: "Do the work." }] },
+                selection: { modelId: "openai/sol", providerId: "codex" },
+            }),
+        );
+
+        const answer = await executor.rawQuery({
+            instructions: "Name this chat.",
+            model: profile("codex", "codex", "openai/sol", "Sol").model,
+            prompt: "User: Name this chat.",
+            sessionId: "conversation:title",
+        });
+
+        expect(answer).toBe("<title>Named from the bare provider</title>");
+        // The question got its own vendor session, holding exactly the instructions it was given.
+        expect(native.options).toHaveLength(2);
+        expect(native.options[1]).toEqual({ instructions: "Name this chat.", tools: [] });
+        expect(native.sessions[1]?.id).toBe("conversation:title");
+        expect(native.sessions[1]?.destroyed).toBe(true);
+        expect(native.sessions[1]?.requests[0]?.context.messages).toEqual([
+            { role: "user", content: "User: Name this chat." },
+        ]);
+        // Nothing of the agent's own prompt or conversation went along, and its session survived.
+        expect(JSON.stringify(native.options[1])).not.toContain("Sol");
+        expect(JSON.stringify(native.sessions[1]?.requests)).not.toContain("Do the work.");
+        expect(native.sessions[0]?.destroyed).toBe(false);
+        expect(executor.hasActiveSession).toBe(true);
+    });
+
+    it("reports the provider's own failure rather than an empty answer", async () => {
+        const native = new AnsweringProvider("", {
+            kind: "unknown",
+            message: "The account is out of capacity.",
+            state: "error",
+            type: "done",
+        });
+        const executor = new Executor(
+            [
+                {
+                    id: "codex",
+                    native,
+                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
+                },
+            ],
+            { environment: TEST_ENVIRONMENT },
+        );
+
+        await expect(
+            executor.rawQuery({
+                instructions: "Name this chat.",
+                model: profile("codex", "codex", "openai/sol", "Sol").model,
+                prompt: "User: Name this chat.",
+                sessionId: "conversation:title",
+            }),
+        ).rejects.toThrow("The account is out of capacity.");
+        expect(native.sessions[0]?.destroyed).toBe(true);
+    });
 });
+
+class AnsweringProvider extends BaseProvider {
+    static override readonly name = "answering";
+    static override readonly inputTypes = ["text"] as const;
+    static override readonly outputTypes = ["text"] as const;
+    readonly options: SessionOptions[] = [];
+    readonly sessions: AnsweringSession[] = [];
+
+    constructor(
+        private readonly answer: string,
+        private readonly terminal: Extract<SessionEvent, { type: "done" }> = {
+            state: "normal",
+            type: "done",
+        },
+    ) {
+        super();
+    }
+
+    override async session(id: string, options: SessionOptions) {
+        this.options.push(options);
+        const session = new AnsweringSession(id, this.answer, this.terminal);
+        this.sessions.push(session);
+        return session;
+    }
+}
+
+class AnsweringSession extends BaseSession {
+    destroyed = false;
+    readonly requests: SessionRunRequest[] = [];
+
+    constructor(
+        id: string,
+        private readonly answer: string,
+        private readonly terminal: Extract<SessionEvent, { type: "done" }>,
+    ) {
+        super(id);
+    }
+
+    override async compact(): Promise<SessionCompaction> {
+        throw new Error("Bounded questions never compact.");
+    }
+
+    override destroy(): void {
+        this.destroyed = true;
+    }
+
+    override async *run(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
+        this.requests.push(request);
+        if (this.answer.length > 0) yield { type: "text_delta", delta: this.answer };
+        yield this.terminal;
+    }
+}
 
 class RecordingProvider extends BaseProvider {
     static override readonly name = "recording";

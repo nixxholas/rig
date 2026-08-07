@@ -258,6 +258,49 @@ describe("InMemorySession metadata settlement", () => {
         expect(inheritedTitles).toEqual(["Delayed session metadata"]);
     });
 
+    it("names the chat and its workspace after a failed first attempt", async () => {
+        const inheritedTitles: string[] = [];
+        const harness = createHarness({
+            failedMetadataAttempts: 1,
+            inheritedTitles,
+            workspaceId: "workspace-1",
+        });
+
+        const first = harness.session.submit({ text: "Name this workspace from the chat." });
+        await harness.session.waitForRun(first.runId);
+        await vi.waitFor(() =>
+            expect(harness.session.snapshot()).toMatchObject({
+                title: "Delayed session metadata",
+                titleStatus: "ready",
+            }),
+        );
+
+        // The failure was reported while it stood, and then it was tried again rather than
+        // leaving the chat and its workspace unnamed for good.
+        expect(
+            harness.session.events
+                .since(undefined)
+                ?.flatMap((event) =>
+                    event.type === "session_title_changed" && "errorMessage" in event.data
+                        ? [event.data.errorMessage]
+                        : [],
+                ),
+        ).toEqual(["The account is out of capacity."]);
+        expect(inheritedTitles).toEqual(["Delayed session metadata"]);
+    });
+
+    it("stops naming a chat whose provider keeps failing", async () => {
+        const harness = createHarness({ failedMetadataAttempts: 10 });
+
+        for (const text of ["Give up eventually.", "Second.", "Third.", "Fourth.", "Fifth."]) {
+            const submitted = harness.session.submit({ text });
+            await harness.session.waitForRun(submitted.runId);
+        }
+        await vi.waitFor(() => expect(harness.session.snapshot().titleStatus).toBe("error"));
+
+        expect(harness.metadataContexts).toHaveLength(3);
+    });
+
     it("lets a database failure from initial workspace title inheritance escape the settlement", async () => {
         const databaseError = captureDriverError();
         let harness: ReturnType<typeof createHarness> | undefined;
@@ -385,6 +428,8 @@ function createHarness(
         agentGate?: Promise<void>;
         afterMetadataAbort?: Promise<void>;
         events?: readonly SessionEvent[];
+        /** How many naming attempts fail before one succeeds. */
+        failedMetadataAttempts?: number;
         onMetadataAbort?: () => void;
         restore?: PersistedSessionState;
         staleMetadata?: Promise<void>;
@@ -437,18 +482,28 @@ function createHarness(
                     if (metadataResponses === 1 && options.staleMetadata !== undefined) {
                         await options.staleMetadata;
                     }
+                    if (metadataResponses <= (options.failedMetadataAttempts ?? 0)) {
+                        // What a failed vendor response looks like from here: no answer at all.
+                        const failure = {
+                            ...assistantMessage(""),
+                            errorMessage: "The account is out of capacity.",
+                            stopReason: "error" as const,
+                        };
+                        yield { type: "error", reason: "error", error: failure };
+                        return failure;
+                    }
+                    const named =
+                        metadataResponses === 1 && options.staleMetadata !== undefined
+                            ? {
+                                  title: "Stale generated title",
+                                  recap: "This stale result must be discarded.",
+                              }
+                            : {
+                                  title: "Delayed session metadata",
+                                  recap: "The user implemented delayed session metadata.",
+                              };
                     const message = assistantMessage(
-                        JSON.stringify(
-                            metadataResponses === 1 && options.staleMetadata !== undefined
-                                ? {
-                                      title: "Stale generated title",
-                                      recap: "This stale result must be discarded.",
-                                  }
-                                : {
-                                      title: "Delayed session metadata",
-                                      recap: "The user implemented delayed session metadata.",
-                                  },
-                        ),
+                        `<title>${named.title}</title>\n<recap>${named.recap}</recap>`,
                     );
                     yield { type: "start", partial: message };
                     yield { type: "done", reason: "stop", message };

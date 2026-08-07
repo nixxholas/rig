@@ -523,7 +523,10 @@ function installGymInference(
         if (request.options.sessionId?.endsWith(":title")) {
             return jsonResponse({
                 content: [
-                    { text: '{"title":"Scheduled session","recap":"Scheduling"}', type: "text" },
+                    {
+                        text: "<title>Scheduled session</title>\n<recap>Scheduling</recap>",
+                        type: "text",
+                    },
                 ],
                 stopReason: "stop",
             });

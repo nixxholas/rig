@@ -3569,10 +3569,10 @@ function sessionMetadataResponse(request: GymInferenceRequest): Response | undef
         JSON.stringify({
             content: [
                 {
-                    text: JSON.stringify({
-                        recap: "The session metadata reflects the visible conversation.",
-                        title: "Generated Session Title",
-                    }),
+                    text: [
+                        "<title>Generated Session Title</title>",
+                        "<recap>The session metadata reflects the visible conversation.</recap>",
+                    ].join("\n"),
                     type: "text",
                 },
             ],

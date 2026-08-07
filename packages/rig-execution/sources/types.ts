@@ -6,6 +6,7 @@
  */
 
 import type { TSchema } from "@sinclair/typebox";
+import { rawQueryFromStream } from "@/rawQueryFromStream.js";
 import type {
     SessionAssistantMessage,
     SessionProviderError,
@@ -286,6 +287,19 @@ export interface ProviderCompactionOptions<
     timestamp: number;
 }
 
+/** One bounded question asked of a provider outside the coding agent. */
+export interface RawQueryOptions {
+    /** The complete system prompt. Nothing of the coding agent is added to it. */
+    instructions: string;
+    model: Model;
+    prompt: string;
+    /** Names the provider-side session so a mock or a log can tell these queries apart. */
+    sessionId: string;
+    signal?: AbortSignal;
+    /** Local calendar date when the inference session began, formatted as YYYY-MM-DD. */
+    startDate?: string;
+}
+
 /** Raw provider events emitted while building an assistant message. */
 export type ProviderAssistantMessageEvent =
     | { type: "start"; partial: AssistantMessage }
@@ -352,6 +366,15 @@ export interface Provider {
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
+    /**
+     * Answers one bounded question on the bare provider, below the coding agent.
+     *
+     * The model is given exactly the supplied instructions: no agent prompt, no environment
+     * description, no tools, and no share of the session's conversation. Naming a chat is such a
+     * question, and asking it through a coding agent is what made it fail. The answer is the
+     * response text; a provider failure throws that failure rather than an empty answer.
+     */
+    rawQuery(options: RawQueryOptions): Promise<string>;
     stream<TThinkingLevel extends string>(
         model: Model<TThinkingLevel>,
         context: Context,
@@ -396,16 +419,21 @@ export function defineProvider(provider: {
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
+    rawQuery?(options: RawQueryOptions): Promise<string>;
     stream<TThinkingLevel extends string>(
         model: Model<TThinkingLevel>,
         context: Context,
         options?: StreamOptions<TThinkingLevel>,
     ): InferenceStream;
 }): Provider {
-    return {
+    const defined: Provider = {
         extendProfilePromptContext: undefined,
         serviceTiers: undefined,
         type: undefined,
+        // A provider that owns no vendor session of its own answers a bounded question through
+        // the stream it already implements.
+        rawQuery: (options) => rawQueryFromStream(defined, options),
         ...provider,
     };
+    return defined;
 }

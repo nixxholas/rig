@@ -1,18 +1,29 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Model, Provider, StreamOptions } from "@slopus/rig-execution";
+import type { Model, Provider } from "@slopus/rig-execution";
 import { providerModelFamily } from "@slopus/rig-providers";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
 
-const METADATA_PROMPT = `Create concise session metadata from the visible conversation.
+const MAX_TITLE_CHARS = 80;
+const MAX_TITLE_WORDS = 6;
+const MAX_RECAP_CHARS = 600;
+const MAX_RECAP_SENTENCES = 2;
+
+/**
+ * Naming a chat is a small writing task, not a coding turn, so it is asked in the shape models
+ * answer most reliably: plain text between tags. A schema would be enforced by the vendor for some
+ * providers and simulated with a retry loop for others, and the loop was what left chats unnamed.
+ */
+const METADATA_PROMPT = `You write short metadata for a saved chat. Reply with exactly these two tags and nothing else:
+
+<title>2 to 6 words naming what the chat is about</title>
+<recap>One or two sentences: the user's goal and the useful outcome or current state.</recap>
 
 Rules:
-- title is 2 to 6 words and at most 80 characters
-- recap is at most 2 sentences and 600 characters
-- recap states the user's goal and the useful outcome or current state
-- preserve the current title exactly unless the conversation clearly makes it misleading
-- use only the supplied visible conversation; do not infer from hidden tool calls or reasoning`;
+- keep the title under 80 characters and the recap under 600 characters
+- keep the current title exactly unless the conversation clearly makes it misleading
+- use only the supplied conversation; do not guess at work you cannot see`;
 
 export const SESSION_METADATA_SCHEMA = Type.Object(
     {
@@ -36,108 +47,67 @@ export async function generateSessionMetadata(options: {
     transcript: string;
 }): Promise<GeneratedSessionMetadata> {
     const now = options.now ?? Date.now;
-    const timestamp = now();
     const model = selectMetadataModel(options.provider, options.modelId);
-    // Naming a chat is its own one-shot conversation, not a turn of the session's. It runs on its
-    // own provider session so it cannot reset the session's cached prefix or wait behind its turn.
-    const provider = options.provider.isolate?.("title") ?? options.provider;
-    const streamOptions: StreamOptions = {
+    const answered = options.provider.rawQuery({
+        instructions: METADATA_PROMPT,
+        model,
+        prompt: [
+            `Current title: ${options.currentTitle ?? "(untitled)"}`,
+            "",
+            "Visible conversation:",
+            options.transcript,
+        ].join("\n"),
+        // Naming a chat is its own one-shot conversation, not a turn of the session's.
         sessionId: `${options.sessionId}:title`,
-        startDate: options.startDate ?? toLocalDate(timestamp),
-        structuredOutput: {
-            name: "session_metadata",
-            schema: SESSION_METADATA_SCHEMA,
-        },
-        thinking: "off",
         ...(options.signal === undefined ? {} : { signal: options.signal }),
-    };
-    try {
-        const stream = provider.stream(
-            model,
-            {
-                systemPrompt: METADATA_PROMPT,
-                messages: [
-                    {
-                        role: "user",
-                        content: [
-                            {
-                                type: "text",
-                                text: [
-                                    `Current title: ${options.currentTitle ?? "(untitled)"}`,
-                                    "",
-                                    "Visible conversation:",
-                                    options.transcript,
-                                ].join("\n"),
-                            },
-                        ],
-                        timestamp,
-                    },
-                ],
-                tools: [],
-            },
-            streamOptions,
-        );
-        const consumed = (async () => {
-            for await (const _event of stream) {
-                // Drain the stream; the normalized final message is read below.
-            }
-
-            const message = await stream.result();
-            const text = message.content
-                .filter((content) => content.type === "text")
-                .map((content) => content.text)
-                .join("")
-                .trim();
-            return parseSessionMetadata(text);
-        })();
-        const result = await raceWithAbort(consumed, options.signal);
-        if (result === ABORTED_BY_SIGNAL) {
-            throw new Error("Session metadata generation was cancelled.");
-        }
-        return result;
-    } finally {
-        // The isolated provider exists only for this request. Cancellation is a hard boundary for
-        // the session queue, so a provider that is slow to acknowledge close cannot retain that
-        // queue barrier. Its stream still receives the abort signal above, and closing the
-        // isolated transport prevents it from sharing the following agent inference.
-        if (provider !== options.provider) {
-            try {
-                const closing =
-                    provider.forceClose === undefined ? provider.close?.() : provider.forceClose();
-                if (closing !== undefined) void Promise.resolve(closing).catch(() => undefined);
-            } catch {
-                // Session naming is optional enrichment. A synchronous teardown failure cannot
-                // replace the cancellation result or stop the durable user run behind it.
-            }
-        }
+        startDate: options.startDate ?? toLocalDate(now()),
+    });
+    const result = await raceWithAbort(answered, options.signal);
+    if (result === ABORTED_BY_SIGNAL) {
+        throw new Error("Session metadata generation was cancelled.");
     }
+    return parseSessionMetadata(result);
 }
 
+/**
+ * Reads the title and recap out of whatever the model said.
+ *
+ * A model that adds a greeting, a code fence, or a closing remark has still answered the question,
+ * so only the tagged text is read and the rest is ignored. Text that is merely too long is
+ * shortened rather than rejected: a slightly long title beats no title at all.
+ */
 export function parseSessionMetadata(text: string): GeneratedSessionMetadata {
-    let value: unknown;
-    try {
-        value = JSON.parse(text);
-    } catch {
-        throw new Error("Session metadata model returned invalid JSON.");
-    }
+    const title = normalizeLine(readTag(text, "title") ?? "");
+    const recap = normalizeLine(readTag(text, "recap") ?? "");
+    const value = { recap: shortenRecap(recap), title: shortenTitle(title) };
     if (!Value.Check(SESSION_METADATA_SCHEMA, value)) {
         throw new Error("Session metadata must contain only string title and recap fields.");
     }
-
-    const title = normalizeLine(value.title);
-    const titleWords = title.split(/\s+/u).filter(Boolean);
-    if (title.length > 80 || titleWords.length < 2 || titleWords.length > 6) {
-        throw new Error("Session metadata title must contain 2 to 6 words.");
+    if (value.title.length === 0 || value.recap.length === 0) {
+        throw new Error("Session metadata must contain a title and a recap.");
     }
+    return value;
+}
 
-    const recap = normalizeLine(value.recap);
+function readTag(text: string, tag: string): string | undefined {
+    const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "iu").exec(text);
+    return match?.[1];
+}
+
+function shortenTitle(title: string): string {
+    const words = title.split(/\s+/u).filter(Boolean).slice(0, MAX_TITLE_WORDS);
+    const shortened = words.join(" ");
+    return shortened.length <= MAX_TITLE_CHARS
+        ? shortened
+        : `${shortened.slice(0, MAX_TITLE_CHARS - 1).trimEnd()}…`;
+}
+
+function shortenRecap(recap: string): string {
     const sentences = recap.split(/(?<=[.!?])\s+/u).filter(Boolean);
-    if (recap.length === 0 || recap.length > 600 || sentences.length > 2) {
-        throw new Error(
-            "Session metadata recap must contain at most 2 sentences and 600 characters.",
-        );
-    }
-    return { recap, title };
+    const shortened = sentences.slice(0, MAX_RECAP_SENTENCES).join(" ");
+    return shortened.length <= MAX_RECAP_CHARS
+        ? shortened
+        : `${shortened.slice(0, MAX_RECAP_CHARS - 1).trimEnd()}…`;
 }
 
 function normalizeLine(value: string): string {
