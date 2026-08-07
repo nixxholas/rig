@@ -22,8 +22,6 @@ import type {
     SessionGoal,
     SessionStatus,
     SessionEvent,
-    SessionSharePeerCapability,
-    SessionShareMemberState,
     SessionTask,
     SessionStreamHello,
     SessionTokenCount,
@@ -489,44 +487,6 @@ export class ChatStore {
         };
     }
 
-    /** Applies the owner share returned by a completed sharing mutation. */
-    applySessionShare(shared: SessionState["shared"]): readonly ChatDelta[] {
-        if (sameSessionShare(this.#session.shared, shared)) return [];
-        const sessionBefore = this.#session;
-        this.#session =
-            shared === undefined
-                ? withoutKeys(this.#session, ["shared"])
-                : { ...this.#session, shared };
-        return this.#finish([], this.#revision, sessionBefore);
-    }
-
-    /**
-     * Applies one member's capability change reported by the global
-     * `session_share_capabilities_changed` event, once its `shareId` matches
-     * the share this session currently has. The event carries the member's
-     * settled state and its capability list together, so a revoke lands in
-     * one frame instead of an access flash followed by a separate refetch.
-     */
-    applySessionShareMemberCapabilities(
-        shareId: string,
-        shareMemberId: string,
-        capabilities: readonly SessionSharePeerCapability[],
-        capabilitiesDescription: string,
-        memberState: SessionShareMemberState,
-    ): readonly ChatDelta[] {
-        if (this.#session.shared?.shareId !== shareId) return [];
-        return [
-            {
-                capabilities,
-                capabilitiesDescription,
-                memberState,
-                shareId,
-                shareMemberId,
-                type: "session_share_member_capabilities_changed",
-            },
-        ];
-    }
-
     /** Adds one immediately visible user bubble for a queued send mutation. */
     applyOptimisticMessage(
         mutationId: string,
@@ -617,7 +577,6 @@ export class ChatStore {
                 "lastEventId",
                 "recap",
                 "serviceTier",
-                "shared",
                 "title",
                 "titleError",
                 "tokens",
@@ -671,7 +630,6 @@ export class ChatStore {
             ...(session.goal === undefined ? {} : { goal: session.goal }),
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
-            ...(session.shared === undefined ? {} : { shared: session.shared }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
             ...(session.systemPrompt === undefined ? {} : { systemPrompt: session.systemPrompt }),
@@ -1383,7 +1341,6 @@ export class ChatStore {
                 "lastEventId",
                 "recap",
                 "serviceTier",
-                "shared",
                 "title",
                 "titleError",
                 "tokens",
@@ -1438,7 +1395,6 @@ export class ChatStore {
             ...(session.goal === undefined ? {} : { goal: session.goal }),
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
-            ...(session.shared === undefined ? {} : { shared: session.shared }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
             ...(session.systemPrompt === undefined ? {} : { systemPrompt: session.systemPrompt }),
@@ -2545,12 +2501,6 @@ export class ChatStore {
             createdAt: at,
             delivery,
             ...(message.contextOnly === true ? { contextOnly: true } : {}),
-            ...(message.friendAuthor === undefined
-                ? {}
-                : { friendAuthor: { ...message.friendAuthor } }),
-            ...(message.friendMessageDisposition === undefined
-                ? {}
-                : { friendMessageContext: message.friendMessageDisposition }),
             id: `message:${message.id}`,
             kind: "user_message",
             messageId: message.id,
@@ -3587,19 +3537,6 @@ function withoutKeys(session: SessionState, keys: readonly (keyof SessionState)[
     const next = { ...session };
     for (const key of keys) delete next[key];
     return next;
-}
-
-function sameSessionShare(left: SessionState["shared"], right: SessionState["shared"]): boolean {
-    return (
-        left === right ||
-        (left !== undefined &&
-            right !== undefined &&
-            left.capabilityMemberCount === right.capabilityMemberCount &&
-            left.includeFriendMessagesInModel === right.includeFriendMessagesInModel &&
-            left.memberCount === right.memberCount &&
-            left.shareId === right.shareId &&
-            left.state === right.state)
-    );
 }
 
 /**

@@ -14,14 +14,10 @@ export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
             contractVersion: happyCloudEnrollment.contractVersion,
             enrollmentChangedAtMs: happyCloudEnrollment.enrollmentChangedAtMs,
             enrollmentState: happyCloudEnrollment.enrollmentState,
-            friendsChangedAtMs: happyCloudEnrollment.friendsChangedAtMs,
-            friendsConsent: happyCloudEnrollment.friendsConsent,
             groupChatsChangedAtMs: happyCloudEnrollment.groupChatsChangedAtMs,
             groupChatsConsent: happyCloudEnrollment.groupChatsConsent,
             happyProfileChangedAtMs: happyCloudEnrollment.happyProfileChangedAtMs,
             happyProfileConsent: happyCloudEnrollment.happyProfileConsent,
-            liveSessionSharingChangedAtMs: happyCloudEnrollment.liveSessionSharingChangedAtMs,
-            liveSessionSharingConsent: happyCloudEnrollment.liveSessionSharingConsent,
             profileChangedAtMs: happyCloudEnrollment.profileChangedAtMs,
             profileVersion: happyCloudEnrollment.profileVersion,
             remoteControlChangedAtMs: happyCloudEnrollment.remoteControlChangedAtMs,
@@ -38,7 +34,6 @@ export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
     return Value.Decode(happyCloudStatusSchema, {
         authority: "local_record_only",
         capabilities: {
-            friends: { changedAt: row.friendsChangedAtMs, consent: row.friendsConsent },
             group_chats: {
                 changedAt: row.groupChatsChangedAtMs,
                 consent: row.groupChatsConsent,
@@ -46,10 +41,6 @@ export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
             happy_profile: {
                 changedAt: row.happyProfileChangedAtMs,
                 consent: row.happyProfileConsent,
-            },
-            live_session_sharing: {
-                changedAt: row.liveSessionSharingChangedAtMs,
-                consent: row.liveSessionSharingConsent,
             },
             remote_control: {
                 changedAt: row.remoteControlChangedAtMs,
@@ -79,10 +70,8 @@ export function defaultHappyCloudStatus(): HappyCloudStatus {
     return {
         authority: "local_record_only",
         capabilities: {
-            friends: denied,
             group_chats: denied,
             happy_profile: denied,
-            live_session_sharing: denied,
             remote_control: denied,
             session_blob_persistence: denied,
         },

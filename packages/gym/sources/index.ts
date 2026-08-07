@@ -16,7 +16,6 @@ export {
     type InterceptedHttpResponse,
 } from "./InterceptingHttpProxy.js";
 export { MockInferenceServer } from "./MockInferenceServer.js";
-export { MurmurRelayServer } from "./MurmurRelayServer.js";
 export { renderTerminalSnapshotPng } from "./renderTerminalSnapshotPng.js";
 export { terminalRowStyleRuns, type TerminalRowStyleRun } from "./terminalRowStyleRuns.js";
 export { waitForFile } from "./waitForFile.js";

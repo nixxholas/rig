@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 
 import type { SessionDatabase } from "../openSessionDatabase.js";
+import { agentSessionSharing } from "../migrations/18-agent-session-sharing.js";
+import { sessionShareEntryLog } from "../migrations/19-session-share-entry-log.js";
 
 /**
  * Removes the schema that migrations after the data-identity ones create.
@@ -18,17 +20,12 @@ export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase
                AND (
                    name LIKE 'happy_cloud_%'
                    OR name LIKE 'scope_share%'
-                   OR name IN ('p2p_peer_pairings', 'p2p_peers', 'session_share_capabilities', 'session_share_peer_actions')
+                   OR name IN ('p2p_peer_pairings', 'p2p_peers')
                )`,
         ),
     )) {
         database.run(sql.raw(`DROP TABLE "${table.name}"`));
     }
-    if (
-        database
-            .all<{ name: string }>(sql.raw("PRAGMA table_info(session_shares)"))
-            .some((column) => column.name === "tool_output")
-    ) {
-        database.run(sql.raw("ALTER TABLE session_shares DROP COLUMN tool_output"));
-    }
+    agentSessionSharing(database);
+    sessionShareEntryLog(database);
 }

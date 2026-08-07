@@ -5,7 +5,6 @@ import type {
     GitChangeSnapshot,
     GlobalEventDelivery,
     GlobalLiveEvent,
-    MurmurFriendshipChangedEvent,
 } from "../../protocol/index.js";
 import { inTx } from "../../persistence/inTx.js";
 import { migrateSessionDatabase } from "../../persistence/database/migrateSessionDatabase.js";
@@ -156,56 +155,6 @@ describe("live global events", () => {
         ]);
     });
 
-    it("retains Murmur friendship events under their peer aggregate", () => {
-        const opened = openSessionDatabase(":memory:");
-        clients.push(opened.client);
-        migrateSessionDatabase(opened.database);
-        const queue = new PersistentGlobalEventQueue(opened.database);
-        const event: MurmurFriendshipChangedEvent = {
-            createdAt: 1,
-            data: {
-                direction: "incoming",
-                reason: "request_received",
-                state: "incoming_pending",
-            },
-            id: "018bcfe5-6800-7fff-a5aa-0102030405ff",
-            murmurPeerId: "peer-1",
-            type: "murmur_friendship_changed",
-        };
-
-        expect(queue.append(event)?.event).toBe(event);
-        expect(new PersistentGlobalEventQueue(opened.database).list()).toEqual([
-            expect.objectContaining({ event }),
-        ]);
-    });
-
-    it("treats an identical cross-database outbox replay as already committed", () => {
-        const opened = openSessionDatabase(":memory:");
-        clients.push(opened.client);
-        migrateSessionDatabase(opened.database);
-        const queue = new PersistentGlobalEventQueue(opened.database);
-        const event: MurmurFriendshipChangedEvent = {
-            createdAt: 600,
-            data: {
-                direction: "incoming",
-                reason: "request_received",
-                state: "incoming_pending",
-            },
-            id: "0195f9ab-9555-7000-8000-000000000001",
-            murmurPeerId: "peer-replayed",
-            type: "murmur_friendship_changed",
-        };
-
-        expect(queue.appendReplaySafe(event)?.event).toBe(event);
-        expect(queue.appendReplaySafe(event)).toBeUndefined();
-        expect(queue.list()).toHaveLength(1);
-        expect(() =>
-            queue.appendReplaySafe({
-                ...event,
-                data: { ...event.data, state: "friends" },
-            }),
-        ).toThrow("was reused with different content");
-    });
 });
 
 function liveEvent(): GlobalLiveEvent {

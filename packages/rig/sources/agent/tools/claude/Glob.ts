@@ -72,14 +72,5 @@ export const claudeGlobTool = defineTool({
         result.numFiles === 0
             ? `Found files for "${args.pattern}" (0)`
             : `Found files for "${args.pattern}" (${String(result.numFiles)}${result.truncated ? ", truncated" : ""})`,
-    toSharedCall: ({ pattern, path }) =>
-        path === undefined
-            ? `Searched for files matching "${pattern}".`
-            : `Searched ${path} for files matching "${pattern}".`,
-    toSharedResult: (result) =>
-        result.numFiles === 0
-            ? "Found no matching files."
-            : `Found ${result.numFiles} file${result.numFiles === 1 ? "" : "s"}${result.truncated ? ", truncated" : ""}.`,
-    sharedOutputDisclosable: true,
     locks: [],
 });

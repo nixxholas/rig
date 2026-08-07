@@ -58,7 +58,7 @@ describe("Happy Cloud HTTP API", () => {
                 {
                     ...command("bad", 3, {
                         action: "set_capability",
-                        capability: "friends",
+                        capability: "group_chats",
                         consent: "granted",
                     }),
                     surprise: true,
@@ -73,7 +73,7 @@ describe("Happy Cloud HTTP API", () => {
                 {
                     ...command("future-contract", 3, {
                         action: "set_capability",
-                        capability: "friends",
+                        capability: "group_chats",
                         consent: "granted",
                     }),
                     contractVersion: 2,
@@ -87,7 +87,7 @@ describe("Happy Cloud HTTP API", () => {
                 "/happy-cloud/commands",
                 command("missing-header", 3, {
                     action: "set_capability",
-                    capability: "friends",
+                    capability: "group_chats",
                     consent: "granted",
                 }),
                 false,
@@ -158,7 +158,7 @@ describe("Happy Cloud HTTP API", () => {
                 "/happy-cloud/commands",
                 command("unauthorized", 3, {
                     action: "set_capability",
-                    capability: "friends",
+                    capability: "group_chats",
                     consent: "granted",
                 }),
             );

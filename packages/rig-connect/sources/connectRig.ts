@@ -34,7 +34,6 @@ import {
     PluginManagementRequestError,
     PluginStore,
 } from "./PluginElement.js";
-import { MurmurFriendsStore, type MurmurFriendsState } from "./MurmurFriendElement.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -69,8 +68,6 @@ import type {
     GetTimelineResponse,
     ListProviderUsageResponse,
     InstalledPluginSummary,
-    ListMurmurContactsResponse,
-    ListMurmurFriendRequestsResponse,
     ListPluginsResponse,
     PluginLogResponse,
     PluginLogSnapshot,
@@ -79,10 +76,6 @@ import type {
     SessionStateResponse,
     TimelineScope,
     UninstalledPluginSummary,
-    AnswerMurmurFriendRequestResponse,
-    DeleteMurmurAccountResponse,
-    GetMurmurAccountResponse,
-    GetMurmurFriendsResponse,
     HappyCloudCommand,
     HappyCloudProfileCiphertextResponse,
     HappyCloudSessionBlobResponse,
@@ -91,41 +84,9 @@ import type {
     CreateP2pInvitationResponse,
     JoinP2pInvitationResponse,
     P2pPairingState,
-    SendMurmurFriendRequestResponse,
-    SignupMurmurAccountRequest,
-    SignupMurmurAccountResponse,
-    StartMurmurServiceRequest,
-    StartMurmurServiceResponse,
-    StopMurmurServiceResponse,
-    AddSessionShareMemberRequest,
-    CreateSessionShareRequest,
-    GetSessionShareHealthResponse,
-    GetSessionSharePeerActivityResponse,
-    GetSessionShareReplicaHistoryResponse,
-    ListSessionShareReplicaCapabilitiesResponse,
-    ListSessionShareReplicasResponse,
-    PostSessionShareFriendMessageRequest,
-    PostSessionShareFriendMessageResponse,
-    SessionSharedMetadata,
-    SessionShareFriendInput,
-    SessionSharePeerCapability,
-    SessionShareOwnerResponse,
-    SessionShareToolOutput,
 } from "./protocol.js";
 import {
-    describeSessionShareToolOutput,
-    getSessionShareHealthResponseSchema,
-    getSessionSharePeerActivityResponseSchema,
-    getSessionShareReplicaHistoryResponseSchema,
-    listSessionShareReplicaCapabilitiesResponseSchema,
-    listSessionShareReplicasResponseSchema,
-    postSessionShareFriendMessageResponseSchema,
-    sessionShareCapabilitiesChangedEventSchema,
     HAPPY_CLOUD_CONTRACT_VERSION,
-    answerMurmurFriendRequestResponseSchema,
-    deleteMurmurAccountResponseSchema,
-    getMurmurAccountResponseSchema,
-    getMurmurFriendsResponseSchema,
     happyCloudCommandErrorResponseSchema,
     happyCloudCommandResponseSchema,
     happyCloudChangedEventSchema,
@@ -137,8 +98,6 @@ import {
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
     p2pPairingStateSchema,
-    listMurmurContactsResponseSchema,
-    listMurmurFriendRequestsResponseSchema,
     listPluginsResponseSchema,
     discoverPluginCatalogRequestSchema,
     githubPluginCatalogSchema,
@@ -147,11 +106,6 @@ import {
     projectRegistrationErrorResponseSchema,
     projectResponseSchema,
     projectWorkspaceSchema,
-    sessionShareOwnerResponseSchema,
-    sendMurmurFriendRequestResponseSchema,
-    signupMurmurAccountResponseSchema,
-    startMurmurServiceResponseSchema,
-    stopMurmurServiceResponseSchema,
 } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
 import { endpointUrl } from "./endpointUrl.js";
@@ -169,7 +123,6 @@ const GIT_WATCH_RETRY_MS = 5_000;
 const MAXIMUM_PLUGIN_APP_REQUEST_BYTES = 1024 * 1024;
 const MAXIMUM_PLUGIN_APP_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAXIMUM_PLUGIN_ICON_BYTES = 4 * 1024 * 1024;
-const MAXIMUM_REMEMBERED_MURMUR_FRIENDSHIP_EVENTS = 1_024;
 const pluginAppToolResponseSchema = Type.Object(
     { result: Type.Unknown() },
     { additionalProperties: false },
@@ -379,16 +332,6 @@ export interface RigPluginsSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
-/**
- * Follows the authoritative Murmur social graph shared by every friends view.
- *
- * The snapshot is refetched after each friendship event instead of making a UI
- * infer the graph from a lightweight notification.
- */
-export interface RigMurmurFriendsSubscriptionOptions {
-    onChange: (state: MurmurFriendsState) => void;
-    onError?: (error: unknown) => void;
-}
 
 export interface RigTimelineSubscriptionOptions {
     /** Leave archived chats out, as the daemon does by default. */
@@ -464,14 +407,6 @@ export interface RigPluginsConnection {
     close: () => void;
 }
 
-export interface RigMurmurFriendsConnection {
-    account: () => MurmurFriendsState["account"];
-    contacts: () => MurmurFriendsState["contacts"];
-    friendships: () => MurmurFriendsState["friendships"];
-    state: () => MurmurFriendsState;
-    stats: () => MurmurFriendsState["stats"];
-    close: () => void;
-}
 
 export interface RigTimelineConnection {
     agents: () => readonly TimelineAgentNode[];
@@ -618,10 +553,6 @@ export interface RigConnection {
     ) => RigProviderUsageConnection;
     /** Follows the complete local plugin and application catalog. */
     connectPlugins: (options: RigPluginsSubscriptionOptions) => RigPluginsConnection;
-    /** Follows the complete Murmur friendship graph and its counters. */
-    connectMurmurFriends: (
-        options: RigMurmurFriendsSubscriptionOptions,
-    ) => RigMurmurFriendsConnection;
     connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
     /** Reads the current plugin catalog once. Lifecycle changes are also announced live. */
     listPlugins: (options?: { signal?: AbortSignal }) => Promise<{
@@ -635,11 +566,7 @@ export interface RigConnection {
         source: DiscoverPluginCatalogRequest,
         options?: { signal?: AbortSignal },
     ) => Promise<GitHubPluginCatalog>;
-    /**
-     * Installs and starts a plugin from an absolute source-folder path on the machine running Rig.
-     *
-     * The source folder belongs to the daemon machine, not to the browser or other remote client.
-     */
+    /** Installs and starts a plugin from a source folder on the Rig machine. */
     installPlugin: (
         source: string | GitHubPluginPackageSource,
         options?: { requestId?: string; signal?: AbortSignal },
@@ -649,81 +576,6 @@ export interface RigConnection {
         name: string,
         options?: { signal?: AbortSignal },
     ) => Promise<UninstalledPluginSummary>;
-    getMurmurAccount: (options?: MurmurOperationOptions) => Promise<GetMurmurAccountResponse>;
-    signupMurmurAccount: (
-        request: SignupMurmurAccountRequest,
-        options?: MurmurOperationOptions,
-    ) => Promise<SignupMurmurAccountResponse>;
-    startMurmurService: (
-        request?: StartMurmurServiceRequest,
-        options?: MurmurOperationOptions,
-    ) => Promise<StartMurmurServiceResponse>;
-    stopMurmurService: (options?: MurmurOperationOptions) => Promise<StopMurmurServiceResponse>;
-    deleteMurmurAccount: (options?: MurmurOperationOptions) => Promise<DeleteMurmurAccountResponse>;
-    sendMurmurFriendRequest: (
-        token: string,
-        options?: MurmurOperationOptions,
-    ) => Promise<SendMurmurFriendRequestResponse>;
-    listMurmurFriendRequests: (
-        options?: MurmurOperationOptions,
-    ) => Promise<ListMurmurFriendRequestsResponse>;
-    answerMurmurFriendRequest: (
-        peerId: string,
-        answer: "accept" | "reject",
-        options?: MurmurOperationOptions,
-    ) => Promise<AnswerMurmurFriendRequestResponse>;
-    listMurmurContacts: (options?: MurmurOperationOptions) => Promise<ListMurmurContactsResponse>;
-    /** Reads the complete current friendship graph once. */
-    listMurmurFriends: (options?: MurmurOperationOptions) => Promise<GetMurmurFriendsResponse>;
-    /** Owner operations are queued like other session mutations; daemon routes may be unavailable. */
-    createSessionShare: (
-        sessionId: string,
-        input: Omit<CreateSessionShareRequest, "mutationId">,
-    ) => MutationId;
-    addSessionShareMember: (sessionId: string, friend: SessionShareFriendInput) => MutationId;
-    revokeSessionShareMember: (sessionId: string, shareMemberId: string) => MutationId;
-    stopSessionShare: (sessionId: string) => MutationId;
-    setSessionShareFriendMessages: (
-        sessionId: string,
-        includeFriendMessagesInModel: boolean,
-    ) => MutationId;
-    /** Raises or lowers how much of each tool's work friends receive from now on. */
-    setSessionShareToolOutput: (
-        sessionId: string,
-        toolOutput: SessionShareToolOutput,
-    ) => MutationId;
-    /** Replaces one member's whole capability set; it is not a delta. */
-    setSessionShareMemberCapabilities: (
-        sessionId: string,
-        shareMemberId: string,
-        capabilities: readonly SessionSharePeerCapability[],
-    ) => MutationId;
-    /** Posts through an authenticated member grant; this is not an optimistic owner mutation. */
-    postSessionShareFriendMessage: (
-        request: PostSessionShareFriendMessageRequest,
-        options?: SessionShareOperationOptions,
-    ) => Promise<PostSessionShareFriendMessageResponse>;
-    listSessionShareReplicas: (
-        options?: SessionShareOperationOptions,
-    ) => Promise<ListSessionShareReplicasResponse>;
-    getSessionShareReplicaHistory: (
-        shareId: string,
-        options?: SessionShareOperationOptions & { after?: string },
-    ) => Promise<GetSessionShareReplicaHistoryResponse>;
-    getSessionShareHealth: (
-        shareId: string,
-        options?: SessionShareOperationOptions,
-    ) => Promise<GetSessionShareHealthResponse>;
-    /** The owner's own read of what happened: who was allowed, and who was denied. */
-    getSessionSharePeerActivity: (
-        sessionId: string,
-        options?: SessionShareOperationOptions & { after?: string },
-    ) => Promise<GetSessionSharePeerActivityResponse>;
-    /** What a member's own replica of a shared session may currently do. */
-    listSessionShareReplicaCapabilities: (
-        shareId: string,
-        options?: SessionShareOperationOptions,
-    ) => Promise<ListSessionShareReplicaCapabilitiesResponse>;
     /** Entity-first project catalog actions. */
     projects: RigProjects;
     /** Reads enrollment, profile status, and every independently denied/granted capability. */
@@ -807,13 +659,6 @@ export interface RigConnection {
     close: () => void;
 }
 
-export interface MurmurOperationOptions {
-    signal?: AbortSignal;
-}
-
-export interface SessionShareOperationOptions {
-    signal?: AbortSignal;
-}
 
 export interface HappyCloudOperationOptions {
     signal?: AbortSignal;
@@ -867,24 +712,6 @@ interface PluginsEntry {
     started: boolean;
     store: PluginStore;
     subscribers: Set<PluginsSubscriber>;
-}
-
-interface MurmurFriendsSubscriber extends RigMurmurFriendsSubscriptionOptions {
-    closed: boolean;
-}
-
-interface MurmurFriendsEntry {
-    bootstrapVersion: number;
-    controller: AbortController;
-    detachRoot: () => void;
-    loading: boolean;
-    reloadPending: boolean;
-    rememberedEventIds: Set<string>;
-    rememberedEventOrder: string[];
-    snapshotLoaded: boolean;
-    started: boolean;
-    store: MurmurFriendsStore;
-    subscribers: Set<MurmurFriendsSubscriber>;
 }
 
 interface TimelineSubscriber extends RigTimelineSubscriptionOptions {
@@ -1050,7 +877,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let happyCloudEntry: HappyCloudEntry | undefined;
     let p2pEntry: P2pEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
-    let murmurFriendsEntry: MurmurFriendsEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
     let providerUsageEntry: ProviderUsageEntryState | undefined;
     const timelineEntries = new Map<string, TimelineEntry>();
@@ -1118,13 +944,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         }
     };
 
-    const publishMurmurFriends = (changed: boolean): void => {
-        const entry = murmurFriendsEntry;
-        if (closed || !changed || entry === undefined) return;
-        for (const subscriber of [...entry.subscribers]) {
-            if (!subscriber.closed) subscriber.onChange(entry.store.state());
-        }
-    };
 
     const publishTimeline = (entry: TimelineEntry, deltas: readonly TimelineDelta[]): void => {
         if (closed || deltas.length === 0) return;
@@ -1306,46 +1125,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 
     const applyAcceptedResponse = (mutation: PendingMutation, data: unknown): boolean => {
         if (mutation.applyAcceptedResponse?.(data) === true) return true;
-        if (mutation.sessionId !== undefined && isSessionShareMutationAction(mutation.action)) {
-            let response: SessionShareOwnerResponse;
-            try {
-                response = Value.Decode(sessionShareOwnerResponseSchema, data);
-            } catch {
-                rejectMutation(mutation, "Rig returned an invalid session-sharing response.");
-                return true;
-            }
-            const sessionId = mutation.sessionId;
-            reconcile(
-                [mutation.entityKey],
-                mutation.id,
-                [sessionId],
-                groupsEntry !== undefined,
-                () => ({
-                    ...(groupsEntry === undefined
-                        ? {}
-                        : {
-                              groupDeltas: groupsEntry.store.applySessionShare(
-                                  sessionId,
-                                  response.share,
-                              ),
-                          }),
-                    ...(sessionEntries.has(sessionId)
-                        ? {
-                              sessionDeltas: new Map([
-                                  [
-                                      sessionId,
-                                      sessionEntries
-                                          .get(sessionId)!
-                                          .store.applySessionShare(response.share),
-                                  ],
-                              ]),
-                          }
-                        : {}),
-                }),
-            );
-            return true;
-        }
-
         const project = responseEntity(data, "project");
         if (
             groupsEntry !== undefined &&
@@ -2016,96 +1795,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
-    const createMurmurFriendsEntry = (): MurmurFriendsEntry => {
-        if (murmurFriendsEntry !== undefined) return murmurFriendsEntry;
-        const linked = linkedController(rootController.signal);
-        const entry: MurmurFriendsEntry = {
-            bootstrapVersion: 0,
-            controller: linked.controller,
-            detachRoot: linked.detach,
-            loading: false,
-            reloadPending: false,
-            rememberedEventIds: new Set(),
-            rememberedEventOrder: [],
-            snapshotLoaded: false,
-            started: false,
-            store: new MurmurFriendsStore(),
-            subscribers: new Set(),
-        };
-        murmurFriendsEntry = entry;
-        return entry;
-    };
-
-    const reportMurmurFriendsError = (entry: MurmurFriendsEntry, error: unknown): void => {
-        if (closed || entry.controller.signal.aborted) return;
-        // A request event may have arrived immediately before this failed
-        // reload. Retain that fact so a clean stream reconnect also rebuilds
-        // instead of relabeling a stale graph as live.
-        entry.reloadPending = true;
-        publishMurmurFriends(entry.store.setConnection("closed"));
-        for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
-    };
-
-    /**
-     * Keeps at most one fetch in flight. Events that land while it is reading
-     * merely ask it for one newer snapshot once that read has settled.
-     */
-    const loadMurmurFriends = async (entry: MurmurFriendsEntry): Promise<void> => {
-        if (entry.loading) {
-            entry.reloadPending = true;
-            return;
-        }
-        entry.loading = true;
-        const version = ++entry.bootstrapVersion;
-        try {
-            do {
-                entry.reloadPending = false;
-                const snapshot = await requestMurmur(
-                    "murmur/friends",
-                    getMurmurFriendsResponseSchema,
-                    murmurJsonInit("GET", undefined, { signal: entry.controller.signal }),
-                );
-                if (
-                    closed ||
-                    entry.controller.signal.aborted ||
-                    version !== entry.bootstrapVersion ||
-                    murmurFriendsEntry !== entry
-                ) {
-                    return;
-                }
-                entry.snapshotLoaded = true;
-                publishMurmurFriends(entry.store.replace(snapshot, "live"));
-            } while (entry.reloadPending);
-        } finally {
-            entry.loading = false;
-        }
-    };
-
-    const requestMurmurFriendsReload = (entry: MurmurFriendsEntry): void => {
-        void loadMurmurFriends(entry).catch((error: unknown) => {
-            reportMurmurFriendsError(entry, error);
-        });
-    };
-
-    const rememberMurmurFriendshipEvent = (entry: MurmurFriendsEntry, id: string): boolean => {
-        if (entry.rememberedEventIds.has(id)) return false;
-        entry.rememberedEventIds.add(id);
-        entry.rememberedEventOrder.push(id);
-        if (entry.rememberedEventOrder.length > MAXIMUM_REMEMBERED_MURMUR_FRIENDSHIP_EVENTS) {
-            const oldest = entry.rememberedEventOrder.shift();
-            if (oldest !== undefined) entry.rememberedEventIds.delete(oldest);
-        }
-        return true;
-    };
-
-    const startMurmurFriendsEntry = (entry: MurmurFriendsEntry): void => {
-        if (entry.started) return;
-        entry.started = true;
-        ensureLiveStream();
-        if (!liveStreamOpen) return;
-        requestMurmurFriendsReload(entry);
-    };
-
     const createTimelineEntry = (subscription: RigTimelineSubscriptionOptions): TimelineEntry => {
         const key = timelineKey(subscription);
         const existing = timelineEntries.get(key);
@@ -2211,14 +1900,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (pluginsEntry !== undefined) {
                         publishPlugins(pluginsEntry.store.setConnection("live"));
                     }
-                    if (murmurFriendsEntry !== undefined) {
-                        const friends = murmurFriendsEntry;
-                        if (friends.started && (!friends.snapshotLoaded || friends.reloadPending)) {
-                            requestMurmurFriendsReload(friends);
-                        } else {
-                            publishMurmurFriends(friends.store.setConnection("live"));
-                        }
-                    }
                     setTimelineConnection("live");
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
@@ -2249,10 +1930,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                             subscriber.onError?.(error);
                         }
                     });
-                }
-                const friends = murmurFriendsEntry;
-                if (friends !== undefined && friends.started) {
-                    requestMurmurFriendsReload(friends);
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     if (!entry.started) continue;
@@ -2322,44 +1999,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     entry.requiredVersion = Math.max(entry.requiredVersion, changed.data.version);
                     void requestHappyCloudReload(entry);
                     return;
-                }
-                if (event.type === "murmur_friendship_changed") {
-                    const entry = murmurFriendsEntry;
-                    if (
-                        entry !== undefined &&
-                        entry.started &&
-                        rememberMurmurFriendshipEvent(entry, event.id)
-                    ) {
-                        requestMurmurFriendsReload(entry);
-                    }
-                    return;
-                }
-                if (event.type === "session_share_capabilities_changed") {
-                    let changed: Static<typeof sessionShareCapabilitiesChangedEventSchema>;
-                    try {
-                        changed = Value.Decode(sessionShareCapabilitiesChangedEventSchema, event);
-                    } catch {
-                        return;
-                    }
-                    // Keyed by shareId, not sessionId: an owner session has at
-                    // most one current share, so every open session whose share
-                    // matches is the one this member row belongs to.
-                    for (const entry of sessionEntries.values()) {
-                        if (entry.pending !== undefined) continue;
-                        publishSession(
-                            entry,
-                            entry.store.applySessionShareMemberCapabilities(
-                                changed.data.shareId,
-                                changed.data.shareMemberId,
-                                changed.data.capabilities,
-                                changed.data.capabilitiesDescription,
-                                changed.data.memberState,
-                            ),
-                        );
-                    }
-                    return;
-                }
-                if (event.type === "plugins_changed") {
+                }                if (event.type === "plugins_changed") {
                     const entry = pluginsEntry;
                     if (entry === undefined || !entry.started) return;
                     const update = {
@@ -2455,9 +2095,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("reconnecting"));
                 }
-                if (murmurFriendsEntry !== undefined) {
-                    publishMurmurFriends(murmurFriendsEntry.store.setConnection("reconnecting"));
-                }
                 setTimelineConnection("reconnecting");
                 for (const entry of [...sessionEntries.values()]) {
                     if (entry.started) {
@@ -2486,12 +2123,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         subscriber.onError?.(error);
                     }
                 }
-                if (murmurFriendsEntry !== undefined) {
-                    publishMurmurFriends(murmurFriendsEntry.store.setConnection("closed"));
-                    for (const subscriber of [...murmurFriendsEntry.subscribers]) {
-                        subscriber.onError?.(error);
-                    }
-                }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
@@ -2511,9 +2142,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("closed"));
-                }
-                if (murmurFriendsEntry !== undefined) {
-                    publishMurmurFriends(murmurFriendsEntry.store.setConnection("closed"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
@@ -2922,33 +2550,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
-    const connectMurmurFriends = (
-        subscription: RigMurmurFriendsSubscriptionOptions,
-    ): RigMurmurFriendsConnection => {
-        if (closed) throw new Error("This Rig connection is closed.");
-        const entry = createMurmurFriendsEntry();
-        const subscriber: MurmurFriendsSubscriber = { ...subscription, closed: false };
-        entry.subscribers.add(subscriber);
-        subscriber.onChange(entry.store.state());
-        startMurmurFriendsEntry(entry);
-        return {
-            account: () => entry.store.state().account,
-            contacts: () => entry.store.state().contacts,
-            friendships: () => entry.store.state().friendships,
-            state: () => entry.store.state(),
-            stats: () => entry.store.state().stats,
-            close: () => {
-                if (subscriber.closed) return;
-                subscriber.closed = true;
-                entry.subscribers.delete(subscriber);
-                if (entry.subscribers.size !== 0 || murmurFriendsEntry !== entry) return;
-                entry.controller.abort();
-                entry.detachRoot();
-                murmurFriendsEntry = undefined;
-            },
-        };
-    };
-
     const connectPlugins = (subscription: RigPluginsSubscriptionOptions): RigPluginsConnection => {
         if (closed) throw new Error("This Rig connection is closed.");
         const entry = createPluginsEntry();
@@ -3212,251 +2813,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             method: "POST",
         });
 
-    const requestSessionShare = async <T extends TSchema>(
-        path: string,
-        schema: T,
-        init: RequestInit = {},
-    ): Promise<Static<T>> => {
-        const response = await requestJson(path, init);
-        try {
-            return Value.Decode(schema, response.data);
-        } catch {
-            throw new Error("Rig returned an invalid session-sharing response.");
-        }
-    };
-
-    const enqueueSessionShareMutation = (
-        action: Extract<
-            MutationAction,
-            | "add_session_share_member"
-            | "create_session_share"
-            | "revoke_session_share_member"
-            | "set_session_share_friend_messages"
-            | "set_session_share_member_capabilities"
-            | "set_session_share_tool_output"
-            | "stop_session_share"
-        >,
-        sessionId: string,
-        path: string,
-        body: Readonly<Record<string, unknown>>,
-        project?: (shared: SessionSharedMetadata) => SessionSharedMetadata,
-        method: "POST" | "PUT" = "POST",
-    ): MutationId => {
-        const id = nextMutationId();
-        const key = sessionKey(sessionId);
-        let expectedEventId: string | undefined;
-        return enqueue({
-            acknowledged: false,
-            action,
-            applyOptimistic: (publish) => {
-                if (project === undefined) return () => undefined;
-                const undos: (() => void)[] = [];
-                const entry = sessionEntries.get(sessionId);
-                const chatShared = entry?.store.session().shared;
-                if (entry !== undefined && chatShared !== undefined) {
-                    const changed = entry.store.applyOptimisticSession({
-                        shared: project(chatShared),
-                    });
-                    undos.push(changed.undo);
-                    if (publish) publishSession(entry, changed.deltas);
-                }
-                const catalogShared = groupsEntry?.store.sessionSummary(sessionId)?.shared;
-                if (groupsEntry !== undefined && catalogShared !== undefined) {
-                    const changed = groupsEntry.store.applyOptimisticSessionPatch(sessionId, {
-                        shared: project(catalogShared),
-                    });
-                    undos.push(changed.undo);
-                    if (publish) publishGroups(groupsEntry, changed.deltas);
-                }
-                return composeUndo(undos);
-            },
-            entityKey: key,
-            id,
-            prepare: () => {
-                expectedEventId ??= currentSessionCursor(sessionId);
-                return {
-                    body: { ...body, mutationId: id },
-                    headers: {
-                        ...ifMatchHeader(expectedEventId),
-                        "x-rig-mutation-id": id,
-                    },
-                    method,
-                    url: endpointUrl(
-                        options.endpoint,
-                        `sessions/${encodeURIComponent(sessionId)}/share${path}`,
-                    ),
-                };
-            },
-            retryOnConflict: true,
-            sessionId,
-            undo: () => undefined,
-            versionSessionId: sessionId,
-        });
-    };
-
-    const createSessionShare: RigConnection["createSessionShare"] = (sessionId, input) =>
-        enqueueSessionShareMutation("create_session_share", sessionId, "", input);
-
-    const addSessionShareMember: RigConnection["addSessionShareMember"] = (sessionId, friend) =>
-        enqueueSessionShareMutation(
-            "add_session_share_member",
-            sessionId,
-            "/members",
-            { friend } satisfies Omit<AddSessionShareMemberRequest, "mutationId">,
-            (shared) => ({ ...shared, memberCount: shared.memberCount + 1 }),
-        );
-
-    const revokeSessionShareMember: RigConnection["revokeSessionShareMember"] = (
-        sessionId,
-        shareMemberId,
-    ) =>
-        enqueueSessionShareMutation(
-            "revoke_session_share_member",
-            sessionId,
-            `/members/${encodeURIComponent(shareMemberId)}/revoke`,
-            {},
-            (shared) => ({ ...shared, memberCount: Math.max(0, shared.memberCount - 1) }),
-        );
-
-    const stopSessionShare: RigConnection["stopSessionShare"] = (sessionId) =>
-        enqueueSessionShareMutation("stop_session_share", sessionId, "/stop", {}, (shared) => ({
-            ...shared,
-            state: "stopped",
-        }));
-
-    const setSessionShareFriendMessages: RigConnection["setSessionShareFriendMessages"] = (
-        sessionId,
-        includeFriendMessagesInModel,
-    ) =>
-        enqueueSessionShareMutation(
-            "set_session_share_friend_messages",
-            sessionId,
-            "/friend-messages",
-            { includeFriendMessagesInModel },
-            (shared) => ({ ...shared, includeFriendMessagesInModel }),
-        );
-
-    const setSessionShareToolOutput: RigConnection["setSessionShareToolOutput"] = (
-        sessionId,
-        toolOutput,
-    ) =>
-        enqueueSessionShareMutation(
-            "set_session_share_tool_output",
-            sessionId,
-            "/tool-output",
-            { toolOutput },
-            (shared) => ({
-                ...shared,
-                toolOutput,
-                toolOutputDescription: describeSessionShareToolOutput(toolOutput),
-            }),
-        );
-
-    const setSessionShareMemberCapabilities: RigConnection["setSessionShareMemberCapabilities"] = (
-        sessionId,
-        shareMemberId,
-        capabilities,
-    ) =>
-        enqueueSessionShareMutation(
-            "set_session_share_member_capabilities",
-            sessionId,
-            `/members/${encodeURIComponent(shareMemberId)}/capabilities`,
-            { capabilities },
-            // capabilityMemberCount depends on this member's capabilities before
-            // the change, which this client does not track, so it waits for the
-            // authoritative response instead of predicting a count it cannot know.
-            undefined,
-            "PUT",
-        );
-
-    const postSessionShareFriendMessage: RigConnection["postSessionShareFriendMessage"] = (
-        post,
-        operationOptions = {},
-    ) =>
-        requestSessionShare(
-            "session-shares/friend-messages",
-            postSessionShareFriendMessageResponseSchema,
-            {
-                body: JSON.stringify(post),
-                headers: { "content-type": "application/json" },
-                method: "POST",
-                ...(operationOptions.signal === undefined
-                    ? {}
-                    : { signal: operationOptions.signal }),
-            },
-        );
-
-    const listSessionShareReplicas: RigConnection["listSessionShareReplicas"] = (
-        operationOptions = {},
-    ) =>
-        requestSessionShare("session-share-replicas", listSessionShareReplicasResponseSchema, {
-            ...(operationOptions.signal === undefined ? {} : { signal: operationOptions.signal }),
-        });
-
-    const getSessionShareReplicaHistory: RigConnection["getSessionShareReplicaHistory"] = (
-        shareId,
-        operationOptions = {},
-    ) => {
-        const after =
-            operationOptions.after === undefined
-                ? ""
-                : `?after=${encodeURIComponent(operationOptions.after)}`;
-        return requestSessionShare(
-            `session-share-replicas/${encodeURIComponent(shareId)}/history${after}`,
-            getSessionShareReplicaHistoryResponseSchema,
-            {
-                ...(operationOptions.signal === undefined
-                    ? {}
-                    : { signal: operationOptions.signal }),
-            },
-        );
-    };
-
-    const getSessionShareHealth: RigConnection["getSessionShareHealth"] = (
-        shareId,
-        operationOptions = {},
-    ) =>
-        requestSessionShare(
-            `session-shares/${encodeURIComponent(shareId)}/health`,
-            getSessionShareHealthResponseSchema,
-            {
-                ...(operationOptions.signal === undefined
-                    ? {}
-                    : { signal: operationOptions.signal }),
-            },
-        );
-
-    const getSessionSharePeerActivity: RigConnection["getSessionSharePeerActivity"] = (
-        sessionId,
-        operationOptions = {},
-    ) => {
-        const after =
-            operationOptions.after === undefined
-                ? ""
-                : `?after=${encodeURIComponent(operationOptions.after)}`;
-        return requestSessionShare(
-            `sessions/${encodeURIComponent(sessionId)}/share/peer-activity${after}`,
-            getSessionSharePeerActivityResponseSchema,
-            {
-                ...(operationOptions.signal === undefined
-                    ? {}
-                    : { signal: operationOptions.signal }),
-            },
-        );
-    };
-
-    const listSessionShareReplicaCapabilities: RigConnection["listSessionShareReplicaCapabilities"] =
-        (shareId, operationOptions = {}) =>
-            requestSessionShare(
-                `session-share-replicas/${encodeURIComponent(shareId)}/capabilities`,
-                listSessionShareReplicaCapabilitiesResponseSchema,
-                {
-                    ...(operationOptions.signal === undefined
-                        ? {}
-                        : { signal: operationOptions.signal }),
-                },
-            );
-
     const projects: RigProjects = {
         add: async (path, addOptions = {}) => {
             const projectId = addOptions.projectId ?? nextEntityId();
@@ -3532,118 +2888,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             }
         },
     };
-
-    const requestMurmur = async <Schema extends TSchema>(
-        path: string,
-        schema: Schema,
-        init: RequestInit = {},
-    ): Promise<Static<Schema>> => {
-        const { data, status } = await requestJson(path, init);
-        if (status >= 400) {
-            throw new MutationHttpError(status, humanMutationError(data, status), undefined, data);
-        }
-        try {
-            return Value.Decode(schema, data);
-        } catch {
-            throw new Error("Rig returned an invalid Murmur response.");
-        }
-    };
-
-    const murmurJsonInit = (
-        method: "DELETE" | "GET" | "POST",
-        body: object | undefined,
-        operationOptions: MurmurOperationOptions,
-    ): RequestInit => ({
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        ...(body === undefined ? {} : { headers: { "content-type": "application/json" } }),
-        method,
-        ...(operationOptions.signal === undefined ? {} : { signal: operationOptions.signal }),
-    });
-
-    const getMurmurAccount: RigConnection["getMurmurAccount"] = (operationOptions = {}) =>
-        requestMurmur(
-            "murmur/account",
-            getMurmurAccountResponseSchema,
-            murmurJsonInit("GET", undefined, operationOptions),
-        );
-
-    const signupMurmurAccount: RigConnection["signupMurmurAccount"] = (
-        signup,
-        operationOptions = {},
-    ) =>
-        requestMurmur(
-            "murmur/account",
-            signupMurmurAccountResponseSchema,
-            murmurJsonInit("POST", signup, operationOptions),
-        );
-
-    const startMurmurService: RigConnection["startMurmurService"] = (
-        start = {},
-        operationOptions = {},
-    ) =>
-        requestMurmur(
-            "murmur/service/start",
-            startMurmurServiceResponseSchema,
-            murmurJsonInit("POST", start, operationOptions),
-        );
-
-    const stopMurmurService: RigConnection["stopMurmurService"] = (operationOptions = {}) =>
-        requestMurmur(
-            "murmur/service/stop",
-            stopMurmurServiceResponseSchema,
-            murmurJsonInit("POST", undefined, operationOptions),
-        );
-
-    const deleteMurmurAccount: RigConnection["deleteMurmurAccount"] = (operationOptions = {}) =>
-        requestMurmur(
-            "murmur/account",
-            deleteMurmurAccountResponseSchema,
-            murmurJsonInit("DELETE", undefined, operationOptions),
-        );
-
-    const sendMurmurFriendRequest: RigConnection["sendMurmurFriendRequest"] = (
-        token,
-        operationOptions = {},
-    ) =>
-        requestMurmur(
-            "murmur/friend-requests",
-            sendMurmurFriendRequestResponseSchema,
-            murmurJsonInit("POST", { token }, operationOptions),
-        );
-
-    const listMurmurFriendRequests: RigConnection["listMurmurFriendRequests"] = (
-        operationOptions = {},
-    ) =>
-        requestMurmur(
-            "murmur/friend-requests",
-            listMurmurFriendRequestsResponseSchema,
-            murmurJsonInit("GET", undefined, operationOptions),
-        );
-
-    const answerMurmurFriendRequest: RigConnection["answerMurmurFriendRequest"] = (
-        peerId,
-        answer,
-        operationOptions = {},
-    ) =>
-        requestMurmur(
-            `murmur/friend-requests/${encodeURIComponent(peerId)}/answer`,
-            answerMurmurFriendRequestResponseSchema,
-            murmurJsonInit("POST", { answer }, operationOptions),
-        );
-
-    const listMurmurContacts: RigConnection["listMurmurContacts"] = (operationOptions = {}) =>
-        requestMurmur(
-            "murmur/contacts",
-            listMurmurContactsResponseSchema,
-            murmurJsonInit("GET", undefined, operationOptions),
-        );
-
-    const listMurmurFriends: RigConnection["listMurmurFriends"] = (operationOptions = {}) =>
-        requestMurmur(
-            "murmur/friends",
-            getMurmurFriendsResponseSchema,
-            murmurJsonInit("GET", undefined, operationOptions),
-        );
 
     const happyCloudGetInit = (operationOptions: HappyCloudOperationOptions): RequestInit => ({
         method: "GET",
@@ -5280,12 +4524,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 pluginsEntry.subscribers.clear();
                 pluginsEntry = undefined;
             }
-            if (murmurFriendsEntry !== undefined) {
-                murmurFriendsEntry.controller.abort();
-                murmurFriendsEntry.detachRoot();
-                murmurFriendsEntry.subscribers.clear();
-                murmurFriendsEntry = undefined;
-            }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;
             for (const entry of timelineEntries.values()) {
@@ -5296,7 +4534,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             timelineEntries.clear();
         },
         answerUserInput,
-        answerMurmurFriendRequest,
         applyHappyCloudCommand,
         attachSecret,
         cancelScheduledMessage,
@@ -5306,48 +4543,32 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectHappyCloud,
         connectP2p,
         connectInbox,
-        connectMurmurFriends,
         connectPlugins,
         connectProviderUsage,
         connectSession,
         connectTerminalPresence,
         connectTimeline,
         createP2pInvitation,
-        createSessionShare,
         createWorkspace,
         createSession,
-        addSessionShareMember,
-        deleteMurmurAccount,
         detachSecret,
         discoverPluginCatalog,
         forkSession,
         installPlugin,
-        getMurmurAccount,
-        getSessionSharePeerActivity,
-        getSessionShareHealth,
-        getSessionShareReplicaHistory,
         getHappyCloudProfile,
         getHappyCloudSessionBlob,
         getHappyCloudStatus,
         getP2pPairing,
         joinP2pInvitation,
-        listMurmurContacts,
-        listMurmurFriends,
-        listMurmurFriendRequests,
-        listSessionShareReplicaCapabilities,
-        listSessionShareReplicas,
         projects,
         readBackgroundProcess,
         readPluginLog,
-        postSessionShareFriendMessage,
         recordActivity,
         renameGroup,
         resolveExternalToolCall,
-        revokeSessionShareMember,
         resetSession,
         rewindSession,
         runShellCommand,
-        sendMurmurFriendRequest,
         sendMessage,
         sendContextMessage,
         setDraft,
@@ -5358,18 +4579,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         setGoal,
         setGoalStatus,
         setSessionArchived,
-        setSessionShareFriendMessages,
-        setSessionShareMemberCapabilities,
-        setSessionShareToolOutput,
         stopRun,
-        startMurmurService,
-        stopMurmurService,
-        stopSessionShare,
         stopBackgroundProcess,
         stopBackgroundProcesses,
         stopWorkflow,
         switchModel,
-        signupMurmurAccount,
         uninstallPlugin,
     };
 }
@@ -5445,10 +4659,8 @@ function initialHappyCloudStatus(): HappyCloudStatus {
     return {
         authority: "local_record_only",
         capabilities: {
-            friends: denied,
             group_chats: denied,
             happy_profile: denied,
-            live_session_sharing: denied,
             remote_control: denied,
             session_blob_persistence: denied,
         },
@@ -5478,10 +4690,8 @@ function predictHappyCloudStatus(
         return {
             ...next,
             capabilities: {
-                friends: denied,
                 group_chats: denied,
                 happy_profile: denied,
-                live_session_sharing: denied,
                 remote_control: denied,
                 session_blob_persistence: denied,
             },
@@ -5719,28 +4929,6 @@ function isRetryableMutationError(error: unknown): boolean {
     );
 }
 
-function isSessionShareMutationAction(
-    action: MutationAction,
-): action is Extract<
-    MutationAction,
-    | "add_session_share_member"
-    | "create_session_share"
-    | "revoke_session_share_member"
-    | "set_session_share_friend_messages"
-    | "set_session_share_member_capabilities"
-    | "set_session_share_tool_output"
-    | "stop_session_share"
-> {
-    return (
-        action === "add_session_share_member" ||
-        action === "create_session_share" ||
-        action === "revoke_session_share_member" ||
-        action === "set_session_share_friend_messages" ||
-        action === "set_session_share_member_capabilities" ||
-        action === "set_session_share_tool_output" ||
-        action === "stop_session_share"
-    );
-}
 
 function retryAfterMilliseconds(value: string | null, currentTime: number): number | undefined {
     if (value === null) return undefined;

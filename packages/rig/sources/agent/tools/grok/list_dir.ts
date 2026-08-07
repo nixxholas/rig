@@ -52,12 +52,5 @@ Other details:
         result.text === "(empty directory)"
             ? `Listed ${args.target_directory} (empty)`
             : `Listed ${args.target_directory} (${countTextLines(result.text)} entries)`,
-    toSharedCall: ({ target_directory }) => `Listed the directory ${target_directory}.`,
-    toSharedResult: (result) => {
-        if (result.text === "(empty directory)") return "The directory is empty.";
-        const count = countTextLines(result.text);
-        return `Found ${count} ${count === 1 ? "entry" : "entries"}.`;
-    },
-    sharedOutputDisclosable: true,
     locks: [],
 });

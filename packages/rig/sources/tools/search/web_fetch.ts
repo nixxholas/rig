@@ -112,12 +112,6 @@ Call web_fetch again with the redirect URL to continue.`;
         toLLM: (result) => [{ type: "text", text: result.result }],
         toUI: (result) =>
             `Received ${formatFileSize(result.bytes)} (${result.code} ${result.codeText})`,
-        toSharedCall: ({ url }) => `Fetched ${url}.`,
-        toSharedResult: (result) =>
-            result.code >= 400
-                ? `The fetch failed with HTTP ${result.code} ${result.codeText}.`
-                : `Fetched ${formatFileSize(result.bytes)} with HTTP ${result.code} ${result.codeText}.`,
-        sharedOutputDisclosable: true,
         locks: [],
     });
 }

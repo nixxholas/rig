@@ -67,10 +67,5 @@ export const claudeEditTool = defineTool({
     }),
     toUI: (result) =>
         `Edited ${result.path} (${result.replacements} replacement${result.replacements === 1 ? "" : "s"})`,
-    // Name the file, never the replaced or replacement text held on the result.
-    toSharedCall: ({ file_path }) => `Edited ${file_path}.`,
-    toSharedResult: (result) =>
-        `Made ${result.replacements} replacement${result.replacements === 1 ? "" : "s"} in ${result.path}.`,
-    sharedOutputDisclosable: true,
     locks: [(args) => args.file_path],
 });

@@ -49,7 +49,6 @@ import type {
     RunShellCommandResponse,
     SecretSummary,
     SessionEvent,
-    SessionSharedMetadata,
     SessionTokenCount,
     SessionTask,
     SteerMessageResponse,
@@ -125,10 +124,6 @@ import { renderNoticeWithChildren } from "./renderNoticeWithChildren.js";
 import { renderExecCommand } from "./renderExecCommand.js";
 import { renderExploration } from "./renderExploration.js";
 import { renderPendingSteeringMessages } from "./renderPendingSteeringMessages.js";
-import {
-    describeActivePeerCapabilities,
-    renderPeerCapabilityIndicator,
-} from "./renderPeerCapabilityIndicator.js";
 import { renderRigBanner } from "./renderRigBanner.js";
 import { renderStartupStatusCard } from "./renderStartupStatusCard.js";
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";
@@ -213,8 +208,6 @@ export interface CodingAssistantAppOptions {
     initialProjectSecretIds?: readonly string[];
     initialSessionSecretIds?: readonly string[];
     initialTasks?: readonly SessionTask[];
-    /** Compact owner-share status only; Happy owns management controls. */
-    sessionShare?: SessionSharedMetadata;
     initialUsageEventId?: EventId;
     initialWorkflowEventId?: EventId;
     initialWorkflows?: readonly WorkflowRun[];
@@ -409,7 +402,6 @@ export class CodingAssistantApp implements Component, Focusable {
         | ((requestId: string, response: UserInputResponse) => void | Promise<void>)
         | undefined;
     readonly #processManager: NativeProcessManager;
-    #sessionShare: SessionSharedMetadata | undefined;
     readonly #readClipboardImage: (
         options?: ReadClipboardImageOptions,
     ) => Promise<ClipboardImage | undefined>;
@@ -556,7 +548,6 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#onExit = options.onExit;
         this.#respondUserInput = options.respondUserInput;
         this.#processManager = options.processManager;
-        this.#sessionShare = options.sessionShare;
         this.#readClipboardImage = options.readClipboardImage ?? readClipboardImage;
         this.#sessionBacked = options.sessionBacked ?? false;
         this.#inferenceMaxRetries = options.inferenceMaxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES;
@@ -776,16 +767,6 @@ export class CodingAssistantApp implements Component, Focusable {
             eventRunId !== undefined &&
             this.#ignoredBoundaryRunIds.has(eventRunId)
         ) {
-            return;
-        }
-
-        if (event.type === "session_updated") {
-            // Absent means this update carries nothing about sharing, not that sharing ended;
-            // overwriting the indicator on every unrelated session update would make it flicker
-            // out from under an owner who never actually stopped being watched.
-            if (event.data.session.shared !== undefined) {
-                this.#applySessionShareUpdate(event.data.session.shared);
-            }
             return;
         }
 
@@ -3541,7 +3522,7 @@ export class CodingAssistantApp implements Component, Focusable {
 
         const controller = this.#abortController;
         if (this.#sessionBacked && this.#activeSessionRunId !== undefined) {
-            // The run-specific stream can settle before the shared session event stream.
+            // The run-specific stream can settle before the session event stream.
             // Keep queued input behind the durable terminal event so it starts as a new turn.
             this.#interruptSettlementRunId = this.#activeSessionRunId;
         }
@@ -4099,25 +4080,6 @@ export class CodingAssistantApp implements Component, Focusable {
         });
     }
 
-    /**
-     * The above-composer indicator is the one place an owner is guaranteed to see that a
-     * capability is active, so its disappearance must never be silent: when the last member
-     * loses every capability, the same update that drops the live row also writes the history
-     * row that explains where it went, in the same render the terminal-layout-stability rule
-     * requires.
-     */
-    #applySessionShareUpdate(share: SessionSharedMetadata): void {
-        const wasActive = (this.#sessionShare?.capabilityMemberCount ?? 0) > 0;
-        if (wasActive && share.capabilityMemberCount === 0 && this.#sessionShare !== undefined) {
-            this.#appendEntry({
-                role: "event",
-                text: `No member can ${describeActivePeerCapabilities(this.#sessionShare)} in this session anymore.`,
-            });
-        }
-        this.#sessionShare = share;
-        this.#requestRender();
-    }
-
     #backgroundTerminalInteraction(
         toolName: string,
         args: unknown,
@@ -4629,13 +4591,6 @@ export class CodingAssistantApp implements Component, Focusable {
         if (this.#activeAgentLabel !== undefined) {
             parts.push(`${this.#theme.secondary}${this.#activeAgentLabel}${RESET}`);
         }
-        if (this.#sessionShare !== undefined) {
-            const label =
-                this.#sessionShare.state === "active"
-                    ? "shared"
-                    : `shared ${this.#sessionShare.state}`;
-            parts.push(`${this.#theme.secondary}${label}${RESET}`);
-        }
         const queuedCount = this.#promptsShownAsQueued().length;
         if (queuedCount > 0) {
             parts.push(`${this.#theme.secondary}queued ${queuedCount}${RESET}`);
@@ -4718,7 +4673,6 @@ export class CodingAssistantApp implements Component, Focusable {
             }),
             renderWorkflowSummary(this.#activeWorkflowCount(), width),
             renderBackgroundTerminalSummary(this.#backgroundProcesses.length, width),
-            renderPeerCapabilityIndicator(this.#sessionShare, width),
         ];
         return rows.filter((row): row is string => row !== undefined);
     }

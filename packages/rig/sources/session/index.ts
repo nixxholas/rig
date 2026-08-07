@@ -3,10 +3,8 @@ export {
     type AgentSessionManagerOptions,
     type AgentSessionRepository,
 } from "./AgentSessionManager.js";
-export { DEFAULT_FRIEND_CONTEXT_DRAIN_LIMITS, InMemorySession } from "./InMemorySession.js";
+export { InMemorySession } from "./InMemorySession.js";
 export type {
-    FriendContextDrainLimits,
-    FriendContextDrainResult,
     InMemorySessionOptions,
     InMemorySessionPersistence,
     PersistedPendingContextMessage,

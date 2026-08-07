@@ -53,7 +53,6 @@ export function createGeminiWebSearchTool(
         }),
         toUI: (result) =>
             `Gemini returned ${result.sources.length} source${result.sources.length === 1 ? "" : "s"}`,
-        sharedOutputDisclosable: true,
         locks: [],
     });
 }

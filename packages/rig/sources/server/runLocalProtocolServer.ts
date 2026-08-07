@@ -1,6 +1,5 @@
 import { chmod, open } from "node:fs/promises";
 import { createServer } from "node:http";
-import { dirname, join } from "node:path";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
@@ -60,17 +59,7 @@ import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
-import { MurmurService } from "../murmur/index.js";
 import { createEventIdFactory, type GlobalLiveEvent, type P2pStatus } from "../protocol/index.js";
-import { createScopeShareKind } from "../scope-sharing/createScopeShareKind.js";
-import { createSessionShareKind } from "../session-sharing/createSessionShareKind.js";
-import {
-    describePeerCapabilities,
-    PeerCapabilityContext,
-    PeerTerminalViewerService,
-} from "../session-sharing/peer-access/index.js";
-import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
-import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 import {
     loadOrCreateIrohSecretKey,
     loadOrCreateP2pIdentity,
@@ -87,12 +76,6 @@ export interface RunLocalProtocolServerOptions {
     socketPath?: string;
     tokenPath?: string;
 }
-
-/** Every kind of share this daemon replicates, over one transport and one router. */
-type RigShareRuntime = ShareRuntime<{
-    scope: ReturnType<typeof createScopeShareKind>;
-    session: ReturnType<typeof createSessionShareKind>;
-}>;
 
 export async function runLocalProtocolServer(
     options: RunLocalProtocolServerOptions = {},
@@ -154,8 +137,6 @@ async function runOwnedLocalProtocolServer(
     let mcpToolProvider: McpToolProvider | undefined;
     let p2pNetwork: P2pNetwork | undefined;
     let p2pPairingService: P2pPairingService | undefined;
-    let murmurService: MurmurService | undefined;
-    let shareRuntime: RigShareRuntime | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -537,16 +518,6 @@ async function runOwnedLocalProtocolServer(
             onSessionEvent: (event, session) => {
                 recordProviderFailure(daemonLog, event);
                 if (happyModule !== undefined) happySyncService?.observe(event, session);
-                shareRuntime?.kinds.session.wake(event.sessionId);
-                const shared = session?.projectIdentity();
-                if (shared !== undefined) {
-                    shareRuntime?.kinds.scope.wakeForSession({
-                        projectId: shared.projectId,
-                        ...(shared.workspaceId === undefined
-                            ? {}
-                            : { workspaceId: shared.workspaceId }),
-                    });
-                }
                 if (store !== undefined && gitStateTracker !== undefined) {
                     const identity = session?.projectIdentity();
                     markGitStateFromSessionEvent(
@@ -708,165 +679,6 @@ async function runOwnedLocalProtocolServer(
             await p2pPairingService?.close();
             await p2pNetwork?.close();
         });
-        murmurService = new MurmurService({
-            publishGlobalEvent: (event) => {
-                const entry = activeStore.globalEventQueue.appendReplaySafe(event);
-                if (entry !== undefined) activeStore.globalEventQueue.publish(entry);
-                if (entry !== undefined) activeStore.liveEvents.publish(event);
-            },
-            storeFactory: () =>
-                new SqliteMurmurStore(join(dirname(paths.databasePath), "murmur.sqlite")),
-        });
-        await murmurService.getAccount();
-        const activeMurmur = murmurService;
-        const createSessionShareCapabilitiesEventId = createEventIdFactory();
-        /**
-         * Resolves the session one share belongs to, and the terminal scope it runs in.
-         *
-         * Every peer question is really a question about the owner's session: which
-         * project, which workspace, which container, which permission mode. Asking the
-         * share for its owner session and then asking the session is the only path, so
-         * a share that has been stopped or a session that has ended answers nothing
-         * rather than answering stale.
-         */
-        const peerShareSession = (shareId: string) => {
-            const ownerSessionId =
-                activeStore.sessionShareDaemonStore.queryShare(shareId)?.ownerSessionId;
-            if (ownerSessionId === undefined) return undefined;
-            const session = activeStore.get(ownerSessionId);
-            return session === undefined ? undefined : { session, snapshot: session.snapshot() };
-        };
-        const peerCapabilities = new PeerCapabilityContext({
-            recordAction: (entry) => {
-                try {
-                    activeStore.sessionShareDaemonStore.appendPeerAction({
-                        ...entry,
-                        now: Date.now(),
-                    });
-                } catch {
-                    // An audit row that cannot be written must never turn an allowed action
-                    // into a crash or a denied one into an allowed one. The decision has
-                    // already been made and returned; this is the record of it.
-                }
-            },
-            resolveGrant: (request) => {
-                const owner = peerShareSession(request.shareId);
-                if (owner === undefined) return undefined;
-                // Gate one, in full: the row must exist, be active, sit at the member's
-                // current epoch, and belong to a member that is itself active. The query
-                // answers all four or answers nothing.
-                const row = activeStore.sessionShareDaemonStore.queryMemberCapability({
-                    capability: request.capability,
-                    shareId: request.shareId,
-                    shareMemberId: request.shareMemberId,
-                });
-                if (row === undefined) return undefined;
-                // The session's mode is read here, at use time, rather than stored with
-                // the grant. The capability is intent; what it amounts to is whatever the
-                // owner's session permits right now.
-                return { grantEpoch: row.grantEpoch, sessionMode: owner.snapshot.permissionMode };
-            },
-        });
-        const peerTerminalViewer = new PeerTerminalViewerService({
-            activeMemberCount: (shareId) =>
-                activeStore.sessionShareDaemonStore
-                    .queryMembers(shareId)
-                    .filter((member) => member.state === "active").length,
-            capabilities: peerCapabilities,
-            terminal: (shareId, terminalId) => {
-                const owner = peerShareSession(shareId);
-                if (owner === undefined) return undefined;
-                return activeStore.remoteTerminals.get(
-                    {
-                        projectId: owner.snapshot.projectId,
-                        ...(owner.snapshot.workspaceId === undefined
-                            ? {}
-                            : { workspaceId: owner.snapshot.workspaceId }),
-                    },
-                    terminalId,
-                );
-            },
-        });
-        shareRuntime = createShareRuntime({
-            kinds: {
-                scope: createScopeShareKind({
-                    daemonStore: activeStore.scopeShareDaemonStore,
-                    shareStore: activeStore.scopeShares,
-                }),
-                session: createSessionShareKind({
-                    daemonStore: activeStore.sessionShareDaemonStore,
-                    docker: (ownerSessionId) => {
-                        const session = activeStore.get(ownerSessionId);
-                        if (session === undefined) return undefined;
-                        const snapshot = session.snapshot();
-                        return activeStore.remoteTerminalDocker({
-                            projectId: snapshot.projectId,
-                            ...(snapshot.workspaceId === undefined
-                                ? {}
-                                : { workspaceId: snapshot.workspaceId }),
-                        });
-                    },
-                    peerAccess: peerCapabilities,
-                    peerTerminalViewer,
-                    deliverFriendMessage: (ownerSessionId, message, persisted) => {
-                        activeStore
-                            .get(ownerSessionId)
-                            ?.applyPersistedFriendMessage(message, persisted);
-                    },
-                    publishCapabilities: (change) => {
-                        // Cheap and authoritative: the durable member row this daemon just
-                        // wrote, rather than inferring state from the capability list alone.
-                        const memberState =
-                            activeStore.sessionShareDaemonStore
-                                .queryMembers(change.shareId)
-                                .find((member) => member.shareMemberId === change.shareMemberId)
-                                ?.state ?? "revoked";
-                        const event: GlobalLiveEvent = {
-                            createdAt: Date.now(),
-                            data: {
-                                capabilities: [...change.capabilities],
-                                capabilitiesDescription: describePeerCapabilities(
-                                    change.capabilities,
-                                ),
-                                memberState,
-                                shareId: change.shareId,
-                                shareMemberId: change.shareMemberId,
-                            },
-                            id: createSessionShareCapabilitiesEventId(),
-                            type: "session_share_capabilities_changed",
-                        };
-                        activeStore.liveEvents.publish(event);
-                        activeStore.globalEventQueue.publishLive(event);
-                        // The owner's own session stream has to say so too. The global
-                        // event reaches a client watching the machine; this reaches the
-                        // client watching the session being shared, which is the one whose
-                        // owner must never be able to forget somebody is attached.
-                        const ownerSessionId = activeStore.sessionShareDaemonStore.queryShare(
-                            change.shareId,
-                        )?.ownerSessionId;
-                        if (ownerSessionId !== undefined) {
-                            activeStore.get(ownerSessionId)?.noteShareCapabilitiesChanged();
-                        }
-                    },
-                    shareStore: activeStore.sessionShares,
-                }),
-            },
-            murmur: activeMurmur,
-            reportFailure: (error) => {
-                daemonLog.record(
-                    "warning",
-                    "share_event_dropped",
-                    "A sharing event could not be applied and was skipped.",
-                    { error: error instanceof Error ? error.message : String(error) },
-                );
-            },
-        });
-        shutdown.register("sharing", async () => {
-            await shareRuntime?.close();
-        });
-        shutdown.register("murmur", async () => {
-            await murmurService?.close();
-        });
         const startedPluginManager = (pluginManager = new PluginManager({
             daemonLog,
             ...(loadedConfig.config.docker === undefined
@@ -965,13 +777,6 @@ async function runOwnedLocalProtocolServer(
                 p2pNode: () => ({ ...p2pNode }),
                 p2pStatus: () => p2pNetwork?.status() ?? { transports: [] },
                 canP2pPeerConfigure,
-                murmur: murmurService,
-                ...(shareRuntime === undefined
-                    ? {}
-                    : {
-                          scopeShares: shareRuntime.kinds.scope.contract,
-                          sessionShares: shareRuntime.kinds.session.contract,
-                      }),
                 plugins,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 listProviderUsage: () => providerUsageTracker?.all() ?? [],

@@ -100,14 +100,6 @@ export interface UserMessage {
     content: string | readonly UserContent[];
     /** Background context that does not establish an inference turn by itself. */
     contextOnly?: true;
-    friendAuthor?: {
-        displayName: string;
-        grantEpoch: number;
-        kind: "friend";
-        murmurPeerId: string;
-        shareId: string;
-        shareMemberId: string;
-    };
     /** Caller-owned identity used only while restoring provider-selected replacement context. */
     sourceMessageId?: string;
     encryptedAgentMessage?: {

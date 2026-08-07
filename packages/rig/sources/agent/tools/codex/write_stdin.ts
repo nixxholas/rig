@@ -120,19 +120,5 @@ export const codexWriteStdinTool = defineTool({
               ? "Sent input; the shell command has finished."
               : "Sent input to the running shell command.";
     },
-    // The keystrokes sent may be a secret, so name only the session, not `chars`.
-    toSharedCall: ({ chars, session_id }) =>
-        chars !== undefined && chars.length > 0
-            ? `Sent input to shell session ${session_id}.`
-            : `Checked shell session ${session_id}.`,
-    toSharedResult: (result) => {
-        if (result.exit_code !== undefined) {
-            return `The shell command exited with code ${result.exit_code}.`;
-        }
-        return result.session_id !== undefined
-            ? "The shell command is still running."
-            : "The shell command has finished.";
-    },
-    sharedOutputDisclosable: true,
     locks: [],
 });

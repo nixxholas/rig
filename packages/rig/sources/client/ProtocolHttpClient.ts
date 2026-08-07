@@ -33,7 +33,6 @@ import type {
     SetPresenceResponse,
     GetGlobalInstructionsResponse,
     GetGlobalSecurityPolicyResponse,
-    GetMurmurFriendsResponse,
     GetSessionUsageResponse,
     ListProviderUsageResponse,
     GlobalStreamHello,
@@ -51,8 +50,6 @@ import type {
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
     ListModelsResponse,
-    ListMurmurContactsResponse,
-    ListMurmurFriendRequestsResponse,
     ListFileTreeRequest,
     ListFileTreeResponse,
     ListProjectFilePathsResponse,
@@ -83,8 +80,6 @@ import type {
     RegisterSecretRequest,
     RegisterSecretResponse,
     SearchFilesResponse,
-    SendMurmurFriendRequestRequest,
-    SendMurmurFriendRequestResponse,
     SecretSessionResponse,
     SessionEvent,
     SessionStreamHello,
@@ -94,16 +89,11 @@ import type {
     SessionTerminalHeartbeatResponse,
     ShutdownServerResponse,
     StartInspectorResponse,
-    StartMurmurServiceRequest,
-    StartMurmurServiceResponse,
     SetGoalRequest,
     SetSessionDraftRequest,
     SteerMessageRequest,
     SteerMessageResponse,
     StopWorkflowResponse,
-    StopMurmurServiceResponse,
-    SignupMurmurAccountRequest,
-    SignupMurmurAccountResponse,
     SubmitMessageRequest,
     SubmitMessageResponse,
     SubmitContextMessageRequest,
@@ -122,10 +112,6 @@ import type {
     UpdateSessionRequest,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
-    AnswerMurmurFriendRequestRequest,
-    AnswerMurmurFriendRequestResponse,
-    DeleteMurmurAccountResponse,
-    GetMurmurAccountResponse,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import { EventStreamHttpError } from "./EventStreamHttpError.js";
@@ -597,57 +583,6 @@ export class ProtocolHttpClient {
 
     health(): Promise<HealthResponse> {
         return this.#requestJson("GET", "/health");
-    }
-
-    getMurmurAccount(): Promise<GetMurmurAccountResponse> {
-        return this.#requestJson("GET", "/murmur/account");
-    }
-
-    signupMurmurAccount(request: SignupMurmurAccountRequest): Promise<SignupMurmurAccountResponse> {
-        return this.#requestJson("POST", "/murmur/account", request);
-    }
-
-    startMurmurService(
-        request: StartMurmurServiceRequest = {},
-    ): Promise<StartMurmurServiceResponse> {
-        return this.#requestJson("POST", "/murmur/service/start", request);
-    }
-
-    stopMurmurService(): Promise<StopMurmurServiceResponse> {
-        return this.#requestJson("POST", "/murmur/service/stop");
-    }
-
-    deleteMurmurAccount(): Promise<DeleteMurmurAccountResponse> {
-        return this.#requestJson("DELETE", "/murmur/account");
-    }
-
-    sendMurmurFriendRequest(
-        request: SendMurmurFriendRequestRequest,
-    ): Promise<SendMurmurFriendRequestResponse> {
-        return this.#requestJson("POST", "/murmur/friend-requests", request);
-    }
-
-    listMurmurFriendRequests(): Promise<ListMurmurFriendRequestsResponse> {
-        return this.#requestJson("GET", "/murmur/friend-requests");
-    }
-
-    getMurmurFriends(): Promise<GetMurmurFriendsResponse> {
-        return this.#requestJson("GET", "/murmur/friends");
-    }
-
-    answerMurmurFriendRequest(
-        peerId: string,
-        request: AnswerMurmurFriendRequestRequest,
-    ): Promise<AnswerMurmurFriendRequestResponse> {
-        return this.#requestJson(
-            "POST",
-            `/murmur/friend-requests/${encodeURIComponent(peerId)}/answer`,
-            request,
-        );
-    }
-
-    listMurmurContacts(): Promise<ListMurmurContactsResponse> {
-        return this.#requestJson("GET", "/murmur/contacts");
     }
 
     models(): Promise<ListModelsResponse> {

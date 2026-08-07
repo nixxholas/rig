@@ -15,9 +15,7 @@ export const happyCloudSessionIdSchema = Type.String({ maxLength: 256, minLength
 export const HAPPY_CLOUD_CONTRACT_VERSION = 1 as const;
 
 export const happyCloudCapabilitySchema = Type.Union([
-    Type.Literal("friends"),
     Type.Literal("group_chats"),
-    Type.Literal("live_session_sharing"),
     Type.Literal("remote_control"),
     Type.Literal("session_blob_persistence"),
     Type.Literal("happy_profile"),
@@ -44,10 +42,8 @@ export const happyCloudStatusSchema = Type.Object(
         authority: Type.Literal("local_record_only"),
         capabilities: Type.Object(
             {
-                friends: happyCloudCapabilityStatusSchema,
                 group_chats: happyCloudCapabilityStatusSchema,
                 happy_profile: happyCloudCapabilityStatusSchema,
-                live_session_sharing: happyCloudCapabilityStatusSchema,
                 remote_control: happyCloudCapabilityStatusSchema,
                 session_blob_persistence: happyCloudCapabilityStatusSchema,
             },

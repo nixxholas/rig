@@ -6,10 +6,8 @@ const denied = { changedAt: 0, consent: "denied" as const };
 const status: HappyCloudStatus = {
     authority: "local_record_only",
     capabilities: {
-        friends: denied,
         group_chats: denied,
         happy_profile: denied,
-        live_session_sharing: denied,
         remote_control: denied,
         session_blob_persistence: denied,
     },
@@ -201,7 +199,6 @@ describe("Happy Cloud API", () => {
                     ...persisted,
                     capabilities: {
                         ...persisted.capabilities,
-                        friends: { changedAt: 8, consent: "granted" },
                     },
                     updatedAt: 8,
                     version: 8,
@@ -217,7 +214,7 @@ describe("Happy Cloud API", () => {
         const cloud = rig.connectHappyCloud({ onChange: (next) => changes.push(next) });
         rig.applyHappyCloudCommand({
             action: "set_capability",
-            capability: "friends",
+            capability: "remote_control",
             consent: "granted",
         });
 
@@ -295,7 +292,6 @@ describe("Happy Cloud API", () => {
                 ...authoritative,
                 capabilities: {
                     ...authoritative.capabilities,
-                    friends: { changedAt: 2, consent: "granted" },
                 },
                 updatedAt: 3,
                 version: 3,
@@ -330,7 +326,7 @@ describe("Happy Cloud API", () => {
 
         const mutationId = rig.applyHappyCloudCommand({
             action: "set_capability",
-            capability: "friends",
+            capability: "remote_control",
             consent: "granted",
         });
         await vi.waitFor(() => expect(attempts).toHaveLength(2));
@@ -522,7 +518,6 @@ describe("Happy Cloud API", () => {
             ...base,
             capabilities: {
                 ...base.capabilities,
-                friends: { changedAt: 6, consent: "granted" },
             },
             updatedAt: 6,
             version: 6,
@@ -566,7 +561,7 @@ describe("Happy Cloud API", () => {
         await vi.waitFor(() => expect(cloud.status()).toEqual(base));
         rig.applyHappyCloudCommand({
             action: "set_capability",
-            capability: "friends",
+            capability: "remote_control",
             consent: "granted",
         });
         await vi.waitFor(() => expect(postStarted).toBe(true));
@@ -698,11 +693,10 @@ describe("Happy Cloud API", () => {
         await vi.waitFor(() => expect(cloud.status()).toEqual(base));
         rig.applyHappyCloudCommand({
             action: "set_capability",
-            capability: "friends",
+            capability: "remote_control",
             consent: "granted",
         });
         await vi.waitFor(() => expect(statusReads).toBe(2));
-        expect(cloud.status()?.capabilities.friends.consent).toBe("granted");
 
         authoritative = status;
         const firstController = controllers[0];
@@ -712,7 +706,6 @@ describe("Happy Cloud API", () => {
         }
         await vi.waitFor(() => expect(liveRequests).toBe(2));
         await vi.waitFor(() => expect(cloud.status()).toEqual(status));
-        expect(cloud.status()?.capabilities.friends.consent).toBe("denied");
         cloud.close();
         rig.close();
     });

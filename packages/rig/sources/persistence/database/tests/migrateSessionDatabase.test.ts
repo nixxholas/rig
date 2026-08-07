@@ -76,6 +76,93 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
+    it("removes sharing data without removing trusted P2P peers", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database);
+
+        opened.database.run(
+            sql.raw(`INSERT INTO p2p_peers (
+                instance_id,
+                public_key,
+                name,
+                bindings_json,
+                connections_json,
+                created_at_ms,
+                updated_at_ms
+            ) VALUES ('peer-1', 'public-key-1', 'Remote Rig', '[]', '[]', 1, 1)`),
+        );
+        opened.database.run(
+            sql.raw(`INSERT INTO p2p_peer_pairings (
+                pairing_id,
+                instance_id,
+                public_key,
+                name,
+                bindings_json,
+                connections_json,
+                assign_primary,
+                state,
+                expires_at_ms
+            ) VALUES ('pairing-1', 'peer-1', 'public-key-1', 'Remote Rig', '[]', '[]', 0, 'prepared', 2)`),
+        );
+        for (const table of removedSharingTables) {
+            opened.database.run(sql.raw(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`));
+        }
+        opened.database.run(
+            sql.raw("ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_consent TEXT NOT NULL DEFAULT 'denied'"),
+        );
+        opened.database.run(
+            sql.raw(
+                "ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_changed_at_ms INTEGER NOT NULL DEFAULT 0",
+            ),
+        );
+        opened.database.run(sql.raw("PRAGMA user_version = 28"));
+
+        migrateSessionDatabase(opened.database);
+
+        expect(
+            opened.database.all<{ name: string }>(
+                sql.raw(
+                    `SELECT name FROM sqlite_master
+                     WHERE type = 'table' AND name IN (${removedSharingTables.map((table) => `'${table}'`).join(", ")})`,
+                ),
+            ),
+        ).toEqual([]);
+        expect(
+            opened.database.get(
+                sql.raw("SELECT instance_id, name FROM p2p_peers WHERE instance_id = 'peer-1'"),
+            ),
+        ).toEqual({ instance_id: "peer-1", name: "Remote Rig" });
+        expect(
+            opened.database.get(
+                sql.raw(
+                    "SELECT pairing_id, instance_id FROM p2p_peer_pairings WHERE pairing_id = 'pairing-1'",
+                ),
+            ),
+        ).toEqual({ instance_id: "peer-1", pairing_id: "pairing-1" });
+        expect(
+            opened.database
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
+                .map((column) => column.name),
+        ).not.toContain("friends_consent");
+        expect(
+            opened.database
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
+                .map((column) => column.name),
+        ).not.toContain("friends_changed_at_ms");
+        expect(
+            opened.database
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
+                .map((column) => column.name),
+        ).not.toContain("live_session_sharing_consent");
+        expect(
+            opened.database
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
+                .map((column) => column.name),
+        ).not.toContain("live_session_sharing_changed_at_ms");
+
+        opened.client.close();
+    });
+
     it("does not replay the identity migration when the following migration runs", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database, { createDataEpoch: () => "stable-epoch" });
@@ -484,6 +571,29 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 });
+
+const removedSharingTables = [
+    "session_share_peer_actions",
+    "session_share_capabilities",
+    "session_share_entries",
+    "session_share_replica_entries",
+    "session_share_replicas",
+    "session_share_message_context",
+    "session_share_friend_messages",
+    "session_share_outbox",
+    "session_share_grants",
+    "session_share_snapshot_messages",
+    "session_share_members",
+    "session_shares",
+    "scope_share_replica_entries",
+    "scope_share_replicas",
+    "scope_share_entries",
+    "scope_share_outbox",
+    "scope_share_session_cursors",
+    "scope_share_grants",
+    "scope_share_members",
+    "scope_shares",
+] as const;
 
 function openTestDatabase() {
     const directory = mkdtempSync(join(tmpdir(), "rig-database-init-"));

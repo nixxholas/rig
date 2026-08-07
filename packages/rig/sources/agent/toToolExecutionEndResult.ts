@@ -8,7 +8,6 @@ export function toToolExecutionEndResult(
     | "failure"
     | "isError"
     | "presentation"
-    | "shared"
     | "toolCallId"
     | "toolName"
     | "type"
@@ -21,6 +20,5 @@ export function toToolExecutionEndResult(
         ...(result.failure === undefined ? {} : { failure: result.failure }),
         ...(result.isError === undefined ? {} : { isError: result.isError }),
         ...(result.presentation === undefined ? {} : { presentation: result.presentation }),
-        ...(result.shared === undefined ? {} : { shared: result.shared }),
     };
 }

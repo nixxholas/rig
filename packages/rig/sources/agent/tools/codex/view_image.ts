@@ -98,11 +98,5 @@ export const codexViewImageTool = defineTool({
             : [{ type: "text", text: result.image_url }];
     },
     toUI: (_result, args) => `Viewed ${args.path}`,
-    toSharedCall: ({ path }) => `Viewed the image ${path}.`,
-    toSharedResult: (result) =>
-        result.image_url === IMAGE_PROCESSING_ERROR_PLACEHOLDER
-            ? "The image could not be processed."
-            : "Loaded the image for viewing.",
-    // Never disclosable: the raw result is base64 image bytes, not working text.
     locks: [],
 });

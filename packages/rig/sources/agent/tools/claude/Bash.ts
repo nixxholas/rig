@@ -15,7 +15,6 @@ import {
     toShellToolOutput,
 } from "../../../tools/utils/index.js";
 import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
-import { describeSharedCommand } from "../../describeSharedCommand.js";
 
 export const claudeBashTool = defineTool({
     name: "Bash",
@@ -123,17 +122,5 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     },
     toLLM: shellOutputToText,
     toUI: (result) => summarizeShellOutput(result),
-    // The command is named, never its output; see describeSharedCommand for why
-    // even the command itself is abbreviated.
-    toSharedCall: ({ command }) => describeSharedCommand(command),
-    toSharedResult: (result) => {
-        if (result.backgroundTaskId !== undefined) {
-            return "The command is still running in the background.";
-        }
-        if (result.timedOut) return "The command timed out.";
-        if (result.exitCode === null) return "The command finished.";
-        return `The command exited with code ${result.exitCode}.`;
-    },
-    sharedOutputDisclosable: true,
     locks: [],
 });

@@ -131,22 +131,5 @@ export const claudeReadTool = defineTool({
         }
         return result.text;
     },
-    toSharedCall: ({ file_path, offset, limit }) => {
-        if (offset !== undefined && limit !== undefined) {
-            return `Read up to ${limit} lines of ${file_path} starting at line ${offset}.`;
-        }
-        if (limit !== undefined) return `Read up to ${limit} lines of ${file_path}.`;
-        if (offset !== undefined) return `Read ${file_path} starting at line ${offset}.`;
-        return `Read ${file_path}.`;
-    },
-    toSharedResult: (result, { file_path }) => {
-        if ("content" in result) {
-            return `Read ${result.returnedLines} line${result.returnedLines === 1 ? "" : "s"} of ${result.path}${result.truncated ? ", truncated" : ""}.`;
-        }
-        if ("image_url" in result) return `Read the image ${file_path}.`;
-        // The remaining shape is a Rig notice that the file could not be read as text.
-        return `Could not read ${file_path} as text.`;
-    },
-    sharedOutputDisclosable: true,
     locks: [],
 });

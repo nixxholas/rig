@@ -6,7 +6,6 @@ import type {
     ModelCatalog,
     RemoteTerminalSummary,
     SessionStatus,
-    SessionSharedMetadata,
     SessionTokenCount,
     SessionUnreadReason,
     SessionUnreadState,
@@ -52,8 +51,6 @@ export interface GroupSession {
     readonly providerId: string;
     readonly recap?: string;
     readonly serviceTier?: string;
-    /** Owner-side sharing state for this chat. */
-    readonly shared?: SessionSharedMetadata;
     readonly sessionTokenCount?: SessionTokenCount;
     readonly status: SessionStatus;
     readonly title?: string;

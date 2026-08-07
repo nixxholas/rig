@@ -130,10 +130,6 @@ Available Claude provider IDs: ${providerIds.join(", ")}.`,
         }),
         toUI: (result) =>
             `Claude searched the web and returned ${result.sources.length} source${result.sources.length === 1 ? "" : "s"}`,
-        toSharedCall: ({ query }) => `Searched the web through Claude for "${query}".`,
-        toSharedResult: (result) =>
-            `Claude returned ${result.sources.length} search source${result.sources.length === 1 ? "" : "s"}.`,
-        sharedOutputDisclosable: true,
         locks: [],
     });
 }

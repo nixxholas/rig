@@ -38,7 +38,6 @@ import type {
     HappyCloudStatus,
     GetSessionUsageResponse,
     GetTimelineResponse,
-    GetMurmurFriendsResponse,
     ListProviderUsageResponse,
     ProviderUsageEntry,
     SessionStateResponse,
@@ -54,8 +53,6 @@ import type {
     GitWatchResponse,
     GoalSessionResponse,
     ListModelsResponse,
-    ListMurmurContactsResponse,
-    ListMurmurFriendRequestsResponse,
     ListFileTreeRequest,
     ListFileTreeResponse,
     ListProjectFilePathsResponse,
@@ -82,7 +79,6 @@ import type {
     RegisterSecretRequest,
     RegisterSecretResponse,
     SearchFilesResponse,
-    SendMurmurFriendRequestResponse,
     SecretSessionResponse,
     ProtocolSession,
     SessionEvent,
@@ -97,12 +93,9 @@ import type {
     SetGoalRequest,
     ShutdownServerResponse,
     StartInspectorResponse,
-    StartMurmurServiceResponse,
     SteerMessageResponse,
     StopBackgroundProcessResponse,
     StopWorkflowResponse,
-    StopMurmurServiceResponse,
-    SignupMurmurAccountResponse,
     SubagentSummary,
     SubmitMessageResponse,
     SubmitContextMessageResponse,
@@ -121,35 +114,10 @@ import type {
     UpdateSessionRequest,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
-    AnswerMurmurFriendRequestResponse,
-    DeleteMurmurAccountResponse,
-    GetMurmurAccountResponse,
-    GetSessionShareHealthResponse,
-    GetSessionSharePeerActivityResponse,
-    GetSessionShareReplicaHistoryResponse,
-    ListSessionShareReplicaCapabilitiesResponse,
-    ListSessionShareReplicasResponse,
-    PostSessionShareFriendMessageResponse,
-    SessionShareOwnerResponse,
-    SessionSharedMetadata,
-    RequestSessionSharePeerTerminalResponse,
 } from "../protocol/index.js";
 import { updateDaemonConfigRequestSchema } from "../protocol/index.js";
 import {
-    addSessionShareMemberRequestSchema,
     HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
-    answerMurmurFriendRequestRequestSchema,
-    addScopeShareMemberRequestSchema,
-    createScopeShareRequestSchema,
-    createSessionShareRequestSchema,
-    revokeScopeShareMemberRequestSchema,
-    stopScopeShareRequestSchema,
-    type GetScopeShareHealthResponse,
-    type GetScopeShareReplicaResponse,
-    type GetScopeShareSessionHistoryResponse,
-    type ListScopeShareReplicasResponse,
-    type ScopeShareOwnerResponse,
-    type ScopeShareScopeKind,
     discoverPluginCatalogRequestSchema,
     globalSecurityPolicySchema,
     installPluginRequestSchema,
@@ -158,17 +126,7 @@ import {
     happyCloudSessionIdSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
-    postSessionShareFriendMessageRequestSchema,
-    revokeSessionShareMemberRequestSchema,
-    sendMurmurFriendRequestRequestSchema,
     SESSION_DRAFT_MAX_LENGTH,
-    signupMurmurAccountRequestSchema,
-    startMurmurServiceRequestSchema,
-    setSessionShareFriendMessagesRequestSchema,
-    requestSessionSharePeerTerminalRequestSchema,
-    setSessionShareMemberCapabilitiesRequestSchema,
-    setSessionShareToolOutputRequestSchema,
-    stopSessionShareRequestSchema,
     submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
     transferSessionRequestSchema,
@@ -176,14 +134,6 @@ import {
 } from "../protocol/index.js";
 import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
 import { HappyCloudPersistenceError } from "../persistence/happy-cloud/HappyCloudPersistenceError.js";
-import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
-import { ScopeShareRequestError } from "../scope-sharing/ScopeShareRequestError.js";
-import type {
-    ScopeShareServiceContract,
-    ScopeShareTarget,
-} from "../scope-sharing/ScopeShareServiceContract.js";
-import type { SessionShareServiceContract } from "../session-sharing/index.js";
-import { SessionShareCapabilityRefusalError } from "../session-sharing/SessionShareCapabilityRefusalError.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { ProjectRegistrationError } from "../project/ProjectRepository.js";
@@ -337,11 +287,6 @@ export interface ProtocolHttpServerOptions {
     p2pNode?: () => DaemonConfig["p2p"];
     p2pStatus?: () => P2pStatus;
     canP2pPeerConfigure?: (peerId: string) => boolean;
-    murmur?: MurmurServiceContract;
-    /** Workspace and project sharing over Murmur. The daemon always supplies it. */
-    scopeShares?: ScopeShareServiceContract;
-    /** Session sharing over Murmur. The daemon always supplies it. */
-    sessionShares?: SessionShareServiceContract;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
@@ -404,9 +349,6 @@ export function createProtocolHttpServer(
         p2pNode: options.p2pNode,
         p2pStatus: options.p2pStatus,
         canP2pPeerConfigure: options.canP2pPeerConfigure,
-        murmur: options.murmur,
-        scopeShares: options.scopeShares,
-        sessionShares: options.sessionShares,
         happyCloud: options.happyCloud,
         onDaemonConfigChange: options.onDaemonConfigChange,
         onReloadHappy: options.onReloadHappy,
@@ -503,9 +445,6 @@ interface ProtocolServerRuntimeConfig {
     p2pPairing: P2pPairingServiceContract | undefined;
     p2pNode: (() => DaemonConfig["p2p"]) | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
-    murmur: MurmurServiceContract | undefined;
-    scopeShares: ScopeShareServiceContract | undefined;
-    sessionShares: SessionShareServiceContract | undefined;
     happyCloud: HappyCloudServiceContract | undefined;
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
@@ -802,468 +741,6 @@ async function handleRequest(
             sendJson<HappyCloudSessionBlobResponse>(response, 200, blob);
             return;
         }
-    }
-
-    if (route.name.startsWith("murmur-")) {
-        const murmur = runtimeConfig.murmur;
-        if (murmur === undefined) {
-            sendJson(response, 503, { error: "Murmur is unavailable while Rig is starting." });
-            return;
-        }
-        try {
-            if (request.method === "GET" && route.name === "murmur-account") {
-                sendJson<GetMurmurAccountResponse>(response, 200, await murmur.getAccount());
-                return;
-            }
-            if (request.method === "POST" && route.name === "murmur-account") {
-                const body = decodeMurmurRequest(
-                    signupMurmurAccountRequestSchema,
-                    await readJson<unknown>(request, 34 * 1024 * 1024),
-                );
-                sendJson<SignupMurmurAccountResponse>(response, 201, await murmur.signup(body));
-                return;
-            }
-            if (request.method === "DELETE" && route.name === "murmur-account") {
-                sendJson<DeleteMurmurAccountResponse>(response, 200, await murmur.deleteAccount());
-                return;
-            }
-            if (request.method === "POST" && route.name === "murmur-service-start") {
-                const body = decodeMurmurRequest(
-                    startMurmurServiceRequestSchema,
-                    await readJson<unknown>(request, 64 * 1024),
-                );
-                sendJson<StartMurmurServiceResponse>(response, 200, await murmur.start(body));
-                return;
-            }
-            if (request.method === "POST" && route.name === "murmur-service-stop") {
-                sendJson<StopMurmurServiceResponse>(response, 200, await murmur.stop());
-                return;
-            }
-            if (request.method === "POST" && route.name === "murmur-friend-requests") {
-                const body = decodeMurmurRequest(
-                    sendMurmurFriendRequestRequestSchema,
-                    await readJson<unknown>(request, 8 * 1024),
-                );
-                sendJson<SendMurmurFriendRequestResponse>(
-                    response,
-                    202,
-                    await murmur.sendFriendRequest(body),
-                );
-                return;
-            }
-            if (request.method === "GET" && route.name === "murmur-friend-requests") {
-                sendJson<ListMurmurFriendRequestsResponse>(
-                    response,
-                    200,
-                    await murmur.listFriendRequests(),
-                );
-                return;
-            }
-            if (request.method === "GET" && route.name === "murmur-friends") {
-                sendJson<GetMurmurFriendsResponse>(response, 200, await murmur.getFriends());
-                return;
-            }
-            if (request.method === "POST" && route.name === "murmur-friend-request-answer") {
-                const body = decodeMurmurRequest(
-                    answerMurmurFriendRequestRequestSchema,
-                    await readJson<unknown>(request, 8 * 1024),
-                );
-                sendJson<AnswerMurmurFriendRequestResponse>(
-                    response,
-                    200,
-                    await murmur.answerFriendRequest(route.peerId, body),
-                );
-                return;
-            }
-            if (request.method === "GET" && route.name === "murmur-contacts") {
-                sendJson<ListMurmurContactsResponse>(response, 200, await murmur.listContacts());
-                return;
-            }
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            if (
-                error instanceof InvalidJsonBodyError ||
-                error instanceof RequestBodyTooLargeError
-            ) {
-                throw error;
-            }
-            if (error instanceof InvalidMurmurRequestError) {
-                sendJson(response, 400, { error: "The Murmur request is invalid." });
-                return;
-            }
-            if (error instanceof MurmurServiceError) {
-                const status =
-                    error.code === "invalid_identity_token" || error.code === "invalid_profile"
-                        ? 400
-                        : error.code === "account_missing" || error.code === "request_not_found"
-                          ? 404
-                          : error.code === "relay_unavailable"
-                            ? 502
-                            : 409;
-                sendJson(response, status, { code: error.code, error: error.message });
-                return;
-            }
-            sendJson(response, 409, { error: errorToMessage(error) });
-            return;
-        }
-    }
-
-    if (route.name.startsWith("scope-share")) {
-        const scopeShares = runtimeConfig.scopeShares;
-        if (scopeShares === undefined) {
-            sendJson(response, 503, {
-                error: "This Rig server was started without project and workspace sharing.",
-            });
-            return;
-        }
-        if (
-            route.name === "scope-share-scope" ||
-            route.name === "scope-share-scope-members" ||
-            route.name === "scope-share-scope-member-revoke" ||
-            route.name === "scope-share-scope-stop"
-        ) {
-            // A project share and a workspace share are the same share over a wider
-            // subject set, so the route only says which one it named and everything
-            // below this line is one path.
-            const scope: ScopeShareTarget = { scopeId: route.scopeId, scopeKind: route.scopeKind };
-            const subject = route.scopeKind === "project" ? "Project" : "Workspace";
-            // The scope has to exist, and a workspace has to be the one this project
-            // actually holds. Without this a share could be created for a workspace
-            // under any project id at all, or for a project that was never added.
-            const exists =
-                route.scopeKind === "project"
-                    ? store.getProject(route.projectId) !== undefined
-                    : store.getWorkspace(route.projectId, route.scopeId) !== undefined;
-            if (!exists) {
-                sendJson(response, 404, { error: `${subject} not found.` });
-                return;
-            }
-            if (request.method === "GET" && route.name === "scope-share-scope") {
-                const share = scopeShares.getOwner(scope);
-                if (share === undefined) {
-                    sendJson(response, 404, { error: `${subject} share not found.` });
-                } else sendJson<ScopeShareOwnerResponse>(response, 200, share);
-                return;
-            }
-            // A refusal the caller can act on — nothing to share with, a scope already
-            // covered by another share, no Murmur account yet — is an answer to their
-            // request, not a fault in the daemon, so it must not be reported as one.
-            try {
-                if (request.method === "POST" && route.name === "scope-share-scope") {
-                    const body = await readCheckedBody(request, createScopeShareRequestSchema);
-                    if (body === undefined) {
-                        sendJson(response, 400, {
-                            error: `The ${subject.toLowerCase()} share request is invalid.`,
-                        });
-                        return;
-                    }
-                    sendJson<ScopeShareOwnerResponse>(
-                        response,
-                        201,
-                        await scopeShares.create(scope, body),
-                    );
-                    return;
-                }
-                if (request.method === "POST" && route.name === "scope-share-scope-members") {
-                    const body = await readCheckedBody(request, addScopeShareMemberRequestSchema);
-                    if (body === undefined) {
-                        sendJson(response, 400, { error: "The member request is invalid." });
-                        return;
-                    }
-                    sendJson<ScopeShareOwnerResponse>(
-                        response,
-                        200,
-                        await scopeShares.add(scope, body),
-                    );
-                    return;
-                }
-                if (request.method === "POST" && route.name === "scope-share-scope-member-revoke") {
-                    const body = await readCheckedBody(
-                        request,
-                        revokeScopeShareMemberRequestSchema,
-                    );
-                    if (body === undefined) {
-                        sendJson(response, 400, { error: "The revocation request is invalid." });
-                        return;
-                    }
-                    sendJson<ScopeShareOwnerResponse>(
-                        response,
-                        200,
-                        await scopeShares.revoke(scope, route.shareMemberId, body),
-                    );
-                    return;
-                }
-                if (request.method === "POST" && route.name === "scope-share-scope-stop") {
-                    const body = await readCheckedBody(request, stopScopeShareRequestSchema);
-                    if (body === undefined) {
-                        sendJson(response, 400, { error: "The stop request is invalid." });
-                        return;
-                    }
-                    sendJson<ScopeShareOwnerResponse>(
-                        response,
-                        200,
-                        await scopeShares.stop(scope, body),
-                    );
-                    return;
-                }
-            } catch (error) {
-                if (!(error instanceof ScopeShareRequestError)) throw error;
-                sendJson(response, scopeShareRequestErrorStatus(error), { error: error.message });
-                return;
-            }
-            sendJson(response, 405, { error: "Method not allowed" });
-            return;
-        }
-        if (request.method === "GET" && route.name === "scope-share-replicas") {
-            sendJson<ListScopeShareReplicasResponse>(response, 200, scopeShares.listReplicas());
-            return;
-        }
-        if (request.method === "GET" && route.name === "scope-share-replica") {
-            const replica = scopeShares.replica(
-                route.shareId,
-                url.searchParams.get("after") ?? undefined,
-            );
-            if (replica === undefined) {
-                sendJson(response, 404, { error: "Shared workspace not found." });
-            } else sendJson<GetScopeShareReplicaResponse>(response, 200, replica);
-            return;
-        }
-        if (request.method === "GET" && route.name === "scope-share-replica-session") {
-            const history = scopeShares.replicaSessionHistory(
-                route.shareId,
-                route.scopeSessionId,
-                url.searchParams.get("after") ?? undefined,
-            );
-            if (history === undefined) {
-                sendJson(response, 404, { error: "Shared workspace not found." });
-            } else sendJson<GetScopeShareSessionHistoryResponse>(response, 200, history);
-            return;
-        }
-        if (request.method === "GET" && route.name === "scope-share-health") {
-            const health = scopeShares.health(route.shareId);
-            if (health === undefined) sendJson(response, 404, { error: "Share not found." });
-            else sendJson<GetScopeShareHealthResponse>(response, 200, health);
-            return;
-        }
-        sendJson(response, 405, { error: "Method not allowed" });
-        return;
-    }
-
-    if (route.name.startsWith("session-share")) {
-        const sessionShares = runtimeConfig.sessionShares;
-        if (sessionShares === undefined) {
-            sendJson(response, 503, {
-                error: "This Rig server was started without session sharing.",
-            });
-            return;
-        }
-        if (
-            route.name === "session-share" ||
-            route.name === "session-share-members" ||
-            route.name === "session-share-member-capabilities" ||
-            route.name === "session-share-member-revoke" ||
-            route.name === "session-share-stop" ||
-            route.name === "session-share-friend-messages" ||
-            route.name === "session-share-tool-output" ||
-            route.name === "session-share-peer-activity"
-        ) {
-            const ownerSession = store.get(route.sessionId);
-            if (ownerSession === undefined) {
-                sendJson(response, 404, { error: "Session not found." });
-                return;
-            }
-            if (ownerSession.agentMetadata().type !== "primary") {
-                sendJson(response, 409, {
-                    error: "Only primary sessions can be shared.",
-                });
-                return;
-            }
-        }
-        if (request.method === "GET" && route.name === "session-share") {
-            const share = sessionShares.getOwner(route.sessionId);
-            if (share === undefined) sendJson(response, 404, { error: "Session share not found." });
-            else sendJson<SessionShareOwnerResponse>(response, 200, share);
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share") {
-            const body = await readCheckedBody(request, createSessionShareRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The session share request is invalid." });
-                return;
-            }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                201,
-                await sessionShares.create(route.sessionId, body),
-            );
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-members") {
-            const body = await readCheckedBody(request, addSessionShareMemberRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The member request is invalid." });
-                return;
-            }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                200,
-                await sessionShares.add(route.sessionId, body),
-            );
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-member-revoke") {
-            const body = await readCheckedBody(request, revokeSessionShareMemberRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The revocation request is invalid." });
-                return;
-            }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                200,
-                await sessionShares.revoke(route.sessionId, route.shareMemberId, body),
-            );
-            return;
-        }
-        if (request.method === "PUT" && route.name === "session-share-member-capabilities") {
-            const body = await readCheckedBody(
-                request,
-                setSessionShareMemberCapabilitiesRequestSchema,
-            );
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The capability request is invalid." });
-                return;
-            }
-            try {
-                sendJson<SessionShareOwnerResponse>(
-                    response,
-                    200,
-                    await sessionShares.setMemberCapabilities(
-                        route.sessionId,
-                        route.shareMemberId,
-                        body,
-                    ),
-                );
-            } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
-                // A refusal to offer a capability is deliberate and permanent, not a
-                // fault of this request, so it is a 4xx a client must not retry rather
-                // than a 500 that invites one.
-                if (error instanceof SessionShareCapabilityRefusalError) {
-                    sendJson(response, 422, { error: error.message });
-                    return;
-                }
-                throw error;
-            }
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-stop") {
-            const body = await readCheckedBody(request, stopSessionShareRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The stop request is invalid." });
-                return;
-            }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                200,
-                await sessionShares.stop(route.sessionId, body),
-            );
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-friend-messages") {
-            const body = await readCheckedBody(request, setSessionShareFriendMessagesRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The friend-message setting is invalid." });
-                return;
-            }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                200,
-                await sessionShares.setFriendMessages(route.sessionId, body),
-            );
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-tool-output") {
-            const body = await readCheckedBody(request, setSessionShareToolOutputRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The tool-output setting is invalid." });
-                return;
-            }
-            sendJson<SessionShareOwnerResponse>(
-                response,
-                200,
-                await sessionShares.setToolOutput(route.sessionId, body),
-            );
-            return;
-        }
-        if (request.method === "GET" && route.name === "session-share-peer-activity") {
-            const activity = sessionShares.peerActivity(
-                route.sessionId,
-                url.searchParams.get("after") ?? undefined,
-            );
-            if (activity === undefined)
-                sendJson(response, 404, { error: "Session share not found." });
-            else sendJson<GetSessionSharePeerActivityResponse>(response, 200, activity);
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-post") {
-            const body = await readCheckedBody(request, postSessionShareFriendMessageRequestSchema);
-            if (body === undefined) {
-                sendJson(response, 400, { error: "The friend message is invalid." });
-                return;
-            }
-            sendJson<PostSessionShareFriendMessageResponse>(
-                response,
-                202,
-                await sessionShares.postFriendMessage(body),
-            );
-            return;
-        }
-        if (request.method === "GET" && route.name === "session-share-replicas") {
-            sendJson<ListSessionShareReplicasResponse>(response, 200, sessionShares.listReplicas());
-            return;
-        }
-        if (request.method === "GET" && route.name === "session-share-replica-history") {
-            const history = sessionShares.replicaHistory(
-                route.shareId,
-                url.searchParams.get("after") ?? undefined,
-            );
-            if (history === undefined)
-                sendJson(response, 404, { error: "Shared session not found." });
-            else sendJson<GetSessionShareReplicaHistoryResponse>(response, 200, history);
-            return;
-        }
-        if (request.method === "GET" && route.name === "session-share-replica-capabilities") {
-            const capabilities = sessionShares.replicaCapabilities(route.shareId);
-            if (capabilities === undefined)
-                sendJson(response, 404, { error: "Shared session not found." });
-            else sendJson<ListSessionShareReplicaCapabilitiesResponse>(response, 200, capabilities);
-            return;
-        }
-        if (request.method === "POST" && route.name === "session-share-replica-terminal") {
-            const body = await readCheckedBody(
-                request,
-                requestSessionSharePeerTerminalRequestSchema,
-            );
-            if (body === undefined) {
-                sendJson(response, 400, { error: "Request body is invalid." });
-                return;
-            }
-            // This machine is the member here, asking the owner for something. It
-            // grants nothing and learns nothing about whether it is allowed: the
-            // owner's gates decide, and a refusal is a channel that never opens.
-            const result = await sessionShares.requestPeerTerminal(route.shareId, body.terminalId);
-            sendJson<RequestSessionSharePeerTerminalResponse>(response, 200, result);
-            return;
-        }
-        if (request.method === "GET" && route.name === "session-share-health") {
-            const health = sessionShares.health(route.shareId);
-            if (health === undefined)
-                sendJson(response, 404, { error: "Session share not found." });
-            else sendJson<GetSessionShareHealthResponse>(response, 200, health);
-            return;
-        }
-        sendJson(response, 405, { error: "Method not allowed" });
-        return;
     }
 
     if (request.method === "POST" && route.name === "shutdown") {
@@ -2501,17 +1978,6 @@ async function handleRequest(
                 sendJson(response, 404, { error: "Project not found" });
                 return;
             }
-            // Archiving a project retires its own share and every workspace share
-            // beneath it, because none of those workspaces is there to replicate. The
-            // archive is already committed, so a share that cannot be stopped must not
-            // turn this into a failure: the share is durably stopped either way, only
-            // its relay notice is late, and answering 409 would tell the client to redo
-            // an archive that already happened.
-            try {
-                await runtimeConfig.scopeShares?.stopForArchivedProject(route.projectId);
-            } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
-            }
             sendJson<ProjectResponse>(response, 202, { project });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -2701,15 +2167,6 @@ async function handleRequest(
             if (workspace === undefined) {
                 sendJson(response, 404, { error: "Workspace not found" });
                 return;
-            }
-            // Archiving one workspace stops its share and nothing else's: a project
-            // share above it still covers everything that is left. The archive is
-            // already committed, so a share that cannot be stopped is not allowed to
-            // report it as failed.
-            try {
-                await runtimeConfig.scopeShares?.stopForArchivedWorkspace(route.workspaceId);
-            } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
             }
             sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
         } catch (error) {
@@ -3272,13 +2729,9 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session message limit is invalid." });
             return;
         }
-        const ownerShare = runtimeConfig.sessionShares?.getOwner(sessionId)?.share;
         const snapshot = session.snapshot();
         sendJson(response, 200, {
-            session: limitProtocolSessionMessages(
-                ownerShare === undefined ? snapshot : { ...snapshot, shared: ownerShare },
-                messageLimit,
-            ),
+            session: limitProtocolSessionMessages(snapshot, messageLimit),
         });
         return;
     }
@@ -3385,9 +2838,6 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         const archived = session.setArchived(route.name === "archive", mutationId);
-        if (route.name === "archive") {
-            await runtimeConfig.sessionShares?.stopForArchivedSession(sessionId);
-        }
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
             store.unarchiveProject(archived.projectId);
@@ -3441,11 +2891,7 @@ async function handleRequest(
         const cursor = store.liveEvents.cursor();
         const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
         const baseHello = sessionStateHello(session, turnLimit, store.listSubagents(sessionId));
-        const ownerShare = runtimeConfig.sessionShares?.getOwner(sessionId)?.share;
-        const hello =
-            ownerShare === undefined || baseHello.session === undefined
-                ? baseHello
-                : { ...baseHello, session: { ...baseHello.session, shared: ownerShare } };
+        const hello = baseHello;
         // A client catching up says which message it already holds, and receives
         // only the turns from there on. It still gets the whole current session,
         // because a gap leaves the rest of that state uncertain too — but the
@@ -4196,10 +3642,6 @@ async function handleRequest(
             sessionEventStreamLeases,
             parseTurnLimit(url.searchParams.get("turns")),
             store.listSubagents(sessionId),
-            // Read per event rather than captured once: a stream outlives every
-            // change to who is watching, and a stale answer here is exactly the
-            // stale answer the disclosure exists to prevent.
-            () => runtimeConfig.sessionShares?.getOwner(sessionId)?.share,
         );
         return;
     }
@@ -4408,21 +3850,12 @@ function matchRoute(pathname: string):
               | "happy-reload"
               | "messages"
               | "models"
-              | "murmur-account"
-              | "murmur-contacts"
-              | "murmur-friends"
-              | "murmur-friend-requests"
-              | "murmur-service-start"
-              | "murmur-service-stop"
               | "presence"
               | "plugin-catalog"
               | "plugins"
               | "projects"
               | "provider-usage"
-              | "scope-share-replicas"
               | "secret-registrations"
-              | "session-share-post"
-              | "session-share-replicas"
               | "sessions"
               | "shutdown"
               | "slots"
@@ -4439,31 +3872,6 @@ function matchRoute(pathname: string):
           name: "p2p-pairing" | "p2p-pairing-answer";
           pairingId: string;
           sessionId?: undefined;
-      }
-    | {
-          name: "murmur-friend-request-answer";
-          peerId: string;
-          sessionId?: undefined;
-      }
-    | {
-          name: "scope-share-health" | "scope-share-replica";
-          sessionId?: undefined;
-          shareId: string;
-      }
-    | {
-          name: "scope-share-replica-session";
-          scopeSessionId: string;
-          sessionId?: undefined;
-          shareId: string;
-      }
-    | {
-          name:
-              | "session-share-health"
-              | "session-share-replica-capabilities"
-              | "session-share-replica-history"
-              | "session-share-replica-terminal";
-          sessionId?: undefined;
-          shareId: string;
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
     | {
@@ -4527,22 +3935,6 @@ function matchRoute(pathname: string):
           workspaceId: string;
       }
     | {
-          name: "scope-share-scope" | "scope-share-scope-members" | "scope-share-scope-stop";
-          projectId: string;
-          /** The workspace or the project itself, whichever the route named. */
-          scopeId: string;
-          scopeKind: ScopeShareScopeKind;
-          sessionId?: undefined;
-      }
-    | {
-          name: "scope-share-scope-member-revoke";
-          projectId: string;
-          scopeId: string;
-          scopeKind: ScopeShareScopeKind;
-          sessionId?: undefined;
-          shareMemberId: string;
-      }
-    | {
           name:
               | "project-file"
               | "project-file-paths"
@@ -4592,12 +3984,6 @@ function matchRoute(pathname: string):
               | "shell"
               | "secrets"
               | "service-tier"
-              | "session-share"
-              | "session-share-friend-messages"
-              | "session-share-members"
-              | "session-share-peer-activity"
-              | "session-share-stop"
-              | "session-share-tool-output"
               | "session"
               | "stream"
               | "session-state"
@@ -4608,11 +3994,6 @@ function matchRoute(pathname: string):
               | "unarchive"
               | "usage";
           sessionId: string;
-      }
-    | {
-          name: "session-share-member-capabilities" | "session-share-member-revoke";
-          sessionId: string;
-          shareMemberId: string;
       }
     | {
           connectionId: string;
@@ -4664,12 +4045,6 @@ function matchRoute(pathname: string):
     if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };
     if (pathname === "/messages") return { name: "messages" };
-    if (pathname === "/murmur/account") return { name: "murmur-account" };
-    if (pathname === "/murmur/contacts") return { name: "murmur-contacts" };
-    if (pathname === "/murmur/friends") return { name: "murmur-friends" };
-    if (pathname === "/murmur/friend-requests") return { name: "murmur-friend-requests" };
-    if (pathname === "/murmur/service/start") return { name: "murmur-service-start" };
-    if (pathname === "/murmur/service/stop") return { name: "murmur-service-stop" };
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/presence") return { name: "presence" };
     if (pathname === "/plugins") return { name: "plugins" };
@@ -4678,9 +4053,6 @@ function matchRoute(pathname: string):
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
-    if (pathname === "/session-shares/friend-messages") return { name: "session-share-post" };
-    if (pathname === "/scope-share-replicas") return { name: "scope-share-replicas" };
-    if (pathname === "/session-share-replicas") return { name: "session-share-replicas" };
     if (pathname === "/shutdown") return { name: "shutdown" };
     if (pathname === "/slots") return { name: "slots" };
     if (pathname === "/webapps") return { name: "webapps" };
@@ -4729,68 +4101,6 @@ function matchRoute(pathname: string):
     const globalParts = pathname.split("/").filter(Boolean);
     if (
         globalParts.length === 3 &&
-        globalParts[0] === "scope-shares" &&
-        globalParts[2] === "health"
-    ) {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        return shareId === undefined ? undefined : { name: "scope-share-health", shareId };
-    }
-    if (globalParts.length === 2 && globalParts[0] === "scope-share-replicas") {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        return shareId === undefined ? undefined : { name: "scope-share-replica", shareId };
-    }
-    if (
-        globalParts.length === 5 &&
-        globalParts[0] === "scope-share-replicas" &&
-        globalParts[2] === "sessions" &&
-        globalParts[4] === "history"
-    ) {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        const scopeSessionId = decodeUrlComponent(globalParts[3]);
-        return shareId === undefined || scopeSessionId === undefined
-            ? undefined
-            : { name: "scope-share-replica-session", scopeSessionId, shareId };
-    }
-    if (
-        globalParts.length === 3 &&
-        globalParts[0] === "session-shares" &&
-        globalParts[2] === "health"
-    ) {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        return shareId === undefined ? undefined : { name: "session-share-health", shareId };
-    }
-    if (
-        globalParts.length === 3 &&
-        globalParts[0] === "session-share-replicas" &&
-        globalParts[2] === "history"
-    ) {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        return shareId === undefined
-            ? undefined
-            : { name: "session-share-replica-history", shareId };
-    }
-    if (
-        globalParts.length === 3 &&
-        globalParts[0] === "session-share-replicas" &&
-        globalParts[2] === "capabilities"
-    ) {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        return shareId === undefined
-            ? undefined
-            : { name: "session-share-replica-capabilities", shareId };
-    }
-    if (
-        globalParts.length === 3 &&
-        globalParts[0] === "session-share-replicas" &&
-        globalParts[2] === "terminal"
-    ) {
-        const shareId = decodeUrlComponent(globalParts[1]);
-        return shareId === undefined
-            ? undefined
-            : { name: "session-share-replica-terminal", shareId };
-    }
-    if (
-        globalParts.length === 3 &&
         globalParts[0] === "happy-cloud" &&
         globalParts[1] === "session-blobs" &&
         globalParts[2] !== undefined
@@ -4799,16 +4109,6 @@ function matchRoute(pathname: string):
         return cloudSessionId === undefined
             ? undefined
             : { cloudSessionId, name: "happy-cloud-session-blob" };
-    }
-    if (
-        globalParts.length === 4 &&
-        globalParts[0] === "murmur" &&
-        globalParts[1] === "friend-requests" &&
-        globalParts[2] !== undefined &&
-        globalParts[3] === "answer"
-    ) {
-        const peerId = decodeUrlComponent(globalParts[2]);
-        return peerId === undefined ? undefined : { name: "murmur-friend-request-answer", peerId };
     }
     const appOperation =
         /^\/plugin-apps\/([^/]+)\/generations\/([^/]+)\/(resources\/read|tools\/call|extensions\/io\.slopus\.happy\/storage\/(get|set|delete|list))$/u.exec(
@@ -4894,12 +4194,6 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "settings") {
             return { name: "project-settings", projectId };
         }
-        const projectShare = matchScopeShareRoute(globalParts.slice(2), {
-            projectId,
-            scopeId: projectId,
-            scopeKind: "project",
-        });
-        if (projectShare !== undefined) return projectShare;
         if (globalParts.length === 3 && globalParts[2] === "terminals") {
             return { name: "project-terminals", projectId };
         }
@@ -4950,12 +4244,6 @@ function matchRoute(pathname: string):
             if (globalParts.length === 5 && globalParts[4] === "reorder") {
                 return { name: "project-workspace-reorder", projectId, workspaceId };
             }
-            const workspaceShare = matchScopeShareRoute(globalParts.slice(4), {
-                projectId,
-                scopeId: workspaceId,
-                scopeKind: "workspace",
-            });
-            if (workspaceShare !== undefined) return workspaceShare;
             if (globalParts.length === 5 && globalParts[4] === "terminals") {
                 return { name: "project-terminals", projectId, workspaceId };
             }
@@ -4990,50 +4278,6 @@ function matchRoute(pathname: string):
 
     const sessionId = decodeURIComponent(parts[1]);
     if (parts.length === 2) return { name: "session", sessionId };
-    if (parts.length === 3 && parts[2] === "share") {
-        return { name: "session-share", sessionId };
-    }
-    if (parts.length === 4 && parts[2] === "share" && parts[3] === "members") {
-        return { name: "session-share-members", sessionId };
-    }
-    if (parts.length === 4 && parts[2] === "share" && parts[3] === "stop") {
-        return { name: "session-share-stop", sessionId };
-    }
-    if (parts.length === 4 && parts[2] === "share" && parts[3] === "friend-messages") {
-        return { name: "session-share-friend-messages", sessionId };
-    }
-    if (parts.length === 4 && parts[2] === "share" && parts[3] === "tool-output") {
-        return { name: "session-share-tool-output", sessionId };
-    }
-    if (parts.length === 4 && parts[2] === "share" && parts[3] === "peer-activity") {
-        return { name: "session-share-peer-activity", sessionId };
-    }
-    if (
-        parts.length === 6 &&
-        parts[2] === "share" &&
-        parts[3] === "members" &&
-        parts[4] !== undefined &&
-        parts[5] === "revoke"
-    ) {
-        return {
-            name: "session-share-member-revoke",
-            sessionId,
-            shareMemberId: decodeURIComponent(parts[4]),
-        };
-    }
-    if (
-        parts.length === 6 &&
-        parts[2] === "share" &&
-        parts[3] === "members" &&
-        parts[4] !== undefined &&
-        parts[5] === "capabilities"
-    ) {
-        return {
-            name: "session-share-member-capabilities",
-            sessionId,
-            shareMemberId: decodeURIComponent(parts[4]),
-        };
-    }
     if (parts.length === 3 && parts[2] === "reorder") {
         return { name: "reorder", sessionId };
     }
@@ -5144,43 +4388,6 @@ function matchRoute(pathname: string):
     if (parts[2] === "usage") return { name: "usage", sessionId };
     if (parts[2] === "unarchive") return { name: "unarchive", sessionId };
     return undefined;
-}
-
-/**
- * The share routes a project and a workspace both answer, below whichever one they hang off.
- *
- * `/projects/{id}/share` and `/projects/{id}/workspaces/{id}/share` are the same four
- * routes over a different subject, so both are parsed here and the scope they name is
- * decided by the caller rather than by the path they were reached through.
- */
-function matchScopeShareRoute(
-    parts: readonly (string | undefined)[],
-    scope: { projectId: string; scopeId: string; scopeKind: ScopeShareScopeKind },
-): ReturnType<typeof matchRoute> {
-    if (parts[0] !== "share") return undefined;
-    if (parts.length === 1) return { name: "scope-share-scope", ...scope };
-    if (parts.length === 2 && parts[1] === "members") {
-        return { name: "scope-share-scope-members", ...scope };
-    }
-    if (parts.length === 2 && parts[1] === "stop") {
-        return { name: "scope-share-scope-stop", ...scope };
-    }
-    if (parts.length === 4 && parts[1] === "members" && parts[3] === "revoke") {
-        const shareMemberId = decodeUrlComponent(parts[2]);
-        return shareMemberId === undefined
-            ? undefined
-            : { name: "scope-share-scope-member-revoke", shareMemberId, ...scope };
-    }
-    return undefined;
-}
-
-/** What a scope-share refusal the caller can act on looks like over HTTP. */
-function scopeShareRequestErrorStatus(error: ScopeShareRequestError): number {
-    if (error.code === "invalid_request") return 400;
-    if (error.code === "not_shared") return 404;
-    // A missing Murmur account and a scope another share already covers are both
-    // states the request conflicts with rather than malformed requests.
-    return 409;
 }
 
 function decodeUrlComponent(value: string | undefined): string | undefined {
@@ -5425,16 +4632,10 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "secrets",
                 "shell",
                 "steer",
-                "session-share",
-                "session-share-friend-messages",
-                "session-share-member-revoke",
-                "session-share-members",
-                "session-share-stop",
                 "unarchive",
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
         (["DELETE", "PUT"].includes(method ?? "") && routeName === "terminal-connection") ||
-        (method === "PUT" && routeName === "session-share-member-capabilities") ||
         (method === "DELETE" && routeName === "background-process") ||
         (["DELETE", "PATCH", "POST"].includes(method ?? "") && routeName === "goal") ||
         (method === "POST" && routeName === "user-input") ||
@@ -5465,17 +4666,6 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "happy-cloud-commands") return request.method === "POST";
     if (route.name === "plugins") return request.method === "POST";
     if (route.name === "plugin-catalog") return false;
-    if (
-        [
-            "murmur-account",
-            "murmur-friend-request-answer",
-            "murmur-friend-requests",
-            "murmur-service-start",
-            "murmur-service-stop",
-        ].includes(route.name)
-    ) {
-        return request.method !== "GET";
-    }
     if (route.name === "plugin-uninstall") return request.method === "DELETE";
     if (route.name === "plugin-app-tool-call" || route.name === "plugin-app-storage") {
         return request.method === "POST";
@@ -5492,8 +4682,6 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "sessions") return request.method === "POST";
-    if (route.name === "session-share-post") return request.method === "POST";
-    if (route.name.startsWith("scope-share-scope")) return request.method !== "GET";
     if (route.name === "projects") return request.method !== "GET";
     if (
         [
@@ -5639,20 +4827,7 @@ function requestMutationId(request: IncomingMessage): string | undefined {
 
 class InvalidJsonBodyError extends Error {}
 
-class InvalidMurmurRequestError extends Error {}
-
 class RequestBodyTooLargeError extends Error {}
-
-function decodeMurmurRequest<Schema extends TSchema>(
-    schema: Schema,
-    value: unknown,
-): Static<Schema> {
-    try {
-        return Value.Decode(schema, value);
-    } catch {
-        throw new InvalidMurmurRequestError();
-    }
-}
 
 function isExternalToolCallResolution(value: unknown): value is ResolveExternalToolCallRequest {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -5690,7 +4865,6 @@ function streamEvents(
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
-    ownerShare: () => SessionSharedMetadata | undefined,
 ): void {
     const cursor = request.headers["last-event-id"];
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
@@ -5718,10 +4892,7 @@ function streamEvents(
     // A resumed client applies durable history first, then the current overlay.
     // If the connection drops mid-catch-up, its cursor advances only through
     // events it actually received, so the next attempt cannot skip anything.
-    if (resumed) {
-        for (const event of catchup)
-            writeSseEvent(response, decorateSessionEvent(event, ownerShare));
-    }
+    if (resumed) for (const event of catchup) writeSseEvent(response, event);
     writeSseHello(response, hello);
 
     const heartbeat = setInterval(() => {
@@ -5730,7 +4901,7 @@ function streamEvents(
     heartbeat.unref?.();
 
     const unsubscribe = session.events.subscribe((event) => {
-        writeSseEvent(response, decorateSessionEvent(event, ownerShare));
+        writeSseEvent(response, event);
     });
     const lease = { session };
     sessionEventStreamLeases.add(lease);
@@ -5759,28 +4930,6 @@ interface SessionEventStreamLease {
 function writeSseHello(response: ServerResponse, hello: SessionStreamHello): void {
     response.write("event: hello\n");
     response.write(`data: ${JSON.stringify(hello)}\n\n`);
-}
-
-/**
- * Join the owner's share onto a session snapshot leaving the daemon.
- *
- * Sharing lives beside the session rather than inside it, so the snapshot never
- * carries it and every boundary that hands a session to a client joins it here.
- * The hello frames already do exactly this; a `session_updated` on the stream
- * has to as well, otherwise an attached client's view of who can see it is
- * frozen at the moment it attached.
- */
-function decorateSessionEvent(
-    event: SessionEvent,
-    ownerShare: () => SessionSharedMetadata | undefined,
-): SessionEvent {
-    if (event.type !== "session_updated") return event;
-    const share = ownerShare();
-    if (share === undefined) return event;
-    return {
-        ...event,
-        data: { ...event.data, session: { ...event.data.session, shared: share } },
-    };
 }
 
 function writeSseEvent(response: ServerResponse, event: SessionEvent): void {

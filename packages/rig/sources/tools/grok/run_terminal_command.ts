@@ -11,7 +11,6 @@ import {
     toTextBlocks,
 } from "../utils/index.js";
 import { shellExplorationPresentation } from "../utils/shellExplorationPresentation.js";
-import { describeSharedCommand } from "../../agent/describeSharedCommand.js";
 
 export const grokRunTerminalCommandTool = defineTool({
     name: "run_terminal_command",
@@ -128,13 +127,5 @@ Usage notes:
     },
     toLLM: (result) => toTextBlocks({ text: result.text }),
     toUI: (result) => summarizeTextOutput(result.text),
-    // The command is named, never its output; see describeSharedCommand for why
-    // even the command itself is abbreviated.
-    toSharedCall: ({ command }) => describeSharedCommand(command),
-    toSharedResult: (result) =>
-        result.task_id !== undefined
-            ? "The command is still running in the background."
-            : "The command finished.",
-    sharedOutputDisclosable: true,
     locks: [],
 });

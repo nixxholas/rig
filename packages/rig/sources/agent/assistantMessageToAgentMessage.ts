@@ -1,4 +1,3 @@
-import type { SharedToolActivity } from "./SharedToolActivity.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { AgentBlock, AgentMessage, ToolCallBlock } from "./types.js";
 import type {
@@ -10,7 +9,6 @@ import type {
 /** Durable per-call data produced by the tool that owns the call. */
 export interface ToolCallDurableDetails {
     presentation?: ToolCallPresentation;
-    shared?: SharedToolActivity;
 }
 
 export function assistantMessageToAgentMessage(
@@ -74,6 +72,5 @@ function providerToolCallToAgentBlock(
         ...(toolCall.kind === undefined ? {} : { kind: toolCall.kind }),
         ...(toolCall.vendor === undefined ? {} : { vendor: toolCall.vendor }),
         ...(details?.presentation === undefined ? {} : { presentation: details.presentation }),
-        ...(details?.shared === undefined ? {} : { shared: details.shared }),
     };
 }

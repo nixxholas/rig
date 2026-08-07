@@ -106,18 +106,5 @@ export const codexApplyPatchTool = defineTool({
                   type: "file_diff",
               },
     toUI: (result) => (result.text === "patch not applied" ? "Patch not applied" : "Applied patch"),
-    // No toSharedCall: the only argument is the raw patch body, so there is no
-    // sentence to write that is not the diff itself. The structured result below
-    // names the outcome without quoting a single changed line. The patch reaches
-    // a friend only where every other payload does — when the owner has asked
-    // this share for full output.
-    toSharedResult: (result) => {
-        if (result.text === "patch not applied") return "The patch was not applied.";
-        const fileCount = result.files.length;
-        const added = result.files.reduce((sum, file) => sum + (file.added ?? 0), 0);
-        const deleted = result.files.reduce((sum, file) => sum + (file.deleted ?? 0), 0);
-        return `Applied a patch to ${fileCount} file${fileCount === 1 ? "" : "s"}, adding ${added} line${added === 1 ? "" : "s"} and deleting ${deleted} line${deleted === 1 ? "" : "s"}.`;
-    },
-    sharedOutputDisclosable: true,
     locks: ["apply_patch"],
 });

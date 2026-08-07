@@ -118,10 +118,6 @@ Available Codex provider IDs: ${providerIds.join(", ")}.`,
         }),
         toUI: (result) =>
             `Codex returned ${result.citations.length} citation${result.citations.length === 1 ? "" : "s"}`,
-        toSharedCall: ({ query }) => `Researched the web through Codex for "${query}".`,
-        toSharedResult: (result) =>
-            `Codex returned ${result.citations.length} citation${result.citations.length === 1 ? "" : "s"}.`,
-        sharedOutputDisclosable: true,
         locks: [],
     });
 }

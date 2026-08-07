@@ -116,7 +116,6 @@ import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRu
 import { sessionSavePendingContextMessage } from "../persistence/session/sessionSavePendingContextMessage.js";
 import { sessionStartQueuedRun } from "../persistence/session/sessionStartQueuedRun.js";
 import { sessionDrainPendingContextMessages } from "../persistence/session/sessionDrainPendingContextMessages.js";
-import { sessionDrainFriendContextMessages } from "../persistence/session-sharing/sessionDrainFriendContextMessages.js";
 import { sessionTransferWorkspace } from "../persistence/session/sessionTransferWorkspace.js";
 import { sessionSetWorkspaceTransferState } from "../persistence/session/sessionSetWorkspaceTransferState.js";
 import { queryWorkspaceHasAttachedSessions } from "../persistence/session/queryWorkspaceHasAttachedSessions.js";
@@ -158,10 +157,6 @@ import { PresenceStore, resolvePresences } from "../presence/index.js";
 import { SlotEntryStore } from "../slots/index.js";
 import { WebappStore } from "../webapps/index.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
-import { PersistentScopeShareCoreStore } from "../persistence/scope-sharing/PersistentScopeShareCoreStore.js";
-import { PersistentScopeShareDaemonStore } from "../persistence/scope-sharing/PersistentScopeShareDaemonStore.js";
-import { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
-import { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
@@ -240,10 +235,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly happyCloud: HappyCloudService;
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
-    readonly scopeShareDaemonStore: PersistentScopeShareDaemonStore;
-    readonly scopeShares: PersistentScopeShareCoreStore;
-    readonly sessionShareDaemonStore: PersistentSessionShareDaemonStore;
-    readonly sessionShares: PersistentSessionShareCoreStore;
     readonly slots: SlotEntryStore;
     readonly webapps: WebappStore;
 
@@ -290,20 +281,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             options.durableGlobalEventQueue === true
                 ? new PersistentGlobalEventQueue(this.#database)
                 : new InMemoryGlobalEventQueue();
-        this.scopeShares = new PersistentScopeShareCoreStore({
-            now: this.#now,
-            tx: () => this.#tx(),
-        });
-        this.scopeShareDaemonStore = new PersistentScopeShareDaemonStore({
-            tx: () => this.#tx(),
-        });
-        this.sessionShares = new PersistentSessionShareCoreStore({
-            now: this.#now,
-            tx: () => this.#tx(),
-        });
-        this.sessionShareDaemonStore = new PersistentSessionShareDaemonStore({
-            tx: () => this.#tx(),
-        });
         this.happyCloud = new HappyCloudService({
             now: this.#now,
             persistence: this,
@@ -863,15 +840,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             if (this.#globalEventQueue.durable) {
                 globalEntry = this.#globalEventQueue.append(input.event, tx);
             }
-            return {
-                regular: sessionDrainPendingContextMessages(tx, sessionId, input.regularMessageIds),
-                friends: sessionDrainFriendContextMessages(tx, {
-                    limits: input.friendLimits,
-                    now: this.#now(),
-                    runId: input.runId,
-                    sessionId,
-                }),
-            };
+            return sessionDrainPendingContextMessages(tx, sessionId, input.regularMessageIds);
         });
         this.#precommittedGlobalEvents.set(input.event.id, globalEntry ?? null);
         return drained;
@@ -886,15 +855,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         messageIds?: readonly string[],
     ): readonly PersistedPendingContextMessage[] {
         return sessionDrainPendingContextMessages(this.#tx(), sessionId, messageIds);
-    }
-
-    drainFriendContextMessages(
-        input: Parameters<NonNullable<InMemorySessionPersistence["drainFriendContextMessages"]>>[0],
-    ) {
-        return sessionDrainFriendContextMessages(this.#tx(), {
-            ...input,
-            now: this.#now(),
-        });
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {

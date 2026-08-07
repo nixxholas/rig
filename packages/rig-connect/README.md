@@ -399,7 +399,7 @@ controls identity and cancellation.
 
 `connectHappyCloud()` follows one versioned singleton through the shared live stream, including
 local optimistic choices. Its `authority` is always `local_record_only`: enrollment is only a local
-record, and all six capabilities remain denied until each is granted explicitly.
+record, and all four capabilities remain denied until each is granted explicitly.
 
 ```ts
 const cloud = rig.connectHappyCloud({
@@ -415,10 +415,10 @@ const mutationId = rig.applyHappyCloudCommand({
 });
 ```
 
-The capabilities are `friends`, `group_chats`, `live_session_sharing`, `remote_control`,
-`session_blob_persistence`, and `happy_profile`. Rig Connect assigns the strict contract version,
-expected state version, and mutation identity, then owns FIFO delivery, retry, reconciliation, and
-rejection. The daemon rejects stale commands and mutation-identity reuse with different content.
+The capabilities are `group_chats`, `remote_control`, `session_blob_persistence`, and
+`happy_profile`. Rig Connect assigns the strict contract version, expected state version, and
+mutation identity, then owns FIFO delivery, retry, reconciliation, and rejection. The daemon
+rejects stale commands and mutation-identity reuse with different content.
 The newest 4,096 successful mutation receipts are retained. Within that window, an exact duplicate
 returns current authoritative status and reuse with different content is rejected. After expiry, a
 stale expected version rejects the command rather than replaying its old response.
@@ -432,8 +432,8 @@ revocation logically remove the affected active rows, but SQLite pages, its WAL,
 retain old encrypted bytes. This is not secure erasure.
 
 These records do not create a Happy Cloud account or device enrollment, upload anything, authorize
-remote control, or activate or gate the existing Happy, Murmur, and terminal integrations. Those
-effects require separate cloud and integration primitives.
+remote control, or activate or gate existing Happy or terminal integrations. Those effects require
+separate cloud and integration primitives.
 
 ## The groups
 

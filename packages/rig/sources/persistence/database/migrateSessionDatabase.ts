@@ -30,6 +30,7 @@ import { sessionShareToolOutput } from "./migrations/25-session-share-tool-outpu
 import { sessionSharePeerCapabilities } from "./migrations/26-session-share-peer-capabilities.js";
 import { sessionWorkspaceWaiting } from "./migrations/27-session-workspace-waiting.js";
 import { p2pPeerTrust } from "./migrations/28-p2p-peer-trust.js";
+import { removeFriendsAndSharing } from "./migrations/29-remove-friends-and-sharing.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -66,6 +67,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     sessionSharePeerCapabilities,
     sessionWorkspaceWaiting,
     p2pPeerTrust,
+    removeFriendsAndSharing,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

@@ -90,12 +90,8 @@ function ensureRoot(tx: TX, now: number): void {
             version: 0,
             enrollmentState: "not_enrolled",
             enrollmentChangedAtMs: 0,
-            friendsConsent: "denied",
-            friendsChangedAtMs: 0,
             groupChatsConsent: "denied",
             groupChatsChangedAtMs: 0,
-            liveSessionSharingConsent: "denied",
-            liveSessionSharingChangedAtMs: 0,
             remoteControlConsent: "denied",
             remoteControlChangedAtMs: 0,
             sessionBlobPersistenceConsent: "denied",
@@ -120,14 +116,10 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
                 enrollmentChangedAtMs: now,
                 ...(revoking
                     ? {
-                          friendsConsent: "denied",
-                          friendsChangedAtMs: now,
                           groupChatsConsent: "denied",
                           groupChatsChangedAtMs: now,
                           happyProfileConsent: "denied",
                           happyProfileChangedAtMs: now,
-                          liveSessionSharingConsent: "denied",
-                          liveSessionSharingChangedAtMs: now,
                           profileChangedAtMs: now,
                           profileCiphertext: null,
                           profileVersion: null,
@@ -241,15 +233,8 @@ function capabilityUpdate(
     now: number,
 ): Partial<typeof happyCloudEnrollment.$inferInsert> {
     switch (capability) {
-        case "friends":
-            return { friendsChangedAtMs: now, friendsConsent: consent };
         case "group_chats":
             return { groupChatsChangedAtMs: now, groupChatsConsent: consent };
-        case "live_session_sharing":
-            return {
-                liveSessionSharingChangedAtMs: now,
-                liveSessionSharingConsent: consent,
-            };
         case "remote_control":
             return { remoteControlChangedAtMs: now, remoteControlConsent: consent };
         case "session_blob_persistence":

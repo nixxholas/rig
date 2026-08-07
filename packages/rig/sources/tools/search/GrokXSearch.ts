@@ -110,7 +110,6 @@ Available Grok provider IDs: ${providerIds.join(", ")}.`,
         }),
         toUI: (result) =>
             `Grok searched X and returned ${result.posts.length} post${result.posts.length === 1 ? "" : "s"}`,
-        sharedOutputDisclosable: true,
         locks: [],
     });
 }

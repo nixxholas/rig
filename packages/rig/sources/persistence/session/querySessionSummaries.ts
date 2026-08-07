@@ -8,15 +8,6 @@ import type {
     SessionUnreadReason,
 } from "../../protocol/index.js";
 import { parsePermissionMode } from "../../permissions/index.js";
-import {
-    describePeerCapabilitiesActivePhrase,
-    resolveOfferablePeerCapabilities,
-    type PeerCapability,
-} from "../../session-sharing/peer-access/index.js";
-import {
-    describeSharedToolOutput,
-    toSharedToolOutput,
-} from "../../session-sharing/SharedToolOutput.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import { summarizeDockerExecution } from "../../execution/index.js";
 import type { TX } from "../Transaction.js";
@@ -33,41 +24,7 @@ export function querySessionSummaries(
     options: { limit?: number },
 ): readonly SessionSummary[] {
     const rows = tx.all<Record<string, unknown>>(sql`
-        SELECT listed_sessions.*,
-            session_shares.share_id AS share_id,
-            session_shares.state AS share_state,
-            session_shares.include_friend_messages AS share_include_friend_messages,
-            session_shares.tool_output AS share_tool_output,
-            (
-                SELECT COUNT(*)
-                FROM session_share_members
-                WHERE session_share_members.share_id = session_shares.share_id
-                  AND session_share_members.state = 'active'
-            ) AS share_member_count,
-            (
-                SELECT COUNT(DISTINCT session_share_capabilities.share_member_id)
-                FROM session_share_capabilities
-                JOIN session_share_members
-                    ON session_share_members.share_member_id
-                        = session_share_capabilities.share_member_id
-                    AND session_share_members.current_grant_epoch
-                        = session_share_capabilities.grant_epoch
-                WHERE session_share_members.share_id = session_shares.share_id
-                  AND session_share_members.state = 'active'
-                  AND session_share_capabilities.state = 'active'
-            ) AS share_capability_member_count,
-            (
-                SELECT GROUP_CONCAT(DISTINCT session_share_capabilities.capability)
-                FROM session_share_capabilities
-                JOIN session_share_members
-                    ON session_share_members.share_member_id
-                        = session_share_capabilities.share_member_id
-                    AND session_share_members.current_grant_epoch
-                        = session_share_capabilities.grant_epoch
-                WHERE session_share_members.share_id = session_shares.share_id
-                  AND session_share_members.state = 'active'
-                  AND session_share_capabilities.state = 'active'
-            ) AS share_active_capabilities
+        SELECT listed_sessions.*
         FROM (
             SELECT
                 id, project_id, workspace_id, order_key, archived, track_unread,
@@ -83,16 +40,6 @@ export function querySessionSummaries(
         ) AS listed_sessions
         JOIN projects ON projects.id = listed_sessions.project_id
         LEFT JOIN project_workspaces ON project_workspaces.id = listed_sessions.workspace_id
-        LEFT JOIN session_shares ON session_shares.share_id = (
-            SELECT latest_share.share_id
-            FROM session_shares AS latest_share
-            WHERE latest_share.owner_session_id = listed_sessions.id
-            ORDER BY
-                latest_share.state <> 'stopped' DESC,
-                latest_share.created_at_ms DESC,
-                latest_share.share_id DESC
-            LIMIT 1
-        )
         ORDER BY
             projects.order_key ASC,
             listed_sessions.workspace_id IS NOT NULL ASC,
@@ -124,47 +71,15 @@ export function querySessionSummaries(
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
         const workspaceId = readOptionalString(row, "workspace_id");
-        const shareId = readOptionalString(row, "share_id");
         // An empty stored key means the session has no place in an ordered
         // list, which the protocol says by leaving the position out.
         const orderKey = readString(row, "order_key");
-        // An unshared session has no joined share row, so this column is absent
-        // rather than empty; anything unreadable is read as the private setting.
-        const toolOutput = toSharedToolOutput(readOptionalString(row, "share_tool_output"));
-        // NULL (no active capability row at all) reads the same as an empty list;
-        // GROUP_CONCAT never produces an empty string for a row that exists.
-        const activeCapabilities = (readOptionalString(row, "share_active_capabilities")?.split(
-            ",",
-        ) ?? []) as PeerCapability[];
         return {
             id: readString(row, "id"),
             archived: readNumber(row, "archived") !== 0,
             projectId: readString(row, "project_id"),
             ...(orderKey === "" ? {} : { orderKey }),
             ...(workspaceId === undefined ? {} : { workspaceId }),
-            ...(shareId === undefined
-                ? {}
-                : {
-                      shared: {
-                          activeCapabilitiesDescription:
-                              describePeerCapabilitiesActivePhrase(activeCapabilities),
-                          capabilityMemberCount: readNumber(row, "share_capability_member_count"),
-                          includeFriendMessagesInModel:
-                              readNumber(row, "share_include_friend_messages") !== 0,
-                          memberCount: readNumber(row, "share_member_count"),
-                          // What this project could offer, which is a property of the
-                          // project's execution environment rather than of the share:
-                          // a session on the host can offer nothing, and says why.
-                          offerableCapabilities: [...resolveOfferablePeerCapabilities(docker)],
-                          shareId,
-                          state: readString(row, "share_state") as
-                              | "active"
-                              | "degraded"
-                              | "stopped",
-                          toolOutput,
-                          toolOutputDescription: describeSharedToolOutput(toolOutput),
-                      },
-                  }),
             trackUnread: readNumber(row, "track_unread") !== 0,
             ...(unreadReason !== undefined && unreadSince !== undefined
                 ? { unread: { reason: unreadReason as SessionUnreadReason, since: unreadSince } }

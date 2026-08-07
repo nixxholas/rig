@@ -48,9 +48,6 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
                               .map((content) => content.text)
                               .join(""),
                 ...(message.contextOnly === true ? { contextOnly: true as const } : {}),
-                ...(message.friendAuthor === undefined
-                    ? {}
-                    : { friendAuthor: { ...message.friendAuthor } }),
                 ...(input === undefined ? {} : { input }),
             };
         }

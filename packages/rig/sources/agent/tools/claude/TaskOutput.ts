@@ -220,22 +220,5 @@ export const claudeTaskOutputTool = defineTool({
               ? "Background agent is still running."
               : "Background task is still running.";
     },
-    toSharedCall: ({ task_id }) => `Checked the output of background task ${task_id}.`,
-    // The captured output never leaks; only the run's status is described. This
-    // is the user's own background work, so it is disclosable on that basis.
-    toSharedResult: (result) => {
-        const kind =
-            result.task?.task_type === "workflow"
-                ? "workflow"
-                : result.task?.task_type === "local_agent"
-                  ? "background agent"
-                  : "background task";
-        if (result.retrieval_status === "success") return `The ${kind}'s output is ready.`;
-        if (result.retrieval_status === "timeout") {
-            return `The ${kind} is still running after the wait.`;
-        }
-        return `The ${kind} is still running.`;
-    },
-    sharedOutputDisclosable: true,
     locks: [],
 });

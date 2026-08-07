@@ -24,10 +24,8 @@ describe("HappyCloudService", () => {
         const fixture = await createFixture();
         expect(fixture.service.status()).toMatchObject({
             capabilities: {
-                friends: { consent: "denied" },
                 group_chats: { consent: "denied" },
                 happy_profile: { consent: "denied" },
-                live_session_sharing: { consent: "denied" },
                 remote_control: { consent: "denied" },
                 session_blob_persistence: { consent: "denied" },
             },
@@ -39,7 +37,7 @@ describe("HappyCloudService", () => {
         fixture.apply({ action: "set_enrollment", state: "enrolled" });
         fixture.apply({
             action: "set_capability",
-            capability: "friends",
+            capability: "group_chats",
             consent: "granted",
         });
         fixture.apply({
@@ -52,8 +50,7 @@ describe("HappyCloudService", () => {
         const restarted = new PersistentSessionStore({ databasePath: fixture.path });
         expect(restarted.happyCloud.status()).toMatchObject({
             capabilities: {
-                friends: { consent: "granted" },
-                group_chats: { consent: "denied" },
+                group_chats: { consent: "granted" },
                 remote_control: { consent: "granted" },
             },
             enrollment: { state: "enrolled" },
@@ -67,7 +64,7 @@ describe("HappyCloudService", () => {
         expect(() =>
             fixture.apply({
                 action: "set_capability",
-                capability: "friends",
+                capability: "group_chats",
                 consent: "granted",
             }),
         ).toThrow("Enroll in Happy Cloud");
@@ -112,7 +109,7 @@ describe("HappyCloudService", () => {
 
         fixture.apply({
             action: "set_capability",
-            capability: "friends",
+            capability: "group_chats",
             consent: "granted",
         });
         expect(fixture.service.getProfile()).toEqual({ ciphertext: profile, version: 4 });
@@ -155,22 +152,22 @@ describe("HappyCloudService", () => {
         expect(fixture.service.status().version).toBe(1);
         fixture.apply({
             action: "set_capability",
-            capability: "friends",
+            capability: "group_chats",
             consent: "granted",
         });
         expect(fixture.service.apply(first).status).toMatchObject({
-            capabilities: { friends: { consent: "granted" } },
+            capabilities: { group_chats: { consent: "granted" } },
             version: 2,
         });
         expect(fixture.service.status()).toMatchObject({
-            capabilities: { friends: { consent: "granted" } },
+            capabilities: { group_chats: { consent: "granted" } },
             version: 2,
         });
         fixture.store.close();
         const restartedStore = new PersistentSessionStore({ databasePath: fixture.path });
         const restarted = restartedStore.happyCloud;
         expect(restarted.apply(first).status).toMatchObject({
-            capabilities: { friends: { consent: "granted" } },
+            capabilities: { group_chats: { consent: "granted" } },
             version: 2,
         });
         expect(() =>
@@ -243,7 +240,7 @@ describe("HappyCloudService", () => {
                 fixture.command(
                     {
                         action: "set_capability",
-                        capability: "friends",
+                        capability: "group_chats",
                         consent: "granted",
                     },
                     0,
