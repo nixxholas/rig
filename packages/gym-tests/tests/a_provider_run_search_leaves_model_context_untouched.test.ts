@@ -11,10 +11,14 @@ afterEach(async () => {
 
 /** Role and block kinds only: the shape a cached prefix is matched on, without the prose. */
 function contextShape(
-    messages: readonly { role: string; content?: readonly { type: string }[] }[],
+    messages: readonly { role: string; content?: string | null | readonly { type: string }[] }[],
 ): { blocks: string[]; role: string }[] {
     return messages.map((message) => ({
-        blocks: (message.content ?? []).map((block) => block.type),
+        // A system message carries its one payload as plain text rather than as blocks.
+        blocks:
+            typeof message.content === "string"
+                ? ["text"]
+                : (message.content ?? []).map((block) => block.type),
         role: message.role,
     }));
 }
@@ -102,7 +106,7 @@ describe("the turn after the provider ran its own search", () => {
 
         // And the text itself, so a search cannot arrive as prose inside a block that already fits
         // the shape above.
-        const text = (messages: readonly { content?: readonly unknown[] }[]) =>
+        const text = (messages: readonly { content?: string | null | readonly unknown[] }[]) =>
             JSON.stringify(messages.map((message) => message.content ?? []));
         expect(text(searched[1]?.context.messages ?? [])).toBe(
             text(plain[1]?.context.messages ?? []),
