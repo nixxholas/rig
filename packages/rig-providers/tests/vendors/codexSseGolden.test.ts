@@ -376,11 +376,11 @@ describe("Codex SSE goldens", () => {
             const session = await provider.session("<SESSION_ID>", {
                 instructions: "legacy instructions",
                 modelConfigurations: {
-                    "gpt-5.5": {
+                    "openai/gpt-5.5": {
                         instructions: "legacy instructions",
                         tools: codexCliTools("gpt-5.5"),
                     },
-                    "gpt-5.6-sol": {
+                    "openai/gpt-5.6-sol": {
                         instructions: "target instructions",
                         tools: codexCliTools("gpt-5.6-sol"),
                     },

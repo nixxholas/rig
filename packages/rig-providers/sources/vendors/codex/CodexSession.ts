@@ -137,7 +137,10 @@ export class CodexSession extends BaseSession {
             tools: this.tools,
         });
         for (const [model, configuration] of Object.entries(options.modelConfigurations ?? {})) {
-            this.modelConfigurations.set(model, cloneConfiguration(configuration));
+            this.modelConfigurations.set(
+                resolveCodexSessionModelId(model, this.credential.name === "bedrock-bearer-token"),
+                cloneConfiguration(configuration),
+            );
         }
         if (options.model !== undefined && !this.modelConfigurations.has(options.model)) {
             this.modelConfigurations.set(options.model, baseConfiguration);
