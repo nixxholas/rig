@@ -34,18 +34,17 @@ import { createExecutor } from "../executor/createExecutor.js";
 import { createGymProviderFromEnvironment } from "../executor/createGymProviderFromEnvironment.js";
 import { getBedrockModelRoute } from "../executor/getBedrockModelRoute.js";
 import { modelOpenaiGpt56Sol } from "@slopus/rig-execution";
-import type { HostedCapability, ServiceTier } from "@slopus/rig-execution";
+import type { ServiceTier } from "@slopus/rig-execution";
 import { routeProviderThroughGym } from "../executor/routeProviderThroughGym.js";
 import { goalTools } from "../tools/goals/index.js";
 import type { WorkflowContext } from "../workflows/index.js";
 import type { CodingAssistantRuntime } from "./CodingAssistantRuntime.js";
 import { createDefaultInstructions } from "./createDefaultInstructions.js";
 import { createGymJustBashAgentContext } from "./createGymJustBashAgentContext.js";
-import { selectToolsForModel } from "./selectToolsForModel.js";
+import { modelToolSurface } from "./modelToolSurface.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
-import { resolveGeminiApiKey } from "../tools/webSearch/resolveGeminiApiKey.js";
+import { resolveGeminiApiKey } from "../tools/search/resolveGeminiApiKey.js";
 import { readAgentHistoryTool } from "../tools/read_agent_history.js";
-import { selectCollaborationToolsForModel } from "./selectCollaborationToolsForModel.js";
 import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
@@ -55,10 +54,18 @@ import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspa
 import type { SchedulingContext } from "../scheduling/index.js";
 import type { ProviderUsageContext } from "../agent/context/ProviderUsageContext.js";
 import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
-import type { ImageGenerationProvider } from "../tools/imageGeneration/createImageGenerationTool.js";
+import {
+    createImageGenerationTool,
+    type ImageGenerationProvider,
+} from "../tools/imageGeneration/createImageGenerationTool.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { CONTAINER_GENERATED_PATH } from "../execution/index.js";
 import { AttachmentContext, type AttachmentScope } from "../tools/attachments/AttachmentContext.js";
+import {
+    assembleSearchTools,
+    type OneOffInferenceRoute,
+    type SearchInferenceRoutes,
+} from "../tools/search/index.js";
 
 export interface CreateCodingAssistantAgentOptions {
     attachmentScope?: AttachmentScope;
@@ -90,12 +97,6 @@ export interface CreateCodingAssistantAgentOptions {
     providers?: ConfigProviders;
     providerUsage?: ProviderUsageContext;
     resolveInferenceMaxRetries?: () => number;
-    /**
-     * The session's own permission mode. Supplied so a decision made per request reads the live
-     * session rather than the context this runtime happens to have been built with, which a model
-     * switch replaces while keeping the executor.
-     */
-    resolvePermissionMode?: () => PermissionMode | undefined;
     serviceTier?: ServiceTier;
     startDate?: string;
     secrets?: SessionSecretContext;
@@ -212,6 +213,11 @@ export function createCodingAssistantAgent(
     if (providerId !== "gym" && (providerConfig === undefined || !providerConfig.enabled)) {
         throw new Error(`Unknown or disabled inference provider '${providerId}'.`);
     }
+    let searchRoutes: SearchInferenceRoutes = {
+        claudeRoutes: [],
+        codexRoutes: [],
+        grokRoutes: [],
+    };
     const nativeProvider =
         options.executor ??
         (() => {
@@ -229,9 +235,6 @@ export function createCodingAssistantAgent(
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 env,
                 ...(options.identity === undefined ? {} : { identity: options.identity }),
-                ...(options.resolvePermissionMode === undefined
-                    ? {}
-                    : { resolvePermissionMode: options.resolvePermissionMode }),
                 ...(options.onAccountUsage === undefined
                     ? {}
                     : { onAccountUsage: options.onAccountUsage }),
@@ -243,6 +246,7 @@ export function createCodingAssistantAgent(
                       }),
                 sessionId: agentId,
             });
+            searchRoutes = result.searchRoutes;
             const executor = result.executor;
             if (executor === undefined) {
                 const variable = result.missingCredentials.get(providerId);
@@ -289,49 +293,39 @@ export function createCodingAssistantAgent(
         throw new Error(`Unknown model '${modelId}' for provider '${provider.id}'`);
     }
     const geminiApiKey = resolveGeminiApiKey(env);
-    const baseTools = selectToolsForModel({
-        imageGeneration:
-            nativeProvider instanceof Executor ? imageGenerationProviders(nativeProvider) : [],
-        model,
-        provider,
+    const surface = modelToolSurface({ model, provider });
+    const imageGeneration =
+        nativeProvider instanceof Executor ? imageGenerationProviders(nativeProvider) : [];
+    const baseTools = [
+        ...surface.baseTools,
+        ...(imageGeneration.length === 0
+            ? []
+            : [createImageGenerationTool(imageGeneration, surface.imageGenerationSurface)]),
+    ];
+    const currentRoute =
+        nativeProvider instanceof Executor
+            ? selectedOneOffRoute(nativeProvider, providerId, model.id)
+            : undefined;
+    const searchTools = assembleSearchTools({
+        ...searchRoutes,
+        ...(currentRoute === undefined ? {} : { currentRoute }),
+        ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
     });
-    const collaborationTools = selectCollaborationToolsForModel({ model, provider }).filter(
-        (tool) =>
-            workflowsEnabled ||
-            ![
-                "workflow",
-                "wait_for_workflow",
-                "workflow_status",
-                "stop_workflow",
-                "Workflow",
-                "WaitForWorkflow",
-            ].includes(tool.name),
-    );
     const availableCollaborationTools =
         options.subagents === undefined
             ? []
             : options.subagents.canSpawn
-              ? collaborationTools
-              : collaborationTools.filter((tool) =>
-                    [
-                        "followup_task",
-                        "wait_agent",
-                        "resume_agent",
-                        "send_input",
-                        "close_agent",
-                        "list_agents",
-                        "interrupt_agent",
-                        "send_message",
-                        "SendMessage",
-                        "followup_subagent",
-                    ].includes(tool.name),
-                );
+              ? workflowsEnabled
+                  ? surface.collaborationTools
+                  : surface.collaborationToolsWithoutWorkflows
+              : surface.limitedCollaborationTools;
     const toolsWithoutGoals = [
         ...baseTools,
         ...selectCommonToolsForModel({
             ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
             hasWorkspaceContext: options.workspaces !== undefined,
             isSubagent: options.isSubagent === true,
+            searchTools,
         }),
         ...(options.workspaces === undefined
             ? []
@@ -418,4 +412,16 @@ function imageGenerationProviders(executor: Executor): readonly ImageGenerationP
             ? []
             : [{ id: provider.id, imageGeneration: provider.imageGeneration }],
     );
+}
+
+function selectedOneOffRoute(
+    executor: Executor,
+    providerId: string,
+    modelId: string,
+): OneOffInferenceRoute | undefined {
+    const provider = executor.providers.find((candidate) => candidate.id === providerId);
+    const profile = provider?.profiles.find(
+        (candidate) => candidate.id === modelId && candidate.hidden !== true,
+    );
+    return provider === undefined || profile === undefined ? undefined : { profile, provider };
 }

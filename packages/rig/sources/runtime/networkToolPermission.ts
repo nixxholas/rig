@@ -3,15 +3,7 @@ import type { PermissionMode } from "../permissions/index.js";
 /**
  * The one rule every way of searching is measured against.
  *
- * Rig offers several: a tool it executes itself through Claude, another through Gemini, and
- * searches Grok and OpenAI run on their own backends. They reach the same place — the network,
- * outside anything Rig sandboxes — so they answer to the same rule, stated once here.
- *
- * Where that rule is enforced is not the same for all of them, and must not be. A tool Rig
- * executes is judged when it is called, which is the moment Rig can still decline. A search the
- * provider runs is judged when the request is built, because that is the last moment there is:
- * by the time anything comes back, the search has happened on someone else's machine. One rule,
- * two honest places to apply it.
+ * Rig's search and fetch tools reach the network outside its sandbox, so they use one rule.
  */
 export function permissionModeAllowsWebSearch(mode: PermissionMode | undefined): boolean {
     return mode === "auto" || mode === "full_access";

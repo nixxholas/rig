@@ -24,18 +24,27 @@ export type SessionEvent =
           callId: string;
           name: string;
           namespace?: string;
+          /**
+           * The provider ran this call on its own backend and settled it before the response
+           * ended. It is reported like any other call, but the client never executes it and never
+           * returns a result for it.
+           */
+          server?: true;
           /** Opaque provider metadata to persist with the tool call and its result. */
           vendor?: any;
       }
     | { type: "toolcall_delta"; callId: string; delta: string }
     | { type: "toolcall_end"; callId: string; arguments: string; incomplete?: boolean }
     /**
-     * A tool the provider ran on its own backend while producing this response. The client never
-     * executes it and never returns a result, so it never becomes one of the run's tool calls.
+     * The provider-owned result of a server tool call.
+     *
+     * Ordinary tools never emit these: the executor answers them and the answer re-enters as a
+     * later user/tool message. Server tools settle inside the same response, so their result is
+     * streamed here beside the call rather than as work for the client to perform.
      */
-    | { type: "server_toolcall_start"; callId: string; name: string }
-    | { type: "server_toolcall_delta"; callId: string; delta: string }
-    | { type: "server_toolcall_end"; callId: string; name: string; arguments: string }
+    | { type: "toolcall_result_start"; callId: string }
+    | { type: "toolcall_result_delta"; callId: string; delta: string }
+    | { type: "toolcall_result_end"; callId: string; result: string; incomplete?: boolean }
     | { type: "retrying"; attempt: number; reason: string }
     | { type: "token_usage"; usage: SessionCacheUsage }
     | { type: "done"; state: "cancelled" }

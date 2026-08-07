@@ -29,12 +29,6 @@ export function routeProviderThroughGym(
         ...(provider.extendProfilePromptContext === undefined
             ? {}
             : { extendProfilePromptContext: provider.extendProfilePromptContext }),
-        // The gym swaps the transport, not the decision. Forwarding the real provider's answer is
-        // what lets a gym test see which searches a request would have carried, rather than a
-        // second copy of the rule that could agree with the test while disagreeing with Rig.
-        ...(provider.hostedCapabilitiesForRequest === undefined
-            ? {}
-            : { hostedCapabilitiesForRequest: () => provider.hostedCapabilitiesForRequest!() }),
         models: provider.models,
         ...(onAccountUsage === undefined ? {} : { onAccountUsage }),
         ...(provider instanceof Executor
@@ -73,10 +67,8 @@ export function routeProviderThroughGym(
                   isolate: (label: string) =>
                       routeProviderThroughGym(provider.isolate!(label), env, onAccountUsage),
               }),
-        ...(provider.runClaudeAuxiliaryQuery === undefined
+        ...(provider.selectProvider === undefined
             ? {}
-            : {
-                  runClaudeAuxiliaryQuery: provider.runClaudeAuxiliaryQuery.bind(provider),
-              }),
+            : { selectProvider: provider.selectProvider.bind(provider) }),
     };
 }

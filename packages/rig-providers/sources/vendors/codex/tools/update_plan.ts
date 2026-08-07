@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const update_plan = {
     name: "update_plan",
-    type: "local",
     description:
         "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.\n",
     parameters: Type.Object(

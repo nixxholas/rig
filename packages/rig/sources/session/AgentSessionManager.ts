@@ -34,7 +34,6 @@ import type {
     AgentSessionTransferSchedule,
 } from "../agent/context/WorkspaceContext.js";
 import type { Message } from "../agent/types.js";
-import { modelSupportsHostedCapabilities, type HostedCapability } from "@slopus/rig-execution";
 import type { PermissionMode } from "../permissions/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
@@ -306,10 +305,6 @@ export class AgentSessionManager {
             projectId,
             trackUnread: true,
             workspaceId: workspace.id,
-            // Dropped rather than carried, for the reason a spawn writes it fresh: a hosted search
-            // was approved once, for one agent and one task. A delegated session is a new
-            // conversation someone will talk to, so inheriting the grant here would spend that
-            // one approval somewhere nobody pointed it.
             ...(selection.providerId === undefined ? {} : { providerId: selection.providerId }),
             ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
             ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),

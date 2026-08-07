@@ -9,7 +9,6 @@ describe("codex exec_command tool", () => {
         if (
             executorTool === undefined ||
             executorTool.kind === "custom" ||
-            executorTool.kind === "tool_search" ||
             executorTool.parameters === undefined
         ) {
             throw new Error("exec_command must expose a function schema.");

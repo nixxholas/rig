@@ -1592,7 +1592,6 @@ describe("AnthropicBedrockProvider", () => {
             {
                 tools: [
                     {
-                        type: "local",
                         name: "Read",
                         namespace: "files",
                     },

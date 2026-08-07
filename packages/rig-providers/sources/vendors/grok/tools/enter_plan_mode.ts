@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const enter_plan_mode = {
     name: "enter_plan_mode",
-    type: "local",
     description:
         "Use this tool when a task has ambiguity about the right approach or when the user asks you to write a plan. This tool enables a read-only plan mode where you explore the codebase and create an implementation plan for the user.",
     parameters: Type.Object(

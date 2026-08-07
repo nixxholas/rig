@@ -3,10 +3,10 @@ import type { HappyTracingEvent } from "happy-plugins";
 import { describe, expect, it, vi } from "vitest";
 
 import { codexViewImageTool } from "./tools/codex/view_image.js";
+import { codexTools } from "./tools/codex/assembleCodexTools.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
 import { validPng32Base64 } from "../tools/testing/validImageFixtures.js";
 import { getImageProcessor } from "../images/getImageProcessor.js";
-import { selectToolsForModel } from "../runtime/selectToolsForModel.js";
 import { Agent } from "./Agent.js";
 import { AGENTS_MD_SPEC } from "./prompt/agentsMdSpec.js";
 import type { AgentLoopEvent } from "./loop.js";
@@ -762,7 +762,7 @@ describe("Agent", () => {
             provider,
             modelId: "openai/gpt-test",
             context: harness.context,
-            toolSelector: selectToolsForModel,
+            toolSelector: () => codexTools,
             printToConsole: false,
         });
         expect(defaultAgent.tools.map((tool) => tool.name)).toEqual([
@@ -792,7 +792,7 @@ describe("Agent", () => {
             modelId: "openai/gpt-test",
             context: harness.context,
             tools: [noopTool],
-            toolSelector: selectToolsForModel,
+            toolSelector: () => codexTools,
             printToConsole: false,
         });
 

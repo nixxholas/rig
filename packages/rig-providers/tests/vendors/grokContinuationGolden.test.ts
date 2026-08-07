@@ -62,6 +62,59 @@ describe("Grok continuation goldens", () => {
         ]);
     });
 
+    it("answers a failed client tool search so the next request is not left open", () => {
+        const call = {
+            type: "tool_search_call",
+            call_id: "search-1",
+            execution: "client",
+            status: "completed",
+            arguments: { query: "workspace tools" },
+        };
+        expect(
+            toGrokResponseInput({
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "assistant",
+                        content: "",
+                        responseItems: [JSON.stringify(call)],
+                    },
+                    {
+                        role: "tool",
+                        callId: "search-1",
+                        content: "Tool unavailable",
+                        isError: true,
+                    },
+                ],
+            }),
+        ).toEqual([
+            { type: "message", role: "system", content: "System prompt." },
+            call,
+            {
+                type: "tool_search_output",
+                call_id: "search-1",
+                execution: "client",
+                status: "completed",
+                tools: [],
+            },
+        ]);
+    });
+
+    it("ignores structurally malformed opaque response items", () => {
+        expect(
+            toGrokResponseInput({
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "assistant",
+                        content: "",
+                        responseItems: ["null", '"text"', '{"type":17}'],
+                    },
+                ],
+            }),
+        ).toEqual([{ type: "message", role: "system", content: "System prompt." }]);
+    });
+
     it.each(["low", "medium", "high"] satisfies SessionReasoningEffort[])(
         "sends captured Grok 4.5 %s reasoning configuration",
         (effort) => {

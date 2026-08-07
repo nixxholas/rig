@@ -16,7 +16,6 @@ import type {
     Message,
     PendingSteeringMessage,
     PermissionReviewState,
-    ProviderToolCallRecord,
     ProtocolSession,
     SessionActivity,
     ScheduledMessage,
@@ -62,7 +61,6 @@ import type {
     GroupEndReason,
     UserMessageElement,
 } from "./ChatElement.js";
-import { describeProviderToolCall } from "./describeProviderToolCall.js";
 import { groupToolCalls } from "./groupToolCalls.js";
 import { mergeForwardTranscriptWindow, mergeTranscriptWindow } from "./mergeTranscriptWindow.js";
 
@@ -106,8 +104,6 @@ export class ChatStore {
     #byId = new Map<string, ChatElement>();
     /** In-flight tool calls by the daemon's tool-call id. */
     #toolCallElementIds = new Map<string, string>();
-    /** Provider-run calls still in flight, keyed by run and provider call id. */
-    #providerToolCallElementIds = new Map<string, string>();
     #permissionReviewsByToolCallId = new Map<string, PermissionReviewState>();
     /** Streaming blocks of the message being generated, keyed by content index. */
     #streamingElementIds = new Map<number, string>();
@@ -1519,7 +1515,6 @@ export class ChatStore {
         this.#indexById.clear();
         this.#groupingDirty = true;
         this.#toolCallElementIds.clear();
-        this.#providerToolCallElementIds.clear();
         this.#callPresentations.clear();
         this.#streamingElementIds.clear();
         this.#appliedMessageIds.clear();
@@ -1636,14 +1631,6 @@ export class ChatStore {
                   kind: "notice";
                   message: SystemMessage;
                   order: number;
-              }
-            | {
-                  at: number;
-                  call: ProviderToolCallRecord;
-                  eventId?: never;
-                  kind: "provider_tool_call";
-                  order: number;
-                  runId: string;
               };
         /**
          * Only one inference occupies the session at a time, so its groups form
@@ -1743,31 +1730,7 @@ export class ChatStore {
                 },
             ];
         });
-        const groupIndexOfContainingGroup = (messageId: string): number | undefined => {
-            const containingGroupId = transcript.messageGroupId?.[messageId];
-            return containingGroupId === undefined
-                ? undefined
-                : groupIndexByMessageId.get(containingGroupId);
-        };
         let order = messages.length;
-        // A provider-run call sits with the assistant message it accompanied, which is where a
-        // client watching live saw it. It has no group of its own: Rig never executed it, so
-        // there is nothing to open or close around it.
-        for (const call of transcript.providerToolCalls ?? []) {
-            const turn = turnByMessageId.get(call.messageId);
-            timeline.push({
-                at: call.createdAt,
-                call,
-                groupIndex:
-                    groupIndexByMessageId.get(call.messageId) ??
-                    groupIndexOfContainingGroup(call.messageId) ??
-                    groupsClosedBy(call.createdAt),
-                kind: "provider_tool_call",
-                order,
-                runId: turn?.runId ?? call.runId,
-            });
-            order += 1;
-        }
         for (const notice of transcript.notices ?? []) {
             timeline.push({
                 at: notice.createdAt,
@@ -1819,7 +1782,9 @@ export class ChatStore {
         const priority = (item: OrderedItem): number =>
             item.kind === "message" && item.steered === true
                 ? timelinePriority("compaction")
-                : timelinePriority(item.kind);
+                : item.kind === "message" && item.message.role === "agent"
+                  ? 3
+                  : timelinePriority(item.kind);
         // Millisecond timestamps can tie across independently stored rows. Structural
         // priorities preserve group boundaries first; event IDs then retain durable
         // order within a priority, so a cross-kind tie can differ from live arrival.
@@ -1837,20 +1802,6 @@ export class ChatStore {
                 continue;
             }
             this.#turnId = item.runId;
-            if (item.kind === "provider_tool_call") {
-                this.#applyProviderToolCall(
-                    {
-                        arguments: item.call.arguments,
-                        callId: item.call.callId,
-                        ...(item.call.status === "interrupted" ? { incomplete: true } : {}),
-                        name: item.call.name,
-                        type: "server_toolcall_end",
-                    } as unknown as AgentLoopEvent,
-                    item.at,
-                    item.runId,
-                );
-                continue;
-            }
             if (item.kind === "group_start") {
                 this.#startGroup(item.group.id, item.runId, item.at, deltas);
             } else if (item.kind === "group_end") {
@@ -2236,19 +2187,6 @@ export class ChatStore {
             this.#callPresentations.delete(elementId);
         }
         this.#toolCallElementIds.clear();
-        // A provider-run call cannot outlive the response that started it. Stopping the turn
-        // stops Rig reading the answer, not the search itself, which already reached the
-        // provider's backend — so the row stays and says its outcome is unknown rather than
-        // spinning for the life of the session.
-        for (const [key, elementId] of this.#providerToolCallElementIds) {
-            const element = this.#byId.get(elementId);
-            if (element?.kind === "provider_tool_call" && element.status === "running") {
-                this.#update(elementId, {
-                    status: outcome === "stopped" ? "interrupted" : "failed",
-                });
-            }
-            this.#providerToolCallElementIds.delete(key);
-        }
     }
 
     #applySubmittedMessage(event: SessionEvent, deltas: ChatDelta[]): void {
@@ -2824,11 +2762,6 @@ export class ChatStore {
             case "toolcall_end":
                 this.#applyStreamedToolCall(event, at);
                 return;
-            case "server_toolcall_start":
-            case "server_toolcall_delta":
-            case "server_toolcall_end":
-                this.#applyProviderToolCall(event, at, runId);
-                return;
             case "tool_execution_start": {
                 const call = (event as { toolCall: ToolCallBlock }).toolCall;
                 const elementId = this.#upsertToolCall(call, at, this.#turnId ?? "");
@@ -3059,13 +2992,6 @@ export class ChatStore {
             this.#remove(elementId);
         }
         this.#streamingElementIds.clear();
-        // A provider-run call that never finished belongs to the abandoned attempt, so its row
-        // goes with it rather than spinning forever. One that completed stays: its end event is
-        // durable evidence that the provider really did search.
-        for (const [key, elementId] of this.#providerToolCallElementIds) {
-            this.#remove(elementId);
-            this.#providerToolCallElementIds.delete(key);
-        }
     }
 
     #applyStreamedText(kind: "agent_text" | "thinking", event: AgentLoopEvent, at: number): void {
@@ -3104,86 +3030,6 @@ export class ChatStore {
         if (data.delta !== undefined) {
             this.#update(existingId, { text: existing.text + data.delta });
         }
-    }
-
-    /**
-     * Records a call the provider ran on its own backend.
-     *
-     * Rig never executes one, so this only ever describes what already happened. The start and
-     * delta events are live-only; on a reopened session just the end arrives, and the completed
-     * row is built from that alone. The element id is derived from the call, so a redelivered
-     * event updates the same row instead of adding another.
-     */
-    #applyProviderToolCall(event: AgentLoopEvent, at: number, runId: string): void {
-        const data = event as {
-            arguments?: string;
-            callId: string;
-            delta?: string;
-            incomplete?: true;
-            name?: string;
-            type: string;
-        };
-        if (data.callId.length === 0) return;
-        const key = `${runId}:${data.callId}`;
-        const existingId = this.#providerToolCallElementIds.get(key);
-        const existing = existingId === undefined ? undefined : this.#byId.get(existingId);
-        const current = existing?.kind === "provider_tool_call" ? existing : undefined;
-
-        if (data.type === "server_toolcall_delta") {
-            if (current === undefined) return;
-            const argumentsText = current.argumentsText + (data.delta ?? "");
-            this.#update(current.id, {
-                argumentsText,
-                presentation: describeProviderToolCall(current.name, argumentsText),
-            });
-            return;
-        }
-
-        const complete = data.type === "server_toolcall_end";
-        const name = data.name ?? current?.name ?? "";
-        // The end event carries the provider's own final arguments, which is where the sources
-        // live; the streamed text is only a fallback for a provider that sends none.
-        const argumentsText = complete
-            ? data.arguments && data.arguments.length > 0
-                ? data.arguments
-                : (current?.argumentsText ?? "")
-            : (current?.argumentsText ?? "");
-
-        // The closing event says whether the provider reported back. One marked incomplete was
-        // written by Rig for a turn that ended first, and is the whole record that the search
-        // reached the network at all.
-        const status = !complete
-            ? "running"
-            : data.incomplete === true
-              ? "interrupted"
-              : "completed";
-        if (current !== undefined) {
-            this.#update(current.id, {
-                argumentsComplete: complete,
-                argumentsText,
-                name,
-                presentation: describeProviderToolCall(name, argumentsText),
-                status,
-            });
-            if (complete) this.#providerToolCallElementIds.delete(key);
-            return;
-        }
-
-        // Appending may reuse the group's placeholder row, which keeps its own id, so the id it
-        // returns is the one to remember rather than the one just proposed.
-        const elementId = this.#appendGroupContent({
-            argumentsComplete: complete,
-            argumentsText,
-            createdAt: at,
-            id: `provider-tool:${runId}:${data.callId}`,
-            kind: "provider_tool_call",
-            name,
-            presentation: describeProviderToolCall(name, argumentsText),
-            providerToolCallId: data.callId,
-            status,
-            ...this.#elementIdentity(runId),
-        });
-        if (!complete) this.#providerToolCallElementIds.set(key, elementId);
     }
 
     #applyStreamedToolCall(event: AgentLoopEvent, at: number): void {
@@ -3570,8 +3416,8 @@ function timelinePriority(kind: string): number {
     // stands ahead of that group opening, the way a steering message does.
     if (kind === "compaction") return 0;
     if (kind === "group_start") return 1;
-    if (kind === "group_end") return 3;
-    if (kind === "end") return 4;
+    if (kind === "group_end") return 4;
+    if (kind === "end") return 5;
     return 2;
 }
 

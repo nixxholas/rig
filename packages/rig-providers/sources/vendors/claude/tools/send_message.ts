@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const claude_send_message_tool: SessionTool = {
     name: "SendMessage",
-    type: "local",
     description:
         "Send follow-up work to a previously spawned subagent by its task name, path, or agent id. The agent resumes with its full context preserved.",
     parameters: Type.Object(
@@ -30,7 +29,6 @@ export const claude_send_message_tool: SessionTool = {
 
 export const claude_send_message_tool_sonnet: SessionTool = {
     name: "SendMessage",
-    type: "local",
     description:
         "Send follow-up work to a previously spawned subagent by its task name, path, or agent id. The agent resumes with its full context preserved.",
     parameters: Type.Object(

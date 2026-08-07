@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const monitor = {
     name: "monitor",
-    type: "local",
     description:
         "Start a background monitor that streams events from a long-running script. Each stdout line is an event - you can keep working and notifications arrive in the chat. Exit ends the watch.\n\n**Output volume**: Every stdout line becomes a message in the conversation, so write selective filters. In pipes use `grep --line-buffered` (plain `grep` buffers and delays events by minutes).\n\nSet `persistent: true` for session-length watches (PR monitoring, log tails) -- the monitor runs until you call kill_command_or_subagent or until the session ends. Otherwise it stops at `timeout_ms` (default 10h).",
     parameters: Type.Object(

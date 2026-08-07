@@ -5,7 +5,6 @@ import type { CodexToolDefinitionVendor } from "@/vendors/codex/CodexToolVendor.
 
 export const tool_search = {
     name: "tool_search",
-    type: "local",
     vendor: {
         provider: "codex",
         type: "tool_search",

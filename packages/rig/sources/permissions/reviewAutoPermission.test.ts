@@ -150,7 +150,7 @@ describe("reviewAutoPermission", () => {
                 messages: [],
                 reviewer,
                 timeoutMs: 5,
-                toolName: "WebFetch",
+                toolName: "web_fetch",
             }),
         ).resolves.toEqual({
             decision: "deny",
@@ -174,7 +174,7 @@ describe("reviewAutoPermission", () => {
                 args: { url: "https://example.com" },
                 messages: [],
                 reviewer,
-                toolName: "WebFetch",
+                toolName: "web_fetch",
             }),
         ).resolves.toEqual({
             decision: "deny",
@@ -199,7 +199,7 @@ describe("reviewAutoPermission", () => {
             messages: [],
             reviewer,
             signal: controller.signal,
-            toolName: "WebFetch",
+            toolName: "web_fetch",
         });
         await Promise.resolve();
         controller.abort();

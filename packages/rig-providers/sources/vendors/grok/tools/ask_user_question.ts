@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const ask_user_question = {
     name: "ask_user_question",
-    type: "local",
     description:
         'Ask the user one or more multiple-choice questions.\n\n- Every question automatically gets an "Other" choice where the user can type their own answer.\n- Put your recommended option first and append "(Recommended)" to its label.',
     parameters: Type.Object(

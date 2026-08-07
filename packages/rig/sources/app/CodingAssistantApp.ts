@@ -82,7 +82,6 @@ import { createCompletedTurn } from "./createCompletedTurn.js";
 import { DEFAULT_TERMINAL_THEME } from "./defaultTerminalTheme.js";
 import { createSlashCommands, type SlashCommandItem } from "./createSlashCommands.js";
 import { describeModelChoice } from "./describeModelChoice.js";
-import { describeServerToolCall } from "./describeServerToolCall.js";
 import { describeReasoningLevel } from "./describeReasoningLevel.js";
 import { encodeModelChoice } from "./encodeModelChoice.js";
 import { formatActivityElapsedTime } from "./formatActivityElapsedTime.js";
@@ -131,7 +130,6 @@ import {
     renderPeerCapabilityIndicator,
 } from "./renderPeerCapabilityIndicator.js";
 import { renderRigBanner } from "./renderRigBanner.js";
-import { renderServerToolCallSummary } from "./renderServerToolCallSummary.js";
 import { renderStartupStatusCard } from "./renderStartupStatusCard.js";
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";
 import { subagentElapsedMs } from "./subagentElapsedMs.js";
@@ -526,8 +524,6 @@ export class CodingAssistantApp implements Component, Focusable {
     #runningToolCallIds = new Set<string>();
     #stoppingBackgroundTerminals = false;
     #toolStatusByCallId = new Map<string, string>();
-    /** Calls the provider is still running on its own backend, by provider call id. */
-    #activeServerToolCalls = new Map<string, { name: string; arguments: string }>();
     #usage: Usage = zeroUsage();
     #usageRequestVersion = 0;
     #skipInitialUsageReplay = false;
@@ -3621,7 +3617,6 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#thinkingEntryIdsByContentIndex.clear();
             this.#streamingThinkingEntryIds.clear();
             this.#toolCallEntryIdsByContentIndex.clear();
-            this.#activeServerToolCalls.clear();
         } else if (event.type === "block_reset") {
             this.#resetStreamedInference();
             this.#statusText = "Running";
@@ -3650,18 +3645,6 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#ensureToolCallEntry(event.contentIndex);
         } else if (event.type === "toolcall_end") {
             this.#finishToolCall(event.contentIndex, event.toolCall);
-        } else if (event.type === "server_toolcall_start") {
-            this.#activeServerToolCalls.set(event.callId, { name: event.name, arguments: "" });
-        } else if (event.type === "server_toolcall_delta") {
-            const active = this.#activeServerToolCalls.get(event.callId);
-            if (active !== undefined) active.arguments += event.delta;
-        } else if (event.type === "server_toolcall_end") {
-            this.#finishServerToolCall(
-                event.callId,
-                event.name,
-                event.arguments,
-                event.incomplete === true,
-            );
         } else if (event.type === "tool_execution_start") {
             this.#activeToolCallIds.add(event.toolCall.id);
             this.#runningToolCallIds.add(event.toolCall.id);
@@ -4135,44 +4118,6 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#requestRender();
     }
 
-    /**
-     * Turns a closed provider-run call into history in the same render that drops its live row,
-     * so the transcript grows by exactly the height the live tail gives up.
-     *
-     * A call marked incomplete was closed by Rig rather than by the provider, because the turn
-     * ended first. That is not the search being stopped — nothing can stop one — so it says which
-     * of the two actually happened.
-     */
-    #finishServerToolCall(
-        callId: string,
-        name: string | undefined,
-        args: string,
-        incomplete: boolean,
-    ): void {
-        const active = this.#activeServerToolCalls.get(callId);
-        this.#activeServerToolCalls.delete(callId);
-        const description = describeServerToolCall(
-            name ?? active?.name,
-            args.trim().length === 0 ? (active?.arguments ?? "") : args,
-        );
-        this.#appendEntry({
-            role: "event",
-            title: incomplete ? description.interrupted : description.title,
-            text: description.detail,
-        });
-    }
-
-    /**
-     * A provider-run call cannot outlive the response that started it, so a stopped, failed, or
-     * finished run leaves nothing to report even if its closing event never arrived.
-     */
-    #activeServerToolCallLabels(): string[] {
-        if (!this.#running) return [];
-        return [...this.#activeServerToolCalls.values()].map(
-            (call) => describeServerToolCall(call.name, call.arguments).active,
-        );
-    }
-
     #backgroundTerminalInteraction(
         toolName: string,
         args: unknown,
@@ -4379,7 +4324,6 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#toolStatusByCallId.delete(entry.id);
         }
         this.#entries = this.#entries.filter((entry) => !entryIds.has(entry.id));
-        this.#activeServerToolCalls.clear();
         this.#streamEntryId = undefined;
         this.#streamedToolCallEntries.clear();
         this.#thinkingEntryIdsByContentIndex.clear();
@@ -4772,7 +4716,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 ),
                 width,
             }),
-            renderServerToolCallSummary(this.#activeServerToolCallLabels(), width),
             renderWorkflowSummary(this.#activeWorkflowCount(), width),
             renderBackgroundTerminalSummary(this.#backgroundProcesses.length, width),
             renderPeerCapabilityIndicator(this.#sessionShare, width),
@@ -6948,6 +6891,9 @@ export class CodingAssistantApp implements Component, Focusable {
         }
         if (normalized.includes("read") || normalized.includes("view")) {
             return active ? "Reading" : "Read";
+        }
+        if (normalized.includes("search")) {
+            return active ? "Searching" : "Searched";
         }
         if (
             normalized.includes("write") ||

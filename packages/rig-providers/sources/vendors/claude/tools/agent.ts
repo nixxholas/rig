@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const claude_agent_tool: SessionTool = {
     name: "Agent",
-    type: "local",
     description:
         "Start a subagent for a focused, self-contained task. Agents run in the background by default and report back when they finish. Set run_in_background to false when the result is needed immediately.",
     parameters: Type.Object({
@@ -44,7 +43,6 @@ export const claude_agent_tool: SessionTool = {
 
 export const claude_agent_tool_sonnet: SessionTool = {
     name: "Agent",
-    type: "local",
     description:
         "Start a subagent for a focused, self-contained task. Agents run in the background by default and report back when they finish. Set run_in_background to false when the result is needed immediately.",
     parameters: Type.Object({

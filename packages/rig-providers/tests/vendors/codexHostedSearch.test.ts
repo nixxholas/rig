@@ -2,51 +2,34 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import { describe, expect, it } from "vitest";
 
-import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
-import type { CodexSession } from "@/vendors/codex/CodexSession.js";
+import { CodexSession } from "@/vendors/codex/CodexSession.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
-import { codex_hosted_tools, web_search } from "@/vendors/codex/tools/index.js";
+import { codex_server_tools, web_search } from "@/vendors/codex/tools/index.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 
 /**
  * OpenAI runs `web_search` on its own backend inside a single response, the way the Codex CLI does.
  * Rig declares it and reads the result back; it never executes or answers one.
  */
-describe("Codex hosted search", () => {
-    // Exactly the definition in the captured `gpt-5.5` CLI requests, which are the only recorded
-    // ones that declare a search at all. `external_web_access: false` is what the CLI sent — it
-    // prefers OpenAI's index to reaching the open web — so Rig sends what the reference sent
-    // rather than quietly asking for more of the web.
-    it("asks again on a retry, so a mode that narrowed mid-turn is honoured", async () => {
-        // Allowed when the first attempt is built, and not when the retry is: exactly a session
-        // downgraded to Read only while its first request was still upstream.
-        let asked = 0;
-        const bodies = await retriedRequestBodies(() =>
-            asked++ === 0 ? codex_hosted_tools : [],
-        );
-
-        expect(asked).toBeGreaterThanOrEqual(2);
-        expect(bodies.length).toBeGreaterThanOrEqual(2);
-        // The first request legitimately carried it; the mode allowed it at the time.
-        expect(declaredIn(bodies[0]!)).toContain("web_search");
-        // The retry is another request, and by then it does not.
-        expect(declaredIn(bodies[bodies.length - 1]!)).not.toContain("web_search");
-    }, 30_000);
-
+describe("Codex server tools", () => {
     it("declares web search the way the captured CLI request does", () => {
-        expect(toCodexToolDefinitions(codex_hosted_tools)).toEqual([
+        expect(toCodexToolDefinitions(codex_server_tools)).toEqual([
             {
                 type: "web_search",
                 external_web_access: false,
                 search_content_types: ["text", "image"],
             },
         ]);
-        expect(web_search.type).toBe("cloud");
+        expect(web_search.server).toEqual({
+            type: "web_search",
+            external_web_access: false,
+            search_content_types: ["text", "image"],
+        });
     });
 
-    it("reports a hosted search as provider-executed rather than a call Rig must answer", async () => {
+    it("reports a server search as provider-executed rather than a call Rig must answer", async () => {
         const { events, result } = await replay(
             [
                 {
@@ -66,20 +49,62 @@ describe("Codex hosted search", () => {
             new Set(["web_search"]),
         );
 
-        expect(
-            events.flatMap((event) => (event.type === "server_toolcall_end" ? [event.name] : [])),
-        ).toEqual(["web_search"]);
+        expect(serverToolCallNames(events)).toEqual(["web_search"]);
         // Nothing was asked of the client, so the turn is a finished answer rather than a loop.
         expect(result.toolCalls).toEqual([]);
         expect(result.stopReason).toBe("stop");
     });
 
-    // Everything above this line reads a response. None of it can tell whether the hosted tool ever
+    it("accepts the partial in-progress item Codex emits before the search action arrives", async () => {
+        const { events, result } = await replay(
+            [
+                {
+                    type: "response.output_item.added",
+                    output_index: 0,
+                    item: {
+                        type: "web_search_call",
+                        id: "ws_1",
+                        status: "in_progress",
+                    },
+                },
+                {
+                    type: "response.output_item.done",
+                    output_index: 0,
+                    item: {
+                        type: "web_search_call",
+                        id: "ws_1",
+                        status: "completed",
+                        action: { type: "search", query: "Node.js current stable version" },
+                    },
+                },
+                {
+                    type: "response.completed",
+                    response: { output: [], usage: { total_tokens: 1 } },
+                },
+            ],
+            new Set(["web_search"]),
+        );
+
+        expect(events).toContainEqual({
+            type: "toolcall_start",
+            callId: "ws_1",
+            name: "web_search",
+            server: true,
+        });
+        expect(events).toContainEqual({
+            type: "toolcall_end",
+            callId: "ws_1",
+            arguments: '{"type":"search","query":"Node.js current stable version"}',
+        });
+        expect(result.stopReason).toBe("stop");
+    });
+
+    // Everything above this line reads a response. None of it can tell whether the server tool ever
     // reached a request, which is the half that was silently broken: the provider accepted the
     // callback and dropped it on the way to the session, so Rig declared no search at all and the
     // mapper was simply never given the chance to be wrong. This asserts on the bytes on the wire.
-    it("puts the hosted search into the request the provider actually sends", async () => {
-        const declared = await declaredTools({ hostedTools: () => codex_hosted_tools });
+    it("puts the server search into the request the provider actually sends", async () => {
+        const declared = await declaredTools(codex_server_tools);
 
         expect(declared).toContainEqual({
             type: "web_search",
@@ -88,20 +113,18 @@ describe("Codex hosted search", () => {
         });
     });
 
-    // The same provider without the grant sends no search, so the tool follows the permission
-    // answer rather than the provider being Codex.
-    it("sends no search when nothing granted one", async () => {
-        const declared = await declaredTools({});
+    it("sends no search when the session defines no server tool", async () => {
+        const declared = await declaredTools([]);
 
         expect(declared.some((tool) => tool.type === "web_search")).toBe(false);
     });
 
     // Compaction summarizes context that already exists, so there is nothing for it to search. It
-    // never adds hosted tools, but it was also forwarding whatever tools it was handed — so a
+    // never adds server tools, but it was also forwarding whatever tools it was handed — so a
     // configured one would have ridden along. It drops them instead, which is also what keeps a
     // compaction sample that calls a tool counting as a tool call rather than as provider work.
-    it("declares no hosted search while compacting, even when handed one", async () => {
-        const declared = await declaredTools({}, async (session) => {
+    it("declares no server search while compacting, even when handed one", async () => {
+        const declared = await declaredTools(codex_server_tools, async (session) => {
             await session.compact().catch(() => {
                 // The stub server does not return a real compaction item; the request it was sent
                 // is the whole subject here.
@@ -111,9 +134,9 @@ describe("Codex hosted search", () => {
         expect(declared.some((tool) => tool.type === "web_search")).toBe(false);
     });
 
-    // A request that did not declare hosted search cannot receive one. Compaction sends none, so
+    // A request that did not declare server search cannot receive one. Compaction sends none, so
     // this is also what keeps a compaction sample that calls a tool counting as a tool call.
-    it("treats the same item as client work when nothing hosted was declared", async () => {
+    it("treats the same item as client work when no server tool was declared", async () => {
         const { events } = await replay(
             [
                 {
@@ -134,14 +157,23 @@ describe("Codex hosted search", () => {
             new Set(),
         );
 
-        expect(events.some((event) => event.type.startsWith("server_tool_call"))).toBe(false);
+        expect(
+            events.some((event) => event.type === "toolcall_start" && event.server === true),
+        ).toBe(false);
     });
 });
 
-async function replay(events: readonly unknown[], hostedToolNames: ReadonlySet<string>) {
+/** Names of every `toolcall_start` the provider marked `server: true`, in emission order. */
+function serverToolCallNames(events: readonly SessionEvent[]): readonly string[] {
+    return events.flatMap((event) =>
+        event.type === "toolcall_start" && event.server === true ? [event.name] : [],
+    );
+}
+
+async function replay(events: readonly unknown[], serverToolNames: ReadonlySet<string>) {
     const mapped = mapOpenAIResponseStream(stream(events), {
         failureMessage: "unused",
-        hostedToolNames,
+        serverToolNames,
         vendor: "codex",
     });
     const collected: SessionEvent[] = [];
@@ -151,67 +183,6 @@ async function replay(events: readonly unknown[], hostedToolNames: ReadonlySet<s
         next = await mapped.next();
     }
     return { events: collected, result: next.value };
-}
-
-/**
- * A retry is another request, and the mode can narrow while the first one is in flight.
- *
- * A hosted search is enforced by declining to declare it, so a request that carries one is the
- * whole exposure — there is no later call to intercept. Resolving the tools once before the retry
- * loop meant a session downgraded mid-turn still sent `web_search` on the way past.
- */
-async function retriedRequestBodies(
-    hostedTools: () => readonly SessionTool[],
-): Promise<readonly Record<string, any>[]> {
-    const bodies: Record<string, any>[] = [];
-    let served = 0;
-    const server = createServer(async (request, response) => {
-        bodies.push(JSON.parse(await readBody(request)));
-        served += 1;
-        if (served === 1) {
-            // A retryable upstream failure, which is the whole point: the turn continues.
-            response.writeHead(500, { "content-type": "application/json" });
-            response.end(JSON.stringify({ error: { message: "server error" } }));
-            return;
-        }
-        completeSse(response);
-    });
-    server.listen(0, "127.0.0.1");
-    await new Promise<void>((resolve, reject) => {
-        server.once("listening", resolve);
-        server.once("error", reject);
-    });
-    const address = server.address();
-    if (typeof address !== "object" || address === null) throw new Error("Missing port.");
-    try {
-        const provider = new CodexProvider({
-            credential: { name: "codex-api-key", credential: { apiKey: "test" } } as never,
-            endpoint: `http://127.0.0.1:${address.port}/v1`,
-            hostedTools,
-            transport: "sse",
-        });
-        const session = await provider.session("session-retry", { instructions: "Be brief." });
-        for await (const _event of session.run({
-            context: { messages: [{ role: "user", content: "Reply with OK." }] },
-            effort: "low",
-            model: "gpt-5.6-sol",
-        })) {
-            // Drain the response.
-        }
-    } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-    return bodies;
-}
-
-function declaredIn(body: Record<string, any>): readonly string[] {
-    return [
-        ...((body.tools as readonly { type?: string }[] | undefined) ?? []),
-        ...((body.input as readonly Record<string, any>[] | undefined) ?? []).flatMap(
-            (item): readonly { type?: string }[] =>
-                item.type === "additional_tools" ? (item.tools ?? []) : [],
-        ),
-    ].flatMap((tool) => (tool.type === undefined ? [] : [tool.type]));
 }
 
 async function* stream(events: readonly unknown[]) {
@@ -226,7 +197,7 @@ async function* stream(events: readonly unknown[]) {
  * telling OpenAI what it may run, so both count, and the test does not have to know which is which.
  */
 async function declaredTools(
-    options: { hostedTools?: () => readonly SessionTool[] },
+    tools: readonly SessionTool[],
     exercise?: (session: CodexSession) => Promise<void>,
 ): Promise<readonly { type?: string }[]> {
     const bodies: Record<string, any>[] = [];
@@ -243,17 +214,14 @@ async function declaredTools(
     if (typeof address !== "object" || address === null) throw new Error("Missing port.");
 
     try {
-        const provider = new CodexProvider({
+        const session = new CodexSession("session-1", {
             credential: { name: "codex-api-key", credential: { apiKey: "test" } } as never,
             endpoint: `http://127.0.0.1:${address.port}/v1`,
-            transport: "sse",
-            ...options,
-        });
-        const session = await provider.session("session-1", {
+            installationId: "00000000-0000-4000-8000-000000000001",
             instructions: "Be brief.",
-            // Configured directly rather than granted, which is the path that was forwarding a
-            // hosted tool into places it does not belong.
-            ...(exercise === undefined ? {} : { tools: codex_hosted_tools }),
+            tools,
+            transport: "sse",
+            userAgent: "rig-test",
         });
         for await (const _event of session.run({
             context: { messages: [{ role: "user", content: "Reply with OK." }] },

@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const claude_ask_user_question_tool: SessionTool = {
     name: "AskUserQuestion",
-    type: "local",
     description:
         "Asks the user multiple-choice questions to clarify ambiguity, understand preferences, or make decisions.",
     parameters: Type.Object(
@@ -51,7 +50,6 @@ export const claude_ask_user_question_tool: SessionTool = {
 
 export const claude_ask_user_question_tool_sonnet: SessionTool = {
     name: "AskUserQuestion",
-    type: "local",
     description:
         "Asks the user multiple-choice questions to clarify ambiguity, understand preferences, or make decisions.",
     parameters: Type.Object(

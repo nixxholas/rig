@@ -1,4 +1,3 @@
-import type { AnyDefinedTool } from "../../types.js";
 import { codexStopWorkflowTool } from "../../../tools/workflows/stop_workflow.js";
 import { codexWaitForWorkflowTool } from "../../../tools/workflows/waitForWorkflowTools.js";
 import { codexWorkflowTool } from "../../../tools/workflows/workflowTools.js";
@@ -23,7 +22,6 @@ import { codexSpawnAgentTool } from "./v2/spawn_agent.js";
 import { codexExtendedFollowupTaskTool } from "./v2/collaboration_ext/followup_task.js";
 import { codexExtendedSpawnAgentTool } from "./v2/collaboration_ext/spawn_agent.js";
 import { codexWaitAgentTool } from "./v2/wait_agent.js";
-import { isCodexV2CollaborationModel } from "./isCodexV2CollaborationModel.js";
 
 export const codexTools = [
     codexExecCommandTool,
@@ -35,7 +33,7 @@ export const codexTools = [
     codexViewImageTool,
 ] as const;
 
-const codexWorkflowTools = [
+export const codexWorkflowTools = [
     codexWorkflowTool,
     codexWaitForWorkflowTool,
     codexWorkflowStatusTool,
@@ -61,18 +59,32 @@ export const codexV1CollaborationTools = [
     codexV1WaitAgentTool,
 ] as const;
 
-export const codexCollaborationTools = [
+export const codexV2FullCollaborationTools = [
     ...codexWorkflowTools,
-    ...codexV1CollaborationTools,
     ...codexV2CollaborationTools,
 ] as const;
 
-export function assembleCodexTools(
-    modelName: string,
-    providerName: string,
-): readonly AnyDefinedTool[] {
-    const collaborationTools = isCodexV2CollaborationModel(modelName, providerName)
-        ? codexV2CollaborationTools
-        : codexV1CollaborationTools;
-    return [...codexTools, ...codexWorkflowTools, ...collaborationTools];
-}
+export const codexV1FullCollaborationTools = [
+    ...codexWorkflowTools,
+    ...codexV1CollaborationTools,
+] as const;
+
+export const codexV2LimitedCollaborationTools = [
+    codexExtendedFollowupTaskTool,
+    codexFollowupTaskTool,
+    codexSendMessageTool,
+    codexWaitAgentTool,
+    codexListAgentsTool,
+    codexInterruptAgentTool,
+] as const;
+
+export const codexV1LimitedCollaborationTools = [
+    codexV1CloseAgentTool,
+    codexV1ResumeAgentTool,
+    codexV1SendInputTool,
+    codexV1WaitAgentTool,
+] as const;
+
+export const codexV2Tools = [...codexTools, ...codexV2FullCollaborationTools] as const;
+
+export const codexV1Tools = [...codexTools, ...codexV1FullCollaborationTools] as const;

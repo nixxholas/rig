@@ -90,17 +90,12 @@ export type { SessionOptions } from "@/core/SessionOptions.js";
 export type {
     SessionTool,
     SessionToolLarkGrammar,
-    SessionToolType,
     SessionToolsOptions,
 } from "@/core/SessionTool.js";
 export type { ProviderModality } from "@/core/ProviderModality.js";
 export { PROVIDER_MODALITIES } from "@/core/ProviderModality.js";
 export { GrokProvider, type GrokProviderOptions } from "@/vendors/grok/GrokProvider.js";
 export { ClaudeProvider, type ClaudeProviderOptions } from "@/vendors/claude/ClaudeProvider.js";
-export type {
-    ClaudeAuxiliaryQueryRequest,
-    ClaudeAuxiliaryQueryResponse,
-} from "@/vendors/claude/ClaudeAuxiliaryQuery.js";
 export {
     fetchClaudeProviderUsage,
     parseClaudeProviderUsage,
@@ -121,8 +116,6 @@ export {
     type FetchGrokProviderUsageOptions,
 } from "@/vendors/grok/fetchGrokProviderUsage.js";
 export { GrokSession, type GrokSessionOptions } from "@/vendors/grok/GrokSession.js";
-export { codex_hosted_tools } from "@/vendors/codex/tools/index.js";
-export { grok_hosted_tools } from "@/vendors/grok/tools/index.js";
 export type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 export { CodexProvider, type CodexProviderOptions } from "@/vendors/codex/CodexProvider.js";
 export {

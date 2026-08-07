@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const exit_plan_mode = {
     name: "exit_plan_mode",
-    type: "local",
     description:
         "Exit plan mode and present your plan to the user.\n\nUse this after you have finished writing your plan to the plan file in plan mode.",
     parameters: Type.Object(

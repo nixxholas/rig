@@ -60,6 +60,10 @@ export function bedrockExecution(options: BedrockProviderOptions = {}): Executor
             providerType: "bedrock",
         }),
         sessionId: options.agentId ?? id,
+        // Bedrock serves Anthropic models over the plain Messages transport, which has no hosted
+        // search; its OpenAI models go through Responses, which has one. Naming only what is
+        // really there is what lets a Bedrock Anthropic session borrow another provider's search
+        // instead of being told it cannot search at all.
         nativeKey: (profile) => {
             const region = resolveBedrockModelRegion(
                 profile.id,

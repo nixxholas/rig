@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const reference_to_video = {
     name: "reference_to_video",
-    type: "local",
     description:
         'Generate a video from multiple reference images guided by a text prompt; returns the saved video\'s absolute path. When telling the user where it was saved, refer to it by its short session-relative path (e.g. `videos/1.mp4`) rather than the absolute path, so it renders as a clickable link that opens the video. Provide `images` with 2 to 7 image references and a required `prompt` describing the desired video. Use this tool when the user wants a video using multiple images as style/content references. Example: reference_to_video(prompt="blend these into a cinematic fashion shot with slow dolly movement", images=["/Users/me/ref1.jpg", "/Users/me/ref2.jpg"], aspect_ratio="16:9", duration=6, resolution_name="480p")',
     parameters: Type.Object(

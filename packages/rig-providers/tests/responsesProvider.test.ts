@@ -243,7 +243,6 @@ describe("ResponsesProvider", () => {
             tools: [
                 {
                     name: "lookup",
-                    type: "local",
                     description: "Look something up.",
                     parameters: Type.Object({ query: Type.String() }),
                 },

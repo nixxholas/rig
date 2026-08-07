@@ -2,9 +2,6 @@ import { release } from "node:os";
 
 import {
     areProviderModelsCompatible,
-    ClaudeProvider,
-    type ClaudeAuxiliaryQueryRequest,
-    type ClaudeAuxiliaryQueryResponse,
     type BaseProvider,
     type BaseSession,
     type SessionCompaction,
@@ -14,7 +11,6 @@ import {
 } from "@slopus/rig-providers";
 
 import type { ExecutorEvent } from "@/ExecutorEvent.js";
-import type { HostedCapability } from "@/HostedCapability.js";
 import type {
     ExecutorModelProfile,
     ExecutorRunRequest,
@@ -28,7 +24,6 @@ import {
 } from "@/createExecutorInferenceStream.js";
 import { filterProviderCompatibleSessionTools } from "@/filterProviderCompatibleSessionTools.js";
 import { reviewerModelForProvider } from "@/reviewerModelForProvider.js";
-import { runProviderAuxiliaryText } from "@/runProviderAuxiliaryText.js";
 import { toSessionMessages } from "@/toSessionMessages.js";
 import type { ExecutorEnvironment } from "@/prompts/ExecutorEnvironment.js";
 import { assembleSystemPrompt } from "@/prompts/assembleSystemPrompt.js";
@@ -116,11 +111,6 @@ export class Executor {
             .map((profile) => profile.model);
     }
 
-    /** What the selected definition would declare on a request built right now. */
-    hostedCapabilitiesForRequest(): readonly HostedCapability[] {
-        return this.selectedProvider.hostedCapabilitiesForRequest?.() ?? [];
-    }
-
     get reviewerModel(): Model | undefined {
         return reviewerModelForProvider(this.selectedProvider.profiles);
     }
@@ -149,24 +139,9 @@ export class Executor {
         return this.active !== undefined;
     }
 
-    /**
-     * An independent executor over the same providers, credentials, and models.
-     *
-     * An executor owns one provider session and serializes every inference through it, which is
-     * right for the conversation it runs and wrong for work that merely happens alongside it.
-     * Titles and permission reviews are their own conversations: they must not reset the session's
-     * cached prefix, wait behind its turn, or fail it. They get their own executor instead, with
-     * its own session identity so no cache prefix is shared.
-     *
-     * The provider definitions are borrowed, not owned: their credentials, clients and quota
-     * caches belong to this executor, and closing the isolate must leave them running. Only the
-     * sessions the isolate opens are its own to tear down.
-     */
     isolate(label: string): Executor {
         const isolated = new Executor(
             this.providers.map((provider) => {
-                // Each definition decides what it is willing to lend; a capability it runs on its
-                // own backend does not travel into work the person never asked for.
                 const { destroy: _destroy, ...lent } = provider.isolated?.() ?? provider;
                 return { ...lent, sessionId: `${provider.sessionId ?? provider.id}:${label}` };
             }),
@@ -208,32 +183,6 @@ export class Executor {
             providerId: selection.providerId,
             ...(streamOptions === undefined ? {} : { streamOptions }),
         });
-    }
-
-    async runClaudeAuxiliaryQuery(
-        model: Model,
-        request: ClaudeAuxiliaryQueryRequest,
-    ): Promise<ClaudeAuxiliaryQueryResponse> {
-        const releaseInference = await this.acquireInference();
-        try {
-            const profile = this.profile({ modelId: model.id, providerId: this.id });
-            const native = await this.resolveNative(this.selectedProvider, profile);
-            if (!(native instanceof ClaudeProvider)) {
-                if ((request.tools?.length ?? 0) > 0) {
-                    throw new Error(
-                        `The selected provider '${this.id}' does not support Claude web search.`,
-                    );
-                }
-                return runProviderAuxiliaryText({
-                    model: profile.id,
-                    native,
-                    request,
-                });
-            }
-            return native.runAuxiliaryQuery(profile.id, request);
-        } finally {
-            releaseInference();
-        }
     }
 
     async *run(request: ExecutorRunRequest): AsyncGenerator<ExecutorEvent> {
@@ -426,9 +375,9 @@ export class Executor {
         tools: readonly import("@slopus/rig-providers").SessionTool[],
     ) {
         if (this.forceClosed) throw new Error("The executor is closed.");
-        const providerTools = filterProviderCompatibleSessionTools(tools);
-        const toolsKey = JSON.stringify(providerTools);
+        const clientTools = filterProviderCompatibleSessionTools(tools);
         const provider = this.providersById.get(profile.providerId)!;
+        const toolsKey = JSON.stringify(clientTools);
         if (
             this.active !== undefined &&
             this.active.profile.providerId === profile.providerId &&
@@ -455,7 +404,10 @@ export class Executor {
             });
             // Sessions receive configuration only. The conversation history is owned by the
             // caller and arrives complete with every run, never at session creation.
-            modelConfigurations[candidate.id] = { instructions, tools: providerTools };
+            modelConfigurations[candidate.id] = {
+                instructions,
+                tools: clientTools,
+            };
         }
         const sequence = ++this.sessionSequence;
         const sessionId =
@@ -468,7 +420,7 @@ export class Executor {
         const session = await native.session(sessionId, {
             instructions: context.instructions,
             modelConfigurations,
-            tools: providerTools,
+            tools: clientTools,
         });
         const resolved = {
             context,

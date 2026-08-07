@@ -11,18 +11,23 @@ describe("Claude provider tool goldens", () => {
                 description: tool.description,
                 name: tool.name,
                 parameters: tool.arguments,
-                type: "local",
             }));
             const goldenTools = resolveClaudeTools(model);
-            const goldenNames = goldenTools.map((tool) => tool.name).sort();
+            const directGoldenTools = goldenTools.filter(
+                (tool) => tool.name !== "WebFetch" && tool.name !== "WebSearch",
+            );
+            const directGoldenNames = directGoldenTools.map((tool) => tool.name).sort();
             const productionGoldenTools = productionTools.filter((tool) =>
-                goldenNames.includes(tool.name),
+                directGoldenNames.includes(tool.name),
             );
 
             // Rig owns its runtime tool surface and may add tools such as TaskInput that are not
-            // present in the native capture. Every captured tool must still exist and preserve
+            // present in the native capture. Every directly executed captured tool still preserves
             // the provider's callable shape.
-            expect(productionGoldenTools.map((tool) => tool.name).sort()).toEqual(goldenNames);
+            expect(productionGoldenTools.map((tool) => tool.name).sort()).toEqual(
+                directGoldenNames,
+            );
+
             // Agent and TaskStop keep their captured callable shapes, but their runtime
             // descriptions document Rig's provider/model and stable-agent-identity extensions.
             const taskStop = productionTools.find((tool) => tool.name === "TaskStop");

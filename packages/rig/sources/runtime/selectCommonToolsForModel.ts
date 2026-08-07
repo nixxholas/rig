@@ -28,8 +28,10 @@ export function selectCommonToolsForModel(options: {
     geminiApiKey?: string;
     hasWorkspaceContext: boolean;
     isSubagent: boolean;
+    searchTools?: readonly AnyDefinedTool[];
 }): readonly AnyDefinedTool[] {
     return [
+        ...(options.searchTools ?? []),
         attachTool,
         ...(options.geminiApiKey === undefined ? [] : createGeminiTools(options.geminiApiKey)),
         ...(options.isSubagent || !options.hasWorkspaceContext ? [] : [transferSessionTool]),

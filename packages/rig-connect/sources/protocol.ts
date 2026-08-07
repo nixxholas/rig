@@ -652,7 +652,7 @@ export interface ToolCallBlock {
     namespace?: string;
     arguments: unknown;
     incomplete?: boolean;
-    kind?: "custom" | "function" | "tool_search";
+    kind?: "custom" | "function";
     vendor?: unknown;
     presentation?: ToolCallPresentation;
 }
@@ -1361,29 +1361,9 @@ export interface SessionTranscriptWindow {
     /** True when this bounded window omitted older service notices in its position range. */
     noticesTruncated?: boolean;
     permissionReviews?: readonly PermissionReviewState[];
-    /** Calls the provider ran itself during the assistant messages in this page. */
-    providerToolCalls?: readonly ProviderToolCallRecord[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
-}
-
-/**
- * A call the provider ran on its own backend, as the daemon durably recorded it.
- *
- * Rig never executes one, so it is deliberately not part of the assistant message and this is the
- * only place a reopened session can learn that the model reached the network at all.
- */
-export interface ProviderToolCallRecord {
-    arguments: string;
-    callId: string;
-    createdAt: number;
-    /** The assistant message it accompanied, which is where a rebuilt transcript puts it back. */
-    messageId: string;
-    name: string;
-    runId: string;
-    /** `interrupted` means the turn ended before the provider reported back. */
-    status: "completed" | "interrupted";
 }
 
 export interface SessionStreamHello {
@@ -1594,15 +1574,6 @@ export type AgentLoopEvent =
           contentIndex: number;
           messageId: string;
           toolCall: { arguments?: unknown; id: string; name: string };
-      }
-    | { type: "server_toolcall_start"; callId: string; messageId: string; name: string }
-    | { type: "server_toolcall_delta"; callId: string; delta: string; messageId: string }
-    | {
-          type: "server_toolcall_end";
-          arguments: string;
-          callId: string;
-          messageId: string;
-          name: string;
       }
     | { type: "tool_execution_start"; toolCall: ToolCallBlock }
     | { type: "tool_execution_progress"; display: string; toolCallId: string }

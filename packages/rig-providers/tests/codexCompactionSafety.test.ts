@@ -47,7 +47,6 @@ describe("Codex compaction request safety", () => {
         const tools: SessionTool[] = [
             {
                 name: "lookup",
-                type: "local",
                 description: "d".repeat(600),
             },
         ];

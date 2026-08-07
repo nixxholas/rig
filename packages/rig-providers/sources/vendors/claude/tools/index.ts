@@ -33,6 +33,10 @@ import {
     claude_web_search_tool,
     claude_web_search_tool_sonnet,
 } from "@/vendors/claude/tools/web_search.js";
+export {
+    claude_server_tools,
+    claude_server_web_search,
+} from "@/vendors/claude/tools/server_web_search.js";
 import {
     claude_task_stop_tool,
     claude_task_stop_tool_sonnet,

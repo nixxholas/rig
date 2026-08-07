@@ -30,6 +30,19 @@ describe("classifyToolName", () => {
         expect(classifyToolName("wait_agent")).toBe("subagent");
     });
 
+    it("classifies every explicit web and X search tool as web activity", () => {
+        for (const toolName of [
+            "web_fetch",
+            "gemini_web_search",
+            "claude_web_search",
+            "codex_web_search",
+            "grok_web_search",
+            "grok_x_search",
+        ]) {
+            expect(classifyToolName(toolName)).toBe("web");
+        }
+    });
+
     it("treats any MCP tool as external, whichever server named it", () => {
         expect(classifyToolName("mcp__node_repl__js")).toBe("mcp");
     });

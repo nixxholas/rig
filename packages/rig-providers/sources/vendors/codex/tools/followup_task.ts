@@ -5,7 +5,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 export const followup_task = {
     name: "followup_task",
     namespace: "collaboration",
-    type: "local",
     description:
         "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
     parameters: Type.Object(

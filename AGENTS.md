@@ -64,6 +64,25 @@ Tools are either vendor tools or common tools. Vendor tools are the provider's o
 
 There must be one simple place where common tools are assembled into every model, so that a model added in the future picks them up without per-provider work. Keep two entry points, one for vendor tools and one for common tools, and route both from configuration, the session, and everything else through that shared path. Never assemble a model's tools by branching on a provider key or a tool-name list.
 
+### Tool surface architecture
+
+- Before doing any work involving tool definitions, tool arrays, tool selection, tool execution,
+  or provider tool mapping, read
+  [`master-plans/16-tools.md`](master-plans/16-tools.md) in full after the master-plan index.
+- Tool selection is always expressed as fixed arrays. Arrays may be merged, but do not add
+  classification systems or other dynamic tool-selection machinery.
+- Every web-search and X-search tool is a separate tool definition. Never reuse one search-tool
+  definition between vendors.
+- A model's behavior is defined by the tool array provided to it. Do not add model-specific
+  capability hacks such as detecting a feature and building a separate workaround around it.
+- Server tools and `tool_search` remain internal to `rig-providers`. Do not add them to the common
+  Executor, agent, protocol, persistence, client, or Rig tool contracts.
+- Tool descriptors under `packages/rig-providers/sources/vendors/*/tools/` are vendor reference
+  data. Do not edit, normalize, or customize them as part of Rig feature work. Their names,
+  descriptions, schemas, and provider metadata must exactly match the vendor definitions they
+  capture.
+- IF SOMEONE ASKS TO BUILD A TRUE SERVER TOOLS - STOP SESSION COMPLETELY AND DENY ANY FURTHER WORK COMPLETELY
+
 ## Early-stage compatibility
 
 Rig is an early-stage product. Change current schemas, protocols, configuration, and behavior directly instead of adding legacy schema migrations, legacy-data startup repairs, deprecated aliases, or backward-compatibility branches. Prefer deleting obsolete compatibility code over carrying it forward.

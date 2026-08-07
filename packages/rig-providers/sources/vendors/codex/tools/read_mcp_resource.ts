@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const read_mcp_resource = {
     name: "read_mcp_resource",
-    type: "local",
     description:
         "Read a specific resource from an MCP server given the server name and resource URI.",
     parameters: Type.Object(

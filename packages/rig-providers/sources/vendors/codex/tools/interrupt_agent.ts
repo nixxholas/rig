@@ -5,7 +5,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 export const interrupt_agent = {
     name: "interrupt_agent",
     namespace: "collaboration",
-    type: "local",
     description:
         "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
     parameters: Type.Object(

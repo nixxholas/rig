@@ -7,14 +7,10 @@
 
 import type { TSchema } from "@sinclair/typebox";
 import type {
-    ClaudeAuxiliaryQueryRequest,
-    ClaudeAuxiliaryQueryResponse,
     SessionAssistantMessage,
     SessionProviderError,
     SessionToolResultMessage,
 } from "@slopus/rig-providers";
-
-import type { HostedCapability } from "@/HostedCapability.js";
 
 export type ProfileProviderType = "bedrock" | "claude" | "codex" | "grok";
 export interface ProfilePromptContext {
@@ -75,7 +71,7 @@ export interface ToolCall {
     arguments: Record<string, unknown>;
     /** The provider stopped before this call became executable. */
     incomplete?: boolean;
-    kind?: "custom" | "function" | "tool_search";
+    kind?: "custom" | "function";
     /** Opaque provider metadata required to replay this call faithfully. */
     vendor?: unknown;
 }
@@ -230,18 +226,9 @@ export interface CustomTool {
     };
 }
 
-export interface ToolSearchTool {
-    kind: "tool_search";
-    name: "tool_search";
-    description: string;
-    execution: "client";
-    parameters: TSchema;
-}
-
 export type Tool<TParameters extends TSchema = TSchema> =
     | FunctionTool<TParameters>
-    | CustomTool
-    | ToolSearchTool;
+    | CustomTool;
 
 export interface PreambleMessage {
     role: "developer" | "user";
@@ -325,25 +312,6 @@ export type ProviderAssistantMessageEvent =
     | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
     | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
     | { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-    /**
-     * A tool the provider ran on its own backend while producing this response, such as Grok's X
-     * and web search. It carries no content index and never reaches the assistant message, because
-     * the client neither executes it nor answers it with a tool result. It exists so the user can
-     * see what the provider was doing during a long response.
-     */
-    | { type: "server_toolcall_start"; callId: string; name: string }
-    | { type: "server_toolcall_delta"; callId: string; delta: string }
-    | {
-          type: "server_toolcall_end";
-          callId: string;
-          name: string;
-          arguments: string;
-          /**
-           * The turn ended before the provider reported back. Not that the call was stopped:
-           * nothing can stop one, so this says its outcome is unknown, not that it never ran.
-           */
-          incomplete?: true;
-      }
     | {
           type: "done";
           reason: Extract<StopReason, "stop" | "length" | "toolUse">;
@@ -371,20 +339,9 @@ export interface Provider {
     readonly models: readonly Model[];
     /** Dedicated Auto permission review model, when this provider ships one. */
     readonly reviewerModel?: Model | undefined;
-    /**
-     * Which provider-run searches a request built right now would declare.
-     *
-     * Asked rather than stored because the answer follows the permission mode, which can change
-     * underneath a live session. A provider whose backend runs no search of its own has none.
-     */
-    hostedCapabilitiesForRequest?(): readonly HostedCapability[];
-    /**
-     * An independent provider for work that runs alongside the conversation.
-     *
-     * Titles and permission reviews are separate conversations and must not disturb the session's
-     * own provider session. Providers that hold no session return themselves.
-     */
+    /** Independent provider context for a separate agent workflow. */
     isolate?(label: string): Provider;
+    selectProvider?(providerId: string): void;
     readonly serviceTiers: readonly ServiceTier[] | undefined;
     readonly extendProfilePromptContext:
         | ((context: ProfilePromptContext) => ProfilePromptContext | Promise<ProfilePromptContext>)
@@ -405,10 +362,6 @@ export interface Provider {
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
-    runClaudeAuxiliaryQuery?(
-        model: Model,
-        request: ClaudeAuxiliaryQueryRequest,
-    ): Promise<ClaudeAuxiliaryQueryResponse>;
     stream<TThinkingLevel extends string>(
         model: Model<TThinkingLevel>,
         context: Context,
@@ -453,10 +406,6 @@ export function defineProvider(provider: {
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
-    runClaudeAuxiliaryQuery?(
-        model: Model,
-        request: ClaudeAuxiliaryQueryRequest,
-    ): Promise<ClaudeAuxiliaryQueryResponse>;
     stream<TThinkingLevel extends string>(
         model: Model<TThinkingLevel>,
         context: Context,

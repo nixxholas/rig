@@ -123,62 +123,50 @@ supports `custom_tool_call` and client-executed `tool_search_call`. `GrokToolVen
 records which wire representation must be reconstructed. Without that metadata, an ordinary
 function call is the safe default.
 
-## Hosted search
+## Server search
 
 Grok performs web and X search on its own backend. Nothing runs locally and no result is ever sent
 back to it: the model issues the search, reads it, and answers with citations inside a single
-response. Rig's own web search cannot see X at all, so this is the only way a Grok session gets
-live posts.
+response.
 
-A hosted tool is declared by type alone — `{"type": "web_search"}` and `{"type": "x_search"}` —
-because the backend owns its schema. `sources/vendors/grok/tools/hosted_web_search.ts` and
-`hosted_x_search.ts` are those declarations, exported together as `grok_hosted_tools`, and
-`impl/toGrokToolDefinitions.ts` emits any `type: "cloud"` tool in that shape. They are kept apart
-from `grok_4_5_tools`, which remains a literal capture of what CLI 0.2.111 sent, including the
-older client-executed `web_search` function.
+Rig declares these on the main Grok 4.5 request via `serverToolsForModel` → `grok_server_tools`.
+Other model families still use Rig client search tools (and may reach Grok as a foreign backend
+when configured). The definitions below are what the main Grok request and any nested foreign
+search both send.
 
-Consistent with the rest of this provider, nothing is injected silently. A caller opts in through
-`GrokProviderOptions.hostedTools`, which `GrokConnection` sends alongside the tools Rig executes.
+A server tool is declared by type alone — `{"type": "web_search"}` and `{"type": "x_search"}` —
+because the backend owns its schema. `sources/vendors/grok/tools/server_web_search.ts` and
+`server_x_search.ts` are those declarations, exported together as `grok_server_tools`, and
+`impl/toGrokToolDefinitions.ts` emits supported tools marked `server: true` in that shape. They are
+kept apart from `grok_4_5_tools`, which remains a literal capture of what CLI 0.2.111 sent,
+including the older client-executed `web_search` function.
 
-That opt-in is where Rig's boundary lives, because there is nowhere else for it to live. Every
-other network tool in Rig is a `ToolDefinition` with a schema, a handler, and a permission policy,
-so Rig decides at call time whether it may run. A hosted tool has none of that: it is declared in
-the request and executed during the response, and by the time Rig sees anything the search has
-already happened. Declaring it is the decision.
-
-Rig therefore gates the grant rather than the call. An agent holds a hosted search only because a
-reviewed spawn granted it one, or because the user named it in `providers.grok.hosted_search`, and
-`grokExecution` declares exactly what that agent was granted and nothing else. The rules guarding a
-grant are in `rig/sources/session/hostedCapabilityGrants.ts`: an agent that cannot reach outside
-Rig's sandbox itself cannot grant one, an agent that already holds one cannot pass it on, and an
-agent holding one cannot spawn at all. What an agent ends up declaring is resolved in
-`rig/sources/runtime/resolveHostedCapabilities.ts`.
+Server tools are ordinary session definitions. `server: true` is the only execution distinction:
+Grok receives them in the same request catalog, completes them before `response.completed`, and
+Rig never puts them in the executor batch or sends a tool result. Local permission modes do not
+gate them because they do not cross Rig's filesystem, shell, or tool-execution boundary.
 
 X search reaches the client as ordinary `custom_tool_call` items named `x_keyword_search` or
 `x_semantic_search`; web search has its own `web_search_call` item. Neither may be mistaken for a
-call Rig must answer, so `mapOpenAIResponseStream` reports them as `server_tool_call_start`,
-`server_tool_call_delta`, and `server_tool_call_end`, keeps them out of the run's tool calls, and
-leaves the terminal state `normal` rather than `tool_call`.
+call Rig must answer, so `mapOpenAIResponseStream` reports them as ordinary tool calls whose start
+carries `server: true`, keeps them out of the run's tool calls, and leaves the terminal state
+`normal` rather than `tool_call`.
 
-Classification rests on two facts true only of a hosted call. The request must have declared hosted
-tools, carried by `hostedToolNames`: nothing runs upstream that was never enabled. That alone keeps
-compaction out of this path, so a compaction sample that calls a tool is still counted as one and
-resampled. Beyond that, Grok marks its own search calls with the reserved `xs_` call-id prefix,
-which stays correct even if a client tool happens to share a backend sub-call's name; absent that
-marker, a name the client never declared is the fallback, so a sub-call named in some way we have
-not captured is still not mistaken for work Rig owes an answer. Function calls never qualify,
-because an undeclared function name is a model mistake the model needs to hear about. A mapper
-given no `hostedToolNames` treats every tool call as client-executed, so Codex and Bedrock behavior
-is unchanged.
+Classification rests on the exact server definitions carried by the request. A `web_search_call`
+qualifies only when `web_search` was declared with `server: true`. Grok's X subcalls additionally
+need the reserved `xs_` call-id prefix, which keeps an ordinary client custom call executable even
+when its name resembles an X backend action. Function calls never qualify: an undeclared function
+name is a model mistake the model needs to hear about. A mapper given no `serverToolNames` treats
+every custom or function call as client-executed, which also keeps compaction out of this path.
 
-Hosted calls are settled against the terminal response the way ordinary tool calls already are. One
-that streamed a start but never its completion is closed using the terminal payload's arguments,
-and one that appears only in that payload still reports both a start and an end, so the durable
-record of a search never depends on which streamed events happened to arrive.
+Server calls are settled against the terminal response the way ordinary tool calls already are.
+One that streamed a start but never its completion is closed using the terminal payload's
+arguments, and one that appears only in that payload still reports both a start and an end, so the
+durable record of a search never depends on which streamed events happened to arrive.
 
 Results live in the encrypted reasoning items that follow each call, so replay needs no special
 case: the opaque `responseItems` return verbatim and nothing fabricates a tool output to pair with
-them. `tests/vendors/grokHostedSearchGolden.test.ts` pins this against captured CLI 0.2.118
+them. `tests/vendors/grokServerToolsGolden.test.ts` pins this against captured CLI 0.2.118
 traffic in `grok-4-5-x-search.sse.json` and `grok-4-5-web-search.sse.json`, and
 `tests/grok.live.test.ts` covers it against the real backend.
 
@@ -401,9 +389,9 @@ continuation, and structural compaction against Grok 4.5.
 - Rig owns transcript persistence, tool execution, and permissions; Grok CLI local session files,
   native tools, and its permission UI are not authoritative.
 - Only Grok 4.5 is supported. Models are not discovered from Grok during startup.
-- The complete vanilla prompt and tools are exported assets, not hidden defaults. Hosted search is
-  likewise opt-in through `hostedTools`; a session that asks for nothing gets nothing.
-- Hosted search other than web and X search is unobserved. Grok reports code interpreter, file
+- The complete vanilla prompt and tools are exported assets, not hidden defaults. Server search is
+  present only when the session tool catalog contains the corresponding `server: true` definitions.
+- Server search other than web and X search is unobserved. Grok reports code interpreter, file
   search, MCP, document search, and image generation in its usage details, but Rig declares only
   the two it has captured.
 - The outer runtime must wrap real queries and supply runtime reminders; the provider does not

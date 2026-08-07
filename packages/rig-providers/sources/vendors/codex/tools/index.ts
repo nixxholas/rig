@@ -29,5 +29,5 @@ export { web_search };
  * Named the same way Grok's are, because the product decides which searches an agent holds without
  * knowing whose backend answers them.
  */
-export const codex_hosted_tools = [web_search] as const satisfies readonly SessionTool[];
+export const codex_server_tools = [web_search] as const satisfies readonly SessionTool[];
 export { write_stdin } from "./write_stdin.js";

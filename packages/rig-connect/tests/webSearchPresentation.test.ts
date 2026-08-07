@@ -1,49 +1,25 @@
 import { describe, expect, it } from "vitest";
 
 import { projectToolPresentation } from "@/ToolPresentation.js";
-import { describeProviderToolCall } from "@/describeProviderToolCall.js";
 
 /**
- * Rig runs some searches itself and the provider runs others on its own backend. Those are not the
- * same kind of work — one has a tool result Rig produced, the other has none and never can — and
- * the two lifecycles are deliberately left apart.
- *
- * A reader is looking at one act either way. These pin the place where the two converge, so a
- * search cannot start reading differently depending on who happened to execute it.
+ * Rig runs some searches itself and the provider runs others on its own backend, but a search
+ * that the provider ran arrives as an ordinary tool call like any other. These pin the shared
+ * presentation, so a search cannot start reading differently depending on who ran it.
  */
 describe("a search, whoever ran it", () => {
-    it("reaches the interface as the same value from a client tool and from the provider", () => {
-        const client = projectToolPresentation(undefined, {
-            query: "Node.js current stable version",
-            sources: [
-                { url: "https://nodejs.org/en/about/previous-releases" },
-                { url: "https://nodejs.org/en" },
-            ],
-            target: "web",
-            type: "search",
-        });
-        const hosted = describeProviderToolCall(
-            "web_search",
-            JSON.stringify({
+    it("reaches the interface as one value from a call and its result", () => {
+        expect(
+            projectToolPresentation(undefined, {
                 query: "Node.js current stable version",
                 sources: [
-                    { type: "url", url: "https://nodejs.org/en/about/previous-releases" },
-                    { type: "url", url: "https://nodejs.org/en" },
+                    { url: "https://nodejs.org/en/about/previous-releases" },
+                    { url: "https://nodejs.org/en" },
                 ],
+                target: "web",
                 type: "search",
             }),
-        );
-
-        expect(client).toEqual({
-            kind: "search",
-            query: "Node.js current stable version",
-            sources: [
-                { url: "https://nodejs.org/en/about/previous-releases" },
-                { url: "https://nodejs.org/en" },
-            ],
-            target: "web",
-        });
-        expect(hosted).toMatchObject({
+        ).toEqual({
             kind: "search",
             query: "Node.js current stable version",
             sources: [

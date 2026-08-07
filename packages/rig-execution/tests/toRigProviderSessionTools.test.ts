@@ -24,7 +24,6 @@ describe("toRigProviderSessionTools", () => {
                 name: "wait_agent",
                 namespace: "collaboration",
                 namespaceDescription: "Caller-owned collaboration tools.",
-                type: "local",
                 description: "Wait for an agent update.",
                 parameters,
             },

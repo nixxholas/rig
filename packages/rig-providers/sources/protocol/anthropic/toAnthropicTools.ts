@@ -6,8 +6,10 @@ import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js
 
 export function toAnthropicTools(tools: readonly SessionTool[]): BetaTool[] {
     return tools.map((tool) => {
-        if (tool.type !== "local") {
-            throw new Error(`Anthropic Bedrock tools must execute locally: '${tool.name}'.`);
+        if (tool.server !== undefined) {
+            throw new Error(
+                `Anthropic Bedrock does not support server tool '${tool.name}' through this transport.`,
+            );
         }
         const schema = tool.parameters ?? Type.Object({}, { additionalProperties: false });
         if (schema.type !== "object") {

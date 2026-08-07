@@ -120,7 +120,6 @@ describe("Codex response items", () => {
             name: "spawn_agent",
             namespace: "rig",
             namespaceDescription: "Provider-neutral collaboration tools.",
-            type: "local",
             description: "Spawn an agent.",
         } as const satisfies SessionTool;
 
@@ -145,7 +144,6 @@ describe("Codex response items", () => {
                 {
                     name: tool.name,
                     namespace: "custom",
-                    type: tool.type,
                     description: tool.description,
                 },
             ]),
@@ -158,7 +156,6 @@ describe("Codex response items", () => {
                 name: "spawn_agent",
                 namespace: "collaboration",
                 namespaceDescription: "Tools for spawning and managing sub-agents.",
-                type: "local",
                 description: "Spawn a native Codex subagent.",
             },
             {
@@ -166,7 +163,6 @@ describe("Codex response items", () => {
                 namespace: "collaboration_ext",
                 namespaceDescription:
                     "Tools for spawning sub-agents across providers and model families.",
-                type: "local",
                 description: "Spawn a subagent with an explicit provider and model.",
             },
         ];

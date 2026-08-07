@@ -20,7 +20,7 @@ export function toExecutorTool(tool: AnyDefinedTool): ExecutorTool {
                   description: `${definition.description}\n\n${STEERABLE_TOOL_DESCRIPTION}`,
               }
             : definition;
-    if (tool.namespace === undefined || describedDefinition.kind === "tool_search") {
+    if (tool.namespace === undefined) {
         return describedDefinition;
     }
     return {

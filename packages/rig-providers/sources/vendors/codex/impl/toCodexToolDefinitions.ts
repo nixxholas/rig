@@ -46,13 +46,8 @@ function humanizeNamespace(namespace: string): string {
 }
 
 function toCodexTool(tool: SessionTool): Tool {
-    if (tool.name === "web_search" && tool.type === "cloud") {
-        const definition = {
-            type: "web_search",
-            external_web_access: false,
-            search_content_types: ["text", "image"],
-        } as const;
-        return definition;
+    if (tool.server !== undefined) {
+        return structuredClone(tool.server) as Tool;
     }
     const vendor = tool.vendor as Partial<CodexToolDefinitionVendor> | undefined;
     if (

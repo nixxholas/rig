@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const claude_bash_tool: SessionTool = {
     name: "Bash",
-    type: "local",
     description:
         "Executes a bash command and returns its output.\n\n- Commands start in the session working directory. Shell state (such as `cd`, environment variables, and functions) does not persist between calls.\n- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.\n- `timeout` is in milliseconds: default 120000, max 600000.\n- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.\n\nRig extension: `secrets` injects selected session secret bundles. `dangerouslyDisableSandbox` requests one reviewed full-access execution in Auto mode; it never bypasses Read only or Workspace write mode.",
     parameters: Type.Object(
@@ -41,7 +40,6 @@ export const claude_bash_tool: SessionTool = {
 
 export const claude_bash_tool_sonnet: SessionTool = {
     name: "Bash",
-    type: "local",
     description:
         "Run a shell command. Output returned to Claude is truncated to the last 2000 lines or 50KB.\n\nRig extension: `secrets` injects selected session secret bundles. `dangerouslyDisableSandbox` requests one reviewed full-access execution in Auto mode; it never bypasses Read only or Workspace write mode.",
     parameters: Type.Object(

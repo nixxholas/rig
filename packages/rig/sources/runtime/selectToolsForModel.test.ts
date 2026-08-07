@@ -1,135 +1,106 @@
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import {
+    defineProvider,
+    modelAnthropicSonnet5,
+    modelOpenaiGpt56Sol,
+    modelXaiGrokBuild,
+    type Model,
+} from "@slopus/rig-execution";
 
-import { selectToolsForModel } from "./selectToolsForModel.js";
+import { defineTool } from "../agent/types.js";
 import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
-import { modelAnthropicSonnet46, modelXaiGrokBuild } from "@slopus/rig-execution";
-import { defineProvider } from "@slopus/rig-execution";
-import { grokBuildTools } from "../tools/grok/index.js";
+import { selectToolsForModel } from "./selectToolsForModel.js";
 
 describe("selectToolsForModel", () => {
-    it("selects the Grok tool surface for Grok models", () => {
-        const provider = defineProvider({
-            id: "custom-xai-provider",
-            models: [modelXaiGrokBuild],
-            type: "grok",
-            stream: () => {
-                throw new Error("Inference is not used by this test.");
-            },
-        });
+    it("keeps search and web_fetch out of fixed vendor arrays", () => {
+        for (const [providerType, model] of [
+            ["claude", modelAnthropicSonnet5],
+            ["codex", modelOpenaiGpt56Sol],
+            ["grok", modelXaiGrokBuild],
+        ] as const) {
+            const names = selectToolsForModel({
+                model,
+                provider: provider(providerType, model),
+            }).map((tool) => tool.name);
 
-        expect(selectToolsForModel({ model: modelXaiGrokBuild, provider })).toEqual(grokBuildTools);
+            expect(names).not.toContain("web_fetch");
+            expect(names).not.toContain("WebSearch");
+            expect(names).not.toContain("claude_web_search");
+            expect(names).not.toContain("codex_web_search");
+            expect(names).not.toContain("grok_web_search");
+            expect(names).not.toContain("grok_x_search");
+        }
     });
 
-    it("names the image tool for each model family and never duplicates it", () => {
+    it("uses the explicit Claude array for Anthropic models on Bedrock", () => {
+        const names = selectToolsForModel({
+            model: modelAnthropicSonnet5,
+            provider: provider("bedrock", modelAnthropicSonnet5),
+        }).map((tool) => tool.name);
+
+        expect(names).toContain("Bash");
+        expect(names).toContain("Read");
+    });
+
+    it("merges an explicit search array through the common seam", () => {
+        const searchTool = defineTool({
+            name: "example_search",
+            label: "Example search",
+            description: "Search.",
+            arguments: Type.Object({}),
+            returnType: Type.Null(),
+            execute: () => null,
+            toLLM: () => [],
+            toUI: () => "Searched",
+            shouldReviewInAutoMode: () => false,
+            locks: [],
+        });
+        const names = selectCommonToolsForModel({
+            hasWorkspaceContext: false,
+            isSubagent: false,
+            searchTools: [searchTool],
+        }).map((tool) => tool.name);
+
+        expect(names[0]).toBe("example_search");
+    });
+
+    it("names the image tool from each exact model surface", () => {
         const imageGeneration = [
             {
                 id: "codex",
                 imageGeneration: { generate: () => Promise.reject(new Error("unused")) },
             },
         ];
-
-        const named = (toolProfile: "claude" | "codex" | "grok") =>
+        const names = (providerType: "claude" | "codex" | "grok", model: Model) =>
             selectToolsForModel({
                 imageGeneration,
-                model: modelXaiGrokBuild,
-                provider: providerWithToolProfile(toolProfile),
+                model,
+                provider: provider(providerType, model),
             })
                 .map((tool) => tool.name)
                 .filter((name) => name.endsWith("imagegen"));
 
-        expect(named("codex")).toEqual(["codex_imagegen"]);
-        expect(named("claude")).toEqual(["imagegen"]);
-        expect(named("grok")).toEqual(["imagegen"]);
+        expect(names("codex", modelOpenaiGpt56Sol)).toEqual(["codex_imagegen"]);
+        expect(names("claude", modelAnthropicSonnet5)).toEqual(["imagegen"]);
+        expect(names("grok", modelXaiGrokBuild)).toEqual(["imagegen"]);
     });
 
-    it("omits the image tool when no provider can generate images", () => {
-        const tools = selectToolsForModel({
-            imageGeneration: [],
-            model: modelXaiGrokBuild,
-            provider: providerWithToolProfile("codex"),
-        });
-
-        expect(tools.map((tool) => tool.name)).not.toContain("codex_imagegen");
-    });
-
-    it("keeps WebFetch but omits unsupported WebSearch for Bedrock Claude models", () => {
-        const tools = selectToolsForModel({
-            model: modelAnthropicSonnet46,
-            provider: {
-                id: "bedrock",
-                type: "bedrock",
-                models: [modelAnthropicSonnet46],
-                serviceTiers: undefined,
-                extendProfilePromptContext: undefined,
-                stream: () => {
-                    throw new Error("Not used");
-                },
-            },
-        });
-
-        expect(tools.map((tool) => tool.name)).toContain("WebFetch");
-        expect(tools.map((tool) => tool.name)).not.toContain("WebSearch");
-    });
-
-    // Gemini is Rig's own tool, configured by holding a Gemini credential rather than by anything
-    // about the selected model, so the common seam owns it and no vendor has to be taught about it.
-    it("leaves Rig's own Gemini tools to the common seam", () => {
-        for (const toolProfile of ["claude", "codex", "grok"] as const) {
-            const names = selectToolsForModel({
-                model: modelXaiGrokBuild,
-                provider: providerWithToolProfile(toolProfile),
-            }).map((tool) => tool.name);
-
-            expect(names).not.toContain("gemini_search");
-        }
-
-        expect(
-            selectCommonToolsForModel({
-                geminiApiKey: "gemini-key",
-                hasWorkspaceContext: false,
-                isSubagent: false,
-            }).map((tool) => tool.name),
-        ).toEqual(
-            expect.arrayContaining([
-                "gemini_search",
-                "gemini_generate_image",
-                "gemini_generate_music",
-                "gemini_analyze_media",
-            ]),
-        );
-        expect(
-            selectCommonToolsForModel({ hasWorkspaceContext: false, isSubagent: false }).map(
-                (tool) => tool.name,
-            ),
-        ).not.toContain("gemini_search");
-    });
-
-    // The endpoint decides, not the tool's name. Bedrock serves the same Anthropic model without
-    // Anthropic's server-side search, so it is never added there rather than added and removed.
-    it("gives Claude's own search to the endpoints that can actually run it", () => {
-        expect(
+    it("rejects a provider/model pair absent from the fixed route table", () => {
+        expect(() =>
             selectToolsForModel({
                 model: modelXaiGrokBuild,
-                provider: providerWithToolProfile("claude"),
-            }).filter((tool) => tool.name === "WebSearch"),
-        ).toHaveLength(1);
-
-        for (const toolProfile of ["codex", "grok"] as const) {
-            expect(
-                selectToolsForModel({
-                    model: modelXaiGrokBuild,
-                    provider: providerWithToolProfile(toolProfile),
-                }).map((tool) => tool.name),
-            ).not.toContain("WebSearch");
-        }
+                provider: provider("claude", modelXaiGrokBuild),
+            }),
+        ).toThrow("No fixed tool array is configured");
     });
 });
 
-function providerWithToolProfile(toolProfile: "claude" | "codex" | "grok") {
+function provider(type: "bedrock" | "claude" | "codex" | "grok", model: Model) {
     return defineProvider({
-        id: `${toolProfile}-compatible-provider`,
-        models: [modelXaiGrokBuild],
-        type: toolProfile,
+        id: type,
+        models: [model],
+        type,
         stream: () => {
             throw new Error("Inference is not used by this test.");
         },

@@ -12,7 +12,6 @@ import { collectSessionEvents, textFromSessionEvents } from "./helpers/collectSe
 const live = process.env.RIG_LIVE_TEST === "1" && process.env.ANTHROPIC_AUTH_TOKEN;
 const liveTools: readonly SessionTool[] = [
     {
-        type: "local",
         name: "Read",
         description: "Read one file during the live provider check.",
         parameters: Type.Object(

@@ -65,7 +65,6 @@ function formatTool(tool) {
         "",
         `export const ${tool.name} = {`,
         `    name: ${JSON.stringify(tool.name)},`,
-        '    type: "local",',
         ...(tool.description === undefined
             ? []
             : [`    description: ${JSON.stringify(tool.description)},`]),

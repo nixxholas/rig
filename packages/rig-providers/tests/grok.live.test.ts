@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "@sinclair/typebox";
 
+import type { SessionEvent } from "@/core/SessionEvent.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import type { GrokCredential } from "@/vendors/VendorCredential.js";
 import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
 import { GrokProvider } from "@/vendors/grok/GrokProvider.js";
 import { GrokSessionCredential } from "@/vendors/grok/GrokSessionCredential.js";
-import { grok_hosted_tools } from "@/vendors/grok/tools/index.js";
+import { grok_server_tools } from "@/vendors/grok/tools/index.js";
 import { collectSessionEvents, textFromSessionEvents } from "./helpers/collectSessionEvents.js";
 
 const LIVE = process.env.RIG_LIVE_TEST === "1";
@@ -81,7 +82,6 @@ describeLive("GrokProvider live", () => {
         }
         const probe = {
             name: "live_probe",
-            type: "local",
             description: "Returns the supplied value.",
             parameters: Type.Object({
                 value: Type.String({ description: "Value to return." }),
@@ -201,10 +201,10 @@ describeLive("GrokProvider live", () => {
             expect.fail("RIG_LIVE_TEST=1 is set but no grok credentials were found");
         }
 
-        const provider = new GrokProvider({ credential, hostedTools: () => grok_hosted_tools });
+        const provider = new GrokProvider({ credential });
         const session = await provider.session(`grok-x-search-live-${Date.now()}`, {
             instructions: "You are a concise assistant.",
-            tools: [],
+            tools: grok_server_tools,
         });
         const events = await collectSessionEvents(
             session.run({
@@ -222,10 +222,16 @@ describeLive("GrokProvider live", () => {
             }),
         );
 
-        const searches = events.filter((event) => event.type === "server_toolcall_start");
+        const searches = events.filter(
+            (event): event is Extract<SessionEvent, { type: "toolcall_start" }> & { server: true } =>
+                event.type === "toolcall_start" && event.server === true,
+        );
         expect(searches.length).toBeGreaterThan(0);
         expect(searches.every((event) => event.name.startsWith("x_"))).toBe(true);
-        expect(events.filter((event) => event.type === "toolcall_start")).toEqual([]);
+        // Every call in this run is the server's own; nothing was left for the client to start.
+        expect(
+            events.filter((event) => event.type === "toolcall_start" && event.server !== true),
+        ).toEqual([]);
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events)).toContain("x.com/");
     }, 180_000);

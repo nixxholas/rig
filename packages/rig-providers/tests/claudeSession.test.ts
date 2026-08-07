@@ -543,7 +543,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     description: "Run a command.",
                     parameters: Type.Object({ command: Type.String() }),
                 },
@@ -615,7 +614,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     description: "Run a command.",
                     parameters: Type.Object({ command: Type.String() }),
                 },
@@ -674,7 +672,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     parameters: Type.Object({ command: Type.String() }),
                 },
             ],
@@ -737,7 +734,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     parameters: Type.Object({ command: Type.String() }),
                 },
             ],
@@ -810,12 +806,10 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Read",
-                    type: "local",
                     parameters: Type.Object({ file_path: Type.String() }),
                 },
                 {
                     name: "Glob",
-                    type: "local",
                     parameters: Type.Object({ pattern: Type.String() }),
                 },
             ],
@@ -1263,7 +1257,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Read",
-                    type: "local",
                     description: "Read a file.",
                     parameters: Type.Object({ path: Type.String() }),
                 },

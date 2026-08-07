@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
-import { createHostedCitationFilter } from "@/protocol/responses/stripHostedCitationMarkers.js";
+import { createServerCitationFilter } from "@/protocol/responses/stripServerCitationMarkers.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 
 /**
- * The exact text a live `gpt-5.6-sol` turn produced with hosted web search on, markers and all.
+ * The exact text a live `gpt-5.6-sol` turn produced with server web search on, markers and all.
  * OpenAI resolves some citations into ordinary links and leaves others as references into search
  * results Rig never receives.
  */
@@ -14,9 +14,9 @@ const LIVE_ANSWER =
     "version: **1.3.14**. \u{e200}cite\u{e202}turn1search0\u{e201}3. Go: **1.26.5**. " +
     "\u{e200}cite\u{e202}turn5view0\u{e201}Deno: **2.9.4** ([github.com](https://github.com/x))";
 
-describe("hosted search citation markers", () => {
+describe("server search citation markers", () => {
     it("keeps the prose and the links, and drops what cannot be resolved", () => {
-        const filter = createHostedCitationFilter();
+        const filter = createServerCitationFilter();
 
         const text = filter(LIVE_ANSWER);
 
@@ -31,7 +31,7 @@ describe("hosted search citation markers", () => {
     // through the middle would otherwise leave both halves on screen, since neither half contains
     // anything a per-delta match could recognise.
     it("removes a marker split across deltas", async () => {
-        const filter = createHostedCitationFilter();
+        const filter = createServerCitationFilter();
         const pieces = ["Deno is **2.8.1**. \u{e200}cit", "e\u{e202}turn0sea", "rch0\u{e201}Next."];
 
         expect(pieces.map((piece) => filter(piece)).join("")).toBe("Deno is **2.8.1**. Next.");
@@ -56,7 +56,7 @@ describe("hosted search citation markers", () => {
         ];
         const mapped = mapOpenAIResponseStream(stream(events), {
             failureMessage: "unused",
-            hostedToolNames: new Set(["web_search"]),
+            serverToolNames: new Set(["web_search"]),
             vendor: "codex",
         });
         const collected: SessionEvent[] = [];

@@ -71,9 +71,9 @@ export interface TerminalInputPresentation {
 /**
  * A search of the world outside the workspace.
  *
- * The same value whether Rig ran the search through a tool of its own or the provider ran it on
- * its own backend. Those lifecycles stay separate — one has a result and the other cannot — but a
- * reader is looking at one act, and this is it. `sources` is empty until they are known.
+ * The same value whether Rig ran the search through a client tool or the provider completed it on
+ * its own backend. Both project as normal tool rows; only the inference layer cares who executed
+ * them. `sources` is empty until they are known.
  */
 export interface SearchPresentation {
     readonly kind: "search";

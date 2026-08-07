@@ -209,6 +209,11 @@ export class ResponsesSession extends BaseSession {
                     failureMessage: `${model} failed to generate a response.`,
                     requireTerminalEvent: true,
                     vendor: "responses",
+                    serverToolNames: new Set(
+                        this.tools
+                            .filter((tool) => tool.server !== undefined)
+                            .map((tool) => tool.name),
+                    ),
                     ...(abort === undefined ? {} : { signal: abort }),
                 });
                 let result;

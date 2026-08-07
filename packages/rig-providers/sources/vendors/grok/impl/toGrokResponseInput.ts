@@ -3,6 +3,8 @@ import type {
     ResponseInputItem,
     ResponseReasoningItem,
 } from "openai/resources/responses/responses.js";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
@@ -45,24 +47,13 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
         if (message.role === "compaction") continue;
         if (message.role === "tool") {
             if (toolSearchCallIds.has(message.callId)) {
-                try {
-                    const parsed = JSON.parse(message.content) as unknown;
-                    input.push({
-                        type: "tool_search_output",
-                        call_id: message.callId,
-                        execution: "client",
-                        status: "completed",
-                        tools:
-                            typeof parsed === "object" &&
-                            parsed !== null &&
-                            "tools" in parsed &&
-                            Array.isArray(parsed.tools)
-                                ? parsed.tools
-                                : parsed,
-                    } as ResponseInputItem);
-                } catch {
-                    // Ignore malformed opaque tool-search output from an earlier response.
-                }
+                input.push({
+                    type: "tool_search_output",
+                    call_id: message.callId,
+                    execution: "client",
+                    status: "completed",
+                    tools: parseToolSearchTools(message.content),
+                } as ResponseInputItem);
                 continue;
             }
             input.push({
@@ -80,7 +71,9 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
         if (message.responseItems !== undefined) {
             for (const encoded of message.responseItems) {
                 try {
-                    const item = JSON.parse(encoded) as ResponseInputItem;
+                    const parsed: unknown = JSON.parse(encoded);
+                    if (!Value.Check(opaqueResponseItemSchema, parsed)) continue;
+                    const item = parsed as ResponseInputItem;
                     input.push(item);
                     if (
                         item.type === "tool_search_call" &&
@@ -150,6 +143,27 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
     }
 
     return input;
+}
+
+const toolSearchToolsSchema = Type.Union([
+    Type.Array(Type.Unknown()),
+    Type.Object({ tools: Type.Array(Type.Unknown()) }, { additionalProperties: true }),
+]);
+
+const opaqueResponseItemSchema = Type.Object(
+    { type: Type.String() },
+    { additionalProperties: true },
+);
+
+function parseToolSearchTools(content: string): readonly unknown[] {
+    try {
+        const parsed: unknown = JSON.parse(content);
+        if (!Value.Check(toolSearchToolsSchema, parsed)) return [];
+        return Array.isArray(parsed) ? parsed : parsed.tools;
+    } catch {
+        // A failed client tool still needs an output so the provider does not wait forever.
+        return [];
+    }
 }
 
 function toolVendorType(vendor: any): GrokToolVendor["type"] | undefined {

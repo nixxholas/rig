@@ -360,9 +360,9 @@ async function prepareUrlAttachment(
     id: string,
     signal?: AbortSignal,
 ): Promise<Attachment> {
-    const { checkWebFetchDomain } = await import("../claude/webFetch/checkWebFetchDomain.js");
+    const { checkWebFetchDomain } = await import("../search/webFetch/checkWebFetchDomain.js");
     const { getWithPermittedRedirects } =
-        await import("../claude/webFetch/getWithPermittedRedirects.js");
+        await import("../search/webFetch/getWithPermittedRedirects.js");
     await checkWebFetchDomain(new URL(url).hostname, signal);
     const result = await getWithPermittedRedirects(url, signal);
     if ("type" in result) {

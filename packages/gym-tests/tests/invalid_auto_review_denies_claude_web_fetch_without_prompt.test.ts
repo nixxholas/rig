@@ -9,7 +9,7 @@ afterEach(async () => {
     running.clear();
 });
 
-describe("Claude WebFetch after an invalid Auto review", () => {
+describe("web_fetch after an invalid Auto review", () => {
     it("fails closed without asking the user for permission", async () => {
         const gym = await createGym({
             environment: { ANTHROPIC_API_KEY: "claude-test-key" },
@@ -34,7 +34,7 @@ describe("Claude WebFetch after an invalid Auto review", () => {
                                     url: "https://example.com",
                                 },
                                 id: "claude-web-fetch-invalid-review",
-                                name: "WebFetch",
+                                name: "web_fetch",
                                 type: "toolCall",
                             },
                         ],
@@ -46,7 +46,7 @@ describe("Claude WebFetch after an invalid Auto review", () => {
                 expect(result).toMatchObject({
                     isError: true,
                     role: "toolResult",
-                    toolName: "WebFetch",
+                    toolName: "web_fetch",
                 });
                 expect(messageText(result)).toContain(
                     "The automatic permission review returned an unreadable decision.",
@@ -71,7 +71,7 @@ describe("Claude WebFetch after an invalid Auto review", () => {
                 ) &&
                 snapshot.text.includes("INVALID_AUTO_REVIEW_DENIED") &&
                 snapshot.text.includes("Ask Rig to do anything"),
-            "the refused Claude WebFetch action and recovered composer",
+            "the refused web_fetch action and recovered composer",
             30_000,
         );
         expect(denied.text.replace(/\s+/gu, " ")).toContain(

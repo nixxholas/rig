@@ -340,21 +340,36 @@ describe("createExecutorInferenceStream", () => {
         });
     });
 
-    it("reports a provider-run search without turning it into a tool call to execute", async () => {
+    it("drops provider-run calls and their result events from the common stream", async () => {
         const executor = {
             run: async function* () {
-                yield { type: "server_toolcall_start", callId: "x-1", name: "x_keyword_search" };
-                yield { type: "server_toolcall_delta", callId: "x-1", delta: '{"query":"Cla' };
                 yield {
-                    type: "server_toolcall_delta",
+                    type: "toolcall_start",
+                    callId: "x-1",
+                    name: "x_keyword_search",
+                    server: true,
+                };
+                yield { type: "toolcall_delta", callId: "x-1", delta: '{"query":"Cla' };
+                yield {
+                    type: "toolcall_delta",
                     callId: "x-1",
                     delta: 'ude Code","limit":"5"}',
                 };
                 yield {
-                    type: "server_toolcall_end",
+                    type: "toolcall_end",
                     callId: "x-1",
-                    name: "x_keyword_search",
                     arguments: '{"query":"Claude Code","limit":"5"}',
+                };
+                yield { type: "toolcall_result_start", callId: "x-1" };
+                yield {
+                    type: "toolcall_result_delta",
+                    callId: "x-1",
+                    delta: '[{"type":"url","url":"https://x.com/a"}]',
+                };
+                yield {
+                    type: "toolcall_result_end",
+                    callId: "x-1",
+                    result: '[{"type":"url","url":"https://x.com/a"}]',
                 };
                 yield { type: "text_delta", delta: "People are talking about it." };
                 yield { type: "done", state: "normal" } as const;
@@ -377,19 +392,14 @@ describe("createExecutorInferenceStream", () => {
             events.push(event);
         }
 
-        expect(events.filter((event) => event.type.startsWith("server_toolcall_"))).toEqual([
-            { type: "server_toolcall_start", callId: "x-1", name: "x_keyword_search" },
-            { type: "server_toolcall_delta", callId: "x-1", delta: '{"query":"Cla' },
-            { type: "server_toolcall_delta", callId: "x-1", delta: 'ude Code","limit":"5"}' },
-            {
-                type: "server_toolcall_end",
-                callId: "x-1",
-                name: "x_keyword_search",
-                arguments: '{"query":"Claude Code","limit":"5"}',
-            },
-        ]);
-        expect(events.some((event) => event.type.startsWith("toolcall_"))).toBe(false);
-
+        expect(
+            events.filter(
+                (event) =>
+                    event.type === "toolcall_start" ||
+                    event.type === "toolcall_delta" ||
+                    event.type === "toolcall_end",
+            ),
+        ).toEqual([]);
         const message = await stream.result();
         expect(message.content).toEqual([{ type: "text", text: "People are talking about it." }]);
         expect(message.stopReason).toBe("stop");

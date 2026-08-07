@@ -116,6 +116,52 @@ describe("HappyMessageMapper", () => {
         });
     });
 
+    it("leaves an ordinary tool call open until its own result arrives", () => {
+        const mapper = new HappyMessageMapper();
+        const output = [
+            ...mapper.map(
+                sessionEvent(
+                    "agent_event",
+                    {
+                        event: {
+                            iteration: 1,
+                            messageId: "agent-1",
+                            type: "inference_iteration_start",
+                        },
+                        runId: "run-1",
+                    },
+                    100,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_message",
+                    {
+                        message: {
+                            blocks: [
+                                {
+                                    arguments: { query: "Rig" },
+                                    id: "call-1",
+                                    name: "web_search",
+                                    type: "tool_call",
+                                },
+                            ],
+                            id: "agent-1",
+                            role: "agent",
+                        },
+                        runId: "run-1",
+                    },
+                    140,
+                ),
+            ),
+        ];
+
+        expect(output.map((message) => message.content.ev.t)).toEqual([
+            "turn-start",
+            "tool-call-start",
+        ]);
+    });
+
     it("keeps every inference iteration in one group across a tool call", () => {
         const mapper = new HappyMessageMapper();
         const output = [

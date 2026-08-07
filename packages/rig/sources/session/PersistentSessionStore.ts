@@ -1824,15 +1824,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ),
         );
         const permissionReviews = eventLog.permissionReviews(toolCallIds);
-        const providerToolCalls = eventLog.providerToolCalls(
-            new Set(window.turns.map((turn) => turn.runId)),
-        );
         return {
             ...window,
             complete,
             ...(noticesTruncated ? { noticesTruncated: true } : {}),
             ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
-            ...(providerToolCalls.length === 0 ? {} : { providerToolCalls }),
         };
     }
 

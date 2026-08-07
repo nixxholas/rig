@@ -46,6 +46,7 @@ async function* streamExecutorInference(options: {
     let activeThinkingIndex: number | undefined;
     let blockCheckpoint: AssistantMessage | undefined;
     const activeTools = new Map<string, number>();
+    const ignoredProviderCalls = new Set<string>();
     const responseItems: string[] = [];
 
     const snapshot = () => ({
@@ -57,13 +58,16 @@ async function* streamExecutorInference(options: {
 
     try {
         const effort = toReasoningEffort(options.streamOptions?.thinking);
+        // Every tool on this request is already a provider descriptor. There is no second catalog
+        // to classify or merge inside Executor.
+        const sessionTools = toRigProviderSessionTools(options.context.tools ?? [], {
+            lockCodexCollaboration:
+                options.executor.type === "codex" && options.model.id.startsWith("openai/"),
+        });
         const events = toSessionEvents(
             options.executor.run({
                 context: { messages: toSessionMessages(options.context.messages) },
-                tools: toRigProviderSessionTools(options.context.tools ?? [], {
-                    lockCodexCollaboration:
-                        options.executor.type === "codex" && options.model.id.startsWith("openai/"),
-                }),
+                tools: sessionTools,
                 ...(options.streamOptions?.signal === undefined
                     ? {}
                     : { abort: options.streamOptions.signal }),
@@ -186,6 +190,10 @@ async function* streamExecutorInference(options: {
                 continue;
             }
             if (event.type === "toolcall_start") {
+                if (event.server === true) {
+                    ignoredProviderCalls.add(event.callId);
+                    continue;
+                }
                 activeTextIndex = undefined;
                 activeThinkingIndex = undefined;
                 const contentIndex = partial.content.length;
@@ -205,6 +213,7 @@ async function* streamExecutorInference(options: {
                 continue;
             }
             if (event.type === "toolcall_delta") {
+                if (ignoredProviderCalls.has(event.callId)) continue;
                 const contentIndex = activeTools.get(event.callId);
                 if (contentIndex === undefined) continue;
                 yield {
@@ -216,6 +225,7 @@ async function* streamExecutorInference(options: {
                 continue;
             }
             if (event.type === "toolcall_end") {
+                if (ignoredProviderCalls.has(event.callId)) continue;
                 const contentIndex = activeTools.get(event.callId);
                 const content =
                     contentIndex === undefined ? undefined : partial.content[contentIndex];
@@ -232,23 +242,14 @@ async function* streamExecutorInference(options: {
                 yield { type: "toolcall_end", contentIndex, toolCall, partial: snapshot() };
                 continue;
             }
-            if (event.type === "server_toolcall_start") {
-                yield { type: "server_toolcall_start", callId: event.callId, name: event.name };
+            if (event.type === "toolcall_result_start") {
                 continue;
             }
-            if (event.type === "server_toolcall_delta") {
-                yield { type: "server_toolcall_delta", callId: event.callId, delta: event.delta };
+            if (event.type === "toolcall_result_delta") {
                 continue;
             }
-            if (event.type === "server_toolcall_end") {
-                // The provider already ran this call and answered it. It stays out of the
-                // assistant message so the agent loop never tries to execute or complete it.
-                yield {
-                    type: "server_toolcall_end",
-                    callId: event.callId,
-                    name: event.name,
-                    arguments: event.arguments,
-                };
+            if (event.type === "toolcall_result_end") {
+                ignoredProviderCalls.delete(event.callId);
                 continue;
             }
             if (event.type === "token_usage") {
@@ -293,7 +294,7 @@ async function* streamExecutorInference(options: {
                         ? "aborted"
                         : event.state === "error"
                           ? "error"
-                          : event.state === "tool_call"
+                          : event.state === "tool_call" && activeTools.size > 0
                             ? "toolUse"
                             : event.state === "length"
                               ? "length"
@@ -388,7 +389,6 @@ export function toRigProviderSessionTools(
             return [
                 {
                     name: tool.name,
-                    type: "local",
                     description: tool.description,
                     ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
                     ...(tool.namespaceDescription === undefined
@@ -400,25 +400,9 @@ export function toRigProviderSessionTools(
                 },
             ];
         }
-        if (tool.kind === "tool_search") {
-            return [
-                {
-                    name: tool.name,
-                    type: "local",
-                    description: tool.description,
-                    parameters: tool.parameters,
-                    vendor: {
-                        provider: "codex",
-                        type: "tool_search",
-                        execution: "client",
-                    },
-                },
-            ];
-        }
         return [
             {
                 name: tool.name,
-                type: "local",
                 description: tool.description,
                 parameters: tool.parameters,
                 ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
@@ -445,12 +429,7 @@ function toolCallMetadata(vendor: unknown): Pick<ToolCall, "kind" | "vendor"> {
             ? (vendor as { type?: unknown }).type
             : undefined;
     return {
-        kind:
-            type === "custom_tool_call"
-                ? "custom"
-                : type === "tool_search_call"
-                  ? "tool_search"
-                  : "function",
+        kind: type === "custom_tool_call" ? "custom" : "function",
         ...(vendor === undefined ? {} : { vendor }),
     };
 }

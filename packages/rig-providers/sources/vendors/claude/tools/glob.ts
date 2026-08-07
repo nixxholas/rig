@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const claude_glob_tool: SessionTool = {
     name: "Glob",
-    type: "local",
     description:
         '- Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead',
     parameters: Type.Object({
@@ -20,7 +19,6 @@ export const claude_glob_tool: SessionTool = {
 
 export const claude_glob_tool_sonnet: SessionTool = {
     name: "Glob",
-    type: "local",
     description:
         '- Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead',
     parameters: Type.Object({

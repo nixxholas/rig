@@ -34,13 +34,16 @@ export function toClaudeSdkOptions(options: {
     callTool?: (name: string) => Promise<CallToolResult>;
     registerAbortCleanup?: (cleanup: () => void) => void;
 }): ClaudeSdkOptions {
-    const mcpToolNames = options.tools.map((tool) => `mcp__${RIG_MCP_SERVER_NAME}__${tool.name}`);
+    const clientTools = options.tools.filter((tool) => tool.server === undefined);
+    const serverToolNames = options.tools
+        .flatMap((tool) => (tool.server === undefined ? [] : [tool.server.type]));
+    const mcpToolNames = clientTools.map((tool) => `mcp__${RIG_MCP_SERVER_NAME}__${tool.name}`);
     const { abortController, cleanup } = toAbortController(options.abort);
     options.registerAbortCleanup?.(cleanup);
     return {
-        allowedTools: mcpToolNames,
+        allowedTools: [...mcpToolNames, ...serverToolNames],
         mcpServers: {
-            [RIG_MCP_SERVER_NAME]: createClaudeMcpServer(options.tools, options.callTool),
+            [RIG_MCP_SERVER_NAME]: createClaudeMcpServer(clientTools, options.callTool),
         },
         ...(options.compaction ? { maxTurns: 1 } : {}),
         model: options.model,
@@ -77,7 +80,9 @@ export function toClaudeSdkOptions(options: {
         skills: [],
         strictMcpConfig: true,
         systemPrompt: createSystemPrompt(options.systemPrompt, options.context),
-        tools: [],
+        // An empty list disables every built-in. A server tool is named here instead of being
+        // bridged over MCP, which is what hands the call to Claude Code's own implementation.
+        tools: serverToolNames,
         ...(abortController === undefined ? {} : { abortController }),
         ...thinkingOptions(options.effort),
     };
@@ -122,11 +127,6 @@ function createClaudeMcpServer(
     tools: readonly SessionTool[],
     callTool?: (name: string) => Promise<CallToolResult>,
 ) {
-    for (const tool of tools) {
-        if (tool.type !== "local") {
-            throw new Error(`Claude SDK tools must execute locally: '${tool.name}'.`);
-        }
-    }
     const instance = new McpServer(
         {
             name: RIG_MCP_SERVER_NAME,

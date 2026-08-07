@@ -128,7 +128,6 @@ import type {
 
 const tool_search = {
     name: "tool_search",
-    type: "local",
     description: "Find deferred tools.",
     parameters: Type.Object({
         query: Type.String(),

@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const view_image = {
     name: "view_image",
-    type: "local",
     description:
         "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
     parameters: Type.Object(

@@ -1,8 +1,5 @@
 import type { TSchema } from "@sinclair/typebox";
 
-/** Where the tool executes: on the provider backend or on the client. */
-export type SessionToolType = "cloud" | "local";
-
 /** Lark grammar for OpenAI-style custom tool call syntax. */
 export interface SessionToolLarkGrammar {
     readonly type: "lark";
@@ -15,7 +12,13 @@ export interface SessionTool {
     readonly namespace?: string;
     /** Description of the containing namespace, when this tool is namespaced. */
     readonly namespaceDescription?: string;
-    readonly type: SessionToolType;
+    /**
+     * Exact native tool descriptor for a call the provider owns and settles inside its response.
+     *
+     * Absence means the caller owns execution. Provider mappers pass this descriptor through
+     * instead of deriving a native tool type from `name`.
+     */
+    readonly server?: { readonly type: string; readonly [key: string]: unknown };
     readonly description?: string;
     readonly parameters?: TSchema;
     /** Opaque provider metadata persisted with this tool definition. */

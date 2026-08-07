@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
 import type { AnyDefinedTool } from "../../types.js";
 import { codexApplyPatchTool } from "../codex/apply_patch.js";
@@ -11,8 +12,6 @@ import { claudeGlobTool } from "../claude/Glob.js";
 import { claudeGrepTool } from "../claude/Grep.js";
 import { claudeReadTool } from "../claude/Read.js";
 import { claudeTaskOutputTool } from "../claude/TaskOutput.js";
-import { claudeWebFetchTool } from "../claude/WebFetch.js";
-import { claudeWebSearchTool } from "../claude/WebSearch.js";
 import { claudeWriteTool } from "../claude/Write.js";
 import { grokGrepTool } from "../grok/grep.js";
 import { grokListDirTool } from "../grok/list_dir.js";
@@ -21,11 +20,30 @@ import { grokSearchReplaceTool } from "../grok/search_replace.js";
 import { grokGetCommandOrSubagentOutputTool } from "../../../tools/grok/get_command_or_subagent_output.js";
 import { grokRunTerminalCommandTool } from "../../../tools/grok/run_terminal_command.js";
 import { grokSendCommandInputTool } from "../../../tools/grok/send_command_input.js";
+import {
+    createClaudeWebSearchTool,
+    createWebFetchTool,
+    type OneOffInferenceRoute,
+} from "../../../tools/search/index.js";
 import { assembleClaudeTools } from "../claude/assembleClaudeTools.js";
-import { assembleCodexTools } from "../codex/assembleCodexTools.js";
+import { codexV1Tools, codexV2Tools } from "../codex/assembleCodexTools.js";
 
 // A fake AWS access key. It must never survive into a replicated summary.
 const FAKE_AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
+const unusedSearchProfile = builtinModelProfiles("claude", "claude")[0]!;
+const unusedSearchProvider: ExecutorProvider = {
+    id: "claude",
+    native: async () => {
+        throw new Error("Inference is not used by this test.");
+    },
+    profiles: [unusedSearchProfile],
+};
+const unusedSearchRoute: OneOffInferenceRoute = {
+    profile: unusedSearchProfile,
+    provider: unusedSearchProvider,
+};
+const webFetchTool = createWebFetchTool();
+const claudeSearchTool = createClaudeWebSearchTool({ routes: [unusedSearchRoute] });
 
 function sharedCall(tool: AnyDefinedTool, args: unknown): string {
     const fn = tool.toSharedCall;
@@ -442,15 +460,15 @@ describe("shared tool summaries", () => {
         });
     });
 
-    describe("claude WebFetch", () => {
+    describe("web_fetch", () => {
         it("names the URL in the call", () => {
-            expect(sharedCall(claudeWebFetchTool, { url: "https://example.com" })).toBe(
+            expect(sharedCall(webFetchTool, { url: "https://example.com" })).toBe(
                 "Fetched https://example.com.",
             );
         });
 
         it("reports the size and status without quoting the page", () => {
-            const summary = sharedResult(claudeWebFetchTool, {
+            const summary = sharedResult(webFetchTool, {
                 bytes: 2048,
                 code: 200,
                 codeText: "OK",
@@ -464,7 +482,7 @@ describe("shared tool summaries", () => {
 
         it("explains an HTTP failure", () => {
             expect(
-                sharedResult(claudeWebFetchTool, {
+                sharedResult(webFetchTool, {
                     bytes: 0,
                     code: 404,
                     codeText: "Not Found",
@@ -476,48 +494,44 @@ describe("shared tool summaries", () => {
         });
 
         it("is disclosable", () => {
-            expect(claudeWebFetchTool.sharedOutputDisclosable).toBe(true);
+            expect(webFetchTool.sharedOutputDisclosable).toBe(true);
         });
     });
 
-    describe("claude WebSearch", () => {
+    describe("Claude search", () => {
         it("names the query in the call", () => {
-            expect(sharedCall(claudeWebSearchTool, { query: "rig privacy" })).toBe(
-                'Searched the web for "rig privacy".',
+            expect(sharedCall(claudeSearchTool, { query: "rig privacy" })).toBe(
+                'Searched the web through Claude for "rig privacy".',
             );
         });
 
         it("reports the result count without quoting titles or URLs", () => {
-            const summary = sharedResult(claudeWebSearchTool, {
+            const summary = sharedResult(claudeSearchTool, {
                 query: "rig privacy",
-                results: [
-                    {
-                        tool_use_id: "1",
-                        content: [
-                            { title: FAKE_AWS_KEY, url: `https://x/${FAKE_AWS_KEY}` },
-                            { title: "Two", url: "https://y" },
-                        ],
-                    },
-                    `commentary ${FAKE_AWS_KEY}`,
+                response: `commentary ${FAKE_AWS_KEY}`,
+                sources: [
+                    { title: FAKE_AWS_KEY, url: `https://x/${FAKE_AWS_KEY}` },
+                    { title: "Two", url: "https://y" },
                 ],
                 durationSeconds: 1.2,
             });
-            expect(summary).toBe("Found 2 search results.");
+            expect(summary).toBe("Claude returned 2 search sources.");
             expect(summary).not.toContain(FAKE_AWS_KEY);
         });
 
         it("handles a single result", () => {
             expect(
-                sharedResult(claudeWebSearchTool, {
+                sharedResult(claudeSearchTool, {
                     query: "q",
-                    results: [{ tool_use_id: "1", content: [{ title: "T", url: "https://x" }] }],
+                    response: "answer",
+                    sources: [{ title: "T", url: "https://x" }],
                     durationSeconds: 0.5,
                 }),
-            ).toBe("Found 1 search result.");
+            ).toBe("Claude returned 1 search source.");
         });
 
         it("is disclosable", () => {
-            expect(claudeWebSearchTool.sharedOutputDisclosable).toBe(true);
+            expect(claudeSearchTool.sharedOutputDisclosable).toBe(true);
         });
     });
 
@@ -735,11 +749,7 @@ describe("shared tool summaries", () => {
 
 describe("every registered tool's disclosure setting", () => {
     it("is off unless the tool also wrote a sentence to go with it", () => {
-        const registered = [
-            ...assembleClaudeTools(),
-            ...assembleCodexTools("gpt-5.6-sol", "codex"),
-            ...assembleCodexTools("gpt-5.6-luna", "codex"),
-        ];
+        const registered = [...assembleClaudeTools(), ...codexV2Tools, ...codexV1Tools];
         expect(registered.length).toBeGreaterThan(20);
 
         // Disclosure is a decision about a tool's payload, so a tool that never

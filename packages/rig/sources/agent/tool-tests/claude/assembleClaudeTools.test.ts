@@ -20,8 +20,6 @@ describe("assembleClaudeTools", () => {
             "TaskGet",
             "TaskUpdate",
             "TaskList",
-            "WebFetch",
-            "WebSearch",
             "TaskStop",
             "TaskInput",
             "AskUserQuestion",

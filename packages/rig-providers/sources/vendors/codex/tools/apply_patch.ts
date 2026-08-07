@@ -2,7 +2,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const apply_patch = {
     name: "apply_patch",
-    type: "local",
     description:
         "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
     grammar: {

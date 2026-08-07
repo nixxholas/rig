@@ -1,4 +1,4 @@
-import { createTimedSignal } from "../claude/webFetch/createTimedSignal.js";
+import { createTimedSignal } from "../search/webFetch/createTimedSignal.js";
 import { readBoundedResponseText } from "./readBoundedResponseText.js";
 
 const GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";

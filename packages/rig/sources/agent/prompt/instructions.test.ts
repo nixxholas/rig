@@ -89,44 +89,45 @@ describe("what a model can search", () => {
     ];
 
     /**
-     * Without this an agent has no way to know a search it cannot run itself exists behind another
-     * model, so it reaches for the tool it does have: it fetches an x.com page, the site refuses
-     * it, and the turn is spent finding that out.
+     * Search is a tool Rig runs, not a property of a backend: a model whose own endpoint cannot
+     * search reaches one that can. Noting it per model would say some models cannot search, and an
+     * agent that believes that delegates a search it could have run itself.
      */
-    it("says which model reaches X, so a task about X is delegated instead of fetched", () => {
+    it("says every model can search, rather than marking some of them as able to", () => {
         const instructions = createAvailableModelsInstructions(models) ?? "";
-        expect(instructions).toMatch(/Grok 4\.5.*searches the web and X/u);
-        expect(instructions).toContain("the way to read X at all");
+        expect(instructions).toContain("Every model listed here can search the web and X");
+        for (const line of instructions.split("\n").filter((line) => line.startsWith("- "))) {
+            expect(line).not.toContain("searches");
+        }
     });
 
     /**
-     * Claude searches through a tool Rig executes rather than inside the provider's response.
-     * Reporting only the provider-run kind would say Claude cannot search, which is false — the
-     * same false statement this listing replaced.
+     * Worth its own sentence: an agent that believes it cannot reach X will fetch an x.com page,
+     * be refused by the site, and spend the turn finding that out.
      */
-    it("counts a search Rig runs, not only one the provider runs", () => {
+    it("says searching is the only way to read X", () => {
         const instructions = createAvailableModelsInstructions(models) ?? "";
-        const claudeLine = instructions
-            .split("\n")
-            .find((line) => line.startsWith("- claude:"));
-        expect(claudeLine).toContain("searches the web");
-        expect(claudeLine).not.toContain("and X");
+        expect(instructions).toContain("the only way to read posts on X");
     });
 
-    // The same Anthropic model served through Bedrock has no search at all, so its line says none.
-    it("does not claim a search the endpoint cannot serve", () => {
-        const instructions = createAvailableModelsInstructions(models) ?? "";
-        const bedrockLine = instructions
-            .split("\n")
-            .find((line) => line.startsWith("- bedrock:"));
-        expect(bedrockLine).toBeDefined();
-        expect(bedrockLine).not.toContain("searches");
+    /** Nothing configured reads X, so the prompt must not promise it. */
+    it("does not claim a search nothing configured can serve", () => {
+        const webOnly = models.filter((model) => model.providerType !== "grok");
+        const instructions = createAvailableModelsInstructions(webOnly) ?? "";
+        expect(instructions).toContain("can search the web");
+        expect(instructions).not.toContain("X");
     });
 
-    it("states the rule rather than the mode of the moment, because the mode can change", () => {
+    /**
+     * A search reaches the network without the shell, which is easy to mistake for being exempt
+     * from permission. It is not: the tool still leaves the sandbox, so the note has to say the
+     * search needs Auto or Full access rather than implying it runs regardless of mode.
+     */
+    it("says a search skips the shell but still needs permission to leave the sandbox", () => {
         const instructions = createAvailableModelsInstructions(models) ?? "";
-        expect(instructions).toContain("only while the session is in Auto or Full access");
-        expect(instructions).toContain("no search is offered");
+        expect(instructions).toContain("reaches the network without the shell");
+        expect(instructions).toContain("needs Auto or Full access");
+        expect(instructions).not.toContain("is not affected by the sandbox");
     });
 
     it("says nothing about searching when no model can", () => {

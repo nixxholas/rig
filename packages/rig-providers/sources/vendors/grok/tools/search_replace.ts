@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const search_replace = {
     name: "search_replace",
-    type: "local",
     description:
         'Replace an exact string in a file.\n\n- Read the file with `read_file` before editing it.\n- `read_file` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.\n- `old_string` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `replace_all` to change every occurrence (handy for renaming an identifier).',
     parameters: Type.Object(

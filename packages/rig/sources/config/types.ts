@@ -1,7 +1,7 @@
 import type { PermissionMode } from "../permissions/index.js";
 import type { McpServerConfig } from "../mcp/types.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
-import type { HostedCapability, ServiceTier } from "@slopus/rig-execution";
+import type { ServiceTier } from "@slopus/rig-execution";
 import type { BedrockModelOverrides } from "../executor/bedrock-model-overrides.js";
 import type { ConfigPermissions, PartialConfigPermissions } from "./configPermissions.js";
 

@@ -11,7 +11,6 @@ describe("universal Gemini media tools", () => {
         const tools = createGeminiTools("secret-key");
 
         expect(tools.map((tool) => tool.name)).toEqual([
-            "gemini_search",
             "gemini_generate_image",
             "gemini_generate_music",
             "gemini_analyze_media",

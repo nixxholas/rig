@@ -20,8 +20,6 @@ describe("Claude tool parity", () => {
             "TaskGet",
             "TaskUpdate",
             "TaskList",
-            "WebFetch",
-            "WebSearch",
             "TaskStop",
             "TaskInput",
             "AskUserQuestion",

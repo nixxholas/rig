@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const claude_task_output_tool: SessionTool = {
     name: "TaskOutput",
-    type: "local",
     description:
         "Read output from a running or completed background shell task, agent, or workflow.",
     parameters: Type.Object({
@@ -28,7 +27,6 @@ export const claude_task_output_tool: SessionTool = {
 
 export const claude_task_output_tool_sonnet: SessionTool = {
     name: "TaskOutput",
-    type: "local",
     description:
         "Read output from a running or completed background shell task, agent, or workflow.",
     parameters: Type.Object({

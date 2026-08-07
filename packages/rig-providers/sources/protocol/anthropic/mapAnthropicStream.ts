@@ -6,6 +6,7 @@ import { APIConnectionError } from "@anthropic-ai/sdk/error";
 
 import { EmptyResponseError } from "@/core/EmptyResponseError.js";
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import { emitToolCallResult } from "@/core/emitToolCallResult.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js";
@@ -38,6 +39,7 @@ export async function* mapAnthropicStream(
             wireName: string;
             arguments: string;
             input: Record<string, unknown>;
+            server?: true;
         }
     >();
     let usage: SessionCacheUsage = {
@@ -50,6 +52,7 @@ export async function* mapAnthropicStream(
     let outputTokensReported = false;
     let stopReason: BetaStopReason | null = null;
     let sawCompaction = false;
+    let sawClientTool = false;
     let started = false;
     for await (const event of stream) {
         if (!started) {
@@ -62,11 +65,26 @@ export async function* mapAnthropicStream(
             continue;
         }
         if (event.type === "content_block_start") {
-            if (event.content_block.type === "tool_use") {
+            if (
+                event.content_block.type === "tool_use" ||
+                event.content_block.type === "server_tool_use"
+            ) {
                 const wireName = event.content_block.name;
                 const configured = options.tools?.find(
                     (tool) => toAnthropicToolName(tool) === wireName,
                 );
+                const server =
+                    event.content_block.type === "server_tool_use" ||
+                    configured?.server !== undefined ||
+                    options.tools?.some(
+                        (tool) =>
+                            tool.server !== undefined && toAnthropicToolName(tool) === wireName,
+                    ) === true;
+                const input = asObjectInput(event.content_block.input);
+                const argumentsJson =
+                    event.content_block.type === "server_tool_use"
+                        ? JSON.stringify(input)
+                        : "";
                 const tool = {
                     callId: event.content_block.id,
                     name: configured?.name ?? event.content_block.name,
@@ -74,17 +92,31 @@ export async function* mapAnthropicStream(
                         ? {}
                         : { namespace: configured.namespace }),
                     wireName,
-                    arguments: "",
-                    input: asObjectInput(event.content_block.input),
+                    arguments: argumentsJson,
+                    input,
+                    ...(server ? { server: true as const } : {}),
                 };
                 tools.set(event.index, tool);
+                if (!server) sawClientTool = true;
                 yield {
                     type: "toolcall_start",
                     callId: tool.callId,
                     name: tool.name,
                     ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
+                    ...(server ? { server: true as const } : {}),
                     vendor: { type: "claude_tool_use" },
                 };
+                if (argumentsJson.length > 0) {
+                    yield {
+                        type: "toolcall_delta",
+                        callId: tool.callId,
+                        delta: argumentsJson,
+                    };
+                }
+            } else if (isAnthropicServerToolResultBlock(event.content_block)) {
+                const callId = event.content_block.tool_use_id;
+                const result = JSON.stringify(event.content_block.content ?? null);
+                yield* emitToolCallResult(callId, result);
             } else if (event.content_block.type === "thinking") {
                 blocks.set(event.index, {
                     type: "thinking",
@@ -191,7 +223,7 @@ export async function* mapAnthropicStream(
             const orderedBlocks = [...blocks.entries()]
                 .sort(([left], [right]) => left - right)
                 .map(([, block]) => block);
-            const terminal = toDoneEvent(stopReason, tools.size > 0, sawCompaction);
+            const terminal = toDoneEvent(stopReason, sawClientTool, sawCompaction);
             if (
                 terminal.state !== "error" &&
                 terminal.state !== "cancelled" &&
@@ -216,12 +248,21 @@ export async function* mapAnthropicStream(
     if (sawCompaction || stopReason === "compaction") {
         yield { type: "token_usage", usage };
         yield { type: "block_stop" };
-        yield toDoneEvent(stopReason, tools.size > 0, sawCompaction);
+        yield toDoneEvent(stopReason, sawClientTool, sawCompaction);
         return;
     }
     throw new APIConnectionError({
         message: "Anthropic Bedrock connection closed before returning message_stop.",
     });
+}
+
+function isAnthropicServerToolResultBlock(
+    block: unknown,
+): block is { type: string; tool_use_id: string; content?: unknown } {
+    if (typeof block !== "object" || block === null) return false;
+    if (!("type" in block) || typeof block.type !== "string") return false;
+    if (!block.type.endsWith("_tool_result")) return false;
+    return "tool_use_id" in block && typeof block.tool_use_id === "string";
 }
 
 function parseArguments(

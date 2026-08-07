@@ -44,7 +44,6 @@ describe("Grok compaction behavior", () => {
                     tools: [
                         {
                             name: "switched_tool",
-                            type: "local",
                             description: "Switched tool.",
                             parameters: Type.Object({ value: Type.String() }),
                         },

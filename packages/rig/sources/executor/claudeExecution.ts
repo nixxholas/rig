@@ -23,8 +23,9 @@ export function claudeExecution(options: {
     const executable = options.config.executable ?? options.env.RIG_CLAUDE_CODE_EXECUTABLE;
     const environment = createConfiguredClaudeEnvironment(options.config, options.env);
     const pathToClaudeCodeExecutable = executable;
-    return {
+    const definition: ExecutorProvider = {
         id: options.id,
+        isolated: () => definition,
         extendProfilePromptContext: (context) => ({
             ...context,
             ...(environment.CLAUDE_CONFIG_DIR === undefined
@@ -76,4 +77,5 @@ export function claudeExecution(options: {
             });
         },
     };
+    return definition;
 }

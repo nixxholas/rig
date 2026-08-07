@@ -73,18 +73,6 @@ export function mergeTranscriptWindow(
             reviews.findLastIndex((candidate) => candidate.toolCallId === review.toolCallId) ===
             index,
     );
-    // A search the provider ran is carried only here: Rig never executed one, so no assistant
-    // message records it and dropping it on a merge deletes it from a conversation already on
-    // screen. Identity is the call, and the fresh window wins wherever the two hold the same one.
-    const providerToolCallsById = new Map(
-        (loaded.providerToolCalls ?? []).map((call) => [call.callId, call]),
-    );
-    for (const call of incoming.providerToolCalls ?? []) {
-        providerToolCallsById.set(call.callId, call);
-    }
-    const providerToolCalls = [...providerToolCallsById.values()].sort(
-        (left, right) => left.createdAt - right.createdAt,
-    );
     const noticesById = new Map(
         (loaded.notices ?? []).map((notice) => [notice.message.id, notice]),
     );
@@ -102,7 +90,6 @@ export function mergeTranscriptWindow(
         ...(Object.keys(messageBoundaryGroupId).length === 0 ? {} : { messageBoundaryGroupId }),
         ...(Object.keys(messageGroupId).length === 0 ? {} : { messageGroupId }),
         ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
-        ...(providerToolCalls.length === 0 ? {} : { providerToolCalls }),
         messages,
         ...(notices.length === 0 ? {} : { notices }),
         ...(loaded.noticesTruncated === true || incoming.noticesTruncated === true

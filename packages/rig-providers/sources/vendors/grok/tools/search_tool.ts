@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const search_tool = {
     name: "search_tool",
-    type: "local",
     description:
         'Search for MCP tools by keyword and retrieve their input schemas.\n\nIf status is "partial", some servers may still be connecting.',
     parameters: Type.Object(

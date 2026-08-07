@@ -58,7 +58,7 @@ export interface ToolCallBlock {
     arguments: unknown;
     /** The provider stopped before this call became executable. */
     incomplete?: boolean;
-    kind?: "custom" | "function" | "tool_search";
+    kind?: "custom" | "function";
     /** Opaque provider metadata required to replay this call faithfully. */
     vendor?: unknown;
     /** Durable model-invisible data defined by the tool for rich transcript rendering. */

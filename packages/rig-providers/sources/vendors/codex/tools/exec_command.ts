@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const exec_command = {
     name: "exec_command",
-    type: "local",
     description:
         "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
     parameters: Type.Object(

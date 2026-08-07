@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const scheduler_list = {
     name: "scheduler_list",
-    type: "local",
     description:
         "List all active scheduled tasks with their IDs, prompts, intervals, and next fire times.",
     parameters: Type.Object(

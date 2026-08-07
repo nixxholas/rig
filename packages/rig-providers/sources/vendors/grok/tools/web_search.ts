@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const web_search = {
     name: "web_search",
-    type: "local",
     description:
         "Search the web for up-to-date information, tailored for coding and software development tasks.",
     parameters: Type.Object(

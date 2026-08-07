@@ -446,6 +446,11 @@ export class ClaudeSession extends BaseSession {
         };
         options.abort?.addEventListener("abort", abort, { once: true });
         const activeTools = new Map<number, SessionToolCall>();
+        // Claude Code runs a server tool inside its own process and answers it there, so Rig
+        // reports these calls without ever collecting them as work for the executor.
+        const serverToolNames = new Set(
+            tools.filter((tool) => tool.server !== undefined).map((tool) => tool.name),
+        );
         this.lastQueryToolCalls = [];
         let sawToolCall = false;
         let sawText = false;
@@ -564,25 +569,56 @@ export class ClaudeSession extends BaseSession {
                     }
                     if (
                         event.type === "content_block_start" &&
-                        event.content_block.type === "tool_use"
+                        (event.content_block.type === "tool_use" ||
+                            event.content_block.type === "server_tool_use")
                     ) {
-                        sawToolCall = true;
+                        // Claude Code runs a server tool itself and answers it in this same
+                        // response, so it is reported like any other call but never becomes work:
+                        // it neither stops the turn nor reaches the tool bridge. Anthropic's
+                        // native path uses `server_tool_use` for the same class of call.
+                        const nativeServer = event.content_block.type === "server_tool_use";
+                        const server =
+                            nativeServer || serverToolNames.has(event.content_block.name);
+                        if (!server) {
+                            sawToolCall = true;
+                            this.activeToolBridge?.register(
+                                event.content_block.id,
+                                event.content_block.name,
+                            );
+                        }
                         activeTools.set(event.index, {
                             callId: event.content_block.id,
                             name: event.content_block.name,
                             arguments: "",
                             vendor: { type: "claude_tool_use" },
                         });
-                        this.activeToolBridge?.register(
-                            event.content_block.id,
-                            event.content_block.name,
-                        );
                         yield {
                             type: "toolcall_start",
                             callId: event.content_block.id,
                             name: event.content_block.name,
+                            ...(server ? { server: true as const } : {}),
                             vendor: { type: "claude_tool_use" },
                         };
+                        // server_tool_use carries its full input on the start block; tool_use
+                        // streams input_json_delta instead.
+                        if (nativeServer) {
+                            const input = JSON.stringify(
+                                (event.content_block as { input?: unknown }).input ?? {},
+                            );
+                            activeTools.set(event.index, {
+                                callId: event.content_block.id,
+                                name: event.content_block.name,
+                                arguments: input,
+                                vendor: { type: "claude_tool_use" },
+                            });
+                            if (input.length > 0) {
+                                yield {
+                                    type: "toolcall_delta",
+                                    callId: event.content_block.id,
+                                    delta: input,
+                                };
+                            }
+                        }
                         continue;
                     }
                     if (event.type === "content_block_delta") {
@@ -625,7 +661,26 @@ export class ClaudeSession extends BaseSession {
                                 callId: block.callId,
                                 arguments: block.arguments,
                             };
+                            // Claude Code answers built-ins out of band and does not stream their
+                            // results as content blocks here. A later text block is the model's
+                            // synthesis, not the tool payload, so server calls end without a
+                            // toolcall_result triple unless a dedicated result block arrives.
                         }
+                    }
+                    // Anthropic-native server tools (when the SDK surfaces them) arrive as their
+                    // own content blocks with a tool_use_id that pairs to the call above.
+                    if (
+                        event.type === "content_block_start" &&
+                        isClaudeServerToolResultBlock(event.content_block)
+                    ) {
+                        const callId = event.content_block.tool_use_id;
+                        const result = JSON.stringify(event.content_block.content ?? null);
+                        yield { type: "toolcall_result_start", callId };
+                        if (result.length > 0) {
+                            yield { type: "toolcall_result_delta", callId, delta: result };
+                        }
+                        yield { type: "toolcall_result_end", callId, result };
+                        continue;
                     }
                     if (event.type === "message_stop" && sawToolCall) {
                         this.lastQueryToolCalls = [...activeTools.values()];
@@ -873,4 +928,21 @@ function withClaudeErrorAttempts(
             },
         },
     };
+}
+
+/**
+ * Anthropic content blocks that carry a provider-owned tool outcome.
+ *
+ * Claude Code's built-in path rarely surfaces these; the native Messages path does for web search
+ * and similar server tools. The block is identified by type and `tool_use_id`, not by name.
+ */
+function isClaudeServerToolResultBlock(
+    block: unknown,
+): block is { type: string; tool_use_id: string; content?: unknown } {
+    if (typeof block !== "object" || block === null) return false;
+    if (!("type" in block) || typeof block.type !== "string") return false;
+    if (!block.type.endsWith("_tool_result") && block.type !== "web_search_tool_result") {
+        return false;
+    }
+    return "tool_use_id" in block && typeof block.tool_use_id === "string";
 }

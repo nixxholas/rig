@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const write_stdin = {
     name: "write_stdin",
-    type: "local",
     description: "Writes characters to an existing unified exec session and returns recent output.",
     parameters: Type.Object(
         {

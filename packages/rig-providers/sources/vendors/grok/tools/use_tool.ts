@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const use_tool = {
     name: "use_tool",
-    type: "local",
     description:
         "Call an MCP integration tool.\n\nThe `tool_name` must be the qualified `server__tool` name (e.g., `linear__save_issue`). The `tool_input` must conform exactly to the input schema returned by `search_tool`.",
     parameters: Type.Object(

@@ -497,46 +497,6 @@ describe("Executor", () => {
         expect(native.sessions).toHaveLength(2);
     });
 
-    it("runs text-only auxiliary inference through the selected native provider", async () => {
-        const selected = new AuxiliaryProvider();
-        const other = new AuxiliaryProvider();
-        const executor = new Executor(
-            [
-                {
-                    id: "work-claude",
-                    native: selected,
-                    profiles: [profile("work-claude", "claude", "anthropic/opus", "Opus")],
-                },
-                {
-                    id: "other-claude",
-                    native: other,
-                    profiles: [profile("other-claude", "claude", "anthropic/sonnet", "Sonnet")],
-                },
-            ],
-            { environment: TEST_ENVIRONMENT },
-        );
-
-        await expect(
-            executor.runClaudeAuxiliaryQuery(executor.models[0]!, {
-                prompt: "Summarize this page.",
-                systemPrompt: "",
-            }),
-        ).resolves.toEqual({
-            content: [{ type: "text", text: "SELECTED" }],
-        });
-
-        expect(selected.sessions).toHaveLength(1);
-        expect(selected.sessions[0]?.requests).toHaveLength(1);
-        expect(selected.sessions[0]?.requests[0]).toMatchObject({
-            model: "anthropic/opus",
-            context: {
-                messages: [{ role: "user", content: "Summarize this page." }],
-            },
-        });
-        expect(selected.sessions[0]?.destroyed).toBe(true);
-        expect(other.sessions).toHaveLength(0);
-    });
-
     it("isolates side inference without taking ownership of parent provider teardown", async () => {
         const native = new RecordingProvider();
         let teardownCount = 0;
@@ -656,42 +616,6 @@ class RecordingSession extends BaseSession {
     }
 }
 
-class AuxiliaryProvider extends BaseProvider {
-    static override readonly name = "auxiliary";
-    static override readonly inputTypes = ["text"] as const;
-    static override readonly outputTypes = ["text"] as const;
-    readonly sessions: AuxiliarySession[] = [];
-
-    override async session(id: string) {
-        const session = new AuxiliarySession(id);
-        this.sessions.push(session);
-        return session;
-    }
-}
-
-class AuxiliarySession extends BaseSession {
-    destroyed = false;
-    readonly requests: SessionRunRequest[] = [];
-
-    constructor(id: string) {
-        super(id);
-    }
-
-    override async compact(): Promise<SessionCompaction> {
-        throw new Error("Not used");
-    }
-
-    override destroy(): void {
-        this.destroyed = true;
-    }
-
-    override async *run(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
-        this.requests.push(request);
-        yield { type: "text_delta", delta: "SELECTED" };
-        yield { type: "done", state: "normal" };
-    }
-}
-
 class ForceCloseProvider extends BaseProvider {
     static override readonly name = "force-close";
     static override readonly inputTypes = ["text"] as const;
@@ -754,7 +678,6 @@ function tool(name: string) {
     return {
         description: name,
         name,
-        type: "local" as const,
     };
 }
 

@@ -31,13 +31,11 @@ describeLive("CodexProvider live", () => {
                     "Call every explicitly requested independent tool in the same response.",
                 tools: [
                     {
-                        type: "local",
                         name: "read_alpha",
                         description: "Read alpha.",
                         parameters: Type.Object({}, { additionalProperties: false }),
                     },
                     {
-                        type: "local",
                         name: "read_beta",
                         description: "Read beta.",
                         parameters: Type.Object({}, { additionalProperties: false }),

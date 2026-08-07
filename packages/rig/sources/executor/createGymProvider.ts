@@ -6,7 +6,6 @@ import {
     defineProvider,
     type AssistantMessage,
     type Context,
-    type HostedCapability,
     type Model,
     type Provider,
     type ProviderAssistantMessageEvent,
@@ -28,8 +27,6 @@ export interface CreateGymProviderOptions {
     endpoint: string;
     extendProfilePromptContext?: Provider["extendProfilePromptContext"];
     fetch?: typeof globalThis.fetch;
-    /** The real provider's answer, forwarded so a gym test reads Rig's decision and not a copy. */
-    hostedCapabilitiesForRequest?: () => readonly HostedCapability[];
     models?: readonly Model[];
     /** Receives account usage a scripted response reports, as a real vendor would. */
     onAccountUsage?: (usage: ProviderUsage) => void;
@@ -138,11 +135,11 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                                   )
                                   .join("\n\n"),
                           });
-                const hostedSearches = options.hostedCapabilitiesForRequest?.() ?? [];
+                // Server tools travel inside the request's own tool list, so a test reads what the
+                // backend was asked to own from the same place the model does.
                 const response = await request(options.endpoint, {
                     body: JSON.stringify({
                         context: preparedContext,
-                        hostedSearches,
                         modelId: model.id,
                         options: streamOptions,
                         providerSessionGeneration,
@@ -175,7 +172,9 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                 }
                 const stopReason =
                     reply.stopReason ??
-                    (reply.content.some((block) => block.type === "toolCall") ? "toolUse" : "stop");
+                    (reply.content.some((block) => block.type === "toolCall")
+                        ? "toolUse"
+                        : "stop");
                 const message: AssistantMessage = {
                     api: "gym",
                     content: [],
@@ -209,34 +208,6 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                     if (retry.delayMs !== undefined) {
                         await delay(retry.delayMs, streamOptions);
                     }
-                }
-
-                // A hosted call is answered by the provider itself, so it streams alongside the
-                // response and never becomes a content block the client has to execute.
-                for (const [index, serverToolCall] of (reply.serverToolCalls ?? []).entries()) {
-                    const callId = serverToolCall.callId ?? `server-call-${String(index + 1)}`;
-                    yield { type: "server_toolcall_start", callId, name: serverToolCall.name };
-                    if (reply.serverToolCallDeltaDelayMs !== undefined) {
-                        await delay(reply.serverToolCallDeltaDelayMs, streamOptions);
-                    }
-                    if (serverToolCall.arguments.length > 0) {
-                        yield {
-                            type: "server_toolcall_delta",
-                            callId,
-                            delta: serverToolCall.arguments,
-                        };
-                    }
-                    const beforeEnd =
-                        reply.serverToolCallEndDelayMs ?? reply.serverToolCallDeltaDelayMs;
-                    if (beforeEnd !== undefined) {
-                        await delay(beforeEnd, streamOptions);
-                    }
-                    yield {
-                        type: "server_toolcall_end",
-                        callId,
-                        name: serverToolCall.name,
-                        arguments: serverToolCall.arguments,
-                    };
                 }
 
                 for (const block of reply.content) {

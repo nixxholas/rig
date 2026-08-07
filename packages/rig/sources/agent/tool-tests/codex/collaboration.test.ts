@@ -4,7 +4,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { ManagedSubagent, SpawnSubagentRequest } from "../../index.js";
 import { claudeSendMessageTool } from "../../tools/claude/SendMessage.js";
 import { createJustBashToolHarness } from "../../../tools/testing/createJustBashToolHarness.js";
-import { assembleCodexTools } from "../../tools/codex/assembleCodexTools.js";
+import { codexV1Tools, codexV2Tools } from "../../tools/codex/assembleCodexTools.js";
 import { codexV1SpawnAgentTool } from "../../tools/codex/v1/spawn_agent.js";
 import { codexV1WaitAgentTool } from "../../tools/codex/v1/wait_agent.js";
 import { codexFollowupTaskTool } from "../../tools/codex/v2/followup_task.js";
@@ -17,8 +17,8 @@ import { codexExtendedSpawnAgentTool } from "../../tools/codex/v2/collaboration_
 import { codexWaitAgentTool } from "../../tools/codex/v2/wait_agent.js";
 
 describe("Codex collaboration tools", () => {
-    it("selects plaintext v1 for Bedrock and encrypted v2 for Codex Cloud", () => {
-        const collaboration = assembleCodexTools("openai/gpt-5.6-sol", "codex").filter(
+    it("keeps plaintext v1 and encrypted v2 as separate fixed arrays", () => {
+        const collaboration = codexV2Tools.filter(
             (tool) => tool.namespace?.name === "collaboration",
         );
         expect(collaboration.map((tool) => tool.name)).toEqual([
@@ -30,42 +30,20 @@ describe("Codex collaboration tools", () => {
             "interrupt_agent",
         ]);
         expect(
-            assembleCodexTools("openai/gpt-5.6-sol", "codex")
+            codexV2Tools
                 .filter((tool) => tool.namespace?.name === "collaboration_ext")
                 .map((tool) => tool.name),
         ).toEqual(["spawn_agent", "followup_task"]);
 
-        const bedrock = assembleCodexTools("openai/gpt-5.6-sol", "bedrock").filter(
-            (tool) => tool.namespace?.name === "multi_agent_v1",
-        );
-        expect(bedrock.map((tool) => tool.name)).toEqual([
+        const v1 = codexV1Tools.filter((tool) => tool.namespace?.name === "multi_agent_v1");
+        expect(v1.map((tool) => tool.name)).toEqual([
             "close_agent",
             "resume_agent",
             "send_input",
             "spawn_agent",
             "wait_agent",
         ]);
-
-        const luna = assembleCodexTools("openai/gpt-5.6-luna", "codex").filter(
-            (tool) => tool.namespace?.name === "multi_agent_v1",
-        );
-        expect(luna.map((tool) => tool.name)).toEqual([
-            "close_agent",
-            "resume_agent",
-            "send_input",
-            "spawn_agent",
-            "wait_agent",
-        ]);
-        expect(
-            assembleCodexTools("openai/gpt-5.6-luna", "codex").some(
-                (tool) => tool.namespace?.name === "collaboration",
-            ),
-        ).toBe(false);
-        expect(
-            assembleCodexTools("openai/gpt-5.6-sol", "bedrock").some(
-                (tool) => tool.namespace?.name === "collaboration",
-            ),
-        ).toBe(false);
+        expect(codexV1Tools.some((tool) => tool.namespace?.name === "collaboration")).toBe(false);
     });
 
     it("exposes background spawn and lifecycle controls", async () => {

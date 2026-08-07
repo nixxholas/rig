@@ -9,11 +9,6 @@ import type { SessionOptions } from "@/core/SessionOptions.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 import { ClaudeSession, type ClaudeSdkQuery } from "@/vendors/claude/ClaudeSession.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
-import type {
-    ClaudeAuxiliaryQueryRequest,
-    ClaudeAuxiliaryQueryResponse,
-} from "@/vendors/claude/ClaudeAuxiliaryQuery.js";
-import { runClaudeAuxiliaryQuery } from "@/vendors/claude/impl/runClaudeAuxiliaryQuery.js";
 
 export interface ClaudeProviderOptions extends InferenceRetryOptions {
     credential: ClaudeCredential;
@@ -71,23 +66,6 @@ export class ClaudeProvider extends BaseProvider {
                 ? {}
                 : { waitForInferenceRetry: this.#waitForInferenceRetry }),
             ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
-        });
-    }
-
-    runAuxiliaryQuery(
-        model: string,
-        request: ClaudeAuxiliaryQueryRequest,
-    ): Promise<ClaudeAuxiliaryQueryResponse> {
-        return runClaudeAuxiliaryQuery({
-            credential: this.credential,
-            ...(this.env === undefined ? {} : { env: this.env }),
-            model: resolveClaudeModelId(model),
-            ...(this.pathToClaudeCodeExecutable === undefined
-                ? {}
-                : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
-            ...(this.query === undefined ? {} : { query: this.query }),
-            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
-            request,
         });
     }
 }

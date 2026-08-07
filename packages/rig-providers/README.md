@@ -158,17 +158,35 @@ import { Type } from "@sinclair/typebox";
 
 const tool = {
     name: "read_file",
-    type: "local", // "local" runs on the client, "cloud" on the provider backend
     description: "Read a file.",
     parameters: Type.Object({ path: Type.String() }),
 } satisfies SessionTool;
 ```
 
+Tools are executor-owned by default. A provider-native tool that completes inside the inference
+response declares `server: true`; Rig never executes it or sends a tool result.
+
+### Backend search
+
+Search adds nothing to this package. A provider that searches on its own backend declares that
+tool like any other server tool, and there is no search-specific type or method here.
+
+Everything that makes search mean one thing across vendors lives above: `rig-execution` owns the
+`SearchKind` a caller asks for — `"web"` or `"x"`, what is wanted rather than what a vendor calls
+it — and resolves it to a backend and a tool name, which may belong to a different vendor than the
+one holding the conversation, so a model whose own endpoint cannot search still searches. Rig then
+runs that search as an ordinary inference on a throwaway provider: one request that declares the
+chosen backend's search tool and reports what came back. There is no separate mechanism for it.
+
 ### Events
 
 `SessionStream` yields `SessionEvent`s. The content events are `text_delta`, `reasoning_delta`,
-`encrypted_reasoning`, `response_items`, `tool_call_start` / `tool_call_delta` / `tool_call_end`,
-and `server_tool_call_delta`. Structural events are `block_start`, `block_stop`, and
+`encrypted_reasoning`, `response_items`, and `toolcall_start` / `toolcall_delta` /
+`toolcall_end`, where a call the provider ran itself carries `server: true` on its start. Server
+tools may also emit `toolcall_result_start` / `toolcall_result_delta` / `toolcall_result_end` with
+the provider-owned outcome (for example web-search sources); client tools never do, because their
+results re-enter as later messages.
+Structural events are `block_start`, `block_stop`, and
 `block_reset` — where `block_reset` signals a rollback, discarding output already emitted for the
 current block. `retrying` reports a provider-owned retry attempt, and `token_usage` carries a
 `SessionCacheUsage`.

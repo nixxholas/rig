@@ -9,7 +9,6 @@ export { grokSearchReplaceTool } from "../../agent/tools/grok/search_replace.js"
 export { grokSpawnSubagentTool } from "./spawn_subagent.js";
 export { grokFollowupSubagentTool } from "./followup_subagent.js";
 export { grokWaitCommandsOrSubagentsTool } from "./wait_commands_or_subagents.js";
-
 import { grokGetCommandOrSubagentOutputTool } from "./get_command_or_subagent_output.js";
 import { grokGrepTool } from "../../agent/tools/grok/grep.js";
 import { grokKillCommandOrSubagentTool } from "./kill_command_or_subagent.js";
@@ -38,3 +37,5 @@ export const grokCollaborationTools = [
     grokFollowupSubagentTool,
     grokWaitCommandsOrSubagentsTool,
 ] as const;
+
+export const grokLimitedCollaborationTools = [grokFollowupSubagentTool] as const;

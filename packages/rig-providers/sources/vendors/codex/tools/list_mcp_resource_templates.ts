@@ -4,7 +4,6 @@ import type { SessionTool } from "@/core/SessionTool.js";
 
 export const list_mcp_resource_templates = {
     name: "list_mcp_resource_templates",
-    type: "local",
     description:
         "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.",
     parameters: Type.Object(

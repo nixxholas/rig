@@ -72,11 +72,6 @@ export interface CodexSessionOptions extends InferenceRetryOptions {
     credential: CodexProviderCredential;
     endpoint: string;
     installationId: string;
-    /**
-     * Tools OpenAI runs on its own backend, asked for once per request so what the caller may
-     * declare can narrow without a new session.
-     */
-    hostedTools?: () => readonly SessionTool[];
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     parallelToolCalls?: boolean;
@@ -92,7 +87,6 @@ export class CodexSession extends BaseSession {
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
     readonly streamIdleTimeoutMs: number;
-    readonly hostedTools: () => readonly SessionTool[];
     readonly tools: readonly SessionTool[];
     readonly transport: CodexTransport;
     readonly userAgent: string;
@@ -128,7 +122,6 @@ export class CodexSession extends BaseSession {
             ((attempt, signal) => waitForCodexRetry(attempt, undefined, signal));
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.tools = options.tools ?? [];
-        this.hostedTools = options.hostedTools ?? (() => []);
         this.transport = options.transport ?? "auto";
         this.userAgent = options.userAgent;
 
@@ -231,12 +224,12 @@ export class CodexSession extends BaseSession {
                   };
         if (signal?.aborted) return { status: "cancelled", context: this.context };
         // Compaction summarizes context that already exists, so it has nothing to search for. It
-        // never adds the hosted tools a turn gets, and it drops any it was handed: declaring one
+        // never adds the server tools a turn gets, and it drops any it was handed: declaring one
         // here would let the provider run work during a summary, and would make a name Rig can
         // read back as provider-run appear in a request whose replies are only ever a summary.
         const compactionConfiguration: SessionModelConfiguration = {
             ...configuration,
-            tools: (configuration.tools ?? []).filter((tool) => tool.type !== "cloud"),
+            tools: (configuration.tools ?? []).filter((tool) => tool.server === undefined),
         };
         if (this.credential.name === "bedrock-bearer-token") {
             return this.compactBedrockContext(
@@ -516,30 +509,17 @@ export class CodexSession extends BaseSession {
         let unauthorizedRecoveryStep = 0;
 
         for (;;) {
-            // Tools OpenAI runs on its own backend ride alongside the ones Rig executes, asked for
-            // once per request so a permission change lands on the next request rather than the
-            // next session. Asked inside the loop because a retry is another request: the answer
-            // can have changed while the previous attempt was in flight, and a mode that has since
-            // narrowed must not be handed a search on the way past. Compaction deliberately gets
-            // none of them: it summarizes context that already exists, so it has nothing to search
-            // for.
-            const turnTools = [...(configuration.tools ?? []), ...this.hostedTools()];
-            const turnConfiguration: SessionModelConfiguration = {
-                ...configuration,
-                tools: turnTools,
-            };
+            const turnTools = configuration.tools ?? [];
             const payload = this.createRequest(
                 this.context,
-                turnConfiguration,
+                configuration,
                 model,
                 effort,
                 request.serviceTier,
                 request.structuredOutput,
             );
-            // Derived from exactly the tools this request carries, never from a standing list: a
-            // name Rig did not send cannot be work the provider ran.
-            const hostedToolNames = new Set(
-                turnTools.filter((tool) => tool.type === "cloud").map((tool) => tool.name),
+            const serverToolNames = new Set(
+                turnTools.filter((tool) => tool.server !== undefined).map((tool) => tool.name),
             );
             const attemptUsage: Extract<SessionEvent, { type: "token_usage" }>[] = [];
             yield { type: "block_start" };
@@ -558,7 +538,7 @@ export class CodexSession extends BaseSession {
                       });
                 const mapped = mapOpenAIResponseStream(responseStream, {
                     failureMessage: `${model} failed to generate a response.`,
-                    hostedToolNames,
+                    serverToolNames,
                     requireTerminalEvent: true,
                     vendor: "codex",
                     ...(request.abort === undefined ? {} : { signal: request.abort }),
@@ -583,7 +563,7 @@ export class CodexSession extends BaseSession {
                     yield event;
                 }
 
-                if (request.abort?.aborted) {
+                if (request.abort?.aborted && terminal === undefined) {
                     if (!useSse) this.websocketConnection.reset("request aborted");
                     yield { type: "block_reset" };
                     yield { type: "done", state: "cancelled" };
