@@ -9,7 +9,7 @@ import { requireSlots } from "./requireSlots.js";
 export const slotUpdateTool = defineTool({
     name: "slot_update",
     label: "Update slot entry",
-    description: `Update an existing slot entry's slot, content, description, or purpose. The entry's scope is fixed at creation, so a new slot and any webapp button's webapp must allow that scope. ${slotScopeMatrixDescription} Remove and recreate an entry whose scope should change.`,
+    description: `Update an existing slot entry's slot, content, description, or purpose. The entry's scope is fixed at creation, so a new slot and any applet button's applet must allow that scope. ${slotScopeMatrixDescription} Remove and recreate an entry whose scope should change.`,
     arguments: Type.Object(
         {
             id: Type.String({ description: "The slot entry to update." }),

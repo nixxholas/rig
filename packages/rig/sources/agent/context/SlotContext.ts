@@ -5,31 +5,31 @@ import type {
     UpdateSlotEntryRequest,
 } from "../../protocol/SlotProtocol.js";
 import type {
-    CreateWebappRequest,
-    RevertWebappRequest,
-    UpdateWebappRequest,
-    Webapp,
-} from "../../protocol/WebappProtocol.js";
+    CreateAppletRequest,
+    RevertAppletRequest,
+    UpdateAppletRequest,
+    Applet,
+} from "../../protocol/AppletProtocol.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 
 /**
- * How an agent reaches Happy's UI slots and webapps. The author session is baked in by whoever
+ * How an agent reaches Happy's UI slots and applets. The author session is baked in by whoever
  * builds this context; a tool can never claim another agent's authorship through arguments.
  */
 export interface SlotContext {
     createEntry(request: Omit<CreateSlotEntryRequest, "author">): SlotEntry;
-    createWebapp(
-        request: Omit<CreateWebappRequest, "authorSessionId">,
+    createApplet(
+        request: Omit<CreateAppletRequest, "authorSessionId">,
         sourceFileSystem?: FileSystemContext,
-    ): Promise<Webapp>;
+    ): Promise<Applet>;
     listEntries(filter?: SlotEntryFilter): readonly SlotEntry[];
-    listWebapps(): readonly Webapp[];
+    listApplets(): readonly Applet[];
     removeEntry(id: string): SlotEntry;
-    revertWebapp(name: string, request: RevertWebappRequest): Webapp;
+    revertApplet(name: string, request: RevertAppletRequest): Applet;
     updateEntry(id: string, request: UpdateSlotEntryRequest): SlotEntry;
-    updateWebapp(
+    updateApplet(
         name: string,
-        request: UpdateWebappRequest,
+        request: UpdateAppletRequest,
         sourceFileSystem?: FileSystemContext,
-    ): Promise<Webapp>;
+    ): Promise<Applet>;
 }

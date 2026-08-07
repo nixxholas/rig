@@ -867,9 +867,9 @@ DM выглядят технически естественным первым u
 9. **Проверить миграцию.** Дать агенту перенести один реальный локальный workflow
    на cloud node, сохранив возможность открыть проект локально.
 10. **Проверить trust boundary.** Смоделировать compromised peer, revoked device,
-   offline execution node и нового участника команды до расширения функций.
+    offline execution node и нового участника команды до расширения функций.
 11. **Проверить экономику.** На реальном event trace оценить storage, WebSocket,
-   fan-out, attachments и egress у нескольких провайдеров.
+    fan-out, attachments и egress у нескольких провайдеров.
 12. **Только после этого оценивать community и public channels.**
 
 ## Связи с существующими master plans

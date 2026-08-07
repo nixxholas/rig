@@ -29,7 +29,7 @@ import { BASH_SESSION_STOP_GRACE_MS } from "../agent/context/bashSessionLimits.j
 import type { BashContext } from "../agent/context/BashContext.js";
 import type { SlotContext } from "../agent/context/SlotContext.js";
 import type { SlotEntryStore } from "../slots/index.js";
-import type { WebappStore } from "../webapps/index.js";
+import type { AppletStore } from "../applets/index.js";
 import {
     createGoalContinuationPrompt,
     normalizeGoalObjective,
@@ -430,7 +430,7 @@ export interface InMemorySessionOptions {
     projectId?: string;
     secretRegistry?: SecretRegistry;
     restore?: PersistedSessionState;
-    /** The slot and webapp stores this session's agent may drive through its common tools. */
+    /** The slot and applet stores this session's agent may drive through its common tools. */
     slotStores?: SessionSlotStores;
     taskDrain?: TaskDrain;
     workspaceFeatures?: WorkspaceFeatures;
@@ -450,7 +450,7 @@ export type WorkspaceRunReadiness =
 
 export interface SessionSlotStores {
     entries: SlotEntryStore;
-    webapps: WebappStore;
+    applets: AppletStore;
 }
 
 /** Which parts of Rig's workspace API the agent in this session may use. */
@@ -6422,7 +6422,7 @@ export class InMemorySession {
         this.#appendAgentMessage(runId, message);
     }
 
-    /** The slot and webapp surface handed to this session's tools, with this session as author. */
+    /** The slot and applet surface handed to this session's tools, with this session as author. */
     #slotContext(): SlotContext {
         const stores = this.#slotStores;
         if (stores === undefined) {
@@ -6434,15 +6434,15 @@ export class InMemorySession {
                     ...request,
                     author: { type: "agent", sessionId: this.id },
                 }),
-            createWebapp: (request, sourceFileSystem) =>
-                stores.webapps.create({ ...request, authorSessionId: this.id }, sourceFileSystem),
+            createApplet: (request, sourceFileSystem) =>
+                stores.applets.create({ ...request, authorSessionId: this.id }, sourceFileSystem),
             listEntries: (filter) => stores.entries.list(filter),
-            listWebapps: () => stores.webapps.list(),
+            listApplets: () => stores.applets.list(),
             removeEntry: (id) => stores.entries.remove(id),
-            revertWebapp: (name, request) => stores.webapps.revert(name, request),
+            revertApplet: (name, request) => stores.applets.revert(name, request),
             updateEntry: (id, request) => stores.entries.update(id, request),
-            updateWebapp: (name, request, sourceFileSystem) =>
-                stores.webapps.update(name, request, sourceFileSystem),
+            updateApplet: (name, request, sourceFileSystem) =>
+                stores.applets.update(name, request, sourceFileSystem),
         };
     }
 

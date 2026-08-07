@@ -267,12 +267,12 @@ export type Attachment =
           description: string;
           id: string;
           image: string;
-          kind: "webapp";
+          kind: "applet";
           name: string;
           path?: string;
           query?: Record<string, string>;
           thumbhash: string;
-          webapp: string;
+          applet: string;
       };
 
 export type ContentBlock = TextBlock | ImageBlock;
@@ -2299,9 +2299,9 @@ export type GlobalEvent =
       }
     | {
           createdAt: number;
-          data: { webapps: readonly Webapp[] };
+          data: { applets: readonly Applet[] };
           id: string;
-          type: "webapps_changed";
+          type: "applets_changed";
       }
     | SessionEvent;
 
@@ -2315,8 +2315,8 @@ export type SlotAction =
     | {
           path?: string;
           query?: Record<string, string>;
-          type: "open-webapp";
-          webapp: string;
+          type: "open-applet";
+          applet: string;
       }
     | { message: string; sessionId: string; type: "send-chat" }
     | { message: string; sessionId: string; type: "draft-chat" }
@@ -2355,14 +2355,14 @@ export interface SlotEntry {
     updatedAt: number;
 }
 
-export interface WebappVersion {
+export interface AppletVersion {
     changeDescription: string;
     createdAt: number;
     version: number;
 }
 
-/** An imported, versioned webapp whose current version rig serves as static files. */
-export interface Webapp {
+/** An imported, versioned applet whose current version rig serves as static files. */
+export interface Applet {
     allowedScopes: readonly SlotScope[];
     authorSessionId: string;
     createdAt: number;
@@ -2374,10 +2374,10 @@ export interface Webapp {
     purpose: string;
     sourceDescription?: string;
     updatedAt: number;
-    versions: readonly WebappVersion[];
+    versions: readonly AppletVersion[];
 }
 
-export interface ResolveWebappOpenRequest {
+export interface ResolveAppletOpenRequest {
     path?: string;
     projectId?: string;
     query?: Record<string, string>;
@@ -2385,15 +2385,15 @@ export interface ResolveWebappOpenRequest {
     workspaceId?: string;
 }
 
-export interface ResolveWebappOpenResponse {
+export interface ResolveAppletOpenResponse {
     url: string;
 }
 
-export interface WebappContext {
+export interface AppletContext {
     projectId?: string;
     sessionId?: string;
     version: number;
-    webapp: string;
+    applet: string;
     workspaceId?: string;
 }
 

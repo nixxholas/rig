@@ -57,7 +57,8 @@ export type {
     ShellCommandInput,
     TerminalPresence,
     UserInputAnswers,
-} from "./connectRig.js";export {
+} from "./connectRig.js";
+export {
     PluginAppRequestError,
     PluginCatalogRequestError,
     PluginIconRequestError,

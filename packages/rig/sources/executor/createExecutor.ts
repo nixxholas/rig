@@ -5,10 +5,7 @@ import { Executor, type ExecutorProvider, type Identity } from "@slopus/rig-exec
 
 import type { AgentContext } from "../agent/context/AgentContext.js";
 import type { ConfigProvider, ConfigProviders } from "../config/types.js";
-import type {
-    OneOffInferenceRoute,
-    SearchInferenceRoutes,
-} from "../tools/search/index.js";
+import type { OneOffInferenceRoute, SearchInferenceRoutes } from "../tools/search/index.js";
 import { configuredBedrockExecution } from "./configuredBedrockExecution.js";
 import { claudeExecution } from "./claudeExecution.js";
 import { codexExecution } from "./codexExecution.js";

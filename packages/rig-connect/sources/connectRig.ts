@@ -332,7 +332,6 @@ export interface RigPluginsSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
-
 export interface RigTimelineSubscriptionOptions {
     /** Leave archived chats out, as the daemon does by default. */
     includeArchived?: boolean;
@@ -406,7 +405,6 @@ export interface RigPluginsConnection {
     ): Promise<void>;
     close: () => void;
 }
-
 
 export interface RigTimelineConnection {
     agents: () => readonly TimelineAgentNode[];
@@ -658,7 +656,6 @@ export interface RigConnection {
     renameGroup: (target: GroupTarget, name: string) => MutationId;
     close: () => void;
 }
-
 
 export interface HappyCloudOperationOptions {
     signal?: AbortSignal;
@@ -943,7 +940,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             );
         }
     };
-
 
     const publishTimeline = (entry: TimelineEntry, deltas: readonly TimelineDelta[]): void => {
         if (closed || deltas.length === 0) return;
@@ -1999,7 +1995,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     entry.requiredVersion = Math.max(entry.requiredVersion, changed.data.version);
                     void requestHappyCloudReload(entry);
                     return;
-                }                if (event.type === "plugins_changed") {
+                }
+                if (event.type === "plugins_changed") {
                     const entry = pluginsEntry;
                     if (entry === undefined || !entry.started) return;
                     const update = {
@@ -4928,7 +4925,6 @@ function isRetryableMutationError(error: unknown): boolean {
         error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500
     );
 }
-
 
 function retryAfterMilliseconds(value: string | null, currentTime: number): number | undefined {
     if (value === null) return undefined;

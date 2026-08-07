@@ -51,12 +51,12 @@ describe("createBundledDocsInstructions", () => {
         expect(instructions).toContain("not the current working directory");
     });
 
-    it("points at the design specification for Happy webapp and plugin UI work", () => {
+    it("points at the design specification for Happy applet and plugin UI work", () => {
         const instructions = createBundledDocsInstructions("/happy/docs");
 
         expect(instructions).toContain("`/happy/docs/DESIGN.md`");
-        expect(instructions).toContain("design specification for Happy plugin apps and webapps");
-        expect(instructions).toContain("before designing or building a Happy webapp or plugin UI");
+        expect(instructions).toContain("design specification for Happy plugin apps and applets");
+        expect(instructions).toContain("before designing or building a Happy applet or plugin UI");
     });
 });
 

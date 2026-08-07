@@ -31,7 +31,7 @@ import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
 import type { PresenceStore } from "../presence/index.js";
 import type { SlotEntryStore } from "../slots/index.js";
-import type { WebappStore } from "../webapps/index.js";
+import type { AppletStore } from "../applets/index.js";
 
 export interface SessionStore {
     /** Stable identity for this initialized Rig data generation. */
@@ -46,8 +46,8 @@ export interface SessionStore {
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     /** Agent- and plugin-authored content plugged into the fixed Happy UI slots. */
     readonly slots: SlotEntryStore;
-    /** Imported, versioned webapps rig serves as static files. */
-    readonly webapps: WebappStore;
+    /** Imported, versioned applets rig serves as static files. */
+    readonly applets: AppletStore;
     attachSecret(
         sessionId: string,
         secretId: string,

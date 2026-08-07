@@ -9530,7 +9530,6 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("Sent from another terminal");
         expect(rendered).not.toContain("Unsent from the last terminal");
     });
-
 });
 
 function createDraftApp(options: {

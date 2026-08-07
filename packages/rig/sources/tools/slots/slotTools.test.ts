@@ -43,7 +43,7 @@ describe("slot tools", () => {
         );
     });
 
-    it("discloses an open-webapp button's destination path and query", () => {
+    it("discloses an open-applet button's destination path and query", () => {
         const context = {} as AgentContext;
         const args = {
             slot: "sidebar",
@@ -52,8 +52,8 @@ describe("slot tools", () => {
                 action: {
                     path: "reports/today.html",
                     query: { theme: "dark", view: "compact" },
-                    type: "open-webapp",
-                    webapp: "build-dashboard",
+                    type: "open-applet",
+                    applet: "build-dashboard",
                 },
                 label: "View build",
                 type: "button",
@@ -63,7 +63,7 @@ describe("slot tools", () => {
         } as const;
 
         expect(slotCreateTool.describeAutoPermissionAction?.(args, context)).toContain(
-            'open the webapp "build-dashboard" at path "reports/today.html" with query parameters "theme" set to "dark", "view" set to "compact"',
+            'open the applet "build-dashboard" at path "reports/today.html" with query parameters "theme" set to "dark", "view" set to "compact"',
         );
     });
 

@@ -14,7 +14,7 @@ import { requireSlots } from "./requireSlots.js";
 export const slotCreateTool = defineTool({
     name: "slot_create",
     label: "Create slot entry",
-    description: `Plug content into one of the Happy app's fixed UI slots: the status line, above the composer, the workspace/project title, or the sidebar. Content is markdown text or a button with an action. ${slotScopeMatrixDescription} A webapp button's webapp must allow the entry's scope. Provide exactly the id matching a project, workspace, or session scope. The description says what the entry is and the purpose says why it exists, so anyone can trace it back to this conversation.`,
+    description: `Plug content into one of the Happy app's fixed UI slots: the status line, above the composer, the workspace/project title, or the sidebar. Content is markdown text or a button with an action. ${slotScopeMatrixDescription} An applet button's applet must allow the entry's scope. Provide exactly the id matching a project, workspace, or session scope. The description says what the entry is and the purpose says why it exists, so anyone can trace it back to this conversation.`,
     arguments: Type.Object(
         {
             slot: slotNameSchema,

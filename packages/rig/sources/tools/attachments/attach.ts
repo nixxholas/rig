@@ -31,9 +31,9 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
     const prepare = dependencies.prepare ?? prepareAttachment;
     return defineTool({
         name: "attach",
-        label: "Attach file, webapp, or link",
+        label: "Attach file, applet, or link",
         description:
-            "Prepare a local file, imported webapp, or HTTP(S) link for the application to show with your final answer. Local files must be inside the active workspace or Rig's generated-media directory; paths elsewhere are rejected in every permission mode. In managed Docker sessions, generated media is mounted read-only at /happy/generated and only Rig tools write its host-side files. Adding returns an attachment id; use operation remove with that id if you decide not to show it. Attachments remain pending until this turn finishes normally, and are not visible if the turn is aborted or fails.",
+            "Prepare a local file, imported applet, or HTTP(S) link for the application to show with your final answer. Local files must be inside the active workspace or Rig's generated-media directory; paths elsewhere are rejected in every permission mode. In managed Docker sessions, generated media is mounted read-only at /happy/generated and only Rig tools write its host-side files. Adding returns an attachment id; use operation remove with that id if you decide not to show it. Attachments remain pending until this turn finishes normally, and are not visible if the turn is aborted or fails.",
         arguments: attachArgumentsSchema,
         returnType: attachResultSchema,
         steerable: true,
@@ -56,9 +56,9 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
                     removed: attachments.remove(args.id),
                 };
             }
-            if ("webapp" in args) {
-                const attachment = await attachments.add(webappSourceKey(args), (id) =>
-                    prepareWebappAttachment(args, id, context),
+            if ("applet" in args) {
+                const attachment = await attachments.add(appletSourceKey(args), (id) =>
+                    prepareAppletAttachment(args, id, context),
                 );
                 return { attachment, id: attachment.id, operation: "add" as const };
             }
@@ -166,8 +166,8 @@ function describeAttachAction(args: Static<typeof attachArgumentsSchema>): strin
     if (args.url !== undefined) {
         return `fetching URL metadata from ${quoteVisibleExact(args.url)}, verifying the domain with Anthropic's web safety service, and preparing it as a final-message attachment. Access: external network requests`;
     }
-    if (args.webapp !== undefined) {
-        return `preparing the imported webapp ${quoteVisibleExact(args.webapp)} as a final-message attachment`;
+    if (args.applet !== undefined) {
+        return `preparing the imported applet ${quoteVisibleExact(args.applet)} as a final-message attachment`;
     }
     return args.path === undefined
         ? "preparing a final-message attachment"
@@ -184,28 +184,28 @@ function parseAttachArguments(args: Static<typeof attachArgumentsSchema>): Attac
     );
 }
 
-function webappSourceKey(args: Extract<AttachArguments, { webapp: string }>): string {
-    return `webapp\u0000${args.webapp}\u0000${args.path ?? ""}\u0000${JSON.stringify(args.query ?? {})}`;
+function appletSourceKey(args: Extract<AttachArguments, { applet: string }>): string {
+    return `applet\u0000${args.applet}\u0000${args.path ?? ""}\u0000${JSON.stringify(args.query ?? {})}`;
 }
 
-async function prepareWebappAttachment(
-    args: Extract<AttachArguments, { webapp: string }>,
+async function prepareAppletAttachment(
+    args: Extract<AttachArguments, { applet: string }>,
     id: string,
     context: AgentContext,
 ) {
-    const webapp = context.slots?.listWebapps().find((candidate) => candidate.name === args.webapp);
-    if (webapp === undefined) {
-        throw new Error(`No webapp named ${JSON.stringify(args.webapp)} exists.`);
+    const applet = context.slots?.listApplets().find((candidate) => candidate.name === args.applet);
+    if (applet === undefined) {
+        throw new Error(`No applet named ${JSON.stringify(args.applet)} exists.`);
     }
     return {
-        description: webapp.description,
+        description: applet.description,
         id,
-        image: webapp.iconUrl,
-        kind: "webapp" as const,
-        name: webapp.name,
+        image: applet.iconUrl,
+        kind: "applet" as const,
+        name: applet.name,
         ...(args.path === undefined ? {} : { path: args.path }),
         ...(args.query === undefined ? {} : { query: args.query }),
-        thumbhash: webapp.iconThumbhash,
-        webapp: webapp.name,
+        thumbhash: applet.iconThumbhash,
+        applet: applet.name,
     };
 }

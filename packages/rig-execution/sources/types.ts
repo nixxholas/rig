@@ -218,9 +218,7 @@ export interface CustomTool {
     };
 }
 
-export type Tool<TParameters extends TSchema = TSchema> =
-    | FunctionTool<TParameters>
-    | CustomTool;
+export type Tool<TParameters extends TSchema = TSchema> = FunctionTool<TParameters> | CustomTool;
 
 export interface PreambleMessage {
     role: "developer" | "user";

@@ -4,13 +4,7 @@ export function toToolExecutionEndResult(
     result: ToolResultBlock,
 ): Pick<
     ToolResultBlock,
-    | "display"
-    | "failure"
-    | "isError"
-    | "presentation"
-    | "toolCallId"
-    | "toolName"
-    | "type"
+    "display" | "failure" | "isError" | "presentation" | "toolCallId" | "toolName" | "type"
 > {
     return {
         type: "tool_result",

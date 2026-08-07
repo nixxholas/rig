@@ -104,7 +104,7 @@ They arrive on the global stream only.
 | `presence_changed` | The user switches presence.                                                       | `presence`: current `PresenceSnapshot`     | **No** |
 | `plugins_changed`  | Plugins finish loading at startup, one is installed or uninstalled, or one stops. | `plugins`: every installed `PluginSummary` | **No** |
 | `slots_changed`    | A slot entry is created, updated, or removed.                                     | `entries`: every current `SlotEntry`       | **No** |
-| `webapps_changed`  | A webapp is imported, updated with a new version, or reverted.                    | `webapps`: every current `Webapp`          | **No** |
+| `applets_changed`  | An applet is imported, updated with a new version, or reverted.                   | `applets`: every current `Applet`          | **No** |
 
 All four are live-only and carry the complete current state, so a client that
 reconnects reads what is there now instead of replaying past changes.
@@ -117,12 +117,12 @@ for a daemon restart to show the current set.
 
 `slots_changed` carries every slot entry — agent-authored content plugged into
 the Happy app's fixed UI slots — with each entry's slot, scope, TypeBox-typed
-content, author session, description, and purpose. `webapps_changed` carries
-every webapp with its description, purpose, author session, version history,
+content, author session, description, and purpose. `applets_changed` carries
+every applet with its description, purpose, author session, version history,
 and which imported version is current. Entries are read and changed through
-`GET`/`POST /slots` and `PATCH`/`DELETE /slots/{id}`; webapps through
-`GET`/`POST /webapps`, `POST /webapps/{name}/versions`,
-`POST /webapps/{name}/revert`, and `GET /webapps/{name}/files/{path}` for the
+`GET`/`POST /slots` and `PATCH`/`DELETE /slots/{id}`; applets through
+`GET`/`POST /applets`, `POST /applets/{name}/versions`,
+`POST /applets/{name}/revert`, and `GET /applets/{name}/files/{path}` for the
 current version's static files.
 
 ## `agent_event` subtypes

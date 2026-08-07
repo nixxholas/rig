@@ -2,7 +2,7 @@
 
 This is the authoritative visual specification for a **plugin app**: the HTML
 document a Happy (2) plugin ships and Happy renders inside a sandboxed iframe
-(an MCP App view, or a webapp served on its own isolated origin).
+(an MCP App view, or an applet served on its own isolated origin).
 
 It is written to be followed literally. Every rule states a name, a number, or a
 condition. Where a choice exists, this document makes it for you. If you are a

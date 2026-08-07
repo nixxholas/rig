@@ -957,10 +957,7 @@ function unreadOf(sessions: readonly GroupSession[]): GroupUnread {
     return {
         attentionCount,
         count,
-        reason:
-            attentionCount > 0
-                ? "attention_needed"
-                  : "turn_finished",
+        reason: attentionCount > 0 ? "attention_needed" : "turn_finished",
         ...(since === undefined ? {} : { since }),
     };
 }

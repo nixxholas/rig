@@ -334,8 +334,8 @@ export const happySlotActionSchema = Type.Union([
         {
             path: Type.Optional(Type.String()),
             query: Type.Optional(Type.Record(Type.String(), Type.String())),
-            type: Type.Literal("open-webapp"),
-            webapp: Type.String(),
+            type: Type.Literal("open-applet"),
+            applet: Type.String(),
         },
         exact,
     ),

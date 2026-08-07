@@ -26,10 +26,10 @@ describe("selectCommonToolsForModel", () => {
             "slot_update",
             "slot_remove",
             "slot_list",
-            "webapp_create",
-            "webapp_update",
-            "webapp_revert",
-            "webapp_list",
+            "applet_create",
+            "applet_update",
+            "applet_revert",
+            "applet_list",
         ]);
     });
 
@@ -53,10 +53,10 @@ describe("selectCommonToolsForModel", () => {
             "slot_update",
             "slot_remove",
             "slot_list",
-            "webapp_create",
-            "webapp_update",
-            "webapp_revert",
-            "webapp_list",
+            "applet_create",
+            "applet_update",
+            "applet_revert",
+            "applet_list",
         ]);
     });
 

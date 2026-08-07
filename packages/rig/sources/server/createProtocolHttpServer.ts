@@ -204,35 +204,35 @@ import {
 } from "../plugins/index.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import {
-    describeWebappScopeNotAllowed,
-    readWebappFile,
-    resolveWebappOpenUrl,
-    WebappContextTokenStore,
-    WebappInvalidError,
-    WebappNotFoundError,
-} from "../webapps/index.js";
+    describeAppletScopeNotAllowed,
+    readAppletFile,
+    resolveAppletOpenUrl,
+    AppletContextTokenStore,
+    AppletInvalidError,
+    AppletNotFoundError,
+} from "../applets/index.js";
 import { MAX_ATTACHMENT_FILE_BYTES } from "../tools/attachments/prepareAttachment.js";
 import {
-    createWebappRequestSchema,
-    resolveWebappOpenRequestSchema,
+    createAppletRequestSchema,
+    resolveAppletOpenRequestSchema,
     slotNameSchema,
 } from "../protocol/index.js";
 import type {
     CreateSlotEntryRequest,
     ListSlotEntriesResponse,
-    ListWebappsResponse,
-    ResolveWebappOpenRequest,
-    ResolveWebappOpenResponse,
-    RevertWebappRequest,
+    ListAppletsResponse,
+    ResolveAppletOpenRequest,
+    ResolveAppletOpenResponse,
+    RevertAppletRequest,
     SlotEntryResponse,
     SlotManagementErrorCode,
     SlotScope,
     UpdateSlotEntryRequest,
-    UpdateWebappRequest,
-    Webapp,
-    WebappContext,
-    WebappManagementErrorCode,
-    WebappResponse,
+    UpdateAppletRequest,
+    Applet,
+    AppletContext,
+    AppletManagementErrorCode,
+    AppletResponse,
 } from "../protocol/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
@@ -336,7 +336,7 @@ export function createProtocolHttpServer(
         });
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
-    const webappContextTokens = new WebappContextTokenStore();
+    const appletContextTokens = new AppletContextTokenStore();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
         inferenceMaxRetries: options.inferenceMaxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES,
         gitStateTracker: options.gitStateTracker,
@@ -401,7 +401,7 @@ export function createProtocolHttpServer(
                 options.getProviderQuota,
                 sessionEventStreamLeases,
                 sessionTerminals,
-                webappContextTokens,
+                appletContextTokens,
             );
         const handling =
             mutating && options.taskDrain !== undefined ? options.taskDrain.run(handle) : handle();
@@ -508,12 +508,12 @@ async function handleRequest(
     getProviderQuota: ((providerId: string) => Promise<ProviderQuota | undefined>) | undefined,
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     sessionTerminals: SessionTerminalTracker,
-    webappContextTokens: WebappContextTokenStore,
+    appletContextTokens: AppletContextTokenStore,
 ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://unix");
     const route = matchRoute(url.pathname);
     const p2pPeerRoute = matchP2pPeerRoute(url);
-    if (route?.name === "webapp-context") {
+    if (route?.name === "applet-context") {
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
@@ -522,13 +522,13 @@ async function handleRequest(
         const context =
             contextToken === null
                 ? undefined
-                : webappContextTokens.exchange(route.webappName, contextToken);
+                : appletContextTokens.exchange(route.appletName, contextToken);
         if (context === undefined) {
             sendJson(response, 401, { error: "Unauthorized" });
             return;
         }
         response.setHeader("cache-control", "no-store");
-        sendJson<WebappContext>(response, 200, context);
+        sendJson<AppletContext>(response, 200, context);
         return;
     }
     if (!isAuthorizedProtocolRequest(request, token)) {
@@ -1212,9 +1212,9 @@ async function handleRequest(
         sendJson(response, 405, { error: "Method not allowed" });
         return;
     }
-    if (route.name === "webapps") {
+    if (route.name === "applets") {
         if (request.method === "GET") {
-            sendJson<ListWebappsResponse>(response, 200, { webapps: store.webapps.list() });
+            sendJson<ListAppletsResponse>(response, 200, { applets: store.applets.list() });
             return;
         }
         if (request.method === "POST") {
@@ -1222,25 +1222,25 @@ async function handleRequest(
             try {
                 body = await readJson<unknown>(request, 64 * 1024);
             } catch (error) {
-                sendInvalidWebappBody(response, error);
+                sendInvalidAppletBody(response, error);
                 return;
             }
-            if (!Value.Check(createWebappRequestSchema, body)) {
-                sendWebappManagementError(
+            if (!Value.Check(createAppletRequestSchema, body)) {
+                sendAppletManagementError(
                     response,
                     400,
                     "invalid_request",
-                    "A webapp import needs a kebab-case name, description, purpose, author session, source folder path, and 512 by 512 PNG icon path.",
+                    "An applet import needs a kebab-case name, description, purpose, author session, source folder path, and 512 by 512 PNG icon path.",
                 );
                 return;
             }
             try {
-                sendJson<WebappResponse>(response, 201, {
-                    webapp: await store.webapps.create(body),
+                sendJson<AppletResponse>(response, 201, {
+                    applet: await store.applets.create(body),
                 });
             } catch (error) {
-                if (error instanceof WebappInvalidError) {
-                    sendWebappManagementError(response, 400, "invalid_webapp", error.message);
+                if (error instanceof AppletInvalidError) {
+                    sendAppletManagementError(response, 400, "invalid_applet", error.message);
                     return;
                 }
                 throw error;
@@ -1250,7 +1250,7 @@ async function handleRequest(
         sendJson(response, 405, { error: "Method not allowed" });
         return;
     }
-    if (route.name === "webapp-versions" || route.name === "webapp-revert") {
+    if (route.name === "applet-versions" || route.name === "applet-revert") {
         if (request.method !== "POST") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
@@ -1259,29 +1259,29 @@ async function handleRequest(
         try {
             body = await readJson<unknown>(request, 64 * 1024);
         } catch (error) {
-            sendInvalidWebappBody(response, error);
+            sendInvalidAppletBody(response, error);
             return;
         }
         try {
-            const webapp =
-                route.name === "webapp-versions"
-                    ? await store.webapps.update(route.webappName, body as UpdateWebappRequest)
-                    : store.webapps.revert(route.webappName, body as RevertWebappRequest);
-            sendJson<WebappResponse>(response, 200, { webapp });
+            const applet =
+                route.name === "applet-versions"
+                    ? await store.applets.update(route.appletName, body as UpdateAppletRequest)
+                    : store.applets.revert(route.appletName, body as RevertAppletRequest);
+            sendJson<AppletResponse>(response, 200, { applet });
         } catch (error) {
-            if (error instanceof WebappInvalidError) {
-                sendWebappManagementError(response, 400, "invalid_webapp", error.message);
+            if (error instanceof AppletInvalidError) {
+                sendAppletManagementError(response, 400, "invalid_applet", error.message);
                 return;
             }
-            if (error instanceof WebappNotFoundError) {
-                sendWebappManagementError(response, 404, "webapp_not_found", error.message);
+            if (error instanceof AppletNotFoundError) {
+                sendAppletManagementError(response, 404, "applet_not_found", error.message);
                 return;
             }
             throw error;
         }
         return;
     }
-    if (route.name === "webapp-open") {
+    if (route.name === "applet-open") {
         if (request.method !== "POST") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
@@ -1290,55 +1290,55 @@ async function handleRequest(
         try {
             body = await readJson<unknown>(request, 64 * 1024);
         } catch (error) {
-            sendInvalidWebappBody(response, error);
+            sendInvalidAppletBody(response, error);
             return;
         }
-        if (!Value.Check(resolveWebappOpenRequestSchema, body)) {
-            sendWebappManagementError(
+        if (!Value.Check(resolveAppletOpenRequestSchema, body)) {
+            sendAppletManagementError(
                 response,
                 400,
                 "invalid_request",
-                "A webapp open request must contain only a relative path, string query values, and optional session, project, or workspace ids.",
+                "An applet open request must contain only a relative path, string query values, and optional session, project, or workspace ids.",
             );
             return;
         }
-        const webapp = store.webapps.get(route.webappName);
-        if (webapp === undefined) {
-            sendWebappManagementError(
+        const applet = store.applets.get(route.appletName);
+        if (applet === undefined) {
+            sendAppletManagementError(
                 response,
                 404,
-                "webapp_not_found",
-                `No webapp named ${JSON.stringify(route.webappName)} exists.`,
+                "applet_not_found",
+                `No applet named ${JSON.stringify(route.appletName)} exists.`,
             );
             return;
         }
-        const resolution = resolveWebappContext(store, webapp, body);
+        const resolution = resolveAppletContext(store, applet, body);
         if (resolution.type === "error") {
-            sendWebappManagementError(response, 400, resolution.code, resolution.message);
+            sendAppletManagementError(response, 400, resolution.code, resolution.message);
             return;
         }
-        sendJson<ResolveWebappOpenResponse>(response, 200, {
-            url: resolveWebappOpenUrl(webapp.name, body, resolution.context, webappContextTokens),
+        sendJson<ResolveAppletOpenResponse>(response, 200, {
+            url: resolveAppletOpenUrl(applet.name, body, resolution.context, appletContextTokens),
         });
         return;
     }
-    if (route.name === "webapp-icon") {
+    if (route.name === "applet-icon") {
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if (store.webapps.get(route.webappName) === undefined) {
-            sendWebappManagementError(
+        if (store.applets.get(route.appletName) === undefined) {
+            sendAppletManagementError(
                 response,
                 404,
-                "webapp_not_found",
-                `No webapp named ${JSON.stringify(route.webappName)} exists.`,
+                "applet_not_found",
+                `No applet named ${JSON.stringify(route.appletName)} exists.`,
             );
             return;
         }
-        const icon = await store.webapps.readIcon(route.webappName, route.format);
+        const icon = await store.applets.readIcon(route.appletName, route.format);
         if (icon.type !== "file") {
-            sendWebappManagementError(response, 404, "webapp_not_found", "Webapp icon not found.");
+            sendAppletManagementError(response, 404, "applet_not_found", "Applet icon not found.");
             return;
         }
         response.writeHead(200, {
@@ -1350,37 +1350,37 @@ async function handleRequest(
         response.end(icon.data);
         return;
     }
-    if (route.name === "webapp-file") {
+    if (route.name === "applet-file") {
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const webapp = store.webapps.get(route.webappName);
-        if (webapp === undefined) {
-            sendWebappManagementError(
+        const applet = store.applets.get(route.appletName);
+        if (applet === undefined) {
+            sendAppletManagementError(
                 response,
                 404,
-                "webapp_not_found",
-                `No webapp named ${JSON.stringify(route.webappName)} exists.`,
+                "applet_not_found",
+                `No applet named ${JSON.stringify(route.appletName)} exists.`,
             );
             return;
         }
-        const file = await readWebappFile(
-            route.webappName,
-            webapp.currentVersion,
-            route.webappFilePath,
+        const file = await readAppletFile(
+            route.appletName,
+            applet.currentVersion,
+            route.appletFilePath,
         );
         if (file.type === "invalid_path") {
-            sendWebappManagementError(
+            sendAppletManagementError(
                 response,
                 400,
                 "invalid_request",
-                "Webapp file paths may not traverse outside the webapp folder or name dotfiles.",
+                "Applet file paths may not traverse outside the applet folder or name dotfiles.",
             );
             return;
         }
         if (file.type === "not_found") {
-            sendWebappManagementError(response, 404, "webapp_not_found", "Webapp file not found.");
+            sendAppletManagementError(response, 404, "applet_not_found", "Applet file not found.");
             return;
         }
         response.writeHead(200, {
@@ -3705,18 +3705,18 @@ function parseArchivedFilter(value: string | null): boolean | "all" | undefined 
     return undefined;
 }
 
-function resolveWebappContext(
+function resolveAppletContext(
     store: SessionStore,
-    webapp: Webapp,
-    request: ResolveWebappOpenRequest,
+    applet: Applet,
+    request: ResolveAppletOpenRequest,
 ):
-    | { context: WebappContext; type: "context" }
+    | { context: AppletContext; type: "context" }
     | {
-          code: "invalid_request" | "invalid_webapp";
+          code: "invalid_request" | "invalid_applet";
           message: string;
           type: "error";
       } {
-    let context: WebappContext;
+    let context: AppletContext;
     let scope: SlotScope;
     if (request.sessionId !== undefined) {
         const session = store.get(request.sessionId);
@@ -3746,8 +3746,8 @@ function resolveWebappContext(
             };
         }
         context = {
-            webapp: webapp.name,
-            version: webapp.currentVersion,
+            applet: applet.name,
+            version: applet.currentVersion,
             sessionId: request.sessionId,
             projectId: identity.projectId,
             ...(identity.workspaceId === undefined ? {} : { workspaceId: identity.workspaceId }),
@@ -3757,7 +3757,7 @@ function resolveWebappContext(
         if (request.workspaceId !== undefined && request.projectId === undefined) {
             return {
                 code: "invalid_request",
-                message: "A workspace webapp context also needs its project id.",
+                message: "A workspace applet context also needs its project id.",
                 type: "error",
             };
         }
@@ -3780,8 +3780,8 @@ function resolveWebappContext(
             };
         }
         context = {
-            webapp: webapp.name,
-            version: webapp.currentVersion,
+            applet: applet.name,
+            version: applet.currentVersion,
             ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
             ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
         };
@@ -3792,10 +3792,10 @@ function resolveWebappContext(
                   ? "project"
                   : "everywhere";
     }
-    if (!webapp.allowedScopes.includes(scope)) {
+    if (!applet.allowedScopes.includes(scope)) {
         return {
-            code: "invalid_webapp",
-            message: describeWebappScopeNotAllowed(webapp, scope),
+            code: "invalid_applet",
+            message: describeAppletScopeNotAllowed(applet, scope),
             type: "error",
         };
     }
@@ -3860,7 +3860,7 @@ function matchRoute(pathname: string):
               | "shutdown"
               | "slots"
               | "timeline"
-              | "webapps";
+              | "applets";
           sessionId?: undefined;
       }
     | {
@@ -3875,17 +3875,17 @@ function matchRoute(pathname: string):
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
     | {
-          name: "webapp-context" | "webapp-open" | "webapp-revert" | "webapp-versions";
+          name: "applet-context" | "applet-open" | "applet-revert" | "applet-versions";
           sessionId?: undefined;
-          webappName: string;
+          appletName: string;
       }
     | {
           format: "ico" | "png";
-          name: "webapp-icon";
+          name: "applet-icon";
           sessionId?: undefined;
-          webappName: string;
+          appletName: string;
       }
-    | { name: "webapp-file"; sessionId?: undefined; webappFilePath: string; webappName: string }
+    | { name: "applet-file"; sessionId?: undefined; appletFilePath: string; appletName: string }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | {
           name: "plugin-log" | "plugin-uninstall";
@@ -4055,46 +4055,46 @@ function matchRoute(pathname: string):
     if (pathname === "/sessions") return { name: "sessions" };
     if (pathname === "/shutdown") return { name: "shutdown" };
     if (pathname === "/slots") return { name: "slots" };
-    if (pathname === "/webapps") return { name: "webapps" };
+    if (pathname === "/applets") return { name: "applets" };
 
-    const webappIcon = /^\/webapps\/([^/]+)\/favicon\.(ico|png)$/u.exec(pathname);
-    if (webappIcon !== null) {
-        const webappName = decodeUrlComponent(webappIcon[1]);
-        if (webappName === undefined) return undefined;
+    const appletIcon = /^\/applets\/([^/]+)\/favicon\.(ico|png)$/u.exec(pathname);
+    if (appletIcon !== null) {
+        const appletName = decodeUrlComponent(appletIcon[1]);
+        if (appletName === undefined) return undefined;
         return {
-            format: webappIcon[2] as "ico" | "png",
-            name: "webapp-icon",
-            webappName,
+            format: appletIcon[2] as "ico" | "png",
+            name: "applet-icon",
+            appletName,
         };
     }
-    const webappFile = /^\/webapps\/([^/]+)\/files(?:\/(.*))?$/u.exec(pathname);
-    if (webappFile !== null) {
-        const webappName = decodeUrlComponent(webappFile[1]);
-        if (webappName === undefined) return undefined;
-        const rawSegments = (webappFile[2] ?? "").split("/").filter((segment) => segment !== "");
+    const appletFile = /^\/applets\/([^/]+)\/files(?:\/(.*))?$/u.exec(pathname);
+    if (appletFile !== null) {
+        const appletName = decodeUrlComponent(appletFile[1]);
+        if (appletName === undefined) return undefined;
+        const rawSegments = (appletFile[2] ?? "").split("/").filter((segment) => segment !== "");
         const segments = rawSegments.map(decodeUrlComponent);
         if (segments.some((segment) => segment === undefined)) return undefined;
-        return { name: "webapp-file", webappFilePath: segments.join("/"), webappName };
+        return { name: "applet-file", appletFilePath: segments.join("/"), appletName };
     }
-    const webappContext = /^\/webapps\/([^/]+)\/context$/u.exec(pathname);
-    if (webappContext !== null) {
-        const webappName = decodeUrlComponent(webappContext[1]);
-        if (webappName === undefined) return undefined;
-        return { name: "webapp-context", webappName };
+    const appletContext = /^\/applets\/([^/]+)\/context$/u.exec(pathname);
+    if (appletContext !== null) {
+        const appletName = decodeUrlComponent(appletContext[1]);
+        if (appletName === undefined) return undefined;
+        return { name: "applet-context", appletName };
     }
-    const webappOpen = /^\/webapps\/([^/]+)\/open$/u.exec(pathname);
-    if (webappOpen !== null) {
-        const webappName = decodeUrlComponent(webappOpen[1]);
-        if (webappName === undefined) return undefined;
-        return { name: "webapp-open", webappName };
+    const appletOpen = /^\/applets\/([^/]+)\/open$/u.exec(pathname);
+    if (appletOpen !== null) {
+        const appletName = decodeUrlComponent(appletOpen[1]);
+        if (appletName === undefined) return undefined;
+        return { name: "applet-open", appletName };
     }
-    const webappOperation = /^\/webapps\/([^/]+)\/(versions|revert)$/u.exec(pathname);
-    if (webappOperation !== null) {
-        const webappName = decodeUrlComponent(webappOperation[1]);
-        if (webappName === undefined) return undefined;
+    const appletOperation = /^\/applets\/([^/]+)\/(versions|revert)$/u.exec(pathname);
+    if (appletOperation !== null) {
+        const appletName = decodeUrlComponent(appletOperation[1]);
+        if (appletName === undefined) return undefined;
         return {
-            name: webappOperation[2] === "versions" ? "webapp-versions" : "webapp-revert",
-            webappName,
+            name: appletOperation[2] === "versions" ? "applet-versions" : "applet-revert",
+            appletName,
         };
     }
 
@@ -4544,28 +4544,28 @@ function sendInvalidSlotBody(response: ServerResponse, error: unknown): void {
     sendSlotManagementError(response, 400, "invalid_request", "A slot entry must be valid JSON.");
 }
 
-function sendInvalidWebappBody(response: ServerResponse, error: unknown): void {
+function sendInvalidAppletBody(response: ServerResponse, error: unknown): void {
     if (error instanceof RequestBodyTooLargeError) {
-        sendWebappManagementError(
+        sendAppletManagementError(
             response,
             413,
             "invalid_request",
-            "The webapp request is larger than the allowed limit.",
+            "The applet request is larger than the allowed limit.",
         );
         return;
     }
-    sendWebappManagementError(
+    sendAppletManagementError(
         response,
         400,
         "invalid_request",
-        "A webapp request must be valid JSON.",
+        "An applet request must be valid JSON.",
     );
 }
 
-function sendWebappManagementError(
+function sendAppletManagementError(
     response: ServerResponse,
     status: number,
-    code: WebappManagementErrorCode,
+    code: AppletManagementErrorCode,
     message: string,
 ): void {
     sendJson(response, status, { error: { code, message } });
@@ -4673,8 +4673,8 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "secret-registrations") return request.method === "POST";
     if (route.name === "slots") return request.method === "POST";
     if (route.name === "slot-entry") return request.method !== "GET";
-    if (route.name === "webapps") return request.method === "POST";
-    if (route.name === "webapp-versions" || route.name === "webapp-revert") {
+    if (route.name === "applets") return request.method === "POST";
+    if (route.name === "applet-versions" || route.name === "applet-revert") {
         return request.method === "POST";
     }
     if (route.name === "secret-registration") return request.method === "DELETE";

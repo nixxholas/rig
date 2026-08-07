@@ -20,9 +20,9 @@ import {
     type SlotsChangedEvent,
     type UpdateSlotEntryRequest,
 } from "../protocol/SlotProtocol.js";
-import type { Webapp } from "../protocol/WebappProtocol.js";
+import type { Applet } from "../protocol/AppletProtocol.js";
 import { allowedSlotScopes, describeAllowedScopesForSlot } from "../protocol/SlotScopeRules.js";
-import { describeWebappScopeNotAllowed } from "../webapps/describeWebappScopeNotAllowed.js";
+import { describeAppletScopeNotAllowed } from "../applets/describeAppletScopeNotAllowed.js";
 import { SlotEntryInvalidError } from "./SlotEntryInvalidError.js";
 import { SlotEntryNotFoundError } from "./SlotEntryNotFoundError.js";
 
@@ -36,7 +36,7 @@ export interface SlotEntryStoreOptions {
      */
     sessionExists: (sessionId: string) => boolean;
     tx: () => TX;
-    webapp: (name: string) => Webapp | undefined;
+    applet: (name: string) => Applet | undefined;
 }
 
 /**
@@ -53,14 +53,14 @@ export class SlotEntryStore {
     readonly #publish: (event: SlotsChangedEvent) => void;
     readonly #sessionExists: (sessionId: string) => boolean;
     readonly #tx: () => TX;
-    readonly #webapp: (name: string) => Webapp | undefined;
+    readonly #applet: (name: string) => Applet | undefined;
 
     constructor(options: SlotEntryStoreOptions) {
         this.#now = options.now ?? Date.now;
         this.#publish = options.publish;
         this.#sessionExists = options.sessionExists;
         this.#tx = options.tx;
-        this.#webapp = options.webapp;
+        this.#applet = options.applet;
     }
 
     create(request: CreateSlotEntryRequest): SlotEntry {
@@ -68,7 +68,7 @@ export class SlotEntryStore {
             throw new SlotEntryInvalidError(describeInvalid(createSlotEntryRequestSchema, request));
         }
         requireAllowedSlotScope(request.slot, request.scope);
-        this.#requireWebappScope(request.content, request.scope);
+        this.#requireAppletScope(request.content, request.scope);
         const now = this.#now();
         const entry: SlotEntry = {
             id: createId(),
@@ -136,7 +136,7 @@ export class SlotEntryStore {
                 requireAllowedSlotScope(entry.slot, entry.scope);
             }
             if (request.slot !== undefined || request.content !== undefined) {
-                this.#requireWebappScope(entry.content, entry.scope);
+                this.#requireAppletScope(entry.content, entry.scope);
             }
             slotEntryUpdate(tx, entry);
             return entry;
@@ -178,11 +178,11 @@ export class SlotEntryStore {
         }
     }
 
-    #requireWebappScope(content: SlotEntry["content"], scope: SlotEntry["scope"]): void {
-        if (content.type !== "button" || content.action.type !== "open-webapp") return;
-        const webapp = this.#webapp(content.action.webapp);
-        if (webapp === undefined || webapp.allowedScopes.includes(scope)) return;
-        throw new SlotEntryInvalidError(describeWebappScopeNotAllowed(webapp, scope));
+    #requireAppletScope(content: SlotEntry["content"], scope: SlotEntry["scope"]): void {
+        if (content.type !== "button" || content.action.type !== "open-applet") return;
+        const applet = this.#applet(content.action.applet);
+        if (applet === undefined || applet.allowedScopes.includes(scope)) return;
+        throw new SlotEntryInvalidError(describeAppletScopeNotAllowed(applet, scope));
     }
 }
 

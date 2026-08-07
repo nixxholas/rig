@@ -233,9 +233,7 @@ describe("Grok server tool goldens", () => {
             arguments: '{"type":"search","query":"Rig"}',
         });
         expect(
-            events.find(
-                (event) => event.type === "toolcall_end" && event.callId === "ws_complete",
-            ),
+            events.find((event) => event.type === "toolcall_end" && event.callId === "ws_complete"),
         ).not.toHaveProperty("incomplete");
         expect(result.stopReason).toBe("length");
     });
@@ -336,9 +334,9 @@ describe("Grok server tool goldens", () => {
 
         expect(result.toolCalls.map((call) => call.name)).toEqual(["format_document"]);
         expect(result.stopReason).toBe("tool_use");
-        expect(events.some((event) => event.type === "toolcall_start" && event.server === true)).toBe(
-            false,
-        );
+        expect(
+            events.some((event) => event.type === "toolcall_start" && event.server === true),
+        ).toBe(false);
     });
 
     // A name nobody declared is a model mistake, and the model has to hear about it. Reading it
@@ -367,9 +365,9 @@ describe("Grok server tool goldens", () => {
 
         expect(result.toolCalls.map((call) => call.name)).toEqual(["search_the_internet"]);
         expect(result.stopReason).toBe("tool_use");
-        expect(events.some((event) => event.type === "toolcall_start" && event.server === true)).toBe(
-            false,
-        );
+        expect(
+            events.some((event) => event.type === "toolcall_start" && event.server === true),
+        ).toBe(false);
     });
 
     it("treats every tool call as the client's when no server tool was requested", async () => {
@@ -406,9 +404,9 @@ describe("Grok server tool goldens", () => {
 
         expect(result.toolCalls.map((call) => call.name)).toEqual(["x_keyword_search"]);
         expect(result.stopReason).toBe("tool_use");
-        expect(events.some((event) => event.type === "toolcall_start" && event.server === true)).toBe(
-            false,
-        );
+        expect(
+            events.some((event) => event.type === "toolcall_start" && event.server === true),
+        ).toBe(false);
     });
 
     it("reports a server call that only ever appears in the terminal response", async () => {
@@ -525,9 +523,9 @@ describe("Grok server tool goldens", () => {
             next = await mapped.next();
         }
         expect(next.value.toolCalls.map((call) => call.name)).toEqual(["grammar_tool"]);
-        expect(events.some((event) => event.type === "toolcall_start" && event.server === true)).toBe(
-            false,
-        );
+        expect(
+            events.some((event) => event.type === "toolcall_start" && event.server === true),
+        ).toBe(false);
     });
 
     it("settles multiple server calls and terminal text before ending a mixed client batch", async () => {
@@ -902,7 +900,6 @@ function serverToolCallStarts(
             event.type === "toolcall_start" && event.server === true,
     );
 }
-
 
 /** Provider-owned results that followed a server tool call, in emission order. */
 function serverToolCallResults(

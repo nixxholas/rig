@@ -223,7 +223,9 @@ describeLive("GrokProvider live", () => {
         );
 
         const searches = events.filter(
-            (event): event is Extract<SessionEvent, { type: "toolcall_start" }> & { server: true } =>
+            (
+                event,
+            ): event is Extract<SessionEvent, { type: "toolcall_start" }> & { server: true } =>
                 event.type === "toolcall_start" && event.server === true,
         );
         expect(searches.length).toBeGreaterThan(0);

@@ -669,7 +669,7 @@ API exposure grants substantial authority. A trusted instance can read
 transcripts, send messages that run agents and tools, change project files,
 install plugins, and manage workspaces as this Rig user. Only configure machines
 you trust to act as you. Rig does not forward P2P topology routes, daemon
-shutdown, the debug inspector, or one-time webapp context exchanges.
+shutdown, the debug inspector, or one-time applet context exchanges.
 
 When `relay_url` is absent, Iroh uses its default discovery and relay services.
 The stable Rig identity seed and the Iroh transport identity are stored

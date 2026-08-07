@@ -567,7 +567,7 @@ export const slotEntries = sqliteTable("slot_entries", {
     updatedAtMs: integer("updated_at_ms").notNull(),
 });
 
-export const webapps = sqliteTable("webapps", {
+export const applets = sqliteTable("applets", {
     name: text("name").primaryKey(),
     description: text("description").notNull(),
     purpose: text("purpose").notNull(),
@@ -580,17 +580,17 @@ export const webapps = sqliteTable("webapps", {
     allowedScopesJson: text("allowed_scopes_json").notNull(),
 });
 
-export const webappVersions = sqliteTable(
-    "webapp_versions",
+export const appletVersions = sqliteTable(
+    "applet_versions",
     {
-        webappName: text("webapp_name")
+        appletName: text("applet_name")
             .notNull()
-            .references(() => webapps.name, { onDelete: "cascade" }),
+            .references(() => applets.name, { onDelete: "cascade" }),
         version: integer("version").notNull(),
         changeDescription: text("change_description").notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
     },
-    (table) => [primaryKey({ columns: [table.webappName, table.version] })],
+    (table) => [primaryKey({ columns: [table.appletName, table.version] })],
 );
 
 export const durableGlobalEvents = sqliteTable("durable_global_events", {

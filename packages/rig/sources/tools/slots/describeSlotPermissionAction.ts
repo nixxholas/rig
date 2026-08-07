@@ -76,9 +76,9 @@ function describeAction(action: SlotAction): string {
     switch (action.type) {
         case "send-current-chat":
             return `send ${quoteVisibleExact(action.message)} to the current chat`;
-        case "open-webapp": {
+        case "open-applet": {
             const destination = [
-                `open the webapp ${quoteVisibleExact(action.webapp)}`,
+                `open the applet ${quoteVisibleExact(action.applet)}`,
                 ...(action.path === undefined ? [] : [`at path ${quoteVisibleExact(action.path)}`]),
                 ...(action.query === undefined
                     ? []

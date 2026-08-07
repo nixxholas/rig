@@ -8,13 +8,7 @@ import type {
 } from "../agent/index.js";
 import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
-import type {
-    Model,
-    ProviderError,
-    ServiceTier,
-    StopReason,
-    Usage,
-} from "@slopus/rig-execution";
+import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import {
     MAX_INFERENCE_MAX_RETRIES,
     type ProviderModelCompatibilityType,
@@ -314,7 +308,6 @@ export interface SessionPermissionReview {
     toolCallId: string;
     userAuthorization: "unknown" | "low" | "medium" | "high";
 }
-
 
 export interface ProtocolSession {
     id: string;

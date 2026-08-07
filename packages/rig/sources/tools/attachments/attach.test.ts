@@ -9,42 +9,42 @@ import { createAttachTool } from "./attach.js";
 import { attachArgumentsSchema } from "./attachmentSchemas.js";
 
 describe("attach tool", () => {
-    it("accepts only string values in webapp query parameters", () => {
+    it("accepts only string values in applet query parameters", () => {
         expect(
             Value.Check(attachArgumentsSchema, {
                 operation: "add",
                 query: { report: "daily" },
-                webapp: "usage-dashboard",
+                applet: "usage-dashboard",
             }),
         ).toBe(true);
         expect(
             Value.Check(attachArgumentsSchema, {
                 operation: "add",
                 query: { report: 1 },
-                webapp: "usage-dashboard",
+                applet: "usage-dashboard",
             }),
         ).toBe(false);
     });
 
-    it("prepares a webapp attachment locally with its requested destination", async () => {
+    it("prepares an applet attachment locally with its requested destination", async () => {
         const harness = createJustBashToolHarness();
         harness.context.attachments = new AttachmentContext({ idFactory: () => "attachment-1" });
-        const listWebapps = vi.fn(() => [
+        const listApplets = vi.fn(() => [
             {
                 description: "Shows current spend.",
                 iconThumbhash: "AQID",
-                iconUrl: "/webapps/usage-dashboard/favicon.png",
+                iconUrl: "/applets/usage-dashboard/favicon.png",
                 name: "usage-dashboard",
             },
         ]);
-        harness.context.slots = { listWebapps } as unknown as SlotContext;
+        harness.context.slots = { listApplets } as unknown as SlotContext;
         const tool = createAttachTool();
 
         const args = {
             operation: "add" as const,
             path: "/reports/today",
             query: { range: "24h", team: "platform" },
-            webapp: "usage-dashboard",
+            applet: "usage-dashboard",
         };
         const result = await tool.execute(args, harness.context, {});
 
@@ -52,36 +52,36 @@ describe("attach tool", () => {
             attachment: {
                 description: "Shows current spend.",
                 id: "attachment-1",
-                image: "/webapps/usage-dashboard/favicon.png",
-                kind: "webapp",
+                image: "/applets/usage-dashboard/favicon.png",
+                kind: "applet",
                 name: "usage-dashboard",
                 path: "/reports/today",
                 query: { range: "24h", team: "platform" },
                 thumbhash: "AQID",
-                webapp: "usage-dashboard",
+                applet: "usage-dashboard",
             },
             id: "attachment-1",
             operation: "add",
         });
-        expect(listWebapps).toHaveBeenCalledOnce();
+        expect(listApplets).toHaveBeenCalledOnce();
         await expect(tool.shouldReviewInAutoMode(args, harness.context)).resolves.toBe(false);
         await expect(tool.shouldRunInFullAccessInAutoMode(args, harness.context)).resolves.toBe(
             false,
         );
     });
 
-    it("rejects a webapp name that is not registered", async () => {
+    it("rejects an applet name that is not registered", async () => {
         const harness = createJustBashToolHarness();
         harness.context.attachments = new AttachmentContext();
-        harness.context.slots = { listWebapps: () => [] } as unknown as SlotContext;
+        harness.context.slots = { listApplets: () => [] } as unknown as SlotContext;
 
         await expect(
             createAttachTool().execute(
-                { operation: "add", webapp: "missing-dashboard" },
+                { operation: "add", applet: "missing-dashboard" },
                 harness.context,
                 {},
             ),
-        ).rejects.toThrow('No webapp named "missing-dashboard" exists.');
+        ).rejects.toThrow('No applet named "missing-dashboard" exists.');
     });
 
     it("rejects local paths outside the workspace and generated-media directory", async () => {

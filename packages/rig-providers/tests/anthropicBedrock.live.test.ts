@@ -45,66 +45,59 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
         }
     });
 
-    it(
-        "replays a native compaction checkpoint in a later turn",
-        { timeout: 300_000 },
-        async () => {
-            const credential = await BedrockBearerTokenCredential.tryLoad({
-                env: process.env,
-            });
-            if (credential === null) {
-                expect.fail("Missing AWS_BEARER_TOKEN_BEDROCK.");
-            }
-            const provider = new AnthropicBedrockProvider({
-                credential,
-                model: "anthropic/sonnet-5",
-            });
-            const session = await provider.session(
-                `anthropic-bedrock-live-compaction-${Date.now()}`,
-                {
-                    instructions: "You are a helpful assistant.",
-                    tools: [],
-                },
-            );
+    it("replays a native compaction checkpoint in a later turn", { timeout: 300_000 }, async () => {
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            env: process.env,
+        });
+        if (credential === null) {
+            expect.fail("Missing AWS_BEARER_TOKEN_BEDROCK.");
+        }
+        const provider = new AnthropicBedrockProvider({
+            credential,
+            model: "anthropic/sonnet-5",
+        });
+        const session = await provider.session(`anthropic-bedrock-live-compaction-${Date.now()}`, {
+            instructions: "You are a helpful assistant.",
+            tools: [],
+        });
 
-            try {
-                const compaction = await session.compact({
+        try {
+            const compaction = await session.compact({
+                context: {
+                    messages: [
+                        { role: "user", content: "My favorite color is teal. Remember it." },
+                        { role: "assistant", content: "Got it, your favorite color is teal." },
+                        {
+                            role: "user",
+                            content:
+                                "Here is a long document to pad the context past the native compaction trigger:\n" +
+                                "The quick brown fox jumps over the lazy dog. ".repeat(30_000),
+                        },
+                    ],
+                },
+            });
+            if (compaction.status !== "completed" || compaction.compaction === undefined) {
+                throw new Error(`Compaction did not complete: ${JSON.stringify(compaction)}`);
+            }
+
+            const events = await collectSessionEvents(
+                session.run({
+                    effort: "low",
                     context: {
                         messages: [
-                            { role: "user", content: "My favorite color is teal. Remember it." },
-                            { role: "assistant", content: "Got it, your favorite color is teal." },
+                            compaction.compaction,
                             {
                                 role: "user",
-                                content:
-                                    "Here is a long document to pad the context past the native compaction trigger:\n" +
-                                    "The quick brown fox jumps over the lazy dog. ".repeat(30_000),
+                                content: "What is my favorite color? Reply with one word.",
                             },
                         ],
                     },
-                });
-                if (compaction.status !== "completed" || compaction.compaction === undefined) {
-                    throw new Error(`Compaction did not complete: ${JSON.stringify(compaction)}`);
-                }
-
-                const events = await collectSessionEvents(
-                    session.run({
-                        effort: "low",
-                        context: {
-                            messages: [
-                                compaction.compaction,
-                                {
-                                    role: "user",
-                                    content: "What is my favorite color? Reply with one word.",
-                                },
-                            ],
-                        },
-                    }),
-                );
-                expect(textFromSessionEvents(events).toLowerCase()).toContain("teal");
-                expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
-            } finally {
-                session.destroy();
-            }
-        },
-    );
+                }),
+            );
+            expect(textFromSessionEvents(events).toLowerCase()).toContain("teal");
+            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        } finally {
+            session.destroy();
+        }
+    });
 });

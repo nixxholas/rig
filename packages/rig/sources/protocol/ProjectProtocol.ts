@@ -17,7 +17,7 @@ import type {
 } from "./SessionProtocol.js";
 import type { RemoteTerminalSummary } from "../terminal/types.js";
 import type { SlotsChangedEvent } from "./SlotProtocol.js";
-import type { WebappsChangedEvent } from "./WebappProtocol.js";
+import type { AppletsChangedEvent } from "./AppletProtocol.js";
 import {
     githubGitRefSchema,
     githubPluginCatalogSchema,
@@ -629,7 +629,7 @@ export type GlobalLiveEvent =
     | PluginsChangedEvent
     | PresenceChangedEvent
     | SlotsChangedEvent
-    | WebappsChangedEvent
+    | AppletsChangedEvent
     | ProjectGitEvent
     | ProjectWorkspaceGitEvent
     | RemoteTerminalsChangedEvent
@@ -666,7 +666,7 @@ export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent 
         event.type === "happy_cloud_changed" ||
         event.type === "presence_changed" ||
         event.type === "slots_changed" ||
-        event.type === "webapps_changed" ||
+        event.type === "applets_changed" ||
         event.type === "project_git_changed" ||
         event.type === "workspace_git_changed" ||
         event.type === "remote_terminals_changed" ||

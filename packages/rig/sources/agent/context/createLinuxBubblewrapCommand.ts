@@ -13,11 +13,7 @@ import {
 import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
-const PROTECTED_WORKSPACE_NAMES = [
-    ".agents",
-    ".codex",
-    ...PROJECT_PROTECTED_FILE_NAMES,
-] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", ...PROJECT_PROTECTED_FILE_NAMES] as const;
 const PROTECTED_CREATE_ONLY_WORKSPACE_NAMES = [".git"] as const;
 
 export async function createLinuxBubblewrapCommand(options: {

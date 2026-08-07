@@ -131,7 +131,7 @@ export function createBundledDocsInstructions(docsPath: string): string {
 
 Rig ships documentation about Rig and Happy as a read-only folder at \`${docsPath}\`. Read it only when the user asks about Rig or Happy themselves — their features, configuration, tools, or behavior — or when you need to explain or troubleshoot them. Resolve paths inside it against \`${docsPath}\`, not the current working directory. It is reference material, not project context, and never a place to write.
 
-\`${docsPath}/DESIGN.md\` is the design specification for Happy plugin apps and webapps. Read it before designing or building a Happy webapp or plugin UI, and follow its host style variables, surfaces, layout grid, typography, control, and state rules so the result looks like part of Happy rather than a generic page.`;
+\`${docsPath}/DESIGN.md\` is the design specification for Happy plugin apps and applets. Read it before designing or building a Happy applet or plugin UI, and follow its host style variables, surfaces, layout grid, typography, control, and state rules so the result looks like part of Happy rather than a generic page.`;
 }
 
 export function createParentDelegationInstructions(): string {

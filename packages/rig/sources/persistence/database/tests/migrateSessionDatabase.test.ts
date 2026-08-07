@@ -108,7 +108,9 @@ describe("migrateSessionDatabase", () => {
             opened.database.run(sql.raw(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`));
         }
         opened.database.run(
-            sql.raw("ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_consent TEXT NOT NULL DEFAULT 'denied'"),
+            sql.raw(
+                "ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_consent TEXT NOT NULL DEFAULT 'denied'",
+            ),
         );
         opened.database.run(
             sql.raw(
@@ -230,7 +232,7 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
-    it("discards only pre-icon webapps while preserving legacy slot entries", () => {
+    it("discards only pre-icon applets while preserving legacy slot entries", () => {
         const opened = openTestDatabase();
         opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
         opened.database.run(sql.raw("PRAGMA user_version = 9"));
@@ -335,8 +337,8 @@ describe("migrateSessionDatabase", () => {
 
         migrateSessionDatabase(opened.database);
 
-        expect(opened.database.all(sql.raw("SELECT * FROM webapps"))).toEqual([]);
-        expect(opened.database.all(sql.raw("SELECT * FROM webapp_versions"))).toEqual([]);
+        expect(opened.database.all(sql.raw("SELECT * FROM applets"))).toEqual([]);
+        expect(opened.database.all(sql.raw("SELECT * FROM applet_versions"))).toEqual([]);
         expect(
             opened.database.get(
                 sql.raw(`
@@ -355,9 +357,14 @@ describe("migrateSessionDatabase", () => {
         });
         expect(
             opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(webapps)"))
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(applets)"))
                 .map((column) => column.name),
         ).toContain("icon_thumbhash");
+        expect(
+            opened.database
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(applet_versions)"))
+                .map((column) => column.name),
+        ).toContain("applet_name");
 
         opened.client.close();
     });

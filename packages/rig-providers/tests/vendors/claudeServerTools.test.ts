@@ -78,9 +78,9 @@ describe("Claude server tools", () => {
         // Rig never executes it and is never asked to answer it, so the call must not become
         // executor work: it is reported as an ordinary call, but every one of them here is the
         // server's own, not one Rig started or must answer.
-        expect(events.some((event) => event.type === "toolcall_start" && event.server !== true)).toBe(
-            false,
-        );
+        expect(
+            events.some((event) => event.type === "toolcall_start" && event.server !== true),
+        ).toBe(false);
         expect(serverToolCallIds(events).has("srvtoolu_1")).toBe(true);
         expect(
             events

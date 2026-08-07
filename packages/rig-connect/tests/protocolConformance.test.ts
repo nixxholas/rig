@@ -73,7 +73,8 @@ type _PartialMessage = Assignable<local.SessionPartialMessage, daemon.SessionPar
 type _Git = Assignable<local.GitChangeSnapshot, daemon.GitChangeSnapshot>;
 type _TokenCount = Assignable<local.SessionTokenCount, daemon.SessionTokenCount>;
 type _UnreadState = Assignable<local.SessionUnreadState, daemon.SessionUnreadState>;
-type _UnreadReason = Assignable<local.SessionUnreadReason, daemon.SessionUnreadReason>;type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
+type _UnreadReason = Assignable<local.SessionUnreadReason, daemon.SessionUnreadReason>;
+type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
 type _ServiceNotice = Assignable<local.ServiceNotice, daemon.ServiceNotice>;
 type _SystemNoticePayload = Assignable<local.SystemNoticePayload, daemon.SystemNoticePayload>;
 type _DaemonServiceNotice = Assignable<daemon.ServiceNotice, local.ServiceNotice>;
@@ -153,21 +154,21 @@ type _HappyCloudSessionBlob = Assignable<
     daemon.HappyCloudSessionBlobResponse
 >;
 type _Attachment = Assignable<local.Attachment, daemon.Attachment>;
-type _Webapp = Assignable<local.Webapp, daemon.Webapp>;
-type _ResolveWebappOpenRequest = Assignable<
-    daemon.ResolveWebappOpenRequest,
-    local.ResolveWebappOpenRequest
+type _Applet = Assignable<local.Applet, daemon.Applet>;
+type _ResolveAppletOpenRequest = Assignable<
+    daemon.ResolveAppletOpenRequest,
+    local.ResolveAppletOpenRequest
 >;
-type _ResolveWebappOpenResponse = Assignable<
-    local.ResolveWebappOpenResponse,
-    daemon.ResolveWebappOpenResponse
+type _ResolveAppletOpenResponse = Assignable<
+    local.ResolveAppletOpenResponse,
+    daemon.ResolveAppletOpenResponse
 >;
-type _WebappContext = Assignable<local.WebappContext, daemon.WebappContext>;
+type _AppletContext = Assignable<local.AppletContext, daemon.AppletContext>;
 type _SlotAction = Assignable<local.SlotAction, daemon.SlotAction>;
-type LocalOpenWebappAction = Extract<local.SlotAction, { type: "open-webapp" }>;
-type DaemonOpenWebappAction = Extract<daemon.SlotAction, { type: "open-webapp" }>;
-type _OpenWebappPath = Assignable<DaemonOpenWebappAction["path"], LocalOpenWebappAction["path"]>;
-type _OpenWebappQuery = Assignable<DaemonOpenWebappAction["query"], LocalOpenWebappAction["query"]>;
+type LocalOpenAppletAction = Extract<local.SlotAction, { type: "open-applet" }>;
+type DaemonOpenAppletAction = Extract<daemon.SlotAction, { type: "open-applet" }>;
+type _OpenAppletPath = Assignable<DaemonOpenAppletAction["path"], LocalOpenAppletAction["path"]>;
+type _OpenAppletQuery = Assignable<DaemonOpenAppletAction["query"], LocalOpenAppletAction["query"]>;
 type _PluginSummary = Assignable<local.PluginSummary, daemon.PluginSummary>;
 type _PluginLog = Assignable<local.PluginLogSnapshot, daemon.PluginLogSnapshot>;
 type _PluginList = Assignable<local.ListPluginsResponse, daemon.ListPluginsResponse>;
@@ -189,7 +190,8 @@ type _UninstallPluginResponse = Assignable<
 type _PluginManagementErrorResponse = Assignable<
     local.PluginManagementErrorResponse,
     daemon.PluginManagementErrorResponse
->;type _TimelineScope = Assignable<local.TimelineScope, daemon.TimelineScope>;
+>;
+type _TimelineScope = Assignable<local.TimelineScope, daemon.TimelineScope>;
 type _TimelineSpan = Assignable<local.TimelineSpan, daemon.TimelineSpan>;
 type _TimelineSpanKind = Assignable<local.TimelineSpanKind, daemon.TimelineSpanKind>;
 type _TimelineSpanOutcome = Assignable<local.TimelineSpanOutcome, daemon.TimelineSpanOutcome>;

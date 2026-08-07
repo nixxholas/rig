@@ -1,0 +1,46 @@
+import { applets, appletVersions } from "../database/schema.js";
+import { inTx } from "../inTx.js";
+import type { TX } from "../Transaction.js";
+import type { AppletAllowedScopes } from "../../protocol/AppletProtocol.js";
+
+export interface AppletCreateRecord {
+    allowedScopes: AppletAllowedScopes;
+    authorSessionId: string;
+    changeDescription: string;
+    createdAt: number;
+    description: string;
+    iconThumbhash: string;
+    name: string;
+    purpose: string;
+    sourceDescription?: string;
+}
+
+/** Writes the applet identity together with its first version so neither exists alone. */
+export function appletCreate(tx: TX, record: AppletCreateRecord): void {
+    inTx(tx, (transaction) => {
+        transaction
+            .insert(applets)
+            .values({
+                allowedScopesJson: JSON.stringify(record.allowedScopes),
+                authorSessionId: record.authorSessionId,
+                createdAtMs: record.createdAt,
+                currentVersion: 1,
+                description: record.description,
+                iconThumbhash: record.iconThumbhash,
+                name: record.name,
+                purpose: record.purpose,
+                sourceDescription: record.sourceDescription ?? null,
+                updatedAtMs: record.createdAt,
+            })
+            .run();
+        transaction
+            .insert(appletVersions)
+            .values({
+                changeDescription: record.changeDescription,
+                createdAtMs: record.createdAt,
+                version: 1,
+                appletName: record.name,
+            })
+            .run();
+    });
+}

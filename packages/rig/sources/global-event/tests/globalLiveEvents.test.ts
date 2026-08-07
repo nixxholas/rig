@@ -154,7 +154,6 @@ describe("live global events", () => {
             }),
         ]);
     });
-
 });
 
 function liveEvent(): GlobalLiveEvent {

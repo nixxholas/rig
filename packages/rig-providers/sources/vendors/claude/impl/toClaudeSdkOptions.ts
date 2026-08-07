@@ -35,8 +35,9 @@ export function toClaudeSdkOptions(options: {
     registerAbortCleanup?: (cleanup: () => void) => void;
 }): ClaudeSdkOptions {
     const clientTools = options.tools.filter((tool) => tool.server === undefined);
-    const serverToolNames = options.tools
-        .flatMap((tool) => (tool.server === undefined ? [] : [tool.server.type]));
+    const serverToolNames = options.tools.flatMap((tool) =>
+        tool.server === undefined ? [] : [tool.server.type],
+    );
     const mcpToolNames = clientTools.map((tool) => `mcp__${RIG_MCP_SERVER_NAME}__${tool.name}`);
     const { abortController, cleanup } = toAbortController(options.abort);
     options.registerAbortCleanup?.(cleanup);

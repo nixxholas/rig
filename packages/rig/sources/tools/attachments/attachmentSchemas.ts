@@ -16,18 +16,18 @@ const attachmentIdSchema = Type.String({
     minLength: 1,
 });
 const attachmentPathSchema = Type.String({
-    description: "Local file path, or a relative path within an imported webapp.",
+    description: "Local file path, or a relative path within an imported applet.",
     minLength: 1,
 });
 const attachmentQuerySchema = Type.Record(Type.String({ minLength: 1 }), Type.String(), {
-    description: "Query values forwarded when the webapp opens.",
+    description: "Query values forwarded when the applet opens.",
 });
 const attachmentUrlSchema = Type.String({
     description: "HTTP(S) link to attach.",
     minLength: 1,
 });
-const attachmentWebappSchema = Type.String({
-    description: "Imported webapp name.",
+const attachmentAppletSchema = Type.String({
+    description: "Imported applet name.",
     minLength: 1,
 });
 
@@ -41,12 +41,12 @@ export const attachArgumentsSchema = Type.Object(
         path: Type.Optional(attachmentPathSchema),
         query: Type.Optional(attachmentQuerySchema),
         url: Type.Optional(attachmentUrlSchema),
-        webapp: Type.Optional(attachmentWebappSchema),
+        applet: Type.Optional(attachmentAppletSchema),
     },
     {
         additionalProperties: false,
         description:
-            "Add a local file, HTTP(S) URL, or imported webapp attachment, or remove a pending attachment.",
+            "Add a local file, HTTP(S) URL, or imported applet attachment, or remove a pending attachment.",
     },
 );
 
@@ -71,7 +71,7 @@ export const attachRuntimeArgumentsSchema = Type.Union(
                 operation: Type.Literal("add"),
                 path: Type.Optional(attachmentPathSchema),
                 query: Type.Optional(attachmentQuerySchema),
-                webapp: attachmentWebappSchema,
+                applet: attachmentAppletSchema,
             },
             { additionalProperties: false },
         ),
@@ -85,7 +85,7 @@ export const attachRuntimeArgumentsSchema = Type.Union(
     ],
     {
         description:
-            "Add a local file, HTTP(S) URL, or imported webapp attachment, or remove a pending attachment.",
+            "Add a local file, HTTP(S) URL, or imported applet attachment, or remove a pending attachment.",
     },
 );
 

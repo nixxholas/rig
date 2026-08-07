@@ -172,9 +172,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                 }
                 const stopReason =
                     reply.stopReason ??
-                    (reply.content.some((block) => block.type === "toolCall")
-                        ? "toolUse"
-                        : "stop");
+                    (reply.content.some((block) => block.type === "toolCall") ? "toolUse" : "stop");
                 const message: AssistantMessage = {
                     api: "gym",
                     content: [],

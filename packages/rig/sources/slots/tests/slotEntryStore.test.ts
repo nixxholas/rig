@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { slotEntryCreate } from "../../persistence/slots/slotEntryCreate.js";
-import { webappCreate } from "../../persistence/webapps/webappCreate.js";
+import { appletCreate } from "../../persistence/applets/appletCreate.js";
 import type { GlobalLiveEvent } from "../../protocol/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { SlotEntryInvalidError } from "../SlotEntryInvalidError.js";
@@ -30,8 +30,8 @@ describe("slot entry store", () => {
                 action: {
                     path: "reports/today.html",
                     query: { theme: "dark", view: "compact" },
-                    type: "open-webapp",
-                    webapp: "build-dashboard",
+                    type: "open-applet",
+                    applet: "build-dashboard",
                 },
                 label: "View build",
                 type: "button",
@@ -53,8 +53,8 @@ describe("slot entry store", () => {
                 action: {
                     path: "reports/today.html",
                     query: { theme: "dark", view: "compact" },
-                    type: "open-webapp",
-                    webapp: "build-dashboard",
+                    type: "open-applet",
+                    applet: "build-dashboard",
                 },
                 label: "View build",
                 type: "button",
@@ -103,8 +103,8 @@ describe("slot entry store", () => {
                 content: {
                     action: {
                         query: { report: 1 },
-                        type: "open-webapp",
-                        webapp: "build-dashboard",
+                        type: "open-applet",
+                        applet: "build-dashboard",
                     },
                     label: "View build",
                     type: "button",
@@ -226,11 +226,11 @@ describe("slot entry store", () => {
         expect(store.slots.list()).toEqual([entry]);
     });
 
-    it("rejects creating or updating a webapp button whose scope the webapp disallows", async () => {
+    it("rejects creating or updating an applet button whose scope the applet disallows", async () => {
         const databasePath = await createDatabasePath();
         createSessionDatabaseFixture(databasePath);
         const opened = openSessionDatabase(databasePath);
-        webappCreate(opened.database, {
+        appletCreate(opened.database, {
             allowedScopes: ["session"],
             authorSessionId: "session-1",
             changeDescription: "Initial import",
@@ -243,8 +243,8 @@ describe("slot entry store", () => {
         opened.client.close();
         const store = new PersistentSessionStore({ databasePath });
         cleanups.push(() => store.close());
-        const webappButton = {
-            action: { type: "open-webapp", webapp: "dashboard" },
+        const appletButton = {
+            action: { type: "open-applet", applet: "dashboard" },
             label: "Open dashboard",
             type: "button",
         } as const;
@@ -252,14 +252,14 @@ describe("slot entry store", () => {
         expect(() =>
             store.slots.create({
                 author: { type: "agent", sessionId: "session-1" },
-                content: webappButton,
+                content: appletButton,
                 description: "Dashboard",
                 purpose: "Track work",
                 scope: "everywhere",
                 slot: "status-line",
             }),
         ).toThrow(
-            'The webapp "dashboard" does not allow the everywhere scope. It allows only the session scope.',
+            'The applet "dashboard" does not allow the everywhere scope. It allows only the session scope.',
         );
 
         const entry = store.slots.create({
@@ -270,7 +270,7 @@ describe("slot entry store", () => {
             scope: "everywhere",
             slot: "status-line",
         });
-        expect(() => store.slots.update(entry.id, { content: webappButton })).toThrow(
+        expect(() => store.slots.update(entry.id, { content: appletButton })).toThrow(
             SlotEntryInvalidError,
         );
     });

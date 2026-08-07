@@ -62,7 +62,6 @@ describe("createToolResultBlock", () => {
             expect.objectContaining({ type: "text", text: expect.stringContaining("truncated") }),
         );
     });
-
 });
 
 describe("createErrorToolResultBlock", () => {

@@ -82,9 +82,7 @@ export async function* mapAnthropicStream(
                     ) === true;
                 const input = asObjectInput(event.content_block.input);
                 const argumentsJson =
-                    event.content_block.type === "server_tool_use"
-                        ? JSON.stringify(input)
-                        : "";
+                    event.content_block.type === "server_tool_use" ? JSON.stringify(input) : "";
                 const tool = {
                     callId: event.content_block.id,
                     name: configured?.name ?? event.content_block.name,

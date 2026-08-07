@@ -69,7 +69,7 @@ import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js
 import { timelineAgentSource } from "./impl/timelineAgentSource.js";
 import { queryLiveAgentTreeUsage } from "./queryLiveAgentTreeUsage.js";
 import { SlotEntryStore } from "../slots/index.js";
-import { WebappStore } from "../webapps/index.js";
+import { AppletStore } from "../applets/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { configureSessionRequest } from "./configureSessionRequest.js";
 import {
@@ -115,7 +115,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     readonly slots: SlotEntryStore;
-    readonly webapps: WebappStore;
+    readonly applets: AppletStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
     readonly #workspaceTransferReservations = new Map<string, string>();
@@ -132,7 +132,7 @@ export class InMemorySessionStore implements SessionStore {
         if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
             throw new Error("The in-memory Rig store did not reach the current schema version.");
         }
-        this.webapps = new WebappStore({
+        this.applets = new AppletStore({
             publish: (event) => this.#publishGlobalEvent(event),
             tx: () => this.#activeTransaction ?? this.#database,
         });
@@ -140,7 +140,7 @@ export class InMemorySessionStore implements SessionStore {
             publish: (event) => this.#publishGlobalEvent(event),
             sessionExists: (sessionId) => this.#sessions.has(sessionId),
             tx: () => this.#activeTransaction ?? this.#database,
-            webapp: (name) => this.webapps.get(name),
+            applet: (name) => this.applets.get(name),
         });
         this.#projects = new ProjectRepository({
             database: this.#database,
@@ -400,7 +400,7 @@ export class InMemorySessionStore implements SessionStore {
                 : {}),
             request: source.requestForSubagent(),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
-            slotStores: { entries: this.slots, webapps: this.webapps },
+            slotStores: { entries: this.slots, applets: this.applets },
             projectId: sourceSnapshot.projectId,
             projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
             secretRegistry: this.#secrets,
@@ -512,7 +512,7 @@ export class InMemorySessionStore implements SessionStore {
             projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,
             secretRegistry: this.#secrets,
-            slotStores: { entries: this.slots, webapps: this.webapps },
+            slotStores: { entries: this.slots, applets: this.applets },
             ...(ownership.workspace === undefined ? {} : { workspaceId: ownership.workspace.id }),
         });
         this.#sessions.set(session.id, session);

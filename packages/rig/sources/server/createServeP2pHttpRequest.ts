@@ -88,7 +88,7 @@ function isProtectedP2pPath(path: string): boolean {
         pathname.startsWith("/p2p/") ||
         pathname === "/shutdown" ||
         pathname === "/debug/inspector" ||
-        /^\/webapps\/[^/]+\/context$/u.test(pathname)
+        /^\/applets\/[^/]+\/context$/u.test(pathname)
     );
 }
 

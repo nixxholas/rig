@@ -92,5 +92,7 @@ export function removeFriendsAndSharing(database: SessionDatabase): void {
         FROM happy_cloud_enrollment`),
     );
     database.run(sql.raw("DROP TABLE happy_cloud_enrollment"));
-    database.run(sql.raw("ALTER TABLE happy_cloud_enrollment_next RENAME TO happy_cloud_enrollment"));
+    database.run(
+        sql.raw("ALTER TABLE happy_cloud_enrollment_next RENAME TO happy_cloud_enrollment"),
+    );
 }

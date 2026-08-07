@@ -9,11 +9,7 @@ import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
 const MACOS_SEATBELT_EXECUTABLE = "/usr/bin/sandbox-exec";
-const PROTECTED_WORKSPACE_NAMES = [
-    ".agents",
-    ".codex",
-    ...PROJECT_PROTECTED_FILE_NAMES,
-] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", ...PROJECT_PROTECTED_FILE_NAMES] as const;
 
 export async function createMacOsSeatbeltCommand(options: {
     /**
