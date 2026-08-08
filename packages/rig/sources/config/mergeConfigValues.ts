@@ -81,6 +81,9 @@ export function mergeConfigValues(
         }
         if (config.settings?.showUsage !== undefined)
             settings.showUsage = config.settings.showUsage;
+        if (config.settings?.toolResultRetentionDays !== undefined) {
+            settings.toolResultRetentionDays = config.settings.toolResultRetentionDays;
+        }
         if (config.features?.workflows !== undefined) {
             features.workflows = config.features.workflows;
         }

@@ -8,11 +8,13 @@ export function createProjectConfigSecurityNoticeTitle(config: PartialRigConfig)
     const daemonHeapSnapshots = config.settings?.daemonHeapSnapshots !== undefined;
     const durableEventQueue = config.settings?.durableGlobalEventQueue !== undefined;
     const happyIntegration = config.settings?.happyIntegration !== undefined;
+    const toolResultRetention = config.settings?.toolResultRetentionDays !== undefined;
     const daemonSetting =
         inferenceRetries ||
         daemonHeapSnapshots ||
         durableEventQueue ||
         happyIntegration ||
+        toolResultRetention ||
         config.p2p !== undefined;
     if (daemonSetting && (permission || docker || providers)) {
         return "Project machine settings ignored";

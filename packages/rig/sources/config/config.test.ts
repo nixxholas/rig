@@ -394,6 +394,7 @@ daemon_heap_snapshots = true
 durable_global_event_queue = true
 happy_integration = false
 show_reasoning = false
+tool_result_retention_days = 14
 
 [theme]
 primary = "#202124"
@@ -451,6 +452,7 @@ mounts = [
                 durableGlobalEventQueue: true,
                 happyIntegration: false,
                 showReasoning: false,
+                toolResultRetentionDays: 14,
             },
             theme: {
                 brand: "ansi:202",
@@ -642,6 +644,10 @@ search_model = "openai/gpt-5.6-terra"
             "[settings]\ninference_max_retries = 1.5\n",
             "settings.inference_max_retries must be a whole number from 0 to 100.",
         ],
+        [
+            "[settings]\ntool_result_retention_days = 36501\n",
+            "settings.tool_result_retention_days must be a whole number from 0 to 36500.",
+        ],
         ['[settings]\nshow_usage = "yes"\n', "settings.show_usage must be a boolean."],
         ["[theme]\nprimary = 5\n", "theme.primary must be a string."],
         ['[features]\nworkflows = "yes"\n', "features.workflows must be a boolean."],
@@ -719,6 +725,11 @@ search_model = "openai/gpt-5.6-terra"
         ).toBe("Project daemon setting ignored");
         expect(
             createProjectConfigSecurityNotice({
+                settings: { toolResultRetentionDays: 30 },
+            }),
+        ).toContain("kept tool result retention under your machine-level control");
+        expect(
+            createProjectConfigSecurityNotice({
                 settings: { happyIntegration: true },
             }),
         ).toContain("kept the Happy integration under your machine-level control");
@@ -758,6 +769,7 @@ daemon_heap_snapshots = false
 durable_global_event_queue = false
 happy_integration = false
 show_reasoning = false
+tool_result_retention_days = 14
 [features]
 workflows = false
 [docker]
@@ -784,6 +796,7 @@ durable_global_event_queue = true
 happy_integration = true
 show_reasoning = true
 show_usage = true
+tool_result_retention_days = 99
 [features]
 workflows = true
 [p2p]
@@ -840,6 +853,7 @@ inference_max_retries = 8
                 happyIntegration: false,
                 showReasoning: true,
                 showUsage: true,
+                toolResultRetentionDays: 14,
             });
             expect(loaded.config.features.workflows).toBe(true);
             expect(loaded.config.p2p).toEqual({
@@ -865,7 +879,7 @@ inference_max_retries = 8
             });
             expect(loaded.config.workspace.setupCommands).toEqual(["printf project"]);
             expect(createProjectConfigSecurityNotice(loaded.sources.local.values)).toBe(
-                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, inference retries, daemon heap snapshots, the durable event queue, the Happy integration, and P2P networking under your machine-level control.",
+                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, inference retries, daemon heap snapshots, the durable event queue, the Happy integration, tool result retention, and P2P networking under your machine-level control.",
             );
 
             const emptyCwd = join(root, "empty-repo");
@@ -886,6 +900,7 @@ inference_max_retries = 8
                 happyIntegration: true,
                 showReasoning: false,
                 showUsage: false,
+                toolResultRetentionDays: 7,
             });
             expect(defaultLoaded.config.features.workflows).toBe(true);
             expect(defaultLoaded.config.defaults.permissionMode).toBe("auto");
@@ -921,6 +936,7 @@ inference_max_retries = 8
                     happyIntegration: false,
                     showReasoning: true,
                     showUsage: true,
+                    toolResultRetentionDays: 30,
                 },
                 features: {
                     crossWorkspace: false,
@@ -984,6 +1000,7 @@ inference_max_retries = 8
                     "happy_integration = false",
                     "show_reasoning = true",
                     "show_usage = true",
+                    "tool_result_retention_days = 30",
                     "",
                     "[features]",
                     "cross_workspace = false",

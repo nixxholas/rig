@@ -136,6 +136,10 @@ import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRu
 import { sessionSavePendingContextMessage } from "../persistence/session/sessionSavePendingContextMessage.js";
 import { sessionStartQueuedRun } from "../persistence/session/sessionStartQueuedRun.js";
 import { sessionDrainPendingContextMessages } from "../persistence/session/sessionDrainPendingContextMessages.js";
+import {
+    sessionPruneToolResults,
+    type SessionToolResultPruneCursor,
+} from "../persistence/session/sessionPruneToolResults.js";
 import { sessionTransferWorkspace } from "../persistence/session/sessionTransferWorkspace.js";
 import { sessionSetWorkspaceTransferState } from "../persistence/session/sessionSetWorkspaceTransferState.js";
 import { queryWorkspaceHasAttachedSessions } from "../persistence/session/queryWorkspaceHasAttachedSessions.js";
@@ -203,6 +207,10 @@ const UNSORTED_SWEEP_LIMIT = 100;
 /** One pass drains a useful backlog without monopolizing the synchronous database. */
 const UNSORTED_SWEEP_MAX_SESSIONS = 1_000;
 const UNSORTED_SWEEP_MAX_MS = 250;
+const TOOL_RESULT_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const TOOL_RESULT_SWEEP_BATCH_LIMIT = 10;
+const TOOL_RESULT_SWEEP_MAX_SCANNED_MESSAGES = 100;
+const TOOL_RESULT_SWEEP_MAX_MS = 250;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -221,6 +229,7 @@ export interface PersistentSessionStoreOptions {
     presence?: PresenceStore;
     projectGit?: GitCommandRunner;
     taskDrain?: TaskDrain;
+    toolResultRetentionMs?: number;
     secrets?: readonly EnvironmentSecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
@@ -262,6 +271,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #scheduledMessageTimer: ReturnType<typeof setTimeout> | undefined;
     #unsortedSweepTimer: ReturnType<typeof setInterval> | undefined;
     #unsortedSweepFollowup: ReturnType<typeof setImmediate> | undefined;
+    readonly #toolResultRetentionMs: number | undefined;
+    #toolResultSweepCursor: SessionToolResultPruneCursor | undefined;
+    #toolResultSweepTimer: ReturnType<typeof setInterval> | undefined;
+    #toolResultSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
         reference: WeakRef<InMemorySession>;
@@ -305,6 +318,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#onSessionEvent = options.onSessionEvent;
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#taskDrain = options.taskDrain;
+        this.#toolResultRetentionMs = options.toolResultRetentionMs;
         this.#workspaceFeatures = options.workspaceFeatures ?? DEFAULT_WORKSPACE_FEATURES;
         if (options.databasePath !== ":memory:") {
             mkdirSync(dirname(options.databasePath), { mode: 0o700, recursive: true });
@@ -476,6 +490,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.repairInterruptedSessions("crash");
         this.#armScheduledMessageTimer();
         this.#armUnsortedSweepTimer();
+        if (this.#toolResultRetentionMs !== undefined) this.#armToolResultSweepTimer();
         const recover = () => this.#recoverProjectWorkspaces();
         const recovery = this.#taskDrain?.run(recover) ?? recover();
         void recovery.catch((error: unknown) => {
@@ -571,6 +586,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#unsortedSweepFollowup !== undefined) {
             clearImmediate(this.#unsortedSweepFollowup);
             this.#unsortedSweepFollowup = undefined;
+        }
+        if (this.#toolResultSweepTimer !== undefined) {
+            clearInterval(this.#toolResultSweepTimer);
+            this.#toolResultSweepTimer = undefined;
+        }
+        if (this.#toolResultSweepFollowup !== undefined) {
+            clearImmediate(this.#toolResultSweepFollowup);
+            this.#toolResultSweepFollowup = undefined;
         }
         void this.remoteTerminals.close();
         this.#workspaceReadyWaiters.close();
@@ -1583,6 +1606,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearImmediate(this.#unsortedSweepFollowup);
             this.#unsortedSweepFollowup = undefined;
         }
+        if (this.#toolResultSweepTimer !== undefined) {
+            clearInterval(this.#toolResultSweepTimer);
+            this.#toolResultSweepTimer = undefined;
+        }
+        if (this.#toolResultSweepFollowup !== undefined) {
+            clearImmediate(this.#toolResultSweepFollowup);
+            this.#toolResultSweepFollowup = undefined;
+        }
         const closingSessions = new Set(this.#cachedSessions());
         const cleanup = [
             ...[...closingSessions].map((session) => session.beginShutdown()),
@@ -1862,6 +1893,56 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.#sweepUnsortedSessions();
         });
         this.#unsortedSweepFollowup.unref();
+    }
+
+    pruneStaleToolResults(): boolean {
+        if (!this.#client.open || this.#toolResultRetentionMs === undefined) return false;
+        const before = this.#now() - this.#toolResultRetentionMs;
+        const deadline = Date.now() + TOOL_RESULT_SWEEP_MAX_MS;
+        let scanned = 0;
+        while (scanned < TOOL_RESULT_SWEEP_MAX_SCANNED_MESSAGES && Date.now() <= deadline) {
+            const page = sessionPruneToolResults(this.#tx(), {
+                ...(this.#toolResultSweepCursor === undefined
+                    ? {}
+                    : { after: this.#toolResultSweepCursor }),
+                before,
+                limit: TOOL_RESULT_SWEEP_BATCH_LIMIT,
+            });
+            if (page.complete) {
+                this.#toolResultSweepCursor = undefined;
+                return false;
+            }
+            this.#toolResultSweepCursor = page.cursor;
+            scanned += TOOL_RESULT_SWEEP_BATCH_LIMIT;
+        }
+        return true;
+    }
+
+    #armToolResultSweepTimer(): void {
+        this.#scheduleToolResultSweep();
+        this.#toolResultSweepTimer = setInterval(
+            () => this.#sweepToolResults(),
+            TOOL_RESULT_SWEEP_INTERVAL_MS,
+        );
+        this.#toolResultSweepTimer.unref();
+    }
+
+    #sweepToolResults(): void {
+        try {
+            if (this.pruneStaleToolResults()) this.#scheduleToolResultSweep();
+        } catch (error) {
+            if (!this.#client.open) return;
+            if (isDatabaseFailure(error)) throw error;
+        }
+    }
+
+    #scheduleToolResultSweep(): void {
+        if (!this.#client.open || this.#toolResultSweepFollowup !== undefined) return;
+        this.#toolResultSweepFollowup = setImmediate(() => {
+            this.#toolResultSweepFollowup = undefined;
+            this.#sweepToolResults();
+        });
+        this.#toolResultSweepFollowup.unref();
     }
 
     #deliverDueScheduledMessages(): void {

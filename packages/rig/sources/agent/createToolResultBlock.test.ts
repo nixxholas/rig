@@ -9,6 +9,7 @@ const MAXIMUM_TEXT_BYTES = 50 * 1024;
 const MAXIMUM_IMAGE_BLOCKS = 4;
 const MAXIMUM_RESULT_BLOCKS = 128;
 const MAXIMUM_IMAGE_BASE64_BYTES = 5 * 1024 * 1024;
+const MAXIMUM_PRESENTATION_OUTPUT_CHARACTERS = 3_000;
 
 describe("createToolResultBlock", () => {
     it("caps aggregate model-facing text across every tool result", () => {
@@ -61,6 +62,56 @@ describe("createToolResultBlock", () => {
         expect(block.rendered).toContainEqual(
             expect.objectContaining({ type: "text", text: expect.stringContaining("truncated") }),
         );
+    });
+
+    it("caps command presentation output without changing model-facing output", () => {
+        const fullOutput = `${"🙂".repeat(2_000)}${"x".repeat(2_000)}`;
+        const block = createToolResultBlock(
+            defineTool({
+                ...definition(),
+                toLLM: () => [{ type: "text", text: fullOutput }],
+                toPresentation: () => ({
+                    command: "make test",
+                    output: fullOutput,
+                    type: "exec_command",
+                }),
+            }),
+            {},
+            {},
+            "call-presentation",
+        );
+
+        expect(block.rendered).toEqual([{ type: "text", text: fullOutput }]);
+        expect(block.presentation).toMatchObject({
+            command: "make test",
+            type: "exec_command",
+        });
+        if (block.presentation?.type !== "exec_command") {
+            throw new Error("Expected an exec command presentation.");
+        }
+        expect(Array.from(block.presentation.output)).toHaveLength(
+            MAXIMUM_PRESENTATION_OUTPUT_CHARACTERS,
+        );
+        expect(block.presentation.output).toContain("truncated");
+        expect(block.presentation.output).toMatch(/x+$/u);
+    });
+
+    it("leaves non-command presentations unchanged", () => {
+        const presentation = {
+            operations: [{ kind: "read" as const, name: "large-file.ts" }],
+            type: "exploration" as const,
+        };
+        const block = createToolResultBlock(
+            defineTool({
+                ...definition(),
+                toPresentation: () => presentation,
+            }),
+            {},
+            {},
+            "call-exploration",
+        );
+
+        expect(block.presentation).toBe(presentation);
     });
 });
 

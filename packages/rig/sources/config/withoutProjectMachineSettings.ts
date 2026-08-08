@@ -16,6 +16,7 @@ export function withoutProjectMachineSettings(config: PartialRigConfig): Partial
         daemonHeapSnapshots: _daemonHeapSnapshots,
         durableGlobalEventQueue: _durableGlobalEventQueue,
         happyIntegration: _happyIntegration,
+        toolResultRetentionDays: _toolResultRetentionDays,
         ...settings
     } = projectSettings ?? {};
 

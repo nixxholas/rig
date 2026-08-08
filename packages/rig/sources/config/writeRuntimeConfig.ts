@@ -41,6 +41,7 @@ export async function writeRuntimeConfigInsideLock(
             happy_integration?: boolean;
             show_reasoning?: boolean;
             show_usage?: boolean;
+            tool_result_retention_days?: number;
         };
         presence?: {
             current?: string;
@@ -107,6 +108,9 @@ export async function writeRuntimeConfigInsideLock(
             document.settings.show_reasoning = settings.showReasoning;
         }
         if (settings.showUsage !== undefined) document.settings.show_usage = settings.showUsage;
+        if (settings.toolResultRetentionDays !== undefined) {
+            document.settings.tool_result_retention_days = settings.toolResultRetentionDays;
+        }
     }
 
     if (presence !== undefined) {

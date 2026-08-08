@@ -33,6 +33,7 @@ export interface ConfigSettings {
     happyIntegration: boolean;
     showReasoning: boolean;
     showUsage: boolean;
+    toolResultRetentionDays: number;
 }
 
 export interface PartialConfigSettings {
@@ -44,6 +45,7 @@ export interface PartialConfigSettings {
     happyIntegration?: boolean;
     showReasoning?: boolean;
     showUsage?: boolean;
+    toolResultRetentionDays?: number;
 }
 
 export interface ConfigFeatures {

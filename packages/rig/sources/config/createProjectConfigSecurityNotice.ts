@@ -11,12 +11,14 @@ export function createProjectConfigSecurityNotice(
     const daemonHeapSnapshots = config.settings?.daemonHeapSnapshots !== undefined;
     const durableEventQueue = config.settings?.durableGlobalEventQueue !== undefined;
     const happyIntegration = config.settings?.happyIntegration !== undefined;
+    const toolResultRetention = config.settings?.toolResultRetentionDays !== undefined;
     const p2p = config.p2p !== undefined;
     if (
         !inferenceRetries &&
         !daemonHeapSnapshots &&
         !durableEventQueue &&
         !happyIntegration &&
+        !toolResultRetention &&
         !p2p
     ) {
         if (!permission && !docker && !providers) return undefined;
@@ -47,6 +49,7 @@ export function createProjectConfigSecurityNotice(
         ...(daemonHeapSnapshots ? ["daemon heap snapshots"] : []),
         ...(durableEventQueue ? ["the durable event queue"] : []),
         ...(happyIntegration ? ["the Happy integration"] : []),
+        ...(toolResultRetention ? ["tool result retention"] : []),
         ...(p2p ? ["P2P networking"] : []),
     ];
     if (ignoredSettings.length === 0) return undefined;

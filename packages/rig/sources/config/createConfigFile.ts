@@ -38,6 +38,7 @@ export async function createConfigFile(
                 happy_integration: config.settings.happyIntegration,
                 show_reasoning: config.settings.showReasoning,
                 show_usage: config.settings.showUsage,
+                tool_result_retention_days: config.settings.toolResultRetentionDays,
             },
             features: {
                 cross_workspace: config.features.crossWorkspace,

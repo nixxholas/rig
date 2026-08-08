@@ -1,6 +1,7 @@
 import type { RigConfig } from "./types.js";
 import { detectP2pNodeName } from "./detectP2pNodeName.js";
 import { DEFAULT_INFERENCE_MAX_RETRIES } from "./inferenceRetrySettings.js";
+import { DEFAULT_TOOL_RESULT_RETENTION_DAYS } from "./toolResultRetentionSettings.js";
 
 export const DEFAULT_RIG_CONFIG: RigConfig = {
     defaults: {
@@ -53,6 +54,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         happyIntegration: true,
         showReasoning: false,
         showUsage: false,
+        toolResultRetentionDays: DEFAULT_TOOL_RESULT_RETENTION_DAYS,
     },
     theme: {
         accent: "cyan",

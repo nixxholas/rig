@@ -31,6 +31,7 @@ import {
     writeDaemonSettings,
     writeP2pNodeSettings,
 } from "../config/index.js";
+import { MILLISECONDS_PER_DAY } from "../config/toolResultRetentionSettings.js";
 import { createConfiguredPresenceStore } from "../presence/index.js";
 import { createProviderQuotaService } from "../executor/createProviderQuotaService.js";
 import {
@@ -579,6 +580,8 @@ async function runOwnedLocalProtocolServer(
                 ? {}
                 : { defaultDocker: loadedConfig.config.docker }),
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
+            toolResultRetentionMs:
+                loadedConfig.config.settings.toolResultRetentionDays * MILLISECONDS_PER_DAY,
             presence: createConfiguredPresenceStore(loadedConfig.config.presence),
             mcpToolProvider,
             localInstanceId: p2pIdentity.instanceId,

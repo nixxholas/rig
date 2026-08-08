@@ -25,6 +25,7 @@ import { p2pPeerNameSchema } from "../p2p/P2pPeer.js";
 import { p2pInstanceIdSchema } from "../protocol/P2pIdentityProtocol.js";
 import { p2pShareSchema } from "../protocol/P2pCredentialProtocol.js";
 import { protectedPathsSchema } from "./configPermissions.js";
+import { MAXIMUM_TOOL_RESULT_RETENTION_DAYS } from "./toolResultRetentionSettings.js";
 
 const irohRelayUrlSchema = Type.String({ pattern: "^https?://" });
 
@@ -169,6 +170,7 @@ function parseKnownConfigToml(source: string): PartialRigConfig {
             "happy_integration",
             "show_reasoning",
             "show_usage",
+            "tool_result_retention_days",
         ]);
         const inferenceMaxRetries = readIntegerInRange(
             settingsTable,
@@ -226,6 +228,16 @@ function parseKnownConfigToml(source: string): PartialRigConfig {
         }
         const showUsage = readBoolean(settingsTable, "show_usage", "settings.show_usage");
         if (showUsage !== undefined) settings.showUsage = showUsage;
+        const toolResultRetentionDays = readIntegerInRange(
+            settingsTable,
+            "tool_result_retention_days",
+            "settings.tool_result_retention_days",
+            0,
+            MAXIMUM_TOOL_RESULT_RETENTION_DAYS,
+        );
+        if (toolResultRetentionDays !== undefined) {
+            settings.toolResultRetentionDays = toolResultRetentionDays;
+        }
     }
 
     const providerSettings = readProviders(table.providers);

@@ -1,5 +1,6 @@
 import type { AnyDefinedTool, ToolResultBlock } from "./types.js";
 import { boundToolResultContent } from "./boundToolResultContent.js";
+import { boundToolResultPresentation } from "./boundToolResultPresentation.js";
 
 export function createToolResultBlock(
     tool: AnyDefinedTool,
@@ -19,7 +20,9 @@ export function createToolResultBlock(
         | undefined;
     const toUI = tool.toUI as (result: unknown, args: unknown) => string;
     const resultIsError = isError?.(result);
-    const presentation = resultIsError === true ? undefined : toPresentation?.(result, args);
+    const presentation = boundToolResultPresentation(
+        resultIsError === true ? undefined : toPresentation?.(result, args),
+    );
     const trustedUserEvidence =
         resultIsError === true ? undefined : toTrustedUserEvidence?.(result, args);
 
