@@ -1,7 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
-import { createSelectionPanel } from "./createSelectionPanel.js";
+import { createSelectionPanel, fitSelectionPanelToViewport } from "./createSelectionPanel.js";
 import { stripAnsi } from "./testing/stripAnsi.js";
 
 describe("createSelectionPanel", () => {
@@ -36,6 +36,124 @@ describe("createSelectionPanel", () => {
         expect(text).toContain("of 1");
         expect(rendered.every((line) => line.startsWith("\x1b[48;5;235m\x1b[39m"))).toBe(true);
         expect(rendered.join("\n")).not.toContain("\x1b[48;5;236m");
+    });
+
+    it("wraps long option labels and descriptions into aligned columns", () => {
+        const panel = createSelectionPanel({
+            cancelDisabled: true,
+            items: [
+                {
+                    description:
+                        "Keep instant renderer deploys and ship a runtime capability check.",
+                    label: "Detect and gate (keep live renderer deploys)",
+                    value: "detect",
+                },
+                {
+                    description: "Pages serves versioned bundles and the shell pins one.",
+                    label: "Eliminate skew (pin renderer to shell release)",
+                    value: "pin",
+                },
+            ],
+            onCancel: () => {},
+            onSelect: () => {},
+            subtitle: "How should that gap be handled? · 1 of 2",
+            title: "Skew policy",
+        });
+
+        const rendered = panel.render(80);
+        const text = stripAnsi(rendered.join("\n"));
+
+        expect(rendered.every((line) => visibleWidth(line) === 80)).toBe(true);
+        expect(text).toContain("Detect and gate (keep live renderer");
+        expect(text).toContain("deploys)");
+        expect(text).toContain("Keep instant renderer deploys and");
+        expect(text).toContain("ship a runtime capability check.");
+        expect(text).not.toContain("…");
+
+        const descriptionColumns = stripAnsi(rendered.join("\n"))
+            .split("\n")
+            .filter((line) => line.includes("Keep instant") || line.includes("Pages serves"))
+            .map((line) => line.indexOf(line.includes("Keep instant") ? "Keep" : "Pages"));
+        expect(new Set(descriptionColumns).size).toBe(1);
+    });
+
+    it("stacks the description under the label when the terminal is narrow", () => {
+        const panel = createSelectionPanel({
+            cancelDisabled: true,
+            items: [
+                {
+                    description: "Enter a response that is not listed.",
+                    label: "Type another answer",
+                    value: "other",
+                },
+            ],
+            onCancel: () => {},
+            onSelect: () => {},
+            subtitle: "Pick one · 1 of 1",
+            title: "Question",
+        });
+
+        const text = stripAnsi(panel.render(36).join("\n"));
+
+        expect(text.replace(/\s+/gu, " ")).toContain("Type another answer");
+        expect(text.replace(/\s+/gu, " ")).toContain("Enter a response that is not listed.");
+        expect(text.split("\n").some((line) => line.trimStart().startsWith("Enter a"))).toBe(true);
+    });
+
+    it("shows both ends of an option that is taller than its viewport", () => {
+        const panel = createSelectionPanel({
+            cancelDisabled: true,
+            items: [
+                {
+                    description:
+                        "First explanation words continue through several wrapped lines before the distinguishing tail words.",
+                    label: "Oversized selected option",
+                    value: "oversized",
+                },
+                { label: "Second option", value: "second" },
+            ],
+            onCancel: () => {},
+            onSelect: () => {},
+            subtitle: "Pick one · 1 of 2",
+            title: "Question",
+        });
+        fitSelectionPanelToViewport(panel, 24, 10);
+
+        const rendered = panel.render(24);
+        const text = stripAnsi(rendered.join("\n"));
+
+        expect(rendered).toHaveLength(10);
+        expect(rendered.every((line) => visibleWidth(line) === 24)).toBe(true);
+        expect(text).toContain("Oversized selected");
+        expect(text).toContain("tail words.");
+        expect(text).toContain("…");
+    });
+
+    it("keeps the selected option usable when the viewport is too short for panel chrome", () => {
+        const onSelect = vi.fn();
+        const panel = createSelectionPanel({
+            cancelDisabled: true,
+            items: [
+                { label: "First option", value: "first" },
+                { label: "Second option", value: "second" },
+            ],
+            onCancel: () => {},
+            onSelect,
+            subtitle: "Pick one · 1 of 2",
+            title: "Question",
+        });
+        fitSelectionPanelToViewport(panel, 24, 2);
+
+        panel.handleInput?.("\x1b[B");
+        const rendered = panel.render(24);
+
+        expect(rendered).toHaveLength(2);
+        expect(rendered.every((line) => visibleWidth(line) === 24)).toBe(true);
+        expect(stripAnsi(rendered.join("\n"))).toContain("Second option");
+        panel.handleInput?.("\r");
+        expect(onSelect).toHaveBeenCalledWith(
+            expect.objectContaining({ label: "Second option", value: "second" }),
+        );
     });
 
     it("removes terminal controls from every user-visible field", () => {

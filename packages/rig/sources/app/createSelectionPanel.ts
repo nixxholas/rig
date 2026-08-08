@@ -1,12 +1,12 @@
 import {
     matchesKey,
-    SelectList,
     wrapTextWithAnsi,
     type Component,
     type SelectItem,
 } from "@earendil-works/pi-tui";
 
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";
+import { SelectionList } from "./SelectionList.js";
 import { surfaceThemedLine } from "./surfaceThemedLine.js";
 import { DEFAULT_TERMINAL_THEME } from "./defaultTerminalTheme.js";
 import type { TerminalTheme } from "./TerminalTheme.js";
@@ -15,6 +15,7 @@ const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const NOT_BOLD_OR_DIM = "\x1b[22m";
+const DEFAULT_VISIBLE_LINES = 12;
 
 export interface CreateSelectionPanelOptions {
     cancelDisabled?: boolean;
@@ -34,13 +35,13 @@ export function createSelectionPanel(options: CreateSelectionPanelOptions): Comp
 class SelectionPanel implements Component {
     readonly #cancelDisabled: boolean;
     readonly #items: SelectItem[];
-    #list: SelectList;
-    #maxVisible = 8;
+    readonly #list: SelectionList;
     readonly #onCancel: () => void;
     readonly #onSelect: (item: SelectItem) => void;
     readonly #subtitle: string;
     readonly #title: string;
     readonly #theme: TerminalTheme;
+    #viewportHeight: number | undefined;
 
     constructor(options: CreateSelectionPanelOptions) {
         this.#cancelDisabled = options.cancelDisabled === true;
@@ -56,7 +57,7 @@ class SelectionPanel implements Component {
         }));
         this.#onSelect = options.onSelect;
         this.#onCancel = options.onCancel;
-        this.#list = this.#createList(this.#maxVisible);
+        this.#list = this.#createList(DEFAULT_VISIBLE_LINES);
 
         const selectedIndex = options.items.findIndex(
             (item) => item.value === options.selectedValue,
@@ -66,21 +67,8 @@ class SelectionPanel implements Component {
         }
     }
 
-    fitToViewport(width: number, height: number): void {
-        const contentWidth = Math.max(1, width - 2);
-        const subtitleRows = wrapTextWithAnsi(this.#subtitle, contentWidth).length;
-        const listRowsWithoutScroll = Math.max(1, height - subtitleRows - 6);
-        const maxVisible =
-            this.#items.length <= listRowsWithoutScroll
-                ? Math.max(1, this.#items.length)
-                : Math.max(1, listRowsWithoutScroll - 1);
-        if (maxVisible === this.#maxVisible) return;
-
-        const selectedValue = this.#list.getSelectedItem()?.value;
-        this.#maxVisible = maxVisible;
-        this.#list = this.#createList(maxVisible);
-        const selectedIndex = this.#items.findIndex((item) => item.value === selectedValue);
-        if (selectedIndex >= 0) this.#list.setSelectedIndex(selectedIndex);
+    fitToViewport(_width: number, height: number): void {
+        this.#viewportHeight = Math.max(1, height);
     }
 
     invalidate(): void {
@@ -90,23 +78,46 @@ class SelectionPanel implements Component {
     render(width: number): string[] {
         const safeWidth = Math.max(1, width);
         const contentWidth = Math.max(1, safeWidth - 2);
+        const titleLines = wrapTextWithAnsi(this.#title, contentWidth);
         const subtitleLines = wrapTextWithAnsi(this.#subtitle, contentWidth);
-        const lines = [
-            "",
-            `  ${this.#theme.brand}${BOLD}${this.#title}${NOT_BOLD_OR_DIM}${this.#theme.primary}`,
-            ...subtitleLines.map(
-                (line) => `  ${this.#theme.secondary}${line}${this.#theme.primary}`,
-            ),
-            "",
-            ...this.#list.render(contentWidth).map((line) => `  ${line}`),
-            "",
-            `  ${DIM}${this.#theme.secondary}${
-                this.#cancelDisabled
-                    ? "Use ↑/↓ to move and Enter to select."
-                    : "Use ↑/↓ to move, Enter to select, Esc to cancel."
-            }${this.#theme.primary}`,
-            "",
-        ];
+        const styledTitle = titleLines.map(
+            (line) =>
+                `  ${this.#theme.brand}${BOLD}${line}${NOT_BOLD_OR_DIM}${this.#theme.primary}`,
+        );
+        const styledSubtitle = subtitleLines.map(
+            (line) => `  ${this.#theme.secondary}${line}${this.#theme.primary}`,
+        );
+        const listWidth = Math.max(1, safeWidth - 4);
+        const fullChromeRows = titleLines.length + subtitleLines.length + 5;
+        let lines: string[];
+        if (this.#viewportHeight === undefined || this.#viewportHeight >= fullChromeRows + 1) {
+            this.#list.setMaxVisibleLines(
+                this.#viewportHeight === undefined
+                    ? DEFAULT_VISIBLE_LINES
+                    : this.#viewportHeight - fullChromeRows,
+            );
+            lines = [
+                "",
+                ...styledTitle,
+                ...styledSubtitle,
+                "",
+                ...this.#list.render(listWidth).map((line) => `  ${line}`),
+                "",
+                `  ${DIM}${this.#theme.secondary}${
+                    this.#cancelDisabled
+                        ? "Use ↑/↓ to move and Enter to select."
+                        : "Use ↑/↓ to move, Enter to select, Esc to cancel."
+                }${this.#theme.primary}`,
+                "",
+            ];
+        } else {
+            const headers = [...styledTitle, ...styledSubtitle].slice(
+                0,
+                Math.max(0, this.#viewportHeight - 1),
+            );
+            this.#list.setMaxVisibleLines(Math.max(1, this.#viewportHeight - headers.length));
+            lines = [...headers, ...this.#list.render(listWidth).map((line) => `  ${line}`)];
+        }
 
         return lines.map((line) => surfaceThemedLine(line, safeWidth, this.#theme));
     }
@@ -116,22 +127,12 @@ class SelectionPanel implements Component {
         this.#list.handleInput(data);
     }
 
-    #createList(maxVisible: number): SelectList {
-        const list = new SelectList(
-            this.#items,
-            maxVisible,
-            {
-                selectedPrefix: (text) => `${this.#theme.brand}${text}${RESET}`,
-                selectedText: (text) => `${this.#theme.brand}${text}${RESET}${this.#theme.primary}`,
-                description: (text) => `${DIM}${this.#theme.secondary}${text}${RESET}`,
-                scrollInfo: (text) => `${DIM}${this.#theme.secondary}${text}${RESET}`,
-                noMatch: (text) => `${this.#theme.secondary}${text}${RESET}`,
-            },
-            {
-                minPrimaryColumnWidth: 18,
-                maxPrimaryColumnWidth: 28,
-            },
-        );
+    #createList(maxVisibleLines: number): SelectionList {
+        const list = new SelectionList(this.#items, maxVisibleLines, {
+            selectedText: (text) => `${this.#theme.brand}${text}${RESET}${this.#theme.primary}`,
+            description: (text) => `${DIM}${this.#theme.secondary}${text}${RESET}`,
+            scrollInfo: (text) => `${DIM}${this.#theme.secondary}${text}${RESET}`,
+        });
         list.onSelect = this.#onSelect;
         list.onCancel = this.#onCancel;
         return list;
