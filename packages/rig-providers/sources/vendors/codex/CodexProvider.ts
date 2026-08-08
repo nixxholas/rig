@@ -2,6 +2,7 @@ import type { ProviderModality } from "@/core/ProviderModality.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import {
     createInferenceMaxRetriesResolver,
+    sessionInferenceMaxRetriesResolver,
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import { ResponsesProvider } from "@/protocol/responses/ResponsesProvider.js";
@@ -114,7 +115,10 @@ export class CodexProvider extends ResponsesProvider {
             ...(this.parallelToolCalls === undefined
                 ? {}
                 : { parallelToolCalls: this.parallelToolCalls }),
-            resolveInferenceMaxRetries: () => this.inferenceMaxRetries,
+            resolveInferenceMaxRetries: sessionInferenceMaxRetriesResolver(
+                options,
+                () => this.inferenceMaxRetries,
+            ),
             ...(this.#waitForInferenceRetry === undefined
                 ? {}
                 : { waitForInferenceRetry: this.#waitForInferenceRetry }),

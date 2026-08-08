@@ -2,6 +2,7 @@ import type { ProviderModality } from "@/core/ProviderModality.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import {
     createInferenceMaxRetriesResolver,
+    sessionInferenceMaxRetriesResolver,
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import { ResponsesProvider } from "@/protocol/responses/ResponsesProvider.js";
@@ -49,7 +50,10 @@ export class GrokProvider extends ResponsesProvider {
             credential: this.credential,
             endpoint: this.endpoint,
             ...(this.model === undefined ? {} : { model: this.model }),
-            resolveInferenceMaxRetries: this.#resolveInferenceMaxRetries,
+            resolveInferenceMaxRetries: sessionInferenceMaxRetriesResolver(
+                options,
+                this.#resolveInferenceMaxRetries,
+            ),
             ...(this.#waitForInferenceRetry === undefined
                 ? {}
                 : { waitForInferenceRetry: this.#waitForInferenceRetry }),

@@ -3,6 +3,7 @@ import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import { BaseProvider } from "@/core/BaseProvider.js";
 import {
     createInferenceMaxRetriesResolver,
+    sessionInferenceMaxRetriesResolver,
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
@@ -61,7 +62,10 @@ export class ClaudeProvider extends BaseProvider {
                 ? {}
                 : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
             ...(this.query === undefined ? {} : { query: this.query }),
-            resolveInferenceMaxRetries: this.#resolveInferenceMaxRetries,
+            resolveInferenceMaxRetries: sessionInferenceMaxRetriesResolver(
+                options,
+                this.#resolveInferenceMaxRetries,
+            ),
             ...(this.#waitForInferenceRetry === undefined
                 ? {}
                 : { waitForInferenceRetry: this.#waitForInferenceRetry }),

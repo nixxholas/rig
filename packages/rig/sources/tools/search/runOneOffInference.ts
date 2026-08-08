@@ -22,6 +22,12 @@ export interface OneOffInferenceResult {
  *
  * The caller owns any vendor-specific event interpretation through `onEvent`. This helper only
  * opens the provider session, streams one request, collects text, and destroys the session.
+ *
+ * The request is never retried. A tool call is a step inside somebody's turn, so a provider that
+ * quietly works through its retry budget spends minutes of that turn to arrive at the same answer,
+ * and an account that is signed out or spent will never answer differently anyway. Failing at once
+ * hands the model a real error it can act on, and it can simply search again if the failure was a
+ * passing one.
  */
 export async function runOneOffInference(options: {
     instructions: string;
@@ -38,6 +44,7 @@ export async function runOneOffInference(options: {
     }
     const native = await resolveNativeProvider(options.route);
     const session = await native.session(createOneOffSessionId(options.route), {
+        inferenceMaxRetries: 0,
         instructions: options.instructions,
         tools: options.tools ?? [],
     });

@@ -40,6 +40,7 @@ describe("runOneOffInference", () => {
         expect(sessionId).toMatch(/^one-off:[0-9a-f]{16}:[a-z0-9]{24}$/u);
         expect(sessionId).toHaveLength(49);
         expect(native.session).toHaveBeenCalledWith(sessionId, {
+            inferenceMaxRetries: 0,
             instructions: "Answer one bounded question.",
             tools: [{ name: "web_search", server: { type: "web_search" } }],
         });

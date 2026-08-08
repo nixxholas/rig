@@ -9,6 +9,11 @@ import type { SessionToolsOptions } from "@/core/SessionTool.js";
  * receive initial messages at creation.
  */
 export interface SessionOptions extends SessionToolsOptions {
+    /**
+     * Retry budget for this session alone, overriding the provider's own. Zero means a failure is
+     * reported the moment it happens. Omit it to retry the way the provider normally would.
+     */
+    readonly inferenceMaxRetries?: number;
     readonly instructions: string;
     /**
      * Alternate model-visible configurations supplied when a session can switch between

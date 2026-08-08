@@ -1,6 +1,7 @@
 import { BaseProvider } from "@/core/BaseProvider.js";
 import {
     createInferenceMaxRetriesResolver,
+    sessionInferenceMaxRetriesResolver,
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import type { ProviderModality } from "@/core/ProviderModality.js";
@@ -62,7 +63,10 @@ export class AnthropicBedrockProvider extends BaseProvider {
             ...(this.endpoint === undefined ? {} : { endpoint: this.endpoint }),
             ...(this.model === undefined ? {} : { model: this.model }),
             region: this.region,
-            resolveInferenceMaxRetries: this.#resolveInferenceMaxRetries,
+            resolveInferenceMaxRetries: sessionInferenceMaxRetriesResolver(
+                options,
+                this.#resolveInferenceMaxRetries,
+            ),
             ...(this.#waitForInferenceRetry === undefined
                 ? {}
                 : { waitForInferenceRetry: this.#waitForInferenceRetry }),
