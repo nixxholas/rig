@@ -47,6 +47,7 @@ export class P2pProfileReplicator {
     readonly #pendingProfileVersions = new Map<string, number>();
     readonly #profiles: RigProfileStore;
     readonly #reportedFailures = new Set<string>();
+    readonly #retryMissingProfileVersions = new Map<string, number>();
     readonly #syncedVersions = new Map<string, number>();
     readonly #targetCheckedAt = new Map<string, number>();
     readonly #targets = new Map<string, boolean>();
@@ -65,12 +66,27 @@ export class P2pProfileReplicator {
 
     syncProfile(profileId: string, version: number): void {
         if (this.#abort.signal.aborted) return;
+        this.#retryMissingProfileVersions.set(
+            profileId,
+            Math.max(version, this.#retryMissingProfileVersions.get(profileId) ?? 0),
+        );
         this.#pendingProfileVersions.set(
             profileId,
             Math.max(version, this.#pendingProfileVersions.get(profileId) ?? 0),
         );
         this.#retryMs = INITIAL_RETRY_MS;
         this.#startNow();
+    }
+
+    profileSynchronized(peerId: string, profileId: string, version: number): void {
+        if (this.#abort.signal.aborted) return;
+        const key = `${peerId}:${profileId}`;
+        this.#syncedVersions.set(key, Math.max(version, this.#syncedVersions.get(key) ?? 0));
+        this.#reportedFailures.delete(peerId);
+        const latest = this.#profiles.get(profileId);
+        if (latest !== undefined && this.#profiles.isLocal(profileId) && latest.version > version) {
+            this.syncProfile(profileId, latest.version);
+        }
     }
 
     syncAll(options: { recheckTargets?: boolean } = {}): void {
@@ -166,9 +182,11 @@ export class P2pProfileReplicator {
             const profile = this.#profiles.get(profileId);
             if (profile === undefined || !this.#profiles.isLocal(profileId)) {
                 this.#pendingProfileVersions.delete(profileId);
+                this.#retryMissingProfileVersions.delete(profileId);
                 continue;
             }
             let complete = true;
+            let missing = false;
             for (const peerId of peerIds) {
                 if (this.#abort.signal.aborted) return;
                 let target = this.#targets.get(peerId);
@@ -189,7 +207,6 @@ export class P2pProfileReplicator {
                     }
                 }
                 if (!target) {
-                    complete = false;
                     continue;
                 }
                 const key = `${peerId}:${profile.id}`;
@@ -203,7 +220,7 @@ export class P2pProfileReplicator {
                         signal: this.#requestSignal(),
                     });
                     if (result === "missing") {
-                        complete = false;
+                        missing = true;
                         continue;
                     }
                     this.#syncedVersions.set(key, profile.version);
@@ -212,15 +229,23 @@ export class P2pProfileReplicator {
                     if (error instanceof P2pProfileReplicationError && error.status === 403) {
                         this.#targets.set(peerId, false);
                         this.#targetCheckedAt.set(peerId, Date.now());
-                        complete = false;
+                        continue;
+                    }
+                    if (error instanceof P2pProfileReplicationError && error.status === 409) {
+                        this.#report(peerId, error);
                         continue;
                     }
                     complete = false;
                     this.#report(peerId, error);
                 }
             }
+            if (missing && this.#retryMissingProfileVersions.get(profileId) === profile.version) {
+                this.#retryMissingProfileVersions.delete(profileId);
+                complete = false;
+            }
             if (complete && (this.#pendingProfileVersions.get(profileId) ?? 0) <= profile.version) {
                 this.#pendingProfileVersions.delete(profileId);
+                this.#retryMissingProfileVersions.delete(profileId);
             }
         }
     }

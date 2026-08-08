@@ -2331,7 +2331,7 @@ export const p2pPeerStatusSchema = Type.Object(
         address: Type.String({ minLength: 1 }),
         error: Type.Optional(Type.String()),
         lastSeenAt: Type.Optional(Type.Number()),
-        name: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+        name: Type.String({ maxLength: 128, minLength: 1 }),
         peerId: Type.Optional(
             Type.String({
                 maxLength: 32,
@@ -2405,7 +2405,7 @@ export const p2pStatusSchema = Type.Object(
                 pattern: "^[a-z][a-z0-9]+$",
             }),
         ),
-        name: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+        name: Type.String({ maxLength: 128, minLength: 1 }),
         publicKey: Type.Optional(
             Type.String({
                 maxLength: 43,

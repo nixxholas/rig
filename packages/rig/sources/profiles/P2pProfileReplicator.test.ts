@@ -136,6 +136,201 @@ describe("P2pProfileReplicator", () => {
             ),
         ).toHaveLength(2);
     });
+
+    it("does not retry a profile that has not been registered on a secondary", async () => {
+        vi.useFakeTimers();
+        database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: LOCAL_INSTANCE,
+            publish: () => undefined,
+        });
+        const created = profiles.create({ name: "Steve" });
+        const requests: { method: string; path: string }[] = [];
+        const network = {
+            fetch: vi.fn(
+                async (
+                    _peerId: string,
+                    request: P2pHttpRequest,
+                ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
+                    requests.push({ method: request.method, path: request.path });
+                    if (request.path === "/config") {
+                        return {
+                            response: response(200, {
+                                config: {
+                                    p2p: {
+                                        primaryId: LOCAL_INSTANCE,
+                                        role: "secondary",
+                                    },
+                                },
+                            }),
+                            transport: "iroh",
+                        };
+                    }
+                    return {
+                        response: response(404, { error: "missing" }),
+                        transport: "iroh",
+                    };
+                },
+            ),
+        } as unknown as P2pNetwork;
+        replicator = new P2pProfileReplicator({
+            listPeerIds: () => [SECONDARY_INSTANCE],
+            localInstanceId: LOCAL_INSTANCE,
+            network,
+            profiles,
+        });
+
+        replicator.syncAll({ recheckTargets: true });
+        await replicator.flush();
+
+        expect(requests).toEqual([
+            { method: "GET", path: "/config" },
+            { method: "GET", path: `/profiles/${created.id}` },
+        ]);
+
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        await replicator.flush();
+
+        expect(requests).toEqual([
+            { method: "GET", path: "/config" },
+            { method: "GET", path: `/profiles/${created.id}` },
+        ]);
+    });
+
+    it("synchronizes an update when a secondary has already registered the profile", async () => {
+        vi.useFakeTimers();
+        database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: LOCAL_INSTANCE,
+            publish: () => undefined,
+        });
+        const created = profiles.create({ name: "Steve" });
+        const remoteProfiles = new Map([[created.id, created]]);
+        const requests: { method: string; path: string }[] = [];
+        const network = {
+            fetch: vi.fn(
+                async (
+                    _peerId: string,
+                    request: P2pHttpRequest,
+                ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
+                    requests.push({ method: request.method, path: request.path });
+                    if (request.path === "/config") {
+                        return {
+                            response: response(200, {
+                                config: {
+                                    p2p: {
+                                        primaryId: LOCAL_INSTANCE,
+                                        role: "secondary",
+                                    },
+                                },
+                            }),
+                            transport: "iroh",
+                        };
+                    }
+                    const profileId = request.path.slice("/profiles/".length);
+                    if (request.method === "GET") {
+                        return {
+                            response: response(200, {
+                                profile: remoteProfiles.get(profileId),
+                            }),
+                            transport: "iroh",
+                        };
+                    }
+                    const decoded = JSON.parse(Buffer.from(request.body).toString("utf8")) as {
+                        profile: RigProfile;
+                    };
+                    remoteProfiles.set(profileId, decoded.profile);
+                    return {
+                        response: response(200, { profile: decoded.profile }),
+                        transport: "iroh",
+                    };
+                },
+            ),
+        } as unknown as P2pNetwork;
+        replicator = new P2pProfileReplicator({
+            listPeerIds: () => [SECONDARY_INSTANCE],
+            localInstanceId: LOCAL_INSTANCE,
+            network,
+            profiles,
+        });
+
+        replicator.syncAll({ recheckTargets: true });
+        await replicator.flush();
+        const updated = profiles.update(created.id, { name: "Steve 🧑‍💻" });
+        expect(updated).toBeDefined();
+        replicator.syncProfile(created.id, updated!.version);
+        await replicator.flush();
+
+        expect(remoteProfiles.get(created.id)).toEqual(updated);
+        expect(requests).toEqual([
+            { method: "GET", path: "/config" },
+            { method: "GET", path: `/profiles/${created.id}` },
+            { method: "GET", path: `/profiles/${created.id}` },
+            { method: "PUT", path: `/profiles/${created.id}` },
+        ]);
+    });
+
+    it("catches up when message preflight registered an older profile version", async () => {
+        database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: LOCAL_INSTANCE,
+            publish: () => undefined,
+        });
+        const created = profiles.create({ name: "Steve" });
+        const updated = profiles.update(created.id, { name: "Steve 🧑‍💻" })!;
+        let remoteProfile = created;
+        const network = {
+            fetch: vi.fn(
+                async (
+                    _peerId: string,
+                    request: P2pHttpRequest,
+                ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
+                    if (request.path === "/config") {
+                        return {
+                            response: response(200, {
+                                config: {
+                                    p2p: {
+                                        primaryId: LOCAL_INSTANCE,
+                                        role: "secondary",
+                                    },
+                                },
+                            }),
+                            transport: "iroh",
+                        };
+                    }
+                    if (request.method === "GET") {
+                        return {
+                            response: response(200, { profile: remoteProfile }),
+                            transport: "iroh",
+                        };
+                    }
+                    remoteProfile = (
+                        JSON.parse(Buffer.from(request.body).toString("utf8")) as {
+                            profile: RigProfile;
+                        }
+                    ).profile;
+                    return {
+                        response: response(200, { profile: remoteProfile }),
+                        transport: "iroh",
+                    };
+                },
+            ),
+        } as unknown as P2pNetwork;
+        replicator = new P2pProfileReplicator({
+            listPeerIds: () => [SECONDARY_INSTANCE],
+            localInstanceId: LOCAL_INSTANCE,
+            network,
+            profiles,
+        });
+
+        replicator.profileSynchronized(SECONDARY_INSTANCE, created.id, created.version);
+        await replicator.flush();
+
+        expect(remoteProfile).toEqual(updated);
+    });
 });
 
 function response(status: number, payload: unknown): P2pHttpResponse {

@@ -57,6 +57,57 @@ describe("replicateProfileForP2pRequest", () => {
         expect(JSON.parse(Buffer.from(requests[1]!.body).toString("utf8"))).toEqual({ profile });
     });
 
+    it("accepts a newer authoritative profile returned by a concurrent first registration", async () => {
+        database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: LOCAL_INSTANCE,
+            publish: () => undefined,
+        });
+        const profile = profiles.create({ name: "Steve" });
+        let authoritativeProfile = profile;
+        const requests: P2pHttpRequest[] = [];
+        const network = {
+            fetch: vi.fn(
+                async (
+                    _peerId: string,
+                    request: P2pHttpRequest,
+                ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
+                    requests.push(request);
+                    if (request.method === "GET") {
+                        authoritativeProfile = profiles.update(profile.id, {
+                            name: "Stephen",
+                        })!;
+                        return {
+                            response: response(404, { error: "missing" }),
+                            transport: "iroh",
+                        };
+                    }
+                    return {
+                        response: response(200, { profile: authoritativeProfile }),
+                        transport: "iroh",
+                    };
+                },
+            ),
+        } as unknown as P2pNetwork;
+
+        await expect(
+            replicateProfileForP2pRequest({
+                body: Buffer.from(JSON.stringify({ identity: profile.id, text: "Hello" })),
+                network,
+                path: "/sessions/asession/messages",
+                peerId: PEER_INSTANCE,
+                profiles,
+                signal: new AbortController().signal,
+            }),
+        ).resolves.toBeUndefined();
+
+        expect(requests.map((request) => request.method)).toEqual(["GET", "PUT"]);
+        expect(JSON.parse(Buffer.from(requests[1]!.body).toString("utf8"))).toEqual({
+            profile,
+        });
+    });
+
     it("does not rewrite an identical replica and rejects conflicting state", async () => {
         database = new PersistentSessionStore({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({

@@ -97,7 +97,7 @@ export interface CreateIrohNetworkOptions {
     addressReadyTimeoutMs?: number;
     addressSupervisionIntervalMs?: number;
     restartCooldownMs?: number;
-    knownPeer?: (endpointId: string) => (P2pPeerIdentity & { name?: string }) | undefined;
+    knownPeer?: (endpointId: string) => (P2pPeerIdentity & { name: string }) | undefined;
     serveRequest?: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
     validatePeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
@@ -128,7 +128,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #idleTimeoutMs: number;
     readonly #identity: P2pInstanceIdentity;
     readonly #knownPeer:
-        | ((endpointId: string) => (P2pPeerIdentity & { name?: string }) | undefined)
+        | ((endpointId: string) => (P2pPeerIdentity & { name: string }) | undefined)
         | undefined;
     readonly #onStatusChange: ((status: P2pTransportStatus) => void) | undefined;
     readonly #pendingConnectChanges = new Map<string, AbortController>();
@@ -208,19 +208,18 @@ export class IrohNetwork implements P2pTransport {
         this.#updatePeerAddress = options.updatePeerAddress;
         for (const endpointId of options.endpointIds) {
             const known = this.#knownPeer?.(endpointId);
-            if (known !== undefined) {
-                this.#peerIdentities.set(endpointId, known);
-                if (known.name !== undefined) this.#peerNames.set(endpointId, known.name);
+            if (known === undefined) {
+                throw new Error(
+                    "Every configured Iroh peer must have a trusted identity and name.",
+                );
             }
+            this.#peerIdentities.set(endpointId, known);
+            this.#peerNames.set(endpointId, known.name);
             this.#peerStatuses.set(endpointId, {
                 address: endpointId,
-                ...(known === undefined
-                    ? {}
-                    : {
-                          ...(known.name === undefined ? {} : { name: known.name }),
-                          peerId: known.instanceId,
-                          publicKey: known.publicKey,
-                      }),
+                name: known.name,
+                peerId: known.instanceId,
+                publicKey: known.publicKey,
                 status: "connecting",
             });
         }
@@ -262,13 +261,13 @@ export class IrohNetwork implements P2pTransport {
         return this.#endpoint.id().toString();
     }
 
-    addPeer(endpointId: string, identity: P2pPeerIdentity, name?: string, ticket?: string): void {
+    addPeer(endpointId: string, identity: P2pPeerIdentity, name: string, ticket?: string): void {
         if (endpointId === this.localAddress()) {
             throw new Error("A P2P peer must not use this daemon's own Iroh endpoint ID.");
         }
         this.#peerIdentities.set(endpointId, identity);
         if (ticket !== undefined) this.#setPeerTicket(endpointId, ticket);
-        if (name !== undefined) this.#peerNames.set(endpointId, name);
+        this.#peerNames.set(endpointId, name);
         if (this.#allowedPeers.has(endpointId)) {
             this.#setPeerStatus(endpointId, this.#statusFor(endpointId, "connecting"));
             return;
@@ -277,7 +276,7 @@ export class IrohNetwork implements P2pTransport {
         this.#endpointIds.push(endpointId);
         this.#peerStatuses.set(endpointId, {
             address: endpointId,
-            ...(name === undefined ? {} : { name }),
+            name,
             peerId: identity.instanceId,
             publicKey: identity.publicKey,
             status: "connecting",
@@ -857,6 +856,7 @@ export class IrohNetwork implements P2pTransport {
                     this.#setPeerStatus(endpointId, {
                         address: endpointId,
                         lastSeenAt: Date.now(),
+                        name: this.#peerName(endpointId),
                         peerId: authenticated.instanceId,
                         publicKey: authenticated.publicKey,
                         rttMs: Date.now() - startedAt,
@@ -1075,9 +1075,7 @@ export class IrohNetwork implements P2pTransport {
             address: endpointId,
             ...(previous?.error === undefined ? {} : { error: previous.error }),
             ...(previous?.lastSeenAt === undefined ? {} : { lastSeenAt: previous.lastSeenAt }),
-            ...(this.#peerNames.get(endpointId) === undefined
-                ? {}
-                : { name: this.#peerNames.get(endpointId)! }),
+            name: this.#peerName(endpointId),
             peerId: identity.instanceId,
             publicKey: identity.publicKey,
             ...(previous?.rttMs === undefined ? {} : { rttMs: previous.rttMs }),
@@ -1101,17 +1099,20 @@ export class IrohNetwork implements P2pTransport {
         const identity = this.#peerIdentities.get(endpointId);
         return {
             address: endpointId,
+            name: this.#peerName(endpointId),
             ...(identity === undefined
                 ? {}
-                : {
-                      ...(this.#peerNames.get(endpointId) === undefined
-                          ? {}
-                          : { name: this.#peerNames.get(endpointId)! }),
-                      peerId: identity.instanceId,
-                      publicKey: identity.publicKey,
-                  }),
+                : { peerId: identity.instanceId, publicKey: identity.publicKey }),
             status,
         };
+    }
+
+    #peerName(endpointId: string): string {
+        const name = this.#peerNames.get(endpointId);
+        if (name === undefined) {
+            throw new Error("The configured Iroh peer has no trusted display name.");
+        }
+        return name;
     }
 
     #setPeerStatus(endpointId: string, status: P2pPeerStatus): void {
@@ -1121,6 +1122,7 @@ export class IrohNetwork implements P2pTransport {
             previous.address === status.address &&
             previous.error === status.error &&
             previous.lastSeenAt === status.lastSeenAt &&
+            previous.name === status.name &&
             previous.peerId === status.peerId &&
             previous.publicKey === status.publicKey &&
             previous.rttMs === status.rttMs
@@ -1128,7 +1130,11 @@ export class IrohNetwork implements P2pTransport {
             return;
         }
         this.#peerStatuses.set(endpointId, status);
-        if (previous?.status !== status.status || previous.error !== status.error) {
+        if (
+            previous?.status !== status.status ||
+            previous.error !== status.error ||
+            previous.name !== status.name
+        ) {
             this.#publishStatus();
         }
     }

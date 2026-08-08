@@ -1196,10 +1196,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const applyProfiles = (entry: ProfilesEntry, incoming: readonly RigProfile[]): boolean => {
         const wasLoaded = entry.loaded;
         const previous = new Map(entry.profiles.map((profile) => [profile.id, profile]));
-        const next = incoming.map((profile) => {
+        const nextById = new Map(previous);
+        for (const profile of incoming) {
             const current = previous.get(profile.id);
-            return current?.version === profile.version ? current : profile;
-        });
+            if (current === undefined || profile.version > current.version) {
+                nextById.set(profile.id, profile);
+            }
+        }
+        const next = [...nextById.values()].sort((first, second) =>
+            first.id.localeCompare(second.id),
+        );
         const changed =
             next.length !== entry.profiles.length ||
             next.some((profile, index) => profile !== entry.profiles[index]);
@@ -1210,6 +1216,20 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             publishSession(session, session.store.applyProfiles(entry.profiles));
         }
         return true;
+    };
+
+    const applyProfileMutation = (entry: ProfilesEntry, profile: RigProfile): void => {
+        const current = entry.profiles.find((candidate) => candidate.id === profile.id);
+        if (current !== undefined && current.version >= profile.version) return;
+        entry.profiles = [
+            ...entry.profiles.filter((candidate) => candidate.id !== profile.id),
+            profile,
+        ].sort((first, second) => first.id.localeCompare(second.id));
+        if (!entry.loaded) return;
+        publishProfiles(entry);
+        for (const session of sessionEntries.values()) {
+            publishSession(session, session.store.applyProfiles(entry.profiles));
+        }
     };
 
     const publishInbox = (deltas: readonly InboxDelta[]): void => {
@@ -2858,7 +2878,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             )
                 .then((page) => {
                     if (closed || entry.controller.signal.aborted) return;
-                    publishSession(entry, entry.store.prependEarlier(page, started.anchor));
+                    const deltas = [...entry.store.prependEarlier(page, started.anchor)];
+                    const profiles = profilesEntry;
+                    if (profiles?.loaded === true) {
+                        deltas.push(...entry.store.applyProfiles(profiles.profiles));
+                    }
+                    publishSession(entry, deltas);
+                    ensureProfilesForSession(entry);
                 })
                 .catch((error: unknown) => {
                     if (closed || entry.controller.signal.aborted) return;
@@ -3887,7 +3913,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (entry.lastLoadError !== undefined) subscriber.onError?.(entry.lastLoadError);
         startProfilesEntry(entry);
         return {
-            profiles: () => (subscriber.closed ? [] : entry.profiles),
+            profiles: () => (subscriber.closed || !entry.loaded ? [] : entry.profiles),
             close: () => {
                 if (subscriber.closed) return;
                 subscriber.closed = true;
@@ -3938,15 +3964,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 throw new Error("Rig returned an invalid human profile.");
             }
             const entry = createProfilesEntry();
-            const withoutProfile = entry.profiles.filter(
-                (candidate) => candidate.id !== profile.profile.id,
-            );
-            applyProfiles(
-                entry,
-                [...withoutProfile, profile.profile].sort((first, second) =>
-                    first.id.localeCompare(second.id),
-                ),
-            );
+            applyProfileMutation(entry, profile.profile);
             startProfilesEntry(entry);
             return profile.profile;
         } finally {

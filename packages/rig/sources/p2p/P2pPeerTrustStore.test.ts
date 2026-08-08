@@ -22,9 +22,15 @@ describe("P2pPeerTrustStore", () => {
 
         await store.validate(identity, "iroh", "a".repeat(64));
         expect(store.peerForBinding("iroh", "a".repeat(64))).toBeUndefined();
-        await store.verifyOrPin(identity, "iroh", "a".repeat(64), {
-            iroh: { endpointId: "a".repeat(64) },
-        });
+        await store.verifyOrPin(
+            identity,
+            "iroh",
+            "a".repeat(64),
+            {
+                iroh: { endpointId: "a".repeat(64) },
+            },
+            "Remote Rig",
+        );
         const restored = P2pPeerTrustStore.fromDatabase(opened.database);
 
         expect(restored.peerForBinding("iroh", "a".repeat(64))).toEqual({
@@ -40,9 +46,15 @@ describe("P2pPeerTrustStore", () => {
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
         const endpointId = "a".repeat(64);
 
-        await store.verifyOrPin(identity, "iroh", endpointId, {
-            iroh: { endpointId, ticket: "first-ticket" },
-        });
+        await store.verifyOrPin(
+            identity,
+            "iroh",
+            endpointId,
+            {
+                iroh: { endpointId, ticket: "first-ticket" },
+            },
+            "Remote Rig",
+        );
         await store.verifyOrPin(identity, "iroh", endpointId, {
             iroh: { endpointId, ticket: "second-ticket" },
         });
@@ -61,7 +73,7 @@ describe("P2pPeerTrustStore", () => {
         const other = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
-        await store.verifyOrPin(trusted, "iroh", "a".repeat(64));
+        await store.verifyOrPin(trusted, "iroh", "a".repeat(64), undefined, "Remote Rig");
         await store.verifyOrPin(trusted, "iroh", "b".repeat(64));
 
         await expect(store.verifyOrPin(impostor, "iroh", "c".repeat(64))).rejects.toThrow(
@@ -71,6 +83,17 @@ describe("P2pPeerTrustStore", () => {
             "another P2P instance",
         );
         expect(store.peerForBinding("iroh", "b".repeat(64))?.instanceId).toBe(trusted.instanceId);
+    });
+
+    it("refuses to create trusted peer state without a display name", async () => {
+        const opened = openTrustDatabase();
+        const identity = createP2pInstanceIdentity();
+        const store = P2pPeerTrustStore.fromDatabase(opened.database);
+
+        await expect(store.verifyOrPin(identity, "iroh", "a".repeat(64))).rejects.toThrow(
+            "must have a display name",
+        );
+        expect(store.peers()).toEqual([]);
     });
 
     it("keeps prepared pairing trust inactive and removes it when pairing aborts", async () => {

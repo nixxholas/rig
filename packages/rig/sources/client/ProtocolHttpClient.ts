@@ -6,7 +6,9 @@ import {
     RemoteTerminalProtocolClient,
     type RemoteTerminalReconnectState,
 } from "@slopus/ghostty-web";
+import { Value } from "@sinclair/typebox/value";
 
+import { p2pStatusSchema } from "../protocol/index.js";
 import type {
     AbortRunOptions,
     AbortRunResponse,
@@ -187,8 +189,12 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/happy-cloud/status");
     }
 
-    getP2pStatus(): Promise<P2pStatus> {
-        return this.#requestJson("GET", "/p2p/status");
+    async getP2pStatus(): Promise<P2pStatus> {
+        const status: unknown = await this.#requestJson("GET", "/p2p/status");
+        if (!Value.Check(p2pStatusSchema, status)) {
+            throw new Error("Rig returned an invalid P2P status.");
+        }
+        return status;
     }
 
     createP2pInvitation(): Promise<CreateP2pInvitationResponse> {

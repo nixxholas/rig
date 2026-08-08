@@ -50,6 +50,9 @@ export function p2pPeerVerifyOrPin(
             }
         }
         if (byInstance === undefined) {
+            if (name === undefined) {
+                throw new Error("A new trusted P2P peer must have a display name.");
+            }
             transaction
                 .insert(p2pPeers)
                 .values({
@@ -57,7 +60,7 @@ export function p2pPeerVerifyOrPin(
                     connectionsJson: JSON.stringify(connections ?? {}),
                     createdAtMs: now,
                     instanceId: identity.instanceId,
-                    name: name ?? identity.instanceId,
+                    name,
                     publicKey: identity.publicKey,
                     updatedAtMs: now,
                 })

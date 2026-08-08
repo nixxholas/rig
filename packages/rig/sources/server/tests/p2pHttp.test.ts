@@ -12,6 +12,7 @@ describe("P2P HTTP API", () => {
     it("reports the stable instance, transport address, and verified peer health", async () => {
         const status: P2pStatus = {
             instanceId: "alocalinstance00000000001",
+            name: "Local Rig",
             publicKey: "A".repeat(43),
             transports: [
                 {
@@ -21,6 +22,7 @@ describe("P2P HTTP API", () => {
                         {
                             address: "remote-endpoint",
                             lastSeenAt: 123,
+                            name: "Remote Rig",
                             peerId: "aremoteinstance0000000001",
                             rttMs: 7,
                             status: "connected",
@@ -43,7 +45,10 @@ describe("P2P HTTP API", () => {
     it("reports no transports when P2P networking is disabled", async () => {
         const started = await startServer();
         try {
-            await expect(getStatus(started.socketPath)).resolves.toEqual({ transports: [] });
+            await expect(getStatus(started.socketPath)).resolves.toEqual({
+                name: "Rig",
+                transports: [],
+            });
         } finally {
             await started.close();
         }
@@ -51,6 +56,7 @@ describe("P2P HTTP API", () => {
 
     it("reports why configured P2P networking could not start", async () => {
         const status: P2pStatus = {
+            name: "Local Rig",
             transports: [
                 {
                     error: "Native binding is unavailable.",

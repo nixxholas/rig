@@ -60,6 +60,7 @@ describe("IrohNetwork", () => {
             identity: firstIdentity,
             handshakeTimeoutMs: 100,
             idleTimeoutMs: 500,
+            knownPeer: () => namedPeer(secondIdentity, "Second Rig"),
             onStatusChange: firstStatusChanged,
             peerTickets: new Map([
                 [secondId, EndpointTicket.fromAddr(secondEndpoint.addr()).toString()],
@@ -76,6 +77,7 @@ describe("IrohNetwork", () => {
             identity: secondIdentity,
             handshakeTimeoutMs: 100,
             idleTimeoutMs: 500,
+            knownPeer: () => namedPeer(firstIdentity, "First Rig"),
             peerAddresses: new Map([[firstId, firstEndpoint.addr()]]),
             pingIntervalMs: 150,
             relayMode: RelayMode.disabled(),
@@ -134,6 +136,7 @@ describe("IrohNetwork", () => {
             endpointIds: [allowedId],
             endpoint: refusedEndpoint,
             identity: refusedIdentity,
+            knownPeer: () => namedPeer(allowedIdentity, "Allowed Rig"),
             peerAddresses: new Map([[allowedId, allowedEndpoint.addr()]]),
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
@@ -161,6 +164,7 @@ describe("IrohNetwork", () => {
         const clientKey = SecretKey.generate();
         const serverKey = SecretKey.generate();
         const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
         const [clientEndpoint, serverEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
@@ -180,6 +184,7 @@ describe("IrohNetwork", () => {
                 endpoint: clientEndpoint,
                 handshakeTimeoutMs: 25,
                 identity: clientIdentity,
+                knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
                 peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
                 pingIntervalMs: 10,
                 pingTimeoutMs: 25,
@@ -215,13 +220,14 @@ describe("IrohNetwork", () => {
         const directory = await createTestSocketDirectory();
         directories.push(directory);
         const trust = openTrustStore();
-        await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId);
+        await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId, undefined, "Client Rig");
 
         const client = await IrohNetwork.create({
             config: {},
             endpointIds: [serverId],
             endpoint: clientEndpoint,
             identity: impostorIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
@@ -233,6 +239,7 @@ describe("IrohNetwork", () => {
             endpointIds: [clientId],
             endpoint: serverEndpoint,
             identity: serverIdentity,
+            knownPeer: () => namedPeer(pinnedClientIdentity, "Client Rig"),
             peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
@@ -248,7 +255,11 @@ describe("IrohNetwork", () => {
                 status: "unreachable",
             }),
         );
-        expect(server.status().peers[0]?.peerId).toBeUndefined();
+        expect(server.status().peers[0]).toMatchObject({
+            peerId: pinnedClientIdentity.instanceId,
+            publicKey: pinnedClientIdentity.publicKey,
+        });
+        expect(server.status().peers[0]?.publicKey).not.toBe(impostorIdentity.publicKey);
     });
 
     it("does not pin an initiator peer before the responder confirms the handshake", async () => {
@@ -289,6 +300,7 @@ describe("IrohNetwork", () => {
             endpointIds: [serverId],
             endpoint: clientEndpoint,
             identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
@@ -332,6 +344,7 @@ describe("IrohNetwork", () => {
             endpointIds: [serverId],
             endpoint: clientEndpoint,
             identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
             pingIntervalMs: 25,
             relayMode: RelayMode.disabled(),
@@ -343,6 +356,7 @@ describe("IrohNetwork", () => {
             endpointIds: [clientId],
             endpoint: serverEndpoint,
             identity: serverIdentity,
+            knownPeer: () => namedPeer(clientIdentity, "Client Rig"),
             peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
             pingIntervalMs: 25,
             relayMode: RelayMode.disabled(),
@@ -442,7 +456,8 @@ describe("IrohNetwork", () => {
         const accepted = new Promise<null>((resolve) => {
             finishAccept = () => resolve(null);
         });
-        const connection = fakePingConnection(peerId, ownId, createP2pInstanceIdentity());
+        const peerIdentity = createP2pInstanceIdentity();
+        const connection = fakePingConnection(peerId, ownId, peerIdentity);
         let connectCount = 0;
         const endpoint = {
             acceptNext: () => accepted,
@@ -465,6 +480,7 @@ describe("IrohNetwork", () => {
             peerAddresses: new Map([
                 [peerId, new EndpointAddr(peerEndpointId, undefined, ["127.0.0.1:10001"])],
             ]),
+            knownPeer: () => namedPeer(peerIdentity),
             pingIntervalMs: 1_000,
             relayMode: RelayMode.disabled(),
             secretKey: null as never,
@@ -493,7 +509,8 @@ describe("IrohNetwork", () => {
             "https://stale-relay.example.com",
             ["10.0.0.5:7777"],
         );
-        const healthyConnection = fakePingConnection(healthyId, ownId, createP2pInstanceIdentity());
+        const healthyIdentity = createP2pInstanceIdentity();
+        const healthyConnection = fakePingConnection(healthyId, ownId, healthyIdentity);
         const stalledIdentity = createP2pInstanceIdentity();
         const stalledConnection = fakePingConnection(stalledId, ownId, stalledIdentity);
         let finishAccept!: () => void;
@@ -528,6 +545,8 @@ describe("IrohNetwork", () => {
             endpoint,
             endpointFactory,
             endpointIds: [healthyId, stalledId],
+            knownPeer: (endpointId) =>
+                namedPeer(endpointId === healthyId ? healthyIdentity : stalledIdentity),
             peerAddresses: new Map([
                 [healthyId, healthyAddress],
                 [stalledId, stalledAddress],
@@ -599,6 +618,7 @@ describe("IrohNetwork", () => {
             endpoint,
             endpointFactory,
             endpointIds: [peerId],
+            knownPeer: () => namedPeer(peerIdentity),
             peerTickets: new Map([[peerId, EndpointTicket.fromAddr(staleAddress).toString()]]),
             relayMode: RelayMode.disabled(),
             secretKey: null as never,
@@ -664,6 +684,7 @@ describe("IrohNetwork", () => {
             endpoint: first,
             endpointFactory,
             endpointIds: [peerId],
+            knownPeer: () => namedPeer(peerIdentity),
             peerTickets: new Map([[peerId, staleTicket]]),
             relayMode: RelayMode.disabled(),
             secretKey: null as never,
@@ -688,6 +709,7 @@ describe("IrohNetwork", () => {
     it("does not bind a replacement before the old endpoint finishes closing", async () => {
         const ownId = "0".repeat(64);
         const peerId = "1".repeat(64);
+        const peerIdentity = createP2pInstanceIdentity();
         let connectCount = 0;
         const closing = new Promise<void>(() => undefined);
         const close = vi.fn(() => closing);
@@ -709,6 +731,7 @@ describe("IrohNetwork", () => {
             endpoint,
             endpointFactory,
             endpointIds: [peerId],
+            knownPeer: () => namedPeer(peerIdentity),
             peerAddresses: new Map([[peerId, {} as EndpointAddr]]),
             relayMode: RelayMode.disabled(),
             secretKey: null as never,
@@ -788,6 +811,7 @@ describe("IrohNetwork", () => {
             endpointFactory,
             endpointIds: [peerId],
             identity: ownIdentity,
+            knownPeer: () => namedPeer(peerIdentity),
             peerAddresses: new Map([
                 [peerId, new EndpointAddr(peerEndpointId, undefined, ["127.0.0.1:10001"])],
             ]),
@@ -842,7 +866,7 @@ describe("IrohNetwork", () => {
             endpointFactory,
             endpointIds: [peerId],
             handshakeTimeoutMs: 700,
-            knownPeer: () => peerIdentity,
+            knownPeer: () => namedPeer(peerIdentity),
             peerAddresses: new Map([
                 [peerId, new EndpointAddr(peerEndpointId, undefined, ["127.0.0.1:10001"])],
             ]),
@@ -903,6 +927,45 @@ describe("IrohNetwork", () => {
         expect(online).not.toHaveBeenCalled();
     });
 
+    it("publishes a changed display name for an existing trusted peer", async () => {
+        const ownEndpointId = SecretKey.generate().public();
+        const peerEndpointId = SecretKey.generate().public();
+        const peerId = peerEndpointId.toString();
+        const peerIdentity = createP2pInstanceIdentity();
+        let finishAccept!: () => void;
+        const accepted = new Promise<null>((resolve) => {
+            finishAccept = () => resolve(null);
+        });
+        const endpoint = {
+            acceptNext: () => accepted,
+            close: async () => finishAccept(),
+            connect: () => new Promise<Connection>(() => undefined),
+            id: () => ownEndpointId,
+        } as unknown as Endpoint;
+        const onStatusChange = vi.fn();
+        const network = await IrohNetwork.create({
+            bindings: { EndpointAddr, EndpointId, EndpointTicket } as never,
+            closeTimeoutMs: 5,
+            config: {},
+            endpoint,
+            endpointIds: [],
+            onStatusChange,
+            relayMode: RelayMode.disabled(),
+            secretKey: null as never,
+        });
+        networks.push(network);
+
+        network.addPeer(peerId, peerIdentity, "Old Name");
+        network.addPeer(peerId, peerIdentity, "New Name");
+
+        expect(network.status().peers[0]?.name).toBe("New Name");
+        expect(onStatusChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                peers: [expect.objectContaining({ name: "New Name" })],
+            }),
+        );
+    });
+
     it("keeps supervising endpoint addresses after a transient native error", async () => {
         const endpointId = SecretKey.generate().public();
         const address = new EndpointAddr(endpointId, "https://relay.example.com", [
@@ -960,12 +1023,14 @@ describe("IrohNetwork", () => {
             id: () => ownEndpointId,
         } as unknown as Endpoint;
         const expectedPeer = expectedPeerId.toString();
+        const expectedPeerIdentity = createP2pInstanceIdentity();
         const network = await IrohNetwork.create({
             bindings: { EndpointAddr, EndpointId, EndpointTicket } as never,
             config: {},
             connectTimeoutMs: 1_000,
             endpoint,
             endpointIds: [expectedPeer],
+            knownPeer: () => namedPeer(expectedPeerIdentity),
             peerTickets: new Map([[expectedPeer, wrongTicket]]),
             relayMode: RelayMode.disabled(),
             secretKey: null as never,
@@ -1033,6 +1098,13 @@ function openTrustStore(): P2pPeerTrustStore {
     migrateSessionDatabase(opened.database);
     databases.push(opened);
     return P2pPeerTrustStore.fromDatabase(opened.database);
+}
+
+function namedPeer(
+    identity: P2pPeerIdentity,
+    name = "Peer Rig",
+): P2pPeerIdentity & { name: string } {
+    return { ...identity, name };
 }
 
 function fakePingConnection(

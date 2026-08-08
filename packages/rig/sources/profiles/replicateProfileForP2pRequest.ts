@@ -11,10 +11,12 @@ import type { RigProfileStore } from "./RigProfileStore.js";
 import { sameRigProfile } from "./sameRigProfile.js";
 
 const PROFILE_RESPONSE_MAXIMUM_BYTES = 256 * 1024;
+const MAXIMUM_CONCURRENT_PROFILE_RETRIES = 3;
 
 export async function replicateProfileForP2pRequest(options: {
     body: Uint8Array;
     network: P2pNetwork;
+    onSynchronized?: (peerId: string, profileId: string, version: number) => void;
     path: string;
     peerId: string;
     profiles: RigProfileStore;
@@ -26,12 +28,41 @@ export async function replicateProfileForP2pRequest(options: {
     if (profile === undefined || !options.profiles.isLocal(profileId)) {
         throw new P2pProfileReplicationError(403, "That human profile is not owned by this Rig.");
     }
-    await replicateProfileToP2pPeer({
-        network: options.network,
-        peerId: options.peerId,
-        profile,
-        signal: options.signal,
-    });
+    let candidate = profile;
+    for (let attempt = 0; attempt < MAXIMUM_CONCURRENT_PROFILE_RETRIES; attempt += 1) {
+        try {
+            await replicateProfileToP2pPeer({
+                network: options.network,
+                peerId: options.peerId,
+                profile: candidate,
+                signal: options.signal,
+            });
+            options.onSynchronized?.(options.peerId, candidate.id, candidate.version);
+            return;
+        } catch (error) {
+            if (!(error instanceof NewerP2pProfileError)) throw error;
+            const latest = options.profiles.get(profileId);
+            if (
+                latest === undefined ||
+                !options.profiles.isLocal(profileId) ||
+                latest.version < error.profile.version
+            ) {
+                throw new P2pProfileReplicationError(
+                    409,
+                    "The remote Rig has conflicting state for that human profile.",
+                );
+            }
+            if (sameRigProfile(latest, error.profile)) {
+                options.onSynchronized?.(options.peerId, latest.id, latest.version);
+                return;
+            }
+            candidate = latest;
+        }
+    }
+    throw new P2pProfileReplicationError(
+        502,
+        "The human profile kept changing while it was synchronized.",
+    );
 }
 
 export async function replicateProfileToP2pPeer(options: {
@@ -57,7 +88,8 @@ export async function replicateProfileToP2pPeer(options: {
         const decoded = decodeProfileResponse(currentBody);
         if (
             decoded.profile.id !== options.profile.id ||
-            decoded.profile.parentInstanceId !== options.profile.parentInstanceId
+            decoded.profile.parentInstanceId !== options.profile.parentInstanceId ||
+            decoded.profile.createdAt !== options.profile.createdAt
         ) {
             throw new P2pProfileReplicationError(
                 409,
@@ -65,7 +97,10 @@ export async function replicateProfileToP2pPeer(options: {
             );
         }
         if (sameRigProfile(decoded.profile, options.profile)) return "synchronized";
-        if (decoded.profile.version >= options.profile.version) {
+        if (decoded.profile.version > options.profile.version) {
+            throw new NewerP2pProfileError(decoded.profile);
+        }
+        if (decoded.profile.version === options.profile.version) {
             throw new P2pProfileReplicationError(
                 409,
                 "The remote Rig has conflicting state for that human profile.",
@@ -105,6 +140,14 @@ export async function replicateProfileToP2pPeer(options: {
     }
     const decoded = decodeProfileResponse(replicatedBody);
     if (!sameRigProfile(decoded.profile, options.profile)) {
+        if (
+            decoded.profile.id === options.profile.id &&
+            decoded.profile.parentInstanceId === options.profile.parentInstanceId &&
+            decoded.profile.createdAt === options.profile.createdAt &&
+            decoded.profile.version > options.profile.version
+        ) {
+            throw new NewerP2pProfileError(decoded.profile);
+        }
         throw new P2pProfileReplicationError(
             502,
             "The remote Rig returned a different human profile.",
@@ -120,6 +163,13 @@ export class P2pProfileReplicationError extends Error {
     ) {
         super(message);
         this.name = "P2pProfileReplicationError";
+    }
+}
+
+class NewerP2pProfileError extends Error {
+    constructor(readonly profile: RigProfile) {
+        super("The remote Rig returned a newer human profile.");
+        this.name = "NewerP2pProfileError";
     }
 }
 

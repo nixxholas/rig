@@ -15,7 +15,7 @@ describe("ProtocolHttpClient", () => {
         let path = "";
         const server = createServer((request, response) => {
             path = request.url ?? "";
-            response.end('{"transports":[]}');
+            response.end('{"name":"Remote Rig","transports":[]}');
         });
         try {
             await new Promise<void>((resolve) => server.listen(socketPath, resolve));
@@ -25,7 +25,10 @@ describe("ProtocolHttpClient", () => {
                 token: "test-token",
             });
 
-            await expect(client.getP2pStatus()).resolves.toEqual({ transports: [] });
+            await expect(client.getP2pStatus()).resolves.toEqual({
+                name: "Remote Rig",
+                transports: [],
+            });
             expect(path).toBe("/p2p/peers/peer/api/p2p/status");
             expect(
                 () =>
@@ -35,6 +38,23 @@ describe("ProtocolHttpClient", () => {
                         token: "test-token",
                     }),
             ).toThrow("absolute URL path");
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects a P2P status without a node name", async () => {
+        const directory = await createTestSocketDirectory();
+        const socketPath = join(directory, "server.sock");
+        const server = createServer((_request, response) => {
+            response.end('{"transports":[]}');
+        });
+        try {
+            await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+            const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
+
+            await expect(client.getP2pStatus()).rejects.toThrow("invalid P2P status");
         } finally {
             await new Promise<void>((resolve) => server.close(() => resolve()));
             await rm(directory, { recursive: true, force: true });

@@ -608,7 +608,14 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "p2p-status") {
-        sendJson<P2pStatus>(response, 200, runtimeConfig.p2pStatus?.() ?? { transports: [] });
+        sendJson<P2pStatus>(
+            response,
+            200,
+            runtimeConfig.p2pStatus?.() ?? {
+                name: runtimeConfig.p2pNode?.().name ?? "Rig",
+                transports: [],
+            },
+        );
         return;
     }
     if (route.name === "profiles" || route.name === "profile") {

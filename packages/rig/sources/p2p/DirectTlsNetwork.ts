@@ -62,6 +62,7 @@ const MAXIMUM_RETRY_MS = 30_000;
 interface DirectPeer {
     address: string;
     instanceId: string;
+    name: string;
     publicKey: string;
 }
 
@@ -126,6 +127,7 @@ export class DirectTlsNetwork implements P2pTransport {
             const peer: DirectPeer = {
                 address: configured.connections.direct.address,
                 instanceId: configured.instanceId,
+                name: configured.name,
                 publicKey: configured.publicKey,
             };
             if (peer.instanceId === this.#identity.instanceId) {
@@ -589,6 +591,7 @@ export class DirectTlsNetwork implements P2pTransport {
         const next: P2pPeerStatus = {
             address: peer.address,
             ...details,
+            name: peer.name,
             peerId: peer.instanceId,
             publicKey: peer.publicKey,
             status,

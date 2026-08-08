@@ -59,6 +59,7 @@ export interface SshBridgeChannel {
 interface SshPeer {
     address: string;
     instanceId: string;
+    name: string;
     publicKey: string;
     ssh: P2pSshPeer;
 }
@@ -120,6 +121,7 @@ export class SshTransport implements P2pTransport {
             const peer: SshPeer = {
                 address: formatSshAddress(configured.connections.ssh),
                 instanceId: configured.instanceId,
+                name: configured.name,
                 publicKey: configured.publicKey,
                 ssh: configured.connections.ssh,
             };
@@ -386,6 +388,7 @@ export class SshTransport implements P2pTransport {
         const next: P2pPeerStatus = {
             address: peer.address,
             ...details,
+            name: peer.name,
             peerId: peer.instanceId,
             publicKey: peer.publicKey,
             status,

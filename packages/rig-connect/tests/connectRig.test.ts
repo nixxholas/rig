@@ -2407,6 +2407,239 @@ describe("connectRig mutations", () => {
             rig.close();
         }
     });
+
+    it("resolves an identity first introduced by an earlier transcript page", async () => {
+        const stream = streamResponse();
+        const profile = {
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name: "Steve",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 1,
+            version: 1,
+        };
+        const state = sessionStateWithTranscript(transcriptWindow([2], false));
+        const earlier: SessionTranscriptWindow = {
+            complete: true,
+            messageCreatedAt: { "message-profiled": 100 },
+            messageEventId: {
+                "message-profiled": "01900000-0000-7000-8000-000000000001",
+            },
+            messages: [
+                {
+                    blocks: [{ text: "Hi from Steve", type: "text" }],
+                    id: "message-profiled",
+                    identity: profile.id,
+                    role: "user",
+                },
+            ],
+            turns: [
+                {
+                    endedAt: 150,
+                    messageIds: ["message-profiled"],
+                    outcome: "success",
+                    runId: "run-1",
+                    startedAt: 100,
+                },
+            ],
+        };
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/profiles") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ profiles: [profile] }), { status: 200 }),
+                    );
+                }
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(new Response(JSON.stringify(state), { status: 200 }));
+                }
+                if (url.pathname.endsWith("/transcript")) {
+                    return Promise.resolve(new Response(JSON.stringify(earlier), { status: 200 }));
+                }
+                return Promise.resolve(new Response("{}", { status: 404 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        const session = rig.connectSession({ onChange: () => undefined, sessionId: "session-1" });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const token = session.session().loadMoreToken;
+            if (token === undefined) throw new Error("Expected an earlier-page token.");
+            session.loadMore(token);
+            await settle();
+
+            expect(session.elements()).toContainEqual(
+                expect.objectContaining({
+                    identity: profile.id,
+                    kind: "user_message",
+                    profile,
+                    text: "Hi from Steve",
+                }),
+            );
+        } finally {
+            session.close();
+            rig.close();
+        }
+    });
+
+    it("does not publish a profile mutation as a complete catalog before its first load", async () => {
+        const stream = streamResponse();
+        const catalog = deferred<Response>();
+        const existing = {
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name: "Existing",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 1,
+            version: 1,
+        };
+        const created = {
+            createdAt: 2,
+            id: "aprofile000000000000000002",
+            name: "Created",
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: 2,
+            version: 1,
+        };
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/profiles" && init?.method === undefined) {
+                    return catalog.promise;
+                }
+                if (url.pathname === "/profiles" && init?.method === "POST") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ profile: created }), { status: 200 }),
+                    );
+                }
+                return Promise.resolve(new Response("{}", { status: 404 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        const changes: (readonly (typeof existing)[])[] = [];
+        const connection = rig.connectProfiles({ onChange: (profiles) => changes.push(profiles) });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            await expect(rig.createProfile({ name: "Created" })).resolves.toEqual(created);
+            expect(connection.profiles()).toEqual([]);
+            expect(changes).toEqual([]);
+
+            catalog.resolve(
+                new Response(JSON.stringify({ profiles: [existing, created] }), { status: 200 }),
+            );
+            await settle();
+
+            expect(connection.profiles()).toEqual([existing, created]);
+            expect(changes).toEqual([[existing, created]]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("keeps the newest profile version when stale lists and mutations finish last", async () => {
+        const stream = streamResponse();
+        const staleList = deferred<Response>();
+        const staleMutation = deferred<Response>();
+        const profile = (version: number, name: string) => ({
+            createdAt: 1,
+            id: "aprofile000000000000000001",
+            name,
+            parentInstanceId: "aparent0000000000000000001",
+            updatedAt: version,
+            version,
+        });
+        let profileReads = 0;
+        let profileUpdates = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, _init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/profiles") {
+                    profileReads += 1;
+                    return profileReads === 1
+                        ? Promise.resolve(
+                              new Response(JSON.stringify({ profiles: [profile(1, "Original")] }), {
+                                  status: 200,
+                              }),
+                          )
+                        : staleList.promise;
+                }
+                if (url.pathname.endsWith("/aprofile000000000000000001")) {
+                    profileUpdates += 1;
+                    if (profileUpdates === 1) {
+                        return Promise.resolve(
+                            new Response(JSON.stringify({ profile: profile(3, "Current") }), {
+                                status: 200,
+                            }),
+                        );
+                    }
+                    if (profileUpdates === 2) return staleMutation.promise;
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ profile: profile(5, "Newest") }), {
+                            status: 200,
+                        }),
+                    );
+                }
+                return Promise.resolve(new Response("{}", { status: 404 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectProfiles({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+            expect(connection.profiles()).toEqual([profile(1, "Original")]);
+
+            const pendingList = rig.listProfiles();
+            await settle();
+            await expect(
+                rig.updateProfile("aprofile000000000000000001", { name: "Current" }),
+            ).resolves.toEqual(profile(3, "Current"));
+            expect(connection.profiles()).toEqual([profile(3, "Current")]);
+
+            staleList.resolve(
+                new Response(JSON.stringify({ profiles: [profile(2, "Stale list")] }), {
+                    status: 200,
+                }),
+            );
+            await expect(pendingList).resolves.toEqual([profile(2, "Stale list")]);
+            expect(connection.profiles()).toEqual([profile(3, "Current")]);
+
+            const pendingMutation = rig.updateProfile("aprofile000000000000000001", {
+                name: "Stale mutation",
+            });
+            await settle();
+            await expect(
+                rig.updateProfile("aprofile000000000000000001", { name: "Newest" }),
+            ).resolves.toEqual(profile(5, "Newest"));
+            expect(connection.profiles()).toEqual([profile(5, "Newest")]);
+
+            staleMutation.resolve(
+                new Response(JSON.stringify({ profile: profile(4, "Stale mutation") }), {
+                    status: 200,
+                }),
+            );
+            await expect(pendingMutation).resolves.toEqual(profile(4, "Stale mutation"));
+            expect(connection.profiles()).toEqual([profile(5, "Newest")]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
 });
 
 describe("connectRig and chats that finish", () => {

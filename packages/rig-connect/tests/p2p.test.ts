@@ -59,12 +59,20 @@ describe("P2P status subscription", () => {
         let stream!: ReadableStreamDefaultController<Uint8Array>;
         const initial = {
             instanceId: localInstanceId,
+            name: "Local Rig",
             publicKey: localPublicKey,
             transports: [
                 {
                     apiExposed: false,
                     localAddress: "local-endpoint",
-                    peers: [{ address: "remote-endpoint", peerId, status: "connecting" as const }],
+                    peers: [
+                        {
+                            address: "remote-endpoint",
+                            name: "Remote Rig",
+                            peerId,
+                            status: "connecting" as const,
+                        },
+                    ],
                     state: "ready" as const,
                     transport: "iroh" as const,
                 },
@@ -72,6 +80,7 @@ describe("P2P status subscription", () => {
         };
         const connected = {
             instanceId: localInstanceId,
+            name: "Local Rig",
             publicKey: localPublicKey,
             transports: [
                 {
@@ -81,6 +90,7 @@ describe("P2P status subscription", () => {
                         {
                             address: "remote-endpoint",
                             lastSeenAt: 123,
+                            name: "Remote Rig",
                             peerId,
                             rttMs: 8,
                             status: "connected" as const,
@@ -131,22 +141,78 @@ describe("P2P status subscription", () => {
         stream.close();
     });
 
+    it.each([
+        [
+            "the local node name",
+            {
+                instanceId: localInstanceId,
+                transports: [
+                    {
+                        apiExposed: false,
+                        localAddress: "local-endpoint",
+                        peers: [
+                            {
+                                address: "remote-endpoint",
+                                name: "Remote Rig",
+                                peerId,
+                                status: "connected",
+                            },
+                        ],
+                        state: "ready",
+                        transport: "iroh",
+                    },
+                ],
+            },
+        ],
+        [
+            "a named peer's node name",
+            {
+                instanceId: localInstanceId,
+                name: "Local Rig",
+                transports: [
+                    {
+                        apiExposed: false,
+                        localAddress: "local-endpoint",
+                        peers: [
+                            {
+                                address: "remote-endpoint",
+                                peerId,
+                                status: "connected",
+                            },
+                        ],
+                        state: "ready",
+                        transport: "iroh",
+                    },
+                ],
+            },
+        ],
+    ])("rejects a P2P snapshot missing %s", async (_missing, snapshot) => {
+        const onError = vi.fn();
+        const rig = connectRig({
+            endpoint: "http://rig.test",
+            fetch: async (input) => {
+                if (String(input).endsWith("/events/live")) {
+                    return new Response(new ReadableStream<Uint8Array>({ start: () => undefined }));
+                }
+                return Response.json(snapshot);
+            },
+            token: "secret",
+            wait: () => new Promise<void>(() => undefined),
+        });
+        const connection = rig.connectP2p({ onChange: () => undefined, onError });
+
+        await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+        expect(connection.status()).toBeUndefined();
+        connection.close();
+        rig.close();
+    });
+
     it("does not let an older opening snapshot overwrite a live status update", async () => {
         const encoder = new TextEncoder();
         let stream!: ReadableStreamDefaultController<Uint8Array>;
         let resolveSnapshot!: (response: Response) => void;
         const snapshot = {
-            transports: [
-                {
-                    apiExposed: false,
-                    localAddress: "local-endpoint",
-                    peers: [{ address: "remote-endpoint", peerId, status: "connecting" as const }],
-                    state: "ready" as const,
-                    transport: "iroh" as const,
-                },
-            ],
-        };
-        const live = {
+            name: "Local Rig",
             transports: [
                 {
                     apiExposed: false,
@@ -154,6 +220,26 @@ describe("P2P status subscription", () => {
                     peers: [
                         {
                             address: "remote-endpoint",
+                            name: "Remote Rig",
+                            peerId,
+                            status: "connecting" as const,
+                        },
+                    ],
+                    state: "ready" as const,
+                    transport: "iroh" as const,
+                },
+            ],
+        };
+        const live = {
+            name: "Local Rig",
+            transports: [
+                {
+                    apiExposed: false,
+                    localAddress: "local-endpoint",
+                    peers: [
+                        {
+                            address: "remote-endpoint",
+                            name: "Remote Rig",
                             peerId,
                             rttMs: 5,
                             status: "connected" as const,
@@ -221,11 +307,19 @@ describe("P2P status subscription", () => {
         let resolveSnapshot!: (response: Response) => void;
         const onError = vi.fn();
         const live = {
+            name: "Local Rig",
             transports: [
                 {
                     apiExposed: false,
                     localAddress: "local-endpoint",
-                    peers: [{ address: "remote-endpoint", peerId, status: "connected" as const }],
+                    peers: [
+                        {
+                            address: "remote-endpoint",
+                            name: "Remote Rig",
+                            peerId,
+                            status: "connected" as const,
+                        },
+                    ],
                     state: "ready" as const,
                     transport: "iroh" as const,
                 },
@@ -295,14 +389,16 @@ describe("P2P status subscription", () => {
                 reads += 1;
                 return reads === 1
                     ? new Response("starting", { status: 503 })
-                    : Response.json({ transports: [] });
+                    : Response.json({ name: "Local Rig", transports: [] });
             },
             token: "secret",
             wait: async () => undefined,
         });
         const connection = rig.connectP2p({ onChange: () => undefined, onError });
 
-        await vi.waitFor(() => expect(connection.status()).toEqual({ transports: [] }));
+        await vi.waitFor(() =>
+            expect(connection.status()).toEqual({ name: "Local Rig", transports: [] }),
+        );
         expect(reads).toBeGreaterThanOrEqual(2);
         expect(onError).toHaveBeenCalledOnce();
         connection.close();
@@ -328,6 +424,7 @@ describe("P2P status subscription", () => {
                 }
                 reads += 1;
                 return Response.json({
+                    name: "Local Rig",
                     transports: [
                         {
                             apiExposed: false,
@@ -335,6 +432,7 @@ describe("P2P status subscription", () => {
                             peers: [
                                 {
                                     address: "remote-endpoint",
+                                    name: "Remote Rig",
                                     peerId,
                                     status: reads === 1 ? "connecting" : "connected",
                                 },

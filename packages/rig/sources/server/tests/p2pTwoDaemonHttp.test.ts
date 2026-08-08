@@ -62,6 +62,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                     endpointIds: [secondId],
                     endpoint: firstEndpoint,
                     identity: firstIdentity,
+                    knownPeer: () => ({ ...secondIdentity, name: "Second" }),
                     onStatusChange,
                     peerAddresses: new Map([[secondId, secondEndpoint.addr()]]),
                     relayMode: RelayMode.disabled(),
@@ -89,6 +90,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                     endpointIds: [firstId],
                     endpoint: secondEndpoint,
                     identity: secondIdentity,
+                    knownPeer: () => ({ ...firstIdentity, name: "First" }),
                     onStatusChange,
                     peerAddresses: new Map([[firstId, firstEndpoint.addr()]]),
                     relayMode: RelayMode.disabled(),
@@ -110,10 +112,22 @@ describe("P2P HTTP between two real daemon servers", () => {
         cleanups.push(() => secondNetwork.close());
         await vi.waitFor(() => {
             expect(firstNetwork.status().transports[0]).toMatchObject({
-                peers: [{ peerId: secondIdentity.instanceId, status: "connected" }],
+                peers: [
+                    {
+                        name: "Second",
+                        peerId: secondIdentity.instanceId,
+                        status: "connected",
+                    },
+                ],
             });
             expect(secondNetwork.status().transports[0]).toMatchObject({
-                peers: [{ peerId: firstIdentity.instanceId, status: "connected" }],
+                peers: [
+                    {
+                        name: "First",
+                        peerId: firstIdentity.instanceId,
+                        status: "connected",
+                    },
+                ],
             });
         });
 

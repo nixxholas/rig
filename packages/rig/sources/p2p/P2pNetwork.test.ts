@@ -135,10 +135,24 @@ describe("P2pNetwork", () => {
 
         publish({
             ...initial,
-            peers: [{ address: "remote-address", peerId, status: "connected" }],
+            peers: [
+                {
+                    address: "remote-address",
+                    name: "Remote Rig",
+                    peerId,
+                    status: "connected",
+                },
+            ],
         });
         expect(network.status().transports[0]).toMatchObject({
-            peers: [{ address: "remote-address", peerId, status: "connected" }],
+            peers: [
+                {
+                    address: "remote-address",
+                    name: "Remote Rig",
+                    peerId,
+                    status: "connected",
+                },
+            ],
         });
         network.setName("Renamed Rig");
         publish(initial);
@@ -213,6 +227,7 @@ describe("P2pNetwork", () => {
         const sshFetch = vi.fn(async () => response);
         const peer = {
             address: "peer-address",
+            name: "Remote Rig",
             peerId,
             publicKey: createP2pInstanceIdentity(peerId).publicKey,
             status: "connected" as const,

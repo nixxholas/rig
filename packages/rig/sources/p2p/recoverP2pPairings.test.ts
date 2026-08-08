@@ -62,7 +62,7 @@ describe("recoverP2pPairings", () => {
         const identity = createP2pInstanceIdentity();
         await prepareReady(store, identity, true);
         const squatter = createP2pInstanceIdentity();
-        await store.verifyOrPin(squatter, "iroh", "a".repeat(64));
+        await store.verifyOrPin(squatter, "iroh", "a".repeat(64), undefined, "Squatter Rig");
         const setPrimaryIfUnset = vi.fn(async () => undefined);
 
         await expect(recoverP2pPairings(store, setPrimaryIfUnset)).rejects.toThrow(

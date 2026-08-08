@@ -884,7 +884,7 @@ async function runOwnedLocalProtocolServer(
                 p2pNetwork,
                 ...(p2pPairingService === undefined ? {} : { p2pPairing: p2pPairingService }),
                 p2pNode: () => ({ ...p2pNode }),
-                p2pStatus: () => p2pNetwork?.status() ?? { transports: [] },
+                p2pStatus: () => p2pNetwork?.status() ?? { name: p2pNode.name, transports: [] },
                 ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
                 ...(rigProfiles === undefined || p2pNetwork === undefined
                     ? {}
@@ -893,6 +893,12 @@ async function runOwnedLocalProtocolServer(
                               replicateProfileForP2pRequest({
                                   body,
                                   network: p2pNetwork!,
+                                  onSynchronized: (synchronizedPeerId, profileId, version) =>
+                                      p2pProfileReplicator?.profileSynchronized(
+                                          synchronizedPeerId,
+                                          profileId,
+                                          version,
+                                      ),
                                   path,
                                   peerId,
                                   profiles: rigProfiles!,
