@@ -31,8 +31,6 @@ export function createModelCatalog(options: CreateModelCatalogOptions = {}): Mod
         processManager: new NativeProcessManager(),
     });
     const providerCatalogs: ModelCatalog["providers"][number][] = [];
-    const emptyModelProviderIds: string[] = [];
-    const missingCredentialVariables = new Set<string>();
     const gymProvider = createGymProviderFromEnvironment(env);
     const gymEnabled = gymProvider !== undefined;
     if (gymProvider !== undefined) {
@@ -72,7 +70,6 @@ export function createModelCatalog(options: CreateModelCatalogOptions = {}): Mod
               ? "not_enabled"
               : configuredDisabledReason;
         if (disabledReason !== undefined) {
-            if (disabledReason === "no_models") emptyModelProviderIds.push(id);
             providerCatalogs.push({
                 disabledReason,
                 models: [],
@@ -84,8 +81,6 @@ export function createModelCatalog(options: CreateModelCatalogOptions = {}): Mod
 
         const definition = definitionsById.get(id);
         if (definition === undefined) {
-            const missingVariable = executorResult.missingCredentials.get(id);
-            if (missingVariable !== undefined) missingCredentialVariables.add(missingVariable);
             providerCatalogs.push({
                 disabledReason: "not_authenticated",
                 models: [],
@@ -98,7 +93,6 @@ export function createModelCatalog(options: CreateModelCatalogOptions = {}): Mod
             .filter((profile) => profile.hidden !== true)
             .map((profile) => profile.model);
         if (models.length === 0) {
-            emptyModelProviderIds.push(id);
             providerCatalogs.push({
                 disabledReason: "no_models",
                 models: [],
@@ -122,34 +116,12 @@ export function createModelCatalog(options: CreateModelCatalogOptions = {}): Mod
     );
     const defaultProvider = availableProviders[0];
     if (defaultProvider === undefined) {
-        if (!Object.values(providerSettings).some((provider) => provider.enabled)) {
-            throw new Error(
-                "No inference providers are enabled. Enable at least one provider in your machine-wide configuration.",
-            );
-        }
-        const unavailableReasons: string[] = [];
-        const unauthenticatedProviderIds = [...(options.disabledProviderReasons ?? [])].flatMap(
-            ([id, reason]) => (reason === "not_authenticated" ? [id] : []),
-        );
-        if (unauthenticatedProviderIds.length > 0) {
-            unavailableReasons.push(
-                `${unauthenticatedProviderIds.length === 1 ? "Provider" : "Providers"} ${unauthenticatedProviderIds.map((id) => `'${id}'`).join(", ")} ${unauthenticatedProviderIds.length === 1 ? "has" : "have"} no local authentication. Sign in through the corresponding coding assistant or configure its credential.`,
-            );
-        }
-        if (emptyModelProviderIds.length > 0) {
-            unavailableReasons.push(
-                `${emptyModelProviderIds.length === 1 ? "Provider" : "Providers"} ${emptyModelProviderIds.map((id) => `'${id}'`).join(", ")} ${emptyModelProviderIds.length === 1 ? "has" : "have"} no models after applying model filters and regional availability.`,
-            );
-        }
-        const credentialVariables = [...missingCredentialVariables];
-        if (credentialVariables.length > 0) {
-            unavailableReasons.push(
-                `Set ${credentialVariables.join(", ")} for the enabled Amazon Bedrock provider${credentialVariables.length === 1 ? "" : "s"}, or enable Codex or Claude Code.`,
-            );
-        }
-        throw new Error(
-            `No inference providers are available.${unavailableReasons.length === 0 ? "" : ` ${unavailableReasons.join(" ")}`}`,
-        );
+        return {
+            defaultModelId: "",
+            defaultProviderId: "",
+            models: [],
+            providers: providerCatalogs,
+        };
     }
     const defaultModel = gymEnabled
         ? (defaultProvider.models.find((model) => model.id === "openai/gym") ??
