@@ -26,6 +26,7 @@ import { inTx } from "../persistence/inTx.js";
 import type { TX } from "../persistence/Transaction.js";
 import { clientChosenId } from "../utils/clientChosenId.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
+import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { getFoldersDirectory } from "./getFoldersDirectory.js";
 
 export class FolderError extends Error {
@@ -188,7 +189,7 @@ export class FolderRepository {
             throw new FolderError("invalid_request", "A folder cannot be placed after itself.");
         }
         const orderKey = orderKeyForDrop(folders, current, parentId, request.afterId);
-        if (orderKey === current.orderKey && parentId === current.parentId) return current;
+        if (parentId === current.parentId && orderKey === current.orderKey) return current;
         return this.#mutate((tx) => {
             const changed = folderMove(
                 tx,
@@ -329,29 +330,38 @@ function isDescendant(folders: readonly Folder[], folderId: string, ancestorId: 
  * `afterId` is the sibling the folder was dropped below, and `null` means it landed first. A drop
  * that changes nothing keeps the key the folder already has.
  */
+/**
+ * Where a dropped folder lands among its new siblings.
+ *
+ * Ordering is the same fractional indexing every ordered list in Rig uses, so a drop is described
+ * by the sibling it landed below and the key is derived from that, never sent by a client. A folder
+ * dropped into another parent joins that parent's siblings first, since the key it carried was only
+ * ever meaningful beside the folders it used to sit with.
+ */
 function orderKeyForDrop(
     folders: readonly Folder[],
     folder: Folder,
     parentId: string | undefined,
     afterId: string | null,
 ): string {
-    const siblings = folders.filter((candidate) => candidate.parentId === parentId);
-    if (parentId === folder.parentId) {
-        const index = siblings.findIndex((candidate) => candidate.id === folder.id);
-        const predecessor = index > 0 ? (siblings[index - 1]?.id ?? null) : null;
-        if (predecessor === afterId) return folder.orderKey;
-    }
-    const remaining = siblings.filter((candidate) => candidate.id !== folder.id);
-    if (afterId === null) return generateKeyBetween(null, remaining[0]?.orderKey ?? null);
-    const index = remaining.findIndex((candidate) => candidate.id === afterId);
-    if (index === -1) {
+    const siblings = folders.filter(
+        (candidate) => candidate.parentId === parentId && candidate.id !== folder.id,
+    );
+    // A folder arriving from another parent carries a key that only ever meant something beside the
+    // folders it used to sit with, so it joins the new row at the end and is placed from there.
+    const arriving =
+        parentId === folder.parentId
+            ? folder
+            : {
+                  id: folder.id,
+                  orderKey: generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null),
+              };
+    try {
+        return orderKeyAfter([...siblings, arriving], folder.id, afterId);
+    } catch {
         throw new FolderError(
             "sibling_not_found",
             "The folder it was dropped below is not in that folder.",
         );
     }
-    return generateKeyBetween(
-        remaining[index]?.orderKey ?? null,
-        remaining[index + 1]?.orderKey ?? null,
-    );
 }

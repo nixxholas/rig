@@ -118,6 +118,42 @@ describe("FolderRepository", () => {
         expect(events.map((event) => event.type)).toEqual(["folder_updated"]);
     });
 
+    it("drops a folder from another parent into the exact place it landed", () => {
+        const { repository } = createRepository();
+        const source = repository.createFolder({ name: "Source" });
+        const target = repository.createFolder({ name: "Target" });
+        const first = repository.createFolder({ name: "First", parentId: target.id });
+        const second = repository.createFolder({ name: "Second", parentId: target.id });
+        const third = repository.createFolder({ name: "Third", parentId: target.id });
+        const arriving = repository.createFolder({ name: "Arriving", parentId: source.id });
+
+        repository.moveFolder(arriving.id, { afterId: first.id, parentId: target.id });
+
+        expect(childrenOf(repository.listFolders(), target.id)).toEqual([
+            first.id,
+            arriving.id,
+            second.id,
+            third.id,
+        ]);
+    });
+
+    it("drops a folder from another parent at the end of its new row", () => {
+        const { repository } = createRepository();
+        const source = repository.createFolder({ name: "Source" });
+        const target = repository.createFolder({ name: "Target" });
+        const first = repository.createFolder({ name: "First", parentId: target.id });
+        const second = repository.createFolder({ name: "Second", parentId: target.id });
+        const arriving = repository.createFolder({ name: "Arriving", parentId: source.id });
+
+        repository.moveFolder(arriving.id, { afterId: second.id, parentId: target.id });
+
+        expect(childrenOf(repository.listFolders(), target.id)).toEqual([
+            first.id,
+            second.id,
+            arriving.id,
+        ]);
+    });
+
     it("refuses a move that would put a folder inside its own subtree", () => {
         const { repository } = createRepository();
         const media = repository.createFolder({ name: "Media" });
@@ -227,4 +263,9 @@ function sortsBefore(left: string | undefined, right: string | undefined): boole
 
 function ids(folders: readonly Folder[]): readonly string[] {
     return folders.map((folder) => folder.id);
+}
+
+/** The ids of one folder's children, in the order the tree holds them. */
+function childrenOf(folders: readonly Folder[], parentId: string): readonly string[] {
+    return folders.filter((folder) => folder.parentId === parentId).map((folder) => folder.id);
 }
