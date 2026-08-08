@@ -1,47 +1,52 @@
-import type { SecretRegistration } from "./types.js";
+import { Value } from "@sinclair/typebox/value";
 
-const SECRET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+import {
+    type EnvironmentSecretRegistration,
+    type SecretRegistration,
+    environmentSecretRegistrationSchema,
+    githubSecretRegistrationSchema,
+} from "./types.js";
 
 export function validateSecretRegistration(secret: SecretRegistration): void {
-    if (typeof secret.id !== "string" || !SECRET_ID_PATTERN.test(secret.id)) {
-        throw new Error(
-            "Secret IDs must be 1-128 characters using letters, numbers, periods, underscores, colons, or hyphens.",
-        );
+    if ("kind" in secret) {
+        if (!Value.Check(githubSecretRegistrationSchema, secret)) {
+            throw new Error("The secret does not match the GitHub secret schema.");
+        }
+        return;
     }
-    if (typeof secret.description !== "string" || secret.description.trim().length === 0) {
+    if (!Value.Check(environmentSecretRegistrationSchema, secret)) {
+        const paths = [...Value.Errors(environmentSecretRegistrationSchema, secret)].map(
+            (error) => error.path,
+        );
+        if (paths.includes("/id")) {
+            throw new Error(
+                "Secret IDs must be 1-128 characters using letters, numbers, periods, underscores, colons, or hyphens.",
+            );
+        }
+        if (paths.includes("/environment")) {
+            throw new Error("A secret must contain at least one environment variable.");
+        }
+        if (paths.some((path) => path.startsWith("/environment/"))) {
+            throw new Error("A secret contains an invalid environment variable name or value.");
+        }
+        throw new Error("The secret does not match a supported secret schema.");
+    }
+    validateEnvironmentSecretRegistration(secret);
+}
+
+export function validateEnvironmentSecretRegistration(secret: EnvironmentSecretRegistration): void {
+    if (secret.id === "github") {
+        throw new Error("Secret ID 'github' is reserved for GitHub CLI credentials.");
+    }
+    if (secret.description.trim().length === 0) {
         throw new Error(`Secret '${secret.id}' must have a description.`);
     }
-    if (
-        secret.environment === null ||
-        typeof secret.environment !== "object" ||
-        Array.isArray(secret.environment)
-    ) {
-        throw new Error(`Secret '${secret.id}' must contain environment variables.`);
-    }
-    const entries = Object.entries(secret.environment);
-    if (entries.length === 0) {
-        throw new Error(`Secret '${secret.id}' must contain at least one environment variable.`);
-    }
     const names = new Set<string>();
-    for (const [name, value] of entries) {
-        if (!ENVIRONMENT_VARIABLE_PATTERN.test(name)) {
-            throw new Error(`Secret '${secret.id}' contains an invalid environment variable name.`);
-        }
+    for (const name of Object.keys(secret.environment)) {
         const normalizedName = name.toUpperCase();
         if (names.has(normalizedName)) {
             throw new Error(`Secret '${secret.id}' contains duplicate environment variable names.`);
         }
         names.add(normalizedName);
-        if (typeof value !== "string") {
-            throw new Error(
-                `Environment variable '${name}' in secret '${secret.id}' must be text.`,
-            );
-        }
-        if (value.includes("\0")) {
-            throw new Error(
-                `Environment variable '${name}' in secret '${secret.id}' cannot contain a null byte.`,
-            );
-        }
     }
 }

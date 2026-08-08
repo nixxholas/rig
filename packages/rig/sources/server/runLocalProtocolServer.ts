@@ -77,6 +77,7 @@ import {
     replicateProfileForP2pRequest,
     RigProfileStore,
 } from "../profiles/index.js";
+import { GitHubSecretSync } from "../secrets/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -597,6 +598,21 @@ async function runOwnedLocalProtocolServer(
             },
             taskDrain,
         });
+        const githubSecretSync = new GitHubSecretSync({
+            register: (secret) => {
+                store?.registerSpecialSecret(secret);
+            },
+            unregister: () => {
+                store?.unregisterSpecialSecret("github");
+            },
+        });
+        try {
+            await githubSecretSync.refresh();
+        } catch {
+            // GitHub credentials are optional; a failed refresh must not stop the daemon.
+        }
+        const githubSecretRefreshLoop = githubSecretSync.run(shutdown.signal);
+        shutdown.register("GitHub credential refresh", () => githubSecretRefreshLoop);
         const activeStore = store;
         const p2pPeerTrustStore = new P2pPeerTrustStore(activeStore);
         const p2pNode: {

@@ -37,7 +37,12 @@ import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import { retriedSession } from "./retriedSession.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
-import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
+import {
+    SecretRegistry,
+    type EnvironmentSecretRegistration,
+    type SpecialSecretKind,
+    type SpecialSecretRegistration,
+} from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import { inTx } from "../persistence/inTx.js";
@@ -97,7 +102,7 @@ export interface InMemorySessionStoreOptions {
     onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     presence?: PresenceStore;
-    secrets?: readonly SecretRegistration[];
+    secrets?: readonly EnvironmentSecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
     workspacesDirectory?: string;
@@ -846,7 +851,14 @@ export class InMemorySessionStore implements SessionStore {
         return this.#secrets.reference(request.id);
     }
 
+    registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary {
+        this.#secrets.register(request);
+        return this.#secrets.reference(request.kind);
+    }
+
     unregisterSecret(secretId: string): boolean {
+        const secret = this.#secrets.references().find((candidate) => candidate.id === secretId);
+        if (secret === undefined || secret.kind !== undefined) return false;
         const removed = this.#secrets.unregister(secretId);
         if (!removed) return false;
         for (const ids of this.#projectSecretIds.values()) ids.delete(secretId);
@@ -855,6 +867,10 @@ export class InMemorySessionStore implements SessionStore {
             session.detachSecret(secretId, { scope: "session" });
         }
         return true;
+    }
+
+    unregisterSpecialSecret(kind: SpecialSecretKind): boolean {
+        return this.#secrets.unregisterSpecial(kind);
     }
 
     getProject(projectId: string): Project | undefined {

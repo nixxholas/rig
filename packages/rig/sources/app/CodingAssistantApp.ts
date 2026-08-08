@@ -55,7 +55,7 @@ import type {
     SubagentSummary,
     WorkflowRun,
 } from "../protocol/index.js";
-import type { SecretAttachmentScope, SecretRegistration } from "../secrets/index.js";
+import type { EnvironmentSecretRegistration, SecretAttachmentScope } from "../secrets/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import { humanizeWorkflowName } from "../workflows/index.js";
 import { createCodeReviewPrompt } from "../review/index.js";
@@ -245,7 +245,9 @@ export interface CodingAssistantAppOptions {
     inferenceMaxRetries?: number;
     compactCompletedTurns?: boolean;
     completionChime?: boolean;
-    registerSecret?: (registration: SecretRegistration) => SecretSummary | Promise<SecretSummary>;
+    registerSecret?: (
+        registration: EnvironmentSecretRegistration,
+    ) => SecretSummary | Promise<SecretSummary>;
     unregisterSecret?: (id: string) => boolean | Promise<boolean>;
     detachSecret?: (id: string, scope: SecretAttachmentScope) => void | Promise<void>;
     durableGlobalEventQueue?: boolean;

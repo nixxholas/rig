@@ -33,6 +33,7 @@ describe("createStartupStatusCardModel", () => {
             access: "Workspace write",
             environment: "Docker image rig-dev:latest",
             fast: true,
+            githubAvailable: false,
             model: "GPT Test",
             provider: "Codex",
             reasoning: "High",

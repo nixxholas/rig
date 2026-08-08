@@ -27,9 +27,9 @@ import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.j
 import type { SessionExecutionEnvironment } from "../execution/SessionExecutionEnvironment.js";
 import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
 import type {
+    EnvironmentSecretRegistration,
     SecretAttachmentScope,
     SecretReference,
-    SecretRegistration,
 } from "../secrets/index.js";
 import type {
     ExternalToolCall,
@@ -769,7 +769,7 @@ export interface SecretSessionResponse {
     session: ProtocolSession;
 }
 
-export type RegisterSecretRequest = SecretRegistration;
+export type RegisterSecretRequest = EnvironmentSecretRegistration;
 export type SecretSummary = SecretReference;
 
 export interface ListSecretsResponse {

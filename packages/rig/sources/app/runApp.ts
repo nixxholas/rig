@@ -247,11 +247,12 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         if (session.session.title !== undefined) {
             terminal.setTitle(`Rig - ${sanitizeTerminalTitle(session.session.title)}`);
         }
-        const [subagents, currentProviderQuotaResponse] = await Promise.all([
+        const [subagents, currentProviderQuotaResponse, secretRegistrations] = await Promise.all([
             localServer.client.listSubagents(session.session.id),
             resolveStartupProviderQuota(() =>
                 localServer.client.getCurrentProviderQuota(session.session.id),
             ),
+            localServer.client.listSecrets(),
         ]).catch(async (error: unknown) => {
             try {
                 startup.stop();
@@ -456,6 +457,9 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             showReasoning,
             showUsage,
             startupStatus: createStartupStatusCardModel({
+                githubAvailable: secretRegistrations.secrets.some(
+                    (secret) => secret.kind === "github",
+                ),
                 model: agent.model,
                 resumed,
                 session: session.session,

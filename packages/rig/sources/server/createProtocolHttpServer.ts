@@ -202,7 +202,10 @@ import { writeGlobalSecurityMd } from "../config/writeGlobalSecurityMd.js";
 import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
-import type { SecretRegistration } from "../secrets/index.js";
+import {
+    environmentSecretRegistrationSchema,
+    type EnvironmentSecretRegistration,
+} from "../secrets/index.js";
 import type {
     CreateRemoteTerminalRequest,
     CreateRemoteTerminalResponse,
@@ -353,7 +356,7 @@ export interface ProtocolHttpServerOptions {
     taskDrain?: TaskDrain;
     /** The daemon's running worklets. Absent when this daemon runs without them. */
     worklets?: WorkletManager;
-    secrets?: readonly SecretRegistration[];
+    secrets?: readonly EnvironmentSecretRegistration[];
     token: string;
 }
 
@@ -2769,13 +2772,15 @@ async function handleRequest(
 
     if (request.method === "POST" && route.name === "secret-registrations") {
         const body = await readJson<unknown>(request);
-        if (body === null || typeof body !== "object" || Array.isArray(body)) {
-            sendJson(response, 400, { error: "Secret settings must be a JSON object." });
+        if (!Value.Check(environmentSecretRegistrationSchema, body)) {
+            sendJson(response, 400, {
+                error: "Secret settings must match the environment secret schema.",
+            });
             return;
         }
         try {
             sendJson<RegisterSecretResponse>(response, 200, {
-                secret: store.registerSecret(body as RegisterSecretRequest),
+                secret: store.registerSecret(body),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;

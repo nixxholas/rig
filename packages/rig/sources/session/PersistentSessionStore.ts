@@ -64,7 +64,12 @@ import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
-import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
+import {
+    SecretRegistry,
+    type EnvironmentSecretRegistration,
+    type SpecialSecretKind,
+    type SpecialSecretRegistration,
+} from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
@@ -211,7 +216,7 @@ export interface PersistentSessionStoreOptions {
     presence?: PresenceStore;
     projectGit?: GitCommandRunner;
     taskDrain?: TaskDrain;
-    secrets?: readonly SecretRegistration[];
+    secrets?: readonly EnvironmentSecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
     workspacesDirectory?: string;
@@ -1434,8 +1439,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return candidate.reference(request.id);
     }
 
+    registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary {
+        this.#secrets.register(request);
+        return this.#secrets.reference(request.kind);
+    }
+
     unregisterSecret(secretId: string): boolean {
-        if (!this.#secrets.references().some((secret) => secret.id === secretId)) return false;
+        const secret = this.#secrets.references().find((candidate) => candidate.id === secretId);
+        if (secret === undefined || secret.kind !== undefined) return false;
         secretUnregister(this.#tx(), secretId);
         this.#secrets.unregister(secretId);
         for (const session of this.#cachedSessions()) {
@@ -1443,6 +1454,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             session.detachSecret(secretId, { scope: "session" });
         }
         return true;
+    }
+
+    unregisterSpecialSecret(kind: SpecialSecretKind): boolean {
+        return this.#secrets.unregisterSpecial(kind);
     }
 
     #listSubagentSessionsByRoot(rootSessionId: string): readonly InMemorySession[] {

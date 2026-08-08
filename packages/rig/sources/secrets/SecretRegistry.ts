@@ -1,9 +1,15 @@
-import type { SecretReference, SecretRegistration } from "./types.js";
+import type {
+    EnvironmentSecretRegistration,
+    SecretReference,
+    SecretRegistration,
+    SpecialSecretKind,
+    SpecialSecretRegistration,
+} from "./types.js";
 import { validateSecretRegistration } from "./validateSecretRegistration.js";
 
 export class SecretRegistry {
     readonly #environmentVariables = new Map<string, Map<string, string>>();
-    readonly #secrets = new Map<string, SecretRegistration>();
+    readonly #secrets = new Map<string, StoredSecretRegistration>();
 
     constructor(secrets: readonly SecretRegistration[] = []) {
         for (const secret of secrets) this.register(secret);
@@ -11,17 +17,18 @@ export class SecretRegistry {
 
     register(secret: SecretRegistration): void {
         validateSecretRegistration(secret);
-        this.#secrets.set(secret.id, {
-            description: secret.description.trim(),
-            environment: { ...secret.environment },
-            id: secret.id,
-        });
-        this.rememberEnvironmentVariables(secret.id, Object.keys(secret.environment));
+        const normalized = normalizeSecretRegistration(secret);
+        this.#secrets.set(normalized.id, normalized);
+        this.rememberEnvironmentVariables(normalized.id, Object.keys(normalized.environment));
     }
 
     unregister(secretId: string): boolean {
         this.#environmentVariables.delete(secretId);
         return this.#secrets.delete(secretId);
+    }
+
+    unregisterSpecial(kind: SpecialSecretKind): boolean {
+        return this.unregister(specialSecretId(kind));
     }
 
     environmentVariables(secretId: string): readonly string[] {
@@ -41,11 +48,16 @@ export class SecretRegistry {
         if (secret === undefined) {
             throw new Error(`Secret '${secretId}' is not registered in this Rig instance.`);
         }
-        return {
+        const reference: SecretReference = {
             description: secret.description,
             environmentVariables: Object.keys(secret.environment),
             id: secret.id,
         };
+        if ("kind" in secret) {
+            reference.availableToModel = false;
+            reference.kind = secret.kind;
+        }
+        return reference;
     }
 
     references(): readonly SecretReference[] {
@@ -75,3 +87,31 @@ export class SecretRegistry {
         return environment;
     }
 }
+
+interface NormalizedSpecialSecretRegistration extends EnvironmentSecretRegistration {
+    kind: SpecialSecretKind;
+}
+
+function normalizeSecretRegistration(
+    secret: SecretRegistration,
+): EnvironmentSecretRegistration | NormalizedSpecialSecretRegistration {
+    if ("kind" in secret) {
+        return {
+            description: "GitHub CLI credentials",
+            environment: { GH_TOKEN: secret.token },
+            id: specialSecretId(secret.kind),
+            kind: secret.kind,
+        };
+    }
+    return {
+        description: secret.description.trim(),
+        environment: { ...secret.environment },
+        id: secret.id,
+    };
+}
+
+function specialSecretId(kind: SpecialSecretRegistration["kind"]): string {
+    return kind;
+}
+
+type StoredSecretRegistration = EnvironmentSecretRegistration | NormalizedSpecialSecretRegistration;

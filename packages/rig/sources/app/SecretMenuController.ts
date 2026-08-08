@@ -1,7 +1,7 @@
 import type { Component } from "@earendil-works/pi-tui";
 
 import type { SecretSummary } from "../protocol/index.js";
-import type { SecretAttachmentScope, SecretRegistration } from "../secrets/index.js";
+import type { EnvironmentSecretRegistration, SecretAttachmentScope } from "../secrets/index.js";
 import type { AppTranscriptEntry } from "./AppTranscriptEntry.js";
 import { createSecretInputPanel } from "./createSecretInputPanel.js";
 import { createSelectionPanel } from "./createSelectionPanel.js";
@@ -24,7 +24,7 @@ export interface SecretMenuControllerOptions {
     initialSessionSecretIds: readonly string[] | undefined;
     listSecrets: (() => readonly SecretSummary[] | Promise<readonly SecretSummary[]>) | undefined;
     registerSecret:
-        | ((registration: SecretRegistration) => SecretSummary | Promise<SecretSummary>)
+        | ((registration: EnvironmentSecretRegistration) => SecretSummary | Promise<SecretSummary>)
         | undefined;
     requestRender: () => void;
     showPanel: (component: Component) => void;
@@ -45,7 +45,7 @@ export class SecretMenuController {
         | (() => readonly SecretSummary[] | Promise<readonly SecretSummary[]>)
         | undefined;
     readonly #registerSecret:
-        | ((registration: SecretRegistration) => SecretSummary | Promise<SecretSummary>)
+        | ((registration: EnvironmentSecretRegistration) => SecretSummary | Promise<SecretSummary>)
         | undefined;
     readonly #requestRender: () => void;
     readonly #showPanelCallback: (component: Component) => void;
@@ -134,9 +134,10 @@ export class SecretMenuController {
         if (refreshList) this.#showSecretsMenu();
     }
 
-    #attachmentStatus(secretId: string): string {
-        const session = this.#sessionSecretIds.includes(secretId);
-        const project = this.#projectSecretIds.includes(secretId);
+    #attachmentStatus(secret: SecretSummary): string {
+        if (secret.kind !== undefined) return "Not available to model";
+        const session = this.#sessionSecretIds.includes(secret.id);
+        const project = this.#projectSecretIds.includes(secret.id);
         if (session && project) return "Attached: Session and Project";
         if (session) return "Attached: Session";
         if (project) return "Attached: Project";
@@ -306,27 +307,32 @@ export class SecretMenuController {
     }
 
     #openSecretActions(secret: SecretSummary, notice?: string): void {
+        const systemManaged = secret.kind !== undefined;
         this.#showPanel(
             createSelectionPanel({
                 theme: this.#theme,
                 title: secret.id,
-                subtitle: notice ?? `${secret.description} · ${this.#attachmentStatus(secret.id)}`,
+                subtitle: notice ?? `${secret.description} · ${this.#attachmentStatus(secret)}`,
                 items: [
-                    {
-                        value: "attach",
-                        label: "Attach",
-                        description: "Make this bundle available to selected commands.",
-                    },
-                    {
-                        value: "detach",
-                        label: "Detach",
-                        description: "Stop making this bundle available at one scope.",
-                    },
-                    {
-                        value: "remove",
-                        label: "Remove registration",
-                        description: "Delete this bundle from Rig.",
-                    },
+                    ...(systemManaged
+                        ? []
+                        : [
+                              {
+                                  value: "attach",
+                                  label: "Attach",
+                                  description: "Make this bundle available to selected commands.",
+                              },
+                              {
+                                  value: "detach",
+                                  label: "Detach",
+                                  description: "Stop making this bundle available at one scope.",
+                              },
+                              {
+                                  value: "remove",
+                                  label: "Remove registration",
+                                  description: "Delete this bundle from Rig.",
+                              },
+                          ]),
                     { value: "back", label: "Back" },
                 ],
                 onSelect: (item) => {
@@ -532,7 +538,7 @@ export class SecretMenuController {
                     ...this.#registrations.map((secret) => ({
                         value: `secret:${secret.id}`,
                         label: secret.id,
-                        description: `${secret.description} · ${secret.environmentVariables.join(", ")} · ${this.#attachmentStatus(secret.id)}`,
+                        description: `${secret.description} · ${secret.environmentVariables.join(", ")} · ${this.#attachmentStatus(secret)}`,
                     })),
                 ],
                 onSelect: (item) => {

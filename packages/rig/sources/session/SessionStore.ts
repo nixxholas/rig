@@ -28,6 +28,7 @@ import type {
 import type { AgentTreeUsage } from "../agent/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
+import type { SpecialSecretKind, SpecialSecretRegistration } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
@@ -183,6 +184,7 @@ export interface SessionStore {
     ): Project | undefined;
     clearProjectAvatar(projectId: string): Project | undefined;
     registerSecret(request: RegisterSecretRequest): SecretSummary;
+    registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary;
     /** The agents a scope covers and when each of them worked, waited, or asked. */
     timeline(request: GetTimelineRequest): readonly TimelineAgent[];
     transferSession(
@@ -190,4 +192,5 @@ export interface SessionStore {
         request: TransferSessionRequest,
     ): Promise<TransferSessionResponse | undefined>;
     unregisterSecret(secretId: string): boolean;
+    unregisterSpecialSecret(kind: SpecialSecretKind): boolean;
 }

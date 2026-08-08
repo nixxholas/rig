@@ -54,6 +54,7 @@ export function renderStartupStatusCard(options: {
                 `${DIM}Model:${RESET} ${model.model} ${DIM}· Reasoning:${RESET} ${model.reasoning} ${DIM}· Provider:${RESET} ${model.provider}${model.fast ? ` ${DIM}·${RESET} ${options.theme.brand}Fast${RESET}` : ""}`,
                 `${DIM}Workspace:${RESET} ${truncatePathToWidth(model.workspace, workspaceWidth)} ${DIM}· Environment:${RESET} ${model.environment}`,
                 `${DIM}Access:${RESET} ${model.access}`,
+                `${DIM}GitHub:${RESET} ${model.githubAvailable === true ? "Authenticated" : "Not authenticated"}`,
                 ...usage.map((line) => `${DIM}${line}${RESET}`),
             ];
         }
@@ -65,6 +66,7 @@ export function renderStartupStatusCard(options: {
             ...packValues(modelValues, width),
             truncatePathToWidth(model.workspace, width),
             ...packValues([model.environment, model.access], width),
+            model.githubAvailable === true ? "GitHub authenticated" : "GitHub not authenticated",
             ...usage.map((line) => `${DIM}${line}${RESET}`),
         ];
     }

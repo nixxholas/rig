@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { SecretRegistry } from "./SecretRegistry.js";
 import { SessionSecretContext } from "./SessionSecretContext.js";
+import { createSecretInstructions } from "./createSecretInstructions.js";
 
 describe("SecretRegistry", () => {
     it("registers, rotates, and resolves multi-variable bundles without exposing values", () => {
@@ -34,6 +35,53 @@ describe("SecretRegistry", () => {
             SERVICE_REGION: "us-west-2",
             SERVICE_TOKEN: "rotated",
         });
+    });
+
+    it("keeps the enumerated GitHub secret away from models while rotating it in place", () => {
+        const registry = new SecretRegistry();
+        const context = new SessionSecretContext(registry);
+
+        registry.register({ kind: "github", token: "first-token" });
+        expect(registry.reference("github")).toEqual({
+            availableToModel: false,
+            description: "GitHub CLI credentials",
+            environmentVariables: ["GH_TOKEN"],
+            id: "github",
+            kind: "github",
+        });
+        expect(context.references()).toEqual([]);
+        const instructions = createSecretInstructions(context);
+        expect(instructions).toBeUndefined();
+        expect(() => context.resolve(["github"])).toThrow("not attached");
+
+        registry.register({ kind: "github", token: "rotated-token" });
+        expect(registry.resolve(["github"])).toEqual({ GH_TOKEN: "rotated-token" });
+
+        expect(registry.unregisterSpecial("github")).toBe(true);
+        expect(context.references()).toEqual([]);
+        expect(() => context.resolve(["github"])).toThrow("not attached");
+    });
+
+    it("reserves special secret IDs for their exact schemas", () => {
+        expect(
+            () =>
+                new SecretRegistry([
+                    {
+                        description: "Spoofed GitHub credentials",
+                        environment: { GH_TOKEN: "token" },
+                        id: "github",
+                    },
+                ]),
+        ).toThrow("reserved for GitHub CLI credentials");
+        expect(
+            () =>
+                new SecretRegistry([
+                    {
+                        kind: "github",
+                        token: "",
+                    },
+                ]),
+        ).toThrow("GitHub secret schema");
     });
 
     it("rejects invalid registrations and conflicting command selections", () => {

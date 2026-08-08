@@ -1061,6 +1061,53 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("keeps system-managed GitHub credentials out of durable secret registrations and attachments", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            store.registerSpecialSecret({ kind: "github", token: "runtime-only-token" });
+            const session = store.create({ cwd: "/tmp/rig-github-secret-session" });
+            expect(store.listSecrets()).toEqual([
+                {
+                    availableToModel: false,
+                    description: "GitHub CLI credentials",
+                    environmentVariables: ["GH_TOKEN"],
+                    id: "github",
+                    kind: "github",
+                },
+            ]);
+            expect(session.snapshot()).toMatchObject({
+                projectSecretIds: [],
+                secretIds: [],
+                sessionSecretIds: [],
+            });
+            store.close();
+
+            const database = new DatabaseSync(databasePath, { readOnly: true });
+            try {
+                expect(
+                    database.prepare("SELECT COUNT(*) AS count FROM secret_registrations").get(),
+                ).toEqual({ count: 0 });
+                expect(
+                    database
+                        .prepare("SELECT secret_ids_json FROM sessions WHERE id = ?")
+                        .get(session.id),
+                ).toEqual({ secret_ids_json: "[]" });
+            } finally {
+                database.close();
+            }
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                expect(restoredStore.listSecrets()).toEqual([]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("conservatively restores null, missing, and unknown agent event subtypes", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
