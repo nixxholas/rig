@@ -186,12 +186,17 @@ export async function createLinuxBubblewrapCommand(options: {
         options.mode !== "read_only"
             ? await prepareProjectConfigPlaceholder(projectConfigPath, gitExcludePath)
             : undefined;
-    const protectedPaths = [...allProtectedPaths, ...(options.protectedPaths ?? [])].filter(
-        (path) =>
-            existsSync(path) &&
-            (!isAtOrBelow(privateTemporaryRoot, path) ||
-                writableRoots.some((root) => isAtOrBelow(root, path))),
-    );
+    const protectedPaths = [
+        ...allProtectedPaths.filter(
+            (path) =>
+                existsSync(path) &&
+                (!isAtOrBelow(privateTemporaryRoot, path) ||
+                    writableRoots.some((root) => isAtOrBelow(root, path))),
+        ),
+        ...(options.protectedPaths ?? []).filter(
+            (path) => existsSync(path) && path !== privateTemporaryRoot,
+        ),
+    ];
     const neverGrantedSocketRoots = [environment.RIG_SERVER_DIRECTORY].filter(
         (path): path is string => typeof path === "string" && path.length > 0,
     );
