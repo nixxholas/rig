@@ -84,8 +84,9 @@ describe("sessionPruneToolResults", () => {
             throw new Error("Expected a retained command presentation.");
         }
         expect(Array.from(block.presentation.output)).toHaveLength(3_000);
+        expect(block.presentation.output).toMatch(/^HEAD_/u);
         expect(block.presentation.output).toContain("truncated");
-        expect(block.presentation.output).toMatch(/p+$/u);
+        expect(block.presentation.output).toMatch(/_TAIL$/u);
         expect(readMessage(opened.database, "session_context_messages")).toEqual(message);
         expect(
             opened.database.get<{ message_updated: number; session_updated: number }>(sql`
@@ -150,7 +151,7 @@ function toolResultMessage(id: string, output: string): AgentMessage {
                 display: "Read a large file.",
                 presentation: {
                     command: "read large-file.ts",
-                    output: "p".repeat(4_000),
+                    output: `HEAD_${"p".repeat(4_000)}_TAIL`,
                     type: "exec_command",
                 },
                 providerToolCallId: "provider-call-1",

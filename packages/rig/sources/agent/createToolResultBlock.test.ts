@@ -93,6 +93,7 @@ describe("createToolResultBlock", () => {
             MAXIMUM_PRESENTATION_OUTPUT_CHARACTERS,
         );
         expect(block.presentation.output).toContain("truncated");
+        expect(block.presentation.output).toMatch(/^🙂+/u);
         expect(block.presentation.output).toMatch(/x+$/u);
     });
 

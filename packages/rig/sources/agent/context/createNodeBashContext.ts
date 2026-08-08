@@ -518,7 +518,6 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     throw error;
                 }
                 const completion = process.wait();
-                void completion.then(activatedSecrets.release, activatedSecrets.release);
                 const sessionId = nextSessionId;
                 nextSessionId += 1;
                 const session: NodeBashSession = {
@@ -546,6 +545,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 sessions.set(sessionId, session);
                 onActiveSessionCountChange?.(activeSessionCount());
                 void completion.then(async (result) => {
+                    activatedSecrets.release();
                     stopObservingNetworkDenials?.();
                     const cleanup = await cleanUpCommandResources(
                         protectedPathMonitor,

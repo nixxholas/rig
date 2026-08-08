@@ -5,6 +5,12 @@ export const TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE = "[Command output trunc
 export const TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_CHARACTERS =
     TOOL_RESULT_PRESENTATION_MAXIMUM_OUTPUT_CHARACTERS -
     Array.from(TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE).length;
+export const TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_HEAD_CHARACTERS = Math.ceil(
+    TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_CHARACTERS / 2,
+);
+export const TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_TAIL_CHARACTERS =
+    TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_CHARACTERS -
+    TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_HEAD_CHARACTERS;
 
 export function boundToolResultPresentation(
     presentation: ToolResultPresentation | undefined,
@@ -19,8 +25,9 @@ export function boundToolResultPresentation(
     return {
         ...presentation,
         output: [
+            ...characters.slice(0, TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_HEAD_CHARACTERS),
             ...notice,
-            ...characters.slice(-TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_CHARACTERS),
+            ...characters.slice(-TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_TAIL_CHARACTERS),
         ].join(""),
     };
 }

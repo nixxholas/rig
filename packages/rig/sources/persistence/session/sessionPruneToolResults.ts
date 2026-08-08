@@ -2,7 +2,8 @@ import { sql, type SQL } from "drizzle-orm";
 
 import {
     TOOL_RESULT_PRESENTATION_MAXIMUM_OUTPUT_CHARACTERS,
-    TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_CHARACTERS,
+    TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_HEAD_CHARACTERS,
+    TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_TAIL_CHARACTERS,
     TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE,
 } from "../../agent/boundToolResultPresentation.js";
 import { inTx } from "../inTx.js";
@@ -96,9 +97,13 @@ export function sessionPruneToolResults(
                                         ELSE block.value
                                     END,
                                     '$.presentation.output',
-                                    ${TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE} || substr(
+                                    substr(
                                         json_extract(block.value, '$.presentation.output'),
-                                        -${TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_CHARACTERS}
+                                        1,
+                                        ${TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_HEAD_CHARACTERS}
+                                    ) || ${TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE} || substr(
+                                        json_extract(block.value, '$.presentation.output'),
+                                        -${TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_TAIL_CHARACTERS}
                                     )
                                 )
                                 WHEN ${stale} AND ${hasRetainedOutput}
