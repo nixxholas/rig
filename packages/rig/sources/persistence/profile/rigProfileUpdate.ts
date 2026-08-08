@@ -12,6 +12,7 @@ export function rigProfileUpdate(tx: TX, profile: RigProfile): void {
     const result = tx
         .update(rigProfiles)
         .set({
+            email: profile.email,
             name: profile.name,
             photoJson: profile.photo === undefined ? null : JSON.stringify(profile.photo),
             updatedAtMs: profile.updatedAt,

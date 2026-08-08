@@ -24,19 +24,28 @@ import {
     type ManagedNetworkProxyHandle,
     shouldApplyManagedNetworkPolicy,
     validateManagedNetworkLoopbackPorts,
+    withTrustedLoopbackPorts,
 } from "../agent/context/ManagedNetworkPolicy.js";
 import {
     startLinuxManagedNetworkBridge,
     type LinuxManagedNetworkBridge,
 } from "../agent/context/startLinuxManagedNetworkBridge.js";
 import { startManagedNetworkProxy } from "../agent/context/startManagedNetworkProxy.js";
-import { assertPermissionRevision, type PermissionContext } from "../permissions/index.js";
+import {
+    assertPermissionRevision,
+    type PermissionContext,
+    type PermissionMode,
+} from "../permissions/index.js";
 import { BoundedOutputBuffer } from "../processes/BoundedOutputBuffer.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
 import { runDockerExec } from "./runDockerExec.js";
 import { readDockerEnvironmentVariableNames } from "./readDockerEnvironmentVariableNames.js";
 import { createDockerCommandEnvironment, type SessionSecretContext } from "../secrets/index.js";
-import { createDockerSandboxCommand } from "./createDockerSandboxCommand.js";
+import { redactGitAuthenticationText } from "../git/GitCredentialBroker.js";
+import {
+    createDockerNetworkRelayScript,
+    createDockerSandboxCommand,
+} from "./createDockerSandboxCommand.js";
 import { prepareDockerSandbox, type PreparedDockerSandbox } from "./prepareDockerSandbox.js";
 import { resolveDockerPath } from "./resolveDockerPath.js";
 import { DOCKER_PROTECTED_PATH_MONITOR_SCRIPT } from "./dockerProtectedPathMonitorScript.js";
@@ -53,6 +62,7 @@ import {
     prepareDockerNetworkBridgeHostRoot,
 } from "./prepareDockerNetworkBridgeHostRoot.js";
 import { prepareDockerNetworkBridgeContainerRoot } from "./prepareDockerNetworkBridgeContainerRoot.js";
+import { assertCanUseCommandSecrets } from "../agent/context/assertCanUseCommandSecrets.js";
 
 interface DockerBashSession {
     command: string;
@@ -70,6 +80,8 @@ interface DockerBashSession {
     networkDenial?: ManagedNetworkBlockedRequest;
     pidFile: string;
     projectConfigPlaceholderCleanup?: () => Promise<void>;
+    redactionEnvironment: NodeJS.ProcessEnv;
+    releaseSecrets: () => void;
     sessionId: number;
     stderr: BoundedOutputBuffer;
     stderrUnread: BoundedOutputBuffer;
@@ -81,6 +93,7 @@ interface DockerBashSession {
     stopNetworkDenialListener?: () => void;
     timedOut: boolean;
     timeout?: NodeJS.Timeout;
+    usesSecrets: boolean;
 }
 
 interface DockerManagedNetwork {
@@ -110,6 +123,7 @@ export function createDockerBashContext(
     permissions: PermissionContext,
     secrets?: SessionSecretContext,
     networkInterceptor?: ManagedNetworkInterceptor,
+    baseEnvironment: Readonly<Record<string, string>> = {},
 ): BashContext {
     const sessions = new Map<number, DockerBashSession>();
     const contextId = randomUUID();
@@ -130,6 +144,7 @@ export function createDockerBashContext(
         const permissionMode = permissions.mode;
         const permissionRevision = permissions.revision;
         assertCanUseCustomShell(permissionMode, options.shell);
+        assertCanUseCommandSecrets(permissionMode, options.secrets);
         const sessionId = nextSessionId++;
         const runCwd = options.cwd === undefined ? cwd : posix.resolve(cwd, options.cwd);
         const shell = options.shell ?? "/bin/sh";
@@ -141,21 +156,27 @@ export function createDockerBashContext(
                 throw error;
             },
         );
-        const secretEnvironment = createDockerCommandEnvironment(
-            secrets,
-            options.secrets,
-            await ambientEnvironmentVariables,
-        );
-        const workspaceCwd =
-            permissionMode === "full_access" ? undefined : await loadCanonicalWorkspace();
         const runtime =
             permissionMode === "full_access" ? undefined : await loadSandboxRuntime(container);
         const appliesManagedNetwork = shouldApplyManagedNetworkPolicy(permissionMode);
-        const containerNetworkBridgeRoot = appliesManagedNetwork
-            ? await prepareDockerNetworkBridgeContainerRoot(container, workspaceCwd!)
-            : undefined;
+        // The host bridge is only an implementation detail for a reviewed/full-access command.
+        // Restricted modes must retain their normal network boundary, even though the session
+        // carries a repository-scoped broker capability in its environment.
+        const commandTrustedLoopbackPorts = dockerTrustedLoopbackPorts(
+            permissionMode,
+            secrets?.trustedLoopbackPorts(options.secrets) ?? [],
+        );
+        const needsTrustedLoopback = commandTrustedLoopbackPorts.length > 0;
+        const workspaceCwd =
+            permissionMode === "full_access" && !needsTrustedLoopback
+                ? undefined
+                : await loadCanonicalWorkspace();
+        const containerNetworkBridgeRoot =
+            appliesManagedNetwork || needsTrustedLoopback
+                ? await prepareDockerNetworkBridgeContainerRoot(container, workspaceCwd!)
+                : undefined;
         const projectConfigPlaceholderMarker =
-            containerNetworkBridgeRoot === undefined
+            containerNetworkBridgeRoot === undefined || !appliesManagedNetwork
                 ? undefined
                 : posix.join(
                       containerNetworkBridgeRoot,
@@ -185,7 +206,10 @@ export function createDockerBashContext(
             }
             throw error;
         }
-        const networkPolicy = networkPolicyState?.policy;
+        const networkPolicy =
+            permissionMode === "full_access"
+                ? withTrustedLoopbackPorts(undefined, commandTrustedLoopbackPorts)
+                : networkPolicyState?.policy;
         const projectConfigPlaceholderCleanup =
             networkPolicyState?.projectConfigPlaceholderCreated === true &&
             projectConfigPlaceholderMarker !== undefined &&
@@ -237,7 +261,24 @@ export function createDockerBashContext(
         try {
             invokedCommand =
                 permissionMode === "full_access"
-                    ? [shell, "-lc", options.command]
+                    ? [
+                          shell,
+                          "-lc",
+                          managedNetwork === undefined
+                              ? options.command
+                              : createDockerNetworkRelayScript(
+                                    options.command,
+                                    {
+                                        authenticationToken: managedNetwork.authenticationToken,
+                                        http: managedNetwork.containerHttpSocketPath,
+                                        loopback: managedNetwork.containerLoopbackSockets,
+                                        socks: managedNetwork.containerSocksSocketPath,
+                                    },
+                                    {
+                                        includeProxyPorts: appliesManagedNetwork,
+                                    },
+                                ),
+                      ]
                     : createDockerSandboxCommand({
                           command: options.command,
                           commandCwd: runCwd,
@@ -276,7 +317,9 @@ export function createDockerBashContext(
             throw error;
         }
         const protectedCreatePaths =
-            workspaceCwd === undefined || permissionMode === "read_only"
+            workspaceCwd === undefined ||
+            permissionMode === "read_only" ||
+            permissionMode === "full_access"
                 ? []
                 : [
                       ".agents",
@@ -288,6 +331,31 @@ export function createDockerBashContext(
                           "happy.toml",
                       ]),
                   ].map((name) => posix.join(workspaceCwd, name));
+        const activatedSecrets = secrets?.activate(options.secrets) ?? {
+            environment: {},
+            release: () => {},
+        };
+        let secretEnvironment: NodeJS.ProcessEnv;
+        try {
+            secretEnvironment = {
+                ...baseEnvironment,
+                ...createDockerCommandEnvironment(
+                    secrets,
+                    options.secrets,
+                    await ambientEnvironmentVariables,
+                    activatedSecrets.environment,
+                ),
+            };
+        } catch (error) {
+            activatedSecrets.release();
+            await runCleanupSteps("Docker command startup", [
+                ...(managedNetwork === undefined ? [] : [() => managedNetwork.close()]),
+                ...(projectConfigPlaceholderCleanup === undefined
+                    ? []
+                    : [projectConfigPlaceholderCleanup]),
+            ]);
+            throw error;
+        }
         let exec: Dockerode.Exec;
         try {
             const payloadCommand =
@@ -316,7 +384,11 @@ export function createDockerBashContext(
                     ...payloadCommand,
                 ],
                 ...(Object.keys(
-                    withDockerManagedNetworkEnvironment(secretEnvironment, managedNetwork),
+                    withDockerManagedNetworkEnvironment(
+                        secretEnvironment,
+                        managedNetwork,
+                        appliesManagedNetwork,
+                    ),
                 ).length === 0
                     ? {}
                     : {
@@ -324,6 +396,7 @@ export function createDockerBashContext(
                               withDockerManagedNetworkEnvironment(
                                   secretEnvironment,
                                   managedNetwork,
+                                  appliesManagedNetwork,
                               ),
                           ).map(([name, value]) => `${name}=${value ?? ""}`),
                       }),
@@ -331,6 +404,7 @@ export function createDockerBashContext(
                 WorkingDir: runCwd,
             });
         } catch (error) {
+            activatedSecrets.release();
             await runCleanupSteps("Docker command startup", [
                 ...(managedNetwork === undefined ? [] : [() => managedNetwork.close()]),
                 ...(projectConfigPlaceholderCleanup === undefined
@@ -346,6 +420,7 @@ export function createDockerBashContext(
             assertPermissionRevision(permissions, permissionRevision);
             stream.write(DOCKER_EXEC_START_GATE);
         } catch (error) {
+            activatedSecrets.release();
             stream?.end();
             await runCleanupSteps("Docker command startup", [
                 ...(managedNetwork === undefined ? [] : [() => managedNetwork.close()]),
@@ -373,6 +448,8 @@ export function createDockerBashContext(
                 ? {}
                 : { projectConfigPlaceholderCleanup }),
             pidFile,
+            redactionEnvironment: secretEnvironment,
+            releaseSecrets: activatedSecrets.release,
             sessionId,
             stderr: new BoundedOutputBuffer(maximum),
             stderrUnread: new BoundedOutputBuffer(maximum),
@@ -382,6 +459,7 @@ export function createDockerBashContext(
             stdoutOffset: 0,
             stream,
             timedOut: false,
+            usesSecrets: (options.secrets?.length ?? 0) > 0,
         };
         const appendStderr = (chunk: Buffer): void => {
             session.stderr.append(chunk);
@@ -400,6 +478,7 @@ export function createDockerBashContext(
             const finish = async (error?: Error) => {
                 if (settled) return;
                 settled = true;
+                session.releaseSecrets();
                 session.stopNetworkDenialListener?.();
                 delete session.stopNetworkDenialListener;
                 if (error !== undefined) {
@@ -617,6 +696,8 @@ export function createDockerBashContext(
             : session.stderrUnread.drain();
         const stdoutDelta = stdoutDeltaBuffer.snapshot().toString("utf8");
         const stderrDelta = stderrDeltaBuffer.snapshot().toString("utf8");
+        const redact = (text: string) =>
+            redactGitAuthenticationText(text, session.redactionEnvironment);
         if (!peek) {
             session.stdoutOffset = session.stdout.totalBytes - session.stdoutUnread.totalBytes;
             session.stderrOffset = session.stderr.totalBytes - session.stderrUnread.totalBytes;
@@ -632,14 +713,14 @@ export function createDockerBashContext(
                     ? "killed"
                     : "completed"
                 : "running",
-            stderr: session.stderr.snapshot().toString("utf8"),
-            stderrDelta,
+            stderr: redact(session.stderr.snapshot().toString("utf8")),
+            stderrDelta: redact(stderrDelta),
             stderrBytes: session.stderr.totalBytes,
             stderrDeltaBytes: stderrDeltaBuffer.totalBytes,
             stderrDeltaOmittedBytes: stderrDeltaBuffer.omittedBytes,
             stderrOmittedBytes: session.stderr.omittedBytes,
-            stdout: session.stdout.snapshot().toString("utf8"),
-            stdoutDelta,
+            stdout: redact(session.stdout.snapshot().toString("utf8")),
+            stdoutDelta: redact(stdoutDelta),
             stdoutBytes: session.stdout.totalBytes,
             stdoutDeltaBytes: stdoutDeltaBuffer.totalBytes,
             stdoutDeltaOmittedBytes: stdoutDeltaBuffer.omittedBytes,
@@ -754,13 +835,26 @@ export function createDockerBashContext(
             makeRoomForSession();
             return (await start(options)).sessionId;
         },
+        sessionUsesSecrets(sessionId) {
+            return sessions.get(sessionId)?.usesSecrets === true;
+        },
         supportsSessionInput: true,
         async writeSession(sessionId, data) {
             const session = sessions.get(sessionId);
             if (session === undefined || session.finished || session.stream.destroyed) return false;
+            if (session.usesSecrets) {
+                assertCanUseCommandSecrets(permissions.mode, ["selected"]);
+            }
             return session.stream.write(data);
         },
     };
+}
+
+export function dockerTrustedLoopbackPorts(
+    permissionMode: PermissionMode,
+    trustedLoopbackPorts: readonly number[],
+): readonly number[] {
+    return permissionMode === "full_access" ? trustedLoopbackPorts : [];
 }
 
 async function inspectDockerExec(exec: Dockerode.Exec): Promise<Dockerode.ExecInspectInfo> {
@@ -884,8 +978,9 @@ async function makeDockerBridgeDirectoryTraversable(directory: string): Promise<
 function withDockerManagedNetworkEnvironment(
     environment: NodeJS.ProcessEnv,
     managedNetwork: DockerManagedNetwork | undefined,
+    useProxyEnvironment: boolean,
 ): NodeJS.ProcessEnv {
-    if (managedNetwork === undefined) return environment;
+    if (managedNetwork === undefined || !useProxyEnvironment) return environment;
     const noProxy = "localhost,127.0.0.1,::1";
     return {
         ...environment,

@@ -30,7 +30,7 @@ describe("P2pProfileReplicator", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = profiles.create({ name: "Steve" });
+        const created = profiles.create({ email: "steve@example.test", name: "Steve" });
         const remoteProfiles = new Map<string, RigProfile>();
         const requests: { method: string; path: string; peerId: string }[] = [];
         const firstPutStarted = deferred();
@@ -145,7 +145,7 @@ describe("P2pProfileReplicator", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = profiles.create({ name: "Steve" });
+        const created = profiles.create({ email: "steve@example.test", name: "Steve" });
         const requests: { method: string; path: string }[] = [];
         const network = {
             fetch: vi.fn(
@@ -206,7 +206,7 @@ describe("P2pProfileReplicator", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = profiles.create({ name: "Steve" });
+        const created = profiles.create({ email: "steve@example.test", name: "Steve" });
         const remoteProfiles = new Map([[created.id, created]]);
         const requests: { method: string; path: string }[] = [];
         const network = {
@@ -279,7 +279,7 @@ describe("P2pProfileReplicator", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = profiles.create({ name: "Steve" });
+        const created = profiles.create({ email: "steve@example.test", name: "Steve" });
         const updated = profiles.update(created.id, { name: "Steve 🧑‍💻" })!;
         let remoteProfile = created;
         const network = {

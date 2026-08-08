@@ -15,6 +15,9 @@ export function retriedSession(
     request: CreateSessionRequest,
 ): InMemorySession {
     const snapshot = existing.snapshot();
+    if (request.identity !== undefined && snapshot.profileId !== request.identity) {
+        throw new Error("That session ID already belongs to another human profile.");
+    }
     if (request.scope !== undefined) {
         const sameScope =
             request.scope.kind === "unsorted"

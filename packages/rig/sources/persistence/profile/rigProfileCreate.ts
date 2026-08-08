@@ -11,6 +11,7 @@ export function rigProfileCreate(tx: TX, profile: RigProfile): void {
     tx.insert(rigProfiles)
         .values({
             createdAtMs: profile.createdAt,
+            email: profile.email,
             id: profile.id,
             name: profile.name,
             parentInstanceId: profile.parentInstanceId,

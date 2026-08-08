@@ -1,4 +1,4 @@
-import { createServer, request } from "node:http";
+import { request } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import { rm } from "node:fs/promises";
 
@@ -13,8 +13,13 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { createServeP2pHttpRequest } from "../createServeP2pHttpRequest.js";
 import { createServeP2pTunnel } from "../createServeP2pTunnel.js";
 import type { P2pPeerTrustStoreContract } from "../../p2p/P2pPeerTrustStore.js";
+import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
+import { RigProfileStore } from "../../profiles/index.js";
+import type { Project, RigProfile } from "../../protocol/index.js";
+import { isP2pRemoteWorkPath } from "../runLocalProtocolServer.js";
 
 const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
+const PROFILE_ID = "aprofile000000000000000005";
 const cleanups: (() => Promise<void>)[] = [];
 const peerTrustStore: P2pPeerTrustStoreContract = {
     preparePairing: async () => {
@@ -33,12 +38,25 @@ afterEach(async () => {
 
 describe("P2P HTTP between two real daemon servers", () => {
     it("serves request/response and live events through the local peer prefix", async () => {
-        const firstDaemon = await startDaemon("first-token");
-        const secondDaemon = await startDaemon("second-token");
         const firstKey = SecretKey.generate();
         const secondKey = SecretKey.generate();
         const firstIdentity = createP2pInstanceIdentity();
         const secondIdentity = createP2pInstanceIdentity();
+        const remoteProfile: RigProfile = {
+            createdAt: 1,
+            email: "steve@example.test",
+            id: PROFILE_ID,
+            name: "Steve",
+            parentInstanceId: firstIdentity.instanceId,
+            updatedAt: 1,
+            version: 1,
+        };
+        const firstDaemon = await startDaemon("first-token");
+        const secondDaemon = await startDaemon("second-token", undefined, {
+            allowedProvisionPeerId: firstIdentity.instanceId,
+            localInstanceId: secondIdentity.instanceId,
+            remoteProfile,
+        });
         const [firstEndpoint, secondEndpoint] = await Promise.all([
             Endpoint.bind({ alpns: [ALPN], secretKey: firstKey.toBytes() }, RelayMode.disabled()),
             Endpoint.bind({ alpns: [ALPN], secretKey: secondKey.toBytes() }, RelayMode.disabled()),
@@ -79,7 +97,7 @@ describe("P2P HTTP between two real daemon servers", () => {
                 enableDirect: false,
                 enableIroh: true,
                 enableSsh: false,
-                exposeApi: true,
+                exposeApi: false,
                 iroh: {},
                 name: "Second",
                 role: "primary",
@@ -96,7 +114,9 @@ describe("P2P HTTP between two real daemon servers", () => {
                     relayMode: RelayMode.disabled(),
                     secretKey: secondKey,
                     serveRequest: createServeP2pHttpRequest({
-                        allowRequest: () => true,
+                        allowRequest: (peerId, incoming) =>
+                            peerId === firstIdentity.instanceId &&
+                            isP2pRemoteWorkPath(incoming.path, incoming.method),
                         socketPath: secondDaemon.socketPath,
                         token: "second-token",
                     }),
@@ -139,9 +159,14 @@ describe("P2P HTTP between two real daemon servers", () => {
             `/p2p/peers/${secondIdentity.instanceId}/api/health`,
             "first-token",
         );
-        expect(health.status).toBe(200);
-        expect(JSON.parse(health.body)).toMatchObject({ status: "ready" });
-        expect(health.headers["x-rig-p2p-peer"]).toBe(secondIdentity.instanceId);
+        expect(health.status).toBe(403);
+        const catalog = await get(
+            exposedFirst.socketPath,
+            `/p2p/peers/${secondIdentity.instanceId}/api/catalog`,
+            "first-token",
+        );
+        expect(catalog.status).toBe(200);
+        expect(catalog.headers["x-rig-p2p-peer"]).toBe(secondIdentity.instanceId);
 
         const hello = await readFirstSseFrame(
             exposedFirst.socketPath,
@@ -155,33 +180,27 @@ describe("P2P HTTP between two real daemon servers", () => {
             socketPath: exposedFirst.socketPath,
             token: "first-token",
         });
-        const createdSession = await peerClient.createSession({ cwd: process.cwd() });
-        const scope = { projectId: createdSession.session.projectId! };
-        const createdTerminal = await peerClient.createRemoteTerminal(scope, {
-            command: 'printf "p2p-terminal-ok\\n"',
+        const createdSession = await peerClient.createSession({
+            cwd: secondDaemon.remoteProject!.path,
+            identity: PROFILE_ID,
+            projectId: secondDaemon.remoteProject!.id,
         });
-        const terminal = await peerClient.attachRemoteTerminal(scope, createdTerminal.terminal.id);
-        await expect(terminal.exited).resolves.toBe(0);
-        terminal.close();
-
-        const target = createServer((_request, response) => response.end("p2p-browser-ok"));
-        await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
-        cleanups.push(
-            () =>
-                new Promise<void>((resolve) => {
-                    target.closeAllConnections();
-                    target.close(() => resolve());
-                }),
+        const sessionState = await get(
+            exposedFirst.socketPath,
+            `/p2p/peers/${secondIdentity.instanceId}/api/sessions/${createdSession.session.id}/state`,
+            "first-token",
         );
-        const address = target.address();
-        if (address === null || typeof address === "string") throw new Error("Missing test port.");
-        const browserResponse = await peerClient.proxyHttpRequest(scope, {
-            url: `http://127.0.0.1:${String(address.port)}/`,
-        });
-        const browserChunks: Buffer[] = [];
-        for await (const chunk of browserResponse.body) browserChunks.push(Buffer.from(chunk));
-        expect(Buffer.concat(browserChunks).toString()).toBe("p2p-browser-ok");
-
+        expect(sessionState.status).toBe(200);
+        expect(JSON.parse(sessionState.body)).toHaveProperty("session");
+        const gitWatch = await post(
+            exposedFirst.socketPath,
+            `/p2p/peers/${secondIdentity.instanceId}/api/git/watch`,
+            "first-token",
+            JSON.stringify({
+                entities: [{ projectId: secondDaemon.remoteProject!.id }],
+            }),
+        );
+        expect(gitWatch.status).toBe(503);
         const exposedSecond = await startDaemon("second-token", secondNetwork);
         const refusal = await get(
             exposedSecond.socketPath,
@@ -195,11 +214,67 @@ describe("P2P HTTP between two real daemon servers", () => {
 async function startDaemon(
     token: string,
     p2pNetwork?: P2pNetwork,
-): Promise<{ close: () => Promise<void>; server: Server; socketPath: string }> {
+    options?: {
+        allowedProvisionPeerId: string;
+        localInstanceId: string;
+        remoteProfile: RigProfile;
+    },
+): Promise<{
+    close: () => Promise<void>;
+    remoteProject?: Project;
+    server: Server;
+    socketPath: string;
+}> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
+    const store =
+        options === undefined
+            ? undefined
+            : new PersistentSessionStore({
+                  databasePath: ":memory:",
+                  homeDirectory: directory,
+                  localInstanceId: options.localInstanceId,
+                  projectClone: async () => undefined,
+              });
+    const profiles =
+        store === undefined
+            ? undefined
+            : new RigProfileStore({
+                  database: store,
+                  localInstanceId: options!.localInstanceId,
+                  publish: () => undefined,
+              });
+    profiles?.replicate(options!.remoteProfile, options!.allowedProvisionPeerId);
+    const remoteProject =
+        store === undefined
+            ? undefined
+            : await store.createRemoteProject(
+                  {
+                      identity: options!.remoteProfile.id,
+                      name: "Peer managed project",
+                      secret: { kind: "github" },
+                      source: { kind: "github", repository: "slopus/rig" },
+                  },
+                  {
+                      createdBy: {
+                          instanceId: options!.allowedProvisionPeerId,
+                          profileId: options!.remoteProfile.id,
+                      },
+                      githubToken: "test-github-token",
+                  },
+              );
     const server = createProtocolHttpServer({
+        ...(options === undefined
+            ? {}
+            : {
+                  canP2pPeerProvision: (peerId: string) =>
+                      peerId === options.allowedProvisionPeerId,
+                  canP2pPeerUseRemoteWork: (peerId: string) =>
+                      peerId === options.allowedProvisionPeerId,
+              }),
         ...(p2pNetwork === undefined ? {} : { p2pNetwork }),
+        ...(profiles === undefined ? {} : { profiles }),
+        ...(store === undefined ? {} : { store }),
         token,
     });
     await new Promise<void>((resolve, reject) => {
@@ -216,10 +291,16 @@ async function startDaemon(
         await new Promise<void>((resolve, reject) => {
             server.close((error) => (error === undefined ? resolve() : reject(error)));
         });
+        store?.close();
         await rm(directory, { force: true, recursive: true });
     };
     cleanups.push(close);
-    return { close, server, socketPath };
+    return {
+        close,
+        ...(remoteProject === undefined ? {} : { remoteProject }),
+        server,
+        socketPath,
+    };
 }
 
 function get(
@@ -248,6 +329,45 @@ function get(
         );
         outgoing.once("error", reject);
         outgoing.end();
+    });
+}
+
+function post(
+    socketPath: string,
+    path: string,
+    token: string,
+    body: string,
+): Promise<{
+    body: string;
+    headers: IncomingHttpHeaders;
+    status: number;
+}> {
+    return new Promise((resolve, reject) => {
+        const outgoing = request(
+            {
+                headers: {
+                    authorization: `Bearer ${token}`,
+                    "content-length": Buffer.byteLength(body),
+                    "content-type": "application/json",
+                },
+                method: "POST",
+                path,
+                socketPath,
+            },
+            (response) => {
+                const chunks: Buffer[] = [];
+                response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                response.once("end", () =>
+                    resolve({
+                        body: Buffer.concat(chunks).toString("utf8"),
+                        headers: response.headers,
+                        status: response.statusCode ?? 0,
+                    }),
+                );
+            },
+        );
+        outgoing.once("error", reject);
+        outgoing.end(body);
     });
 }
 

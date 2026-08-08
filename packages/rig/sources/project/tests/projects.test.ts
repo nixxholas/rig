@@ -13,7 +13,7 @@ import {
     writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
@@ -42,9 +42,15 @@ import type { InMemorySession, InMemorySessionOptions } from "../../session/InMe
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { NativeProcessManager } from "../../processes/index.js";
 import type { GitCommandRunner } from "../../git/types.js";
-import { ProjectRegistrationError, ProjectRepository } from "../ProjectRepository.js";
+import { RigProfileStore } from "../../profiles/index.js";
+import {
+    ProjectRegistrationError,
+    ProjectRepository,
+    type ProjectRepositoryOptions,
+} from "../ProjectRepository.js";
 
 const execFile = promisify(execFileCallback);
+const TEST_LOCAL_INSTANCE_ID = "alocalprojecttest000000001";
 const cleanups: (() => Promise<void>)[] = [];
 
 afterEach(async () => {
@@ -52,6 +58,284 @@ afterEach(async () => {
 });
 
 describe("projects", () => {
+    it("creates one managed project immediately while its repository clones in the background", async () => {
+        const clones: {
+            gitAuthentication?: {
+                environment: Readonly<Record<string, string>>;
+                loopbackPort: number;
+            };
+            destination: string;
+            gitIdentity: { email: string; name: string };
+        }[] = [];
+        const fixture = await createFixture({
+            durableGlobalEventQueue: true,
+            projectClone: async ({ destination, gitAuthentication, gitIdentity }) => {
+                clones.push({
+                    destination,
+                    ...(gitAuthentication === undefined ? {} : { gitAuthentication }),
+                    gitIdentity,
+                });
+                await createRepository(dirname(destination), basename(destination));
+            },
+        });
+        const profile = createLocalProfile(fixture.store);
+        fixture.store.registerSpecialSecret({ kind: "github", token: "temporary-token" });
+        const projectId = createId();
+
+        await expect(
+            fixture.store.createRemoteProject({
+                identity: profile.id,
+                name: ".rig",
+                secret: { kind: "github" },
+                source: { kind: "github", repository: "slopus/rig" },
+            }),
+        ).rejects.toMatchObject({ code: "invalid_request" });
+        const created = await fixture.store.createRemoteProject({
+            identity: profile.id,
+            name: "Managed Repository",
+            projectId,
+            secret: { kind: "github" },
+            source: { kind: "github", repository: "slopus/rig" },
+        });
+
+        expect(created).toMatchObject({
+            id: projectId,
+            initializationStatus: "initializing",
+            path: join(await realpath(fixture.home), "Projects", "Managed Repository"),
+            presence: "missing",
+            remoteSource: { kind: "github", repository: "slopus/rig" },
+            requiredSecretKind: "github",
+        });
+        const ready = await waitForProject(
+            fixture.store,
+            projectId,
+            (project) => project.initializationStatus === "ready",
+        );
+        expect(ready.presence).toBe("present");
+        expect(clones).toHaveLength(1);
+        expect(clones[0]).toMatchObject({
+            destination: join(
+                await realpath(fixture.home),
+                "Projects",
+                ".rig",
+                "clones",
+                projectId,
+            ),
+            gitAuthentication: {
+                environment: {
+                    GIT_CONFIG_VALUE_1: "https://github.com/slopus/rig.git",
+                },
+                loopbackPort: expect.any(Number),
+            },
+            gitIdentity: {
+                email: "steve@example.test",
+                name: "Steve Korshakov",
+            },
+        });
+        expect(JSON.stringify(clones)).not.toContain("temporary-token");
+
+        await expect(
+            fixture.store.createWorkspace(projectId, {
+                baseRef: "HEAD",
+                name: "Unattributed workspace",
+            }),
+        ).rejects.toThrow("does not own the managed project");
+
+        const repeated = await fixture.store.createRemoteProject({
+            identity: profile.id,
+            name: "Managed Repository",
+            projectId,
+            secret: { kind: "github" },
+            source: { kind: "github", repository: "slopus/rig" },
+        });
+        expect(repeated.id).toBe(projectId);
+        expect(clones).toHaveLength(1);
+        const workspace = await fixture.store.createWorkspace(
+            projectId,
+            {
+                baseRef: "HEAD",
+                identity: profile.id,
+                name: "Remote owner workspace",
+                secret: { kind: "github" },
+            },
+            {
+                createdBy: {
+                    instanceId: TEST_LOCAL_INSTANCE_ID,
+                    profileId: profile.id,
+                },
+                githubToken: "rotated-workspace-token",
+            },
+        );
+        expect(workspace?.createdBy).toEqual({
+            instanceId: TEST_LOCAL_INSTANCE_ID,
+            profileId: profile.id,
+        });
+        await expect
+            .poll(() => fixture.store.getWorkspace(projectId, workspace!.id)?.status)
+            .toBe("ready");
+        expect(JSON.stringify(fixture.store.listProjects())).not.toContain("temporary-token");
+        expect(JSON.stringify(fixture.store.listWorkspaces(projectId))).not.toContain(
+            "rotated-workspace-token",
+        );
+        expect(JSON.stringify(fixture.store.globalEventQueue.list())).not.toContain(
+            "temporary-token",
+        );
+    });
+
+    it("does not use this Rig's native GitHub secret for another Rig's managed project", async () => {
+        let clones = 0;
+        const fixture = await createFixture({
+            projectClone: async () => {
+                clones += 1;
+            },
+        });
+        const profiles = new RigProfileStore({
+            database: fixture.store,
+            localInstanceId: TEST_LOCAL_INSTANCE_ID,
+            publish: () => undefined,
+        });
+        profiles.replicate(
+            {
+                createdAt: 1,
+                email: "steve@example.test",
+                id: "asteveprofile",
+                name: "Steve Korshakov",
+                parentInstanceId: "aremoteinstance000000001",
+                updatedAt: 1,
+                version: 1,
+            },
+            "aremoteinstance000000001",
+        );
+        fixture.store.registerSpecialSecret({ kind: "github", token: "local-token" });
+        const request = {
+            identity: "asteveprofile",
+            name: "Peer Repository",
+            secret: { kind: "github" as const },
+            source: { kind: "github" as const, repository: "slopus/private" },
+        };
+        const creator = {
+            instanceId: "aremoteinstance000000001",
+            profileId: "asteveprofile",
+        };
+        const project = await fixture.store.createRemoteProject(request, { createdBy: creator });
+
+        const failed = await waitForProject(
+            fixture.store,
+            project.id,
+            (candidate) => candidate.initializationStatus === "failed",
+        );
+        expect(failed.createdBy).toEqual({
+            instanceId: "aremoteinstance000000001",
+            profileId: "asteveprofile",
+        });
+        expect(failed.initializationError).toContain("GitHub credentials are unavailable");
+        expect(clones).toBe(0);
+        const repeated = await fixture.store.createRemoteProject(
+            { ...request, projectId: project.id },
+            { createdBy: creator },
+        );
+        expect(repeated).toMatchObject({
+            initializationAttempt: failed.initializationAttempt,
+            initializationError: failed.initializationError,
+            initializationStatus: "failed",
+        });
+        const session = fixture.store.create(
+            {
+                cwd: project.path,
+                identity: creator.profileId,
+                projectId: project.id,
+            },
+            { ownerInstanceId: creator.instanceId, profileId: creator.profileId },
+        );
+        await fixture.store.refreshSessionGitCredential(session.id, creator, "peer-refresh-token");
+        await expect.poll(() => clones).toBe(1);
+    });
+
+    it("does not adopt a different repository that appears during clone recovery", async () => {
+        let cloneAttempts = 0;
+        const fixture = await createFixture({
+            projectClone: async () => {
+                cloneAttempts += 1;
+                const wrong = await createRepository(
+                    join(fixture.home, "Projects"),
+                    "Interrupted clone",
+                );
+                await git(wrong, [
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/someone/else.git",
+                ]);
+                throw new Error("Clone stopped after the final folder appeared.");
+            },
+        });
+        const profile = createLocalProfile(fixture.store);
+        fixture.store.registerSpecialSecret({ kind: "github", token: "temporary-token" });
+        const request = {
+            identity: profile.id,
+            name: "Interrupted clone",
+            projectId: createId(),
+            secret: { kind: "github" as const },
+            source: { kind: "github" as const, repository: "slopus/rig" },
+        };
+        const project = await fixture.store.createRemoteProject(request);
+        await waitForProject(
+            fixture.store,
+            project.id,
+            (candidate) => candidate.initializationStatus === "failed",
+        );
+
+        await fixture.store.createRemoteProject(request);
+        const retried = await waitForProject(
+            fixture.store,
+            project.id,
+            (candidate) =>
+                candidate.initializationStatus === "failed" &&
+                candidate.initializationError?.includes("different origin repository") === true,
+        );
+
+        expect(retried.initializationError).toContain("different origin repository");
+        expect(cloneAttempts).toBe(1);
+    });
+
+    it("reconciles concurrent managed project reservations by identity and path", async () => {
+        const fixture = await createFixture({
+            projectClone: async () => await new Promise<void>(() => undefined),
+        });
+        const profile = createLocalProfile(fixture.store);
+        const projectId = createId();
+        const request = {
+            identity: profile.id,
+            name: "Concurrent retry",
+            projectId,
+            source: { kind: "github" as const, repository: "slopus/rig" },
+        };
+
+        const repeated = await Promise.all([
+            fixture.store.createRemoteProject(request),
+            fixture.store.createRemoteProject(request),
+        ]);
+        expect(repeated.map((project) => project.id)).toEqual([projectId, projectId]);
+
+        const pathRace = await Promise.allSettled([
+            fixture.store.createRemoteProject({
+                identity: profile.id,
+                name: "Concurrent path",
+                projectId: createId(),
+                source: request.source,
+            }),
+            fixture.store.createRemoteProject({
+                identity: profile.id,
+                name: "Concurrent path",
+                projectId: createId(),
+                source: request.source,
+            }),
+        ]);
+        expect(pathRace.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+        const rejected = pathRace.find((result) => result.status === "rejected");
+        expect(rejected?.reason).toMatchObject({ code: "project_path_conflict" });
+    });
+
     it("validates every project registration path failure before importing it", async () => {
         const fixture = await createFixture({
             projectGit: async (cwd, args) => {
@@ -115,6 +399,21 @@ describe("projects", () => {
         expect(worktree.id).not.toBe(first.id);
         expect(fixture.store.listProjects()).toHaveLength(2);
         expect(fixture.store.listWorkspaces()).toEqual([]);
+        await expect(
+            fixture.store.createWorkspace(
+                first.id,
+                {
+                    identity: "aremoteprofile000000000001",
+                    name: "Remote intrusion",
+                },
+                {
+                    createdBy: {
+                        instanceId: "aremoteinstance000000001",
+                        profileId: "aremoteprofile000000000001",
+                    },
+                },
+            ),
+        ).rejects.toThrow("does not own the managed project");
         expect(fixture.store.list()).toEqual([]);
         expect(
             fixture.store.globalEventQueue
@@ -2888,6 +3187,7 @@ async function createFixture(
         onSessionAccess?: (session: InMemorySession) => void;
         onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
         projectGit?: GitCommandRunner;
+        projectClone?: ProjectRepositoryOptions["cloneRemote"];
         createRuntime?: InMemorySessionOptions["createRuntime"];
         workspacesDirectory?: string;
     } = {},
@@ -2910,6 +3210,7 @@ async function createFixture(
                 ? {}
                 : { createRuntime: options.createRuntime }),
             databasePath,
+            localInstanceId: TEST_LOCAL_INSTANCE_ID,
             ...(options.durableGlobalEventQueue === undefined
                 ? {}
                 : { durableGlobalEventQueue: options.durableGlobalEventQueue }),
@@ -2921,6 +3222,7 @@ async function createFixture(
                 ? {}
                 : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
             ...(options.projectGit === undefined ? {} : { projectGit: options.projectGit }),
+            ...(options.projectClone === undefined ? {} : { projectClone: options.projectClone }),
             stateDirectory: state,
             ...(options.workspacesDirectory === undefined
                 ? {}
@@ -2940,6 +3242,17 @@ async function createFixture(
         return next;
     };
     return { databasePath, home, restart, root, state, store: stores[0]! };
+}
+
+function createLocalProfile(store: PersistentSessionStore) {
+    return new RigProfileStore({
+        database: store,
+        localInstanceId: TEST_LOCAL_INSTANCE_ID,
+        publish: () => undefined,
+    }).create({
+        email: "steve@example.test",
+        name: "Steve Korshakov",
+    });
 }
 
 async function createTransferFixture(

@@ -936,6 +936,7 @@ export interface ProtocolSession {
     agentId?: string;
     agent?: SessionAgentMetadata;
     ownerInstanceId: string;
+    profileId?: string;
     archived: boolean;
     appendSystemPrompt?: string;
     /** The only project, workspace, folder, or Unsorted collection containing this chat. */
@@ -1330,6 +1331,15 @@ export type AgentLoopEvent =
     | { type: string };
 
 /** A folder or repository Rig has sessions in. */
+export type ProjectRemoteSource =
+    | { kind: "github"; repository: string }
+    | { kind: "git"; url: string };
+
+export interface ProjectCreator {
+    instanceId: string;
+    profileId: string;
+}
+
 export interface Project {
     archivedAt?: number;
     avatar?: {
@@ -1342,6 +1352,7 @@ export interface Project {
     };
     avatarBuiltin?: "home";
     createdAt: number;
+    createdBy?: ProjectCreator;
     defaultBranch?: string;
     git?: GitRepositoryFacts;
     id: string;
@@ -1354,6 +1365,8 @@ export interface Project {
     orderKey: string;
     path: string;
     presence: "present" | "missing";
+    remoteSource?: ProjectRemoteSource;
+    requiredSecretKind?: "github";
     settings: {
         defaultWorkspaceCompute?:
             | { generation: number; type: "local" }
@@ -1374,6 +1387,7 @@ export interface GitRepositoryFacts {
 export interface SessionSummary {
     id: string;
     ownerInstanceId: string;
+    profileId?: string;
     archived: boolean;
     /** The only project, workspace, folder, or Unsorted collection containing this chat. */
     scope: SessionScope;
@@ -1493,6 +1507,26 @@ const projectGitFactsSchema = Type.Object(
     exact,
 );
 
+const projectRemoteSourceSchema = Type.Union([
+    Type.Object(
+        {
+            kind: Type.Literal("github"),
+            repository: Type.String({
+                maxLength: 201,
+                pattern: "^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$",
+            }),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            kind: Type.Literal("git"),
+            url: Type.String({ maxLength: 16_384, minLength: 1 }),
+        },
+        exact,
+    ),
+]);
+
 const projectWorkspaceComputeSchema = Type.Union([
     Type.Object(
         {
@@ -1519,6 +1553,15 @@ export const projectWorkspaceSchema = Type.Object(
         baseRef: Type.Optional(Type.String()),
         branch: Type.String(),
         createdAt: Type.Number(),
+        createdBy: Type.Optional(
+            Type.Object(
+                {
+                    instanceId: Type.String({ minLength: 1 }),
+                    profileId: Type.String({ minLength: 1 }),
+                },
+                exact,
+            ),
+        ),
         error: Type.Optional(Type.String({ maxLength: PROJECT_WORKSPACE_ERROR_MAX_LENGTH })),
         git: Type.Optional(projectGitFactsSchema),
         gitCommonDir: Type.String(),
@@ -1568,6 +1611,15 @@ export const projectSchema = Type.Object(
         ),
         avatarBuiltin: Type.Optional(Type.Literal("home")),
         createdAt: Type.Number(),
+        createdBy: Type.Optional(
+            Type.Object(
+                {
+                    instanceId: Type.String({ minLength: 1 }),
+                    profileId: Type.String({ minLength: 1 }),
+                },
+                exact,
+            ),
+        ),
         defaultBranch: Type.Optional(Type.String()),
         git: Type.Optional(projectGitFactsSchema),
         id: Type.String({ minLength: 1 }),
@@ -1588,6 +1640,8 @@ export const projectSchema = Type.Object(
         orderKey: Type.String(),
         path: Type.String(),
         presence: Type.Union([Type.Literal("present"), Type.Literal("missing")]),
+        remoteSource: Type.Optional(projectRemoteSourceSchema),
+        requiredSecretKind: Type.Optional(Type.Literal("github")),
         settings: Type.Object(
             {
                 defaultWorkspaceCompute: Type.Optional(projectWorkspaceComputeSchema),
@@ -1617,6 +1671,9 @@ export const projectRegistrationErrorCodeSchema = Type.Union([
     Type.Literal("not_git_repository"),
     Type.Literal("not_git_top_level"),
     Type.Literal("project_id_conflict"),
+    Type.Literal("project_path_conflict"),
+    Type.Literal("secret_unavailable"),
+    Type.Literal("unsupported_git_source"),
     Type.Literal("managed_workspace_unavailable"),
 ]);
 export type ProjectRegistrationErrorCode = Static<typeof projectRegistrationErrorCodeSchema>;
@@ -2315,6 +2372,11 @@ export const rigProfileIdSchema = Type.String({
     minLength: 2,
     pattern: "^[a-z][a-z0-9]+$",
 });
+export const rigProfileEmailSchema = Type.String({
+    maxLength: 254,
+    minLength: 3,
+    pattern: "^[^\\s@<>]+@[^\\s@<>]+\\.[^\\s@<>]+$",
+});
 export const rigProfilePhotoInputSchema = Type.Object(
     {
         data: Type.String({
@@ -2346,6 +2408,7 @@ export type RigProfilePhoto = Static<typeof rigProfilePhotoSchema>;
 export const rigProfileSchema = Type.Object(
     {
         createdAt: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        email: rigProfileEmailSchema,
         id: rigProfileIdSchema,
         name: Type.String({
             maxLength: 128,
@@ -2363,6 +2426,7 @@ export const rigProfileSchema = Type.Object(
 export type RigProfile = Static<typeof rigProfileSchema>;
 export const createRigProfileRequestSchema = Type.Object(
     {
+        email: rigProfileEmailSchema,
         name: rigProfileSchema.properties.name,
         photo: Type.Optional(rigProfilePhotoInputSchema),
     },
@@ -2371,6 +2435,7 @@ export const createRigProfileRequestSchema = Type.Object(
 export type CreateRigProfileRequest = Static<typeof createRigProfileRequestSchema>;
 export const updateRigProfileRequestSchema = Type.Object(
     {
+        email: Type.Optional(rigProfileEmailSchema),
         name: Type.Optional(rigProfileSchema.properties.name),
         photo: Type.Optional(Type.Union([rigProfilePhotoInputSchema, Type.Null()])),
     },

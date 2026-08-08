@@ -103,6 +103,8 @@ export interface CreateCodingAssistantAgentOptions {
     providerUsage?: ProviderUsageContext;
     resolveInferenceMaxRetries?: () => number;
     serviceTier?: ServiceTier;
+    /** Variables injected into every command this session executes. */
+    shellEnvironment?: Readonly<Record<string, string>>;
     startDate?: string;
     secrets?: SessionSecretContext;
     scheduling?: SchedulingContext;
@@ -125,6 +127,10 @@ export function createCodingAssistantAgent(
 ): CodingAssistantRuntime {
     const processManager = options.processManager ?? new NativeProcessManager();
     const env = options.env ?? process.env;
+    const shellEnvironment =
+        options.shellEnvironment === undefined
+            ? process.env
+            : { ...process.env, ...options.shellEnvironment };
     const agentId = options.agentId ?? createId();
     const workflowsEnabled = options.workflows !== undefined && options.workflowsEnabled !== false;
     const sharedContextOptions = {
@@ -145,11 +151,15 @@ export function createCodingAssistantAgent(
               ? createNodeAgentContext({
                     ...sharedContextOptions,
                     cwd: options.cwd,
+                    environment: shellEnvironment,
                     processManager,
                 })
               : createDockerAgentContext({
                     ...sharedContextOptions,
                     docker: options.docker,
+                    ...(options.shellEnvironment === undefined
+                        ? {}
+                        : { environment: options.shellEnvironment }),
                     sessionId: options.sessionId ?? options.agentId ?? "standalone",
                 });
     const runtimeCwd = context.fs.cwd;
@@ -283,6 +293,7 @@ export function createCodingAssistantAgent(
             : options.docker === undefined
               ? createNodeAgentContext({
                     cwd: options.cwd,
+                    environment: shellEnvironment,
                     permissionMode: "read_only",
                     processManager,
                     ...(options.protectedPaths === undefined
@@ -291,6 +302,9 @@ export function createCodingAssistantAgent(
                 })
               : createDockerAgentContext({
                     docker: options.docker,
+                    ...(options.shellEnvironment === undefined
+                        ? {}
+                        : { environment: options.shellEnvironment }),
                     permissionMode: "read_only",
                     ...(options.protectedPaths === undefined
                         ? {}

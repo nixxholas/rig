@@ -388,6 +388,8 @@ export interface ProtocolSession {
     agentId: string;
     /** Stable Rig identity whose credentials and usage this session consumes. */
     ownerInstanceId: string;
+    /** Human profile whose Git identity this session uses. */
+    profileId?: string;
     /** Git state of the session's directory, when it is inside a repository. */
     git?: GitChangeSnapshot;
     archived: boolean;
@@ -651,6 +653,8 @@ export interface SessionSummary {
     id: string;
     /** Stable Rig identity whose credentials and usage this session consumes. */
     ownerInstanceId: string;
+    /** Human profile whose Git identity this session uses. */
+    profileId?: string;
     archived: boolean;
     /** The only project, workspace, folder, or Unsorted collection containing this chat. */
     scope: SessionScope;
@@ -719,6 +723,10 @@ export interface CreateSessionRequest {
     effort?: string;
     serviceTier?: ServiceTier;
     instructions?: string;
+    /** Human profile responsible for this session. Required for remote creation. */
+    identity?: string;
+    /** Refreshes the peer daemon's memory-only GitHub authentication for this managed project. */
+    gitSecret?: { kind: "github" };
     modelId?: string;
     providerId?: string;
     permissionMode?: PermissionMode;
@@ -952,6 +960,8 @@ export interface SubmitMessageRequest {
     interactive?: boolean;
     /** Stable human profile identity. Local unattributed messages use null. */
     identity?: string | null;
+    /** Refreshes the peer daemon's memory-only GitHub authentication for this managed project. */
+    gitSecret?: { kind: "github" };
     /** Replaces the external function set for this and subsequent runs when present. */
     externalTools?: readonly ExternalToolDefinition[];
     /** Replaces the integration-owned durable skill set when present. */

@@ -18,6 +18,11 @@ export const rigProfileNameSchema = Type.String({
     pattern:
         "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b\\u200e\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u206f]+$",
 });
+export const rigProfileEmailSchema = Type.String({
+    maxLength: 254,
+    minLength: 3,
+    pattern: "^[^\\s@<>]+@[^\\s@<>]+\\.[^\\s@<>]+$",
+});
 
 export const rigProfilePhotoInputSchema = Type.Object(
     {
@@ -52,6 +57,7 @@ export type RigProfilePhoto = Static<typeof rigProfilePhotoSchema>;
 export const rigProfileSchema = Type.Object(
     {
         createdAt: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        email: rigProfileEmailSchema,
         id: rigProfileIdSchema,
         name: rigProfileNameSchema,
         parentInstanceId: p2pInstanceIdSchema,
@@ -65,6 +71,7 @@ export type RigProfile = Static<typeof rigProfileSchema>;
 
 export const createRigProfileRequestSchema = Type.Object(
     {
+        email: rigProfileEmailSchema,
         name: rigProfileNameSchema,
         photo: Type.Optional(rigProfilePhotoInputSchema),
     },
@@ -74,6 +81,7 @@ export type CreateRigProfileRequest = Static<typeof createRigProfileRequestSchem
 
 export const updateRigProfileRequestSchema = Type.Object(
     {
+        email: Type.Optional(rigProfileEmailSchema),
         name: Type.Optional(rigProfileNameSchema),
         photo: Type.Optional(Type.Union([rigProfilePhotoInputSchema, Type.Null()])),
     },

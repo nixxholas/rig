@@ -41,6 +41,12 @@ export const codexExecCommandTool = defineTool({
                             "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
                     }),
                 ),
+                secrets: Type.Optional(
+                    Type.Array(Type.String(), {
+                        description:
+                            "IDs of attached secret bundles to use for this command. Selecting any secret requires reviewed Full-access execution.",
+                    }),
+                ),
                 shell: Type.Optional(
                     Type.String({
                         description:
@@ -90,7 +96,7 @@ export const codexExecCommandTool = defineTool({
         secrets: Type.Optional(
             Type.Array(Type.String(), {
                 description:
-                    "IDs of attached secret bundles to inject for this command. Use an empty array for none.",
+                    "IDs of attached secret bundles to use for this command. Model-available environment secrets are injected; managed credentials may activate a proxy. Use an empty array for none.",
             }),
         ),
         shell: Type.Optional(
@@ -119,18 +125,21 @@ export const codexExecCommandTool = defineTool({
     }),
     returnType: unifiedExecOutputSchema,
     autoPermissionInstructions:
-        'For exec_command, request full-access execution with sandbox_permissions: "require_escalated" and include a concise justification. Keep sandbox_permissions at "use_default" or omit it for ordinary commands.',
-    describeAutoPermissionAction: ({ cmd, shell, workdir }, context) =>
-        summarizeEscalatedShellAction({
-            command: cmd,
-            cwd: workdir ?? context.fs.cwd,
-            ...(shell === undefined ? {} : { shell }),
-        }),
+        'For exec_command, request full-access execution with sandbox_permissions: "require_escalated" and include a concise justification. Selecting any attached secret also requires reviewed Full-access execution automatically. Keep sandbox_permissions at "use_default" or omit it for ordinary commands without secrets.',
+    describeAutoPermissionAction: ({ cmd, secrets, shell, workdir }, context) =>
+        describeShellActionWithSecrets(
+            summarizeEscalatedShellAction({
+                command: cmd,
+                cwd: workdir ?? context.fs.cwd,
+                ...(shell === undefined ? {} : { shell }),
+            }),
+            secrets,
+        ),
     availableToPermissionReviewer: true,
-    shouldReviewInAutoMode: ({ sandbox_permissions }) =>
-        sandbox_permissions === "require_escalated",
-    shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
-        sandbox_permissions === "require_escalated",
+    shouldReviewInAutoMode: ({ sandbox_permissions, secrets }) =>
+        sandbox_permissions === "require_escalated" || (secrets?.length ?? 0) > 0,
+    shouldRunInFullAccessInAutoMode: ({ sandbox_permissions, secrets }) =>
+        sandbox_permissions === "require_escalated" || (secrets?.length ?? 0) > 0,
     steerable: true,
     execute: async (
         { cmd, max_output_tokens, secrets, shell, tty, workdir, yield_time_ms },
@@ -210,3 +219,12 @@ export const codexExecCommandTool = defineTool({
     },
     locks: [],
 });
+
+function describeShellActionWithSecrets(
+    action: string,
+    secrets: readonly string[] | undefined,
+): string {
+    return secrets === undefined || secrets.length === 0
+        ? action
+        : `${action}. Secrets: ${secrets.map((secret) => JSON.stringify(secret)).join(", ")}`;
+}

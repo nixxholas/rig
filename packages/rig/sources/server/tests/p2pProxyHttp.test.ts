@@ -70,6 +70,41 @@ describe("P2P-prefixed daemon HTTP", () => {
         }
     });
 
+    it("forwards the one-request body prepared for the authenticated peer", async () => {
+        const fetch = vi.fn(async (_peerId: string, _forwarded: P2pHttpRequest) => ({
+            response: {
+                body: (async function* () {
+                    yield Buffer.from("{}");
+                })(),
+                headers: { "content-type": "application/json" },
+                status: 202,
+            },
+            transport: "iroh" as const,
+        }));
+        const prepare = vi.fn(async () =>
+            Buffer.from(JSON.stringify({ temporaryGitSecret: { kind: "github", token: "token" } })),
+        );
+        const started = await startServer({ fetch } as unknown as P2pNetwork, prepare);
+        try {
+            await sendRequest(
+                started.socketPath,
+                `/p2p/peers/${peerId}/api/projects/clone`,
+                {
+                    authorization: "Bearer test-token",
+                    "content-type": "application/json",
+                },
+                JSON.stringify({ name: "Remote" }),
+            );
+
+            expect(prepare).toHaveBeenCalledOnce();
+            expect(JSON.parse(Buffer.from(fetch.mock.calls[0]![1].body).toString("utf8"))).toEqual({
+                temporaryGitSecret: { kind: "github", token: "token" },
+            });
+        } finally {
+            await started.close();
+        }
+    });
+
     it("keeps the prefix authenticated and refuses recursive P2P forwarding", async () => {
         const fetch = vi.fn();
         const started = await startServer({ fetch } as unknown as P2pNetwork);

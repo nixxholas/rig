@@ -5,6 +5,7 @@ export function createDockerCommandEnvironment(
     context: SessionSecretContext | undefined,
     secretIds: readonly string[] | undefined,
     ambientEnvironmentVariables: readonly string[] = [],
+    activatedEnvironment: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
     const environment = Object.create(null) as NodeJS.ProcessEnv;
     const attachedNames = context?.environmentVariables() ?? [];
@@ -14,6 +15,9 @@ export function createDockerCommandEnvironment(
         if (hiddenNames.has(name.toUpperCase())) environment[name] = "";
     }
     for (const [name, value] of Object.entries(resolveSecretEnvironment(context, secretIds))) {
+        environment[name] = value;
+    }
+    for (const [name, value] of Object.entries(activatedEnvironment)) {
         environment[name] = value;
     }
     return environment;

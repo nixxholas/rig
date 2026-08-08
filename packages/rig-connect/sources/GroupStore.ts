@@ -244,6 +244,32 @@ export class GroupStore {
     }
 
     /** Adds the single local row that the response and stream echo later replace. */
+    applyOptimisticProjectCreate(project: Project): {
+        deltas: readonly GroupDelta[];
+        undo: () => void;
+    } {
+        if (this.#projects.has(project.id)) return { deltas: [], undo: () => undefined };
+        const previousTree = this.projects();
+        this.#projects.set(project.id, project);
+        this.#markDirty(project.id);
+        const projects = this.projects();
+        return {
+            deltas: [
+                ...(projects === previousTree
+                    ? []
+                    : ([{ projects, type: "projects_changed" }] as const)),
+                { projectId: project.id, type: "project_added" },
+            ],
+            undo: () => {
+                if (this.#projects.get(project.id) !== project) return;
+                this.#projects.delete(project.id);
+                this.#groups.delete(project.id);
+                this.#markDirty(project.id);
+            },
+        };
+    }
+
+    /** Adds the single local row that the response and stream echo later replace. */
     applyOptimisticWorkspaceCreate(workspace: ProjectWorkspace): {
         deltas: readonly GroupDelta[];
         undo: () => void;
@@ -849,12 +875,23 @@ export class GroupStore {
                           },
                       }),
                 id: project.id,
+                ...(project.createdBy === undefined ? {} : { createdBy: project.createdBy }),
                 kind: project.kind,
                 name: project.name,
+                ...(project.initializationError === undefined
+                    ? {}
+                    : { initializationError: project.initializationError }),
+                initializationStatus: project.initializationStatus,
                 ...(branch === undefined ? {} : { branch }),
                 orderKey: project.orderKey,
                 path: project.path,
                 presence: project.presence,
+                ...(project.remoteSource === undefined
+                    ? {}
+                    : { remoteSource: project.remoteSource }),
+                ...(project.requiredSecretKind === undefined
+                    ? {}
+                    : { requiredSecretKind: project.requiredSecretKind }),
                 sessions: (sessionsByProject.get(project.id) ?? []).sort(byOrderKey),
                 terminals: this.#projectTerminals.get(project.id) ?? EMPTY_TERMINALS,
                 unread: unreadOf(sessionsByProject.get(project.id) ?? []),
@@ -895,6 +932,7 @@ export class GroupStore {
             return cached;
         }
         const group: WorkspaceGroup = {
+            ...(workspace.createdBy === undefined ? {} : { createdBy: workspace.createdBy }),
             id: workspace.id,
             name: workspace.name,
             ...(branch === undefined ? {} : { branch }),
@@ -927,6 +965,7 @@ export class GroupStore {
             id: session.id,
             modelId: session.modelId,
             ownerInstanceId: session.ownerInstanceId,
+            ...(session.profileId === undefined ? {} : { profileId: session.profileId }),
             orderKey: session.orderKey ?? "",
             permissionMode: session.permissionMode,
             scope: session.scope as Extract<

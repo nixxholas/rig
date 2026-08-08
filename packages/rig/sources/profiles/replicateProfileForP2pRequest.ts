@@ -177,6 +177,9 @@ function messageProfileId(path: string, body: Uint8Array): string | undefined {
     const pathname = new URL(path, "http://rig.local").pathname;
     if (
         pathname !== "/messages" &&
+        pathname !== "/projects/clone" &&
+        pathname !== "/sessions" &&
+        !/^\/projects\/[^/]+\/workspaces$/u.test(pathname) &&
         !/^\/sessions\/[^/]+\/(?:context|messages|steer)$/u.test(pathname)
     ) {
         return undefined;

@@ -1,5 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+export const PROJECT_GIT_SECRET_ID = "project-git";
+
 const secretIdSchema = Type.String({
     maxLength: 128,
     minLength: 1,

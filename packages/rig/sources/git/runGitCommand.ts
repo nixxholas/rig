@@ -1,6 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 
+import { redactGitAuthenticationText } from "./GitCredentialBroker.js";
+
 const execFile = promisify(execFileCallback);
 
 const GIT_TIMEOUT_MS = 5_000;
@@ -21,13 +23,28 @@ const GIT_OUTPUT_LIMIT = 1024 * 1024;
  * one thing that would genuinely wait forever, a repository asking for credentials, fails at once.
  */
 export async function runGitCommand(cwd: string, args: readonly string[]): Promise<string> {
-    const result = await execFile("git", ["-C", cwd, ...args], {
-        encoding: "utf8",
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-        maxBuffer: GIT_OUTPUT_LIMIT,
-        timeout: usesNetwork(args) ? 0 : GIT_TIMEOUT_MS,
-    });
-    return result.stdout.trim();
+    return await runGitCommandWithEnvironment(cwd, args);
+}
+
+export async function runGitCommandWithEnvironment(
+    cwd: string,
+    args: readonly string[],
+    environment: Readonly<Record<string, string>> = {},
+): Promise<string> {
+    try {
+        const result = await execFile("git", ["-C", cwd, ...args], {
+            encoding: "utf8",
+            env: { ...process.env, ...environment, GIT_TERMINAL_PROMPT: "0" },
+            maxBuffer: GIT_OUTPUT_LIMIT,
+            timeout: usesNetwork(args) ? 0 : GIT_TIMEOUT_MS,
+        });
+        return result.stdout.trim();
+    } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        const message = redactGitAuthenticationText(error.message, environment);
+        if (message === error.message) throw error;
+        throw new Error(message, { cause: error });
+    }
 }
 
 function usesNetwork(args: readonly string[]): boolean {

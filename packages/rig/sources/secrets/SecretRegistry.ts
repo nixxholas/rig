@@ -121,6 +121,10 @@ export class SecretRegistry {
         }
         return environment;
     }
+
+    resolveSpecial(kind: SpecialSecretKind): NodeJS.ProcessEnv {
+        return this.resolve([specialSecretId(kind)]);
+    }
 }
 
 interface NormalizedSpecialSecretRegistration extends EnvironmentSecretRegistration {

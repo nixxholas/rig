@@ -22,11 +22,15 @@ import {
     createEventIdFactory,
     PROJECT_ERROR_MAX_LENGTH,
     type CreateProjectWorkspaceRequest,
+    type CreateRemoteProjectRequest,
     type GitRepositoryFacts,
     type Project,
     type ProjectAvatarSource,
     type ProjectEvent,
+    type ProjectRemoteSource,
     type ProjectRegistrationErrorCode,
+    type ProjectCreator,
+    type RigProfile,
     type ProjectSettings,
     type ProjectSettingsUpdate,
     type ProjectWorkspace,
@@ -46,6 +50,7 @@ import { projectApplyProbe } from "../persistence/project/projectApplyProbe.js";
 import { projectArchive } from "../persistence/project/projectArchive.js";
 import { projectMarkInitializationFailed } from "../persistence/project/projectMarkInitializationFailed.js";
 import { projectMarkInitializationReady } from "../persistence/project/projectMarkInitializationReady.js";
+import { projectMarkCloneReady } from "../persistence/project/projectMarkCloneReady.js";
 import { projectRefresh } from "../persistence/project/projectRefresh.js";
 import { projectRename } from "../persistence/project/projectRename.js";
 import { projectReorder } from "../persistence/project/projectReorder.js";
@@ -98,8 +103,14 @@ import { remoteProjectName } from "../git/remoteProjectName.js";
 import { removeGitWorktree } from "../git/removeGitWorktree.js";
 import { renameGitBranch } from "../git/renameGitBranch.js";
 import { resolveWorkspaceBase } from "../git/resolveWorkspaceBase.js";
-import { runGitCommand } from "../git/runGitCommand.js";
+import { runGitCommand, runGitCommandWithEnvironment } from "../git/runGitCommand.js";
 import { runSandboxedGitCommand } from "../git/runSandboxedGitCommand.js";
+import { cloneRemoteRepository, remoteUrlForSource } from "../git/cloneRemoteRepository.js";
+import {
+    GitCredentialBroker,
+    type GitAuthentication,
+    type GitCommandAuthentication,
+} from "../git/GitCredentialBroker.js";
 import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
 import type { GitCommandRunner } from "../git/types.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
@@ -109,7 +120,8 @@ import { loadConfig } from "../config/loadConfig.js";
 import { runWorkspaceSetupCommands } from "./runWorkspaceSetupCommands.js";
 import { syncWorkspaceFiles } from "./syncWorkspaceFiles.js";
 import { watchWorkspaceSyncPaths } from "./watchWorkspaceSyncPaths.js";
-import { asyncLock, asyncQueue, type AsyncLock } from "../concurrency/index.js";
+import { asyncLock, type AsyncLock } from "../concurrency/index.js";
+import { getManagedProjectsDirectory } from "./getManagedProjectsDirectory.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
 const WORKSPACE_SYNC_DEBOUNCE_MS = 300;
@@ -160,10 +172,14 @@ export class ProjectRegistrationError extends Error {
 }
 
 export interface ProjectRepositoryOptions {
+    cloneRemote?: typeof cloneRemoteRepository;
     database: SessionDatabase;
     /** Replaces both Git execution surfaces at once, so a test can drive lifecycle without Git. */
     git?: GitCommandRunner;
+    gitCredentialBroker?: GitCredentialBroker;
     homeDirectory?: string;
+    localInstanceId?: string;
+    managedProjectsDirectory?: string;
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
     onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void;
@@ -175,6 +191,8 @@ export interface ProjectRepositoryOptions {
     taskDrain?: TaskDrain;
     transaction?: <T>(body: (tx: TX) => T) => T;
     workspacesDirectory?: string;
+    resolveGitSecret?: (kind: "github") => string | undefined;
+    resolveProfile?: (profileId: string) => RigProfile | undefined;
 }
 
 export class ProjectRepository {
@@ -183,15 +201,20 @@ export class ProjectRepository {
     readonly #createEventId = createEventIdFactory();
     readonly #database: SessionDatabase;
     readonly #git: GitCommandRunner;
+    readonly #gitCredentialBroker: GitCredentialBroker;
+    readonly #hasCustomGit: boolean;
     /**
      * Background probes run unattended, so they read through the sandbox for the same reason live
      * scans do: a repository must not be able to make an unattended read execute a helper.
      */
     readonly #probeGit: GitCommandRunner;
     readonly #homeDirectory: string;
+    readonly #localInstanceId: string | undefined;
+    readonly #managedProjectsDirectory: string;
     readonly #initializing = new Set<string>();
     readonly #pendingInitializations: string[] = [];
     readonly #projectInitializationLocks = new Map<string, AsyncLock>();
+    readonly #cloneRemote: typeof cloneRemoteRepository;
     readonly #now: () => number;
     readonly #onEvent: ((event: ProjectEvent | ProjectWorkspaceEvent) => void) | undefined;
     readonly #onWorkspaceBranchError:
@@ -204,6 +227,8 @@ export class ProjectRepository {
     readonly #taskDrain: TaskDrain | undefined;
     readonly #transactionRunner: (<T>(body: (tx: TX) => T) => T) | undefined;
     readonly #workspacesDirectory: string;
+    readonly #resolveGitSecret: ((kind: "github") => string | undefined) | undefined;
+    readonly #resolveProfile: ((profileId: string) => RigProfile | undefined) | undefined;
     readonly #workspaceLifecycle = new Map<string, Promise<void>>();
     readonly #workspaceSetupControllers = new Map<string, AbortController>();
     readonly #workspaceSyncChain = new Map<string, Promise<void>>();
@@ -214,15 +239,25 @@ export class ProjectRepository {
 
     constructor(options: ProjectRepositoryOptions) {
         this.#database = options.database;
+        this.#cloneRemote = options.cloneRemote ?? cloneRemoteRepository;
+        this.#gitCredentialBroker = options.gitCredentialBroker ?? new GitCredentialBroker();
+        this.#hasCustomGit = options.git !== undefined;
         this.#git = options.git ?? runGitCommand;
         this.#probeGit = options.git ?? runSandboxedGitCommand;
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
+        this.#localInstanceId = options.localInstanceId;
+        this.#managedProjectsDirectory = normalizeFuturePath(
+            options.managedProjectsDirectory ??
+                getManagedProjectsDirectory(process.env, this.#homeDirectory),
+        );
         this.#now = options.now ?? Date.now;
         this.#onEvent = options.onEvent;
         this.#onWorkspaceBranchError = options.onWorkspaceBranchError;
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#taskDrain = options.taskDrain;
         this.#transactionRunner = options.transaction;
+        this.#resolveGitSecret = options.resolveGitSecret;
+        this.#resolveProfile = options.resolveProfile;
         this.#stateDirectory = normalizeFuturePath(
             options.stateDirectory ??
                 join(tmpdir(), `rig-projects-${String(process.pid)}-${createId()}`),
@@ -343,6 +378,126 @@ export class ProjectRepository {
         }
         const path = await this.#validateRegistrationPath(request.path);
         return this.#resolvePath(path, undefined, request.projectId).project;
+    }
+
+    async createRemoteProject(
+        request: CreateRemoteProjectRequest,
+        options: {
+            createdBy?: ProjectCreator;
+            githubToken?: string;
+            mutationId?: string;
+        } = {},
+    ): Promise<Project> {
+        const name = validateManagedProjectFolderName(request.name);
+        if (options.createdBy === undefined || options.createdBy.profileId !== request.identity) {
+            throw new ProjectRegistrationError(
+                "invalid_request",
+                "A valid human profile is required to create a managed project.",
+            );
+        }
+        const creator = options.createdBy;
+        if (request.secret !== undefined && request.source.kind !== "github") {
+            throw new ProjectRegistrationError(
+                "unsupported_git_source",
+                "GitHub credentials can only be used with a GitHub repository.",
+            );
+        }
+        const requestedId =
+            request.projectId === undefined ? undefined : clientChosenProjectId(request.projectId);
+        const id = requestedId ?? createId();
+        const path = normalizeFuturePath(join(this.#managedProjectsDirectory, name));
+        const githubToken =
+            options.githubToken ??
+            (request.secret?.kind === "github" && creator.instanceId === this.#localInstanceId
+                ? this.#localGitSecret("github")
+                : undefined);
+        if (githubToken !== undefined && request.source.kind !== "github") {
+            throw new ProjectRegistrationError(
+                "unsupported_git_source",
+                "GitHub credentials can only be used with a GitHub repository.",
+            );
+        }
+        const registerCredential = async () => {
+            if (githubToken === undefined || request.source.kind !== "github") return;
+            await this.#gitCredentialBroker.register({
+                creator,
+                projectId: id,
+                repository: request.source.repository,
+                token: githubToken,
+            });
+        };
+        const retried = this.#retriedRemoteProject(id, path, request);
+        if (retried !== undefined) {
+            await registerCredential();
+            const canRetry =
+                retried.requiredSecretKind !== "github" ||
+                this.gitAuthentication(retried.id, creator) !== undefined;
+            if (retried.initializationStatus === "failed" && !canRetry) return retried;
+            if (retried.initializationStatus === "failed") {
+                this.#mutate((tx) => {
+                    const changed = projectRetryInitialization(tx, id, this.#now());
+                    if (changed > 0) this.#publishedProject(id, options.mutationId);
+                });
+            }
+            if (retried.initializationStatus !== "ready" && canRetry) {
+                this.scheduleInitialization(id);
+            }
+            return this.getProject(id) ?? retried;
+        }
+        const projectAtPath = queryProjectByPath(this.#database, path);
+        if (projectAtPath !== undefined) {
+            throw new ProjectRegistrationError(
+                "project_path_conflict",
+                "That managed project folder already belongs to another project.",
+            );
+        }
+        if (existsSync(path)) {
+            throw new ProjectRegistrationError(
+                "project_path_conflict",
+                "That managed project folder already exists.",
+            );
+        }
+        await mkdir(this.#managedProjectsDirectory, { recursive: true });
+        await registerCredential();
+        try {
+            const project = this.#mutate((tx) => {
+                projectCreate(tx, {
+                    createdBy: creator,
+                    baseName: name,
+                    id,
+                    kind: "regular",
+                    now: this.#now(),
+                    path,
+                    remoteSource: request.source,
+                    ...(request.secret === undefined
+                        ? {}
+                        : { requiredSecretKind: request.secret.kind }),
+                });
+                const created = this.getProject(id);
+                if (created === undefined)
+                    throw new Error("The remote project could not be created.");
+                this.#publishProject("project_created", created, options.mutationId);
+                return created;
+            });
+            this.scheduleInitialization(id);
+            return project;
+        } catch (error) {
+            const racedRetry = this.#retriedRemoteProject(id, path, request);
+            if (racedRetry !== undefined) {
+                if (racedRetry.initializationStatus !== "ready") {
+                    this.scheduleInitialization(id);
+                }
+                return racedRetry;
+            }
+            this.#gitCredentialBroker.revoke(id);
+            if (queryProjectByPath(this.#database, path) !== undefined) {
+                throw new ProjectRegistrationError(
+                    "project_path_conflict",
+                    "That managed project folder already belongs to another project.",
+                );
+            }
+            throw error;
+        }
     }
 
     #resolvePath(
@@ -478,6 +633,7 @@ export class ProjectRepository {
 
     close(): void {
         this.#closed = true;
+        this.#gitCredentialBroker.close();
         this.#pendingInitializations.length = 0;
         for (const controller of this.#workspaceSetupControllers.values()) {
             controller.abort(new Error("Workspace setup stopped because Rig is closing."));
@@ -833,7 +989,7 @@ export class ProjectRepository {
         if (this.#closed || this.#initializing.has(projectId)) return;
         const project = this.getProject(projectId);
         if (project === undefined) return;
-        if (!existsSync(project.path)) {
+        if (!existsSync(project.path) && project.remoteSource === undefined) {
             this.#mutate((tx) => {
                 const changed = projectMarkInitializationFailed(
                     tx,
@@ -848,6 +1004,45 @@ export class ProjectRepository {
         this.#initializing.add(projectId);
         this.#pendingInitializations.push(projectId);
         setImmediate(() => this.#drainInitializations());
+    }
+
+    retryRemoteProjects(kind: "github"): void {
+        for (const project of this.listProjects()) {
+            if (project.requiredSecretKind !== kind) continue;
+            if (
+                project.createdBy !== undefined &&
+                project.createdBy.instanceId !== this.#localInstanceId
+            ) {
+                continue;
+            }
+            const token = this.#localGitSecret(kind);
+            if (
+                token === undefined ||
+                project.remoteSource?.kind !== "github" ||
+                project.createdBy === undefined
+            ) {
+                continue;
+            }
+            void this.#gitCredentialBroker
+                .register({
+                    creator: project.createdBy,
+                    projectId: project.id,
+                    repository: project.remoteSource.repository,
+                    token,
+                })
+                .then(() => {
+                    if (this.#closed) return;
+                    const current = this.getProject(project.id);
+                    if (current?.initializationStatus === "failed") {
+                        this.#mutate((tx) => {
+                            const changed = projectRetryInitialization(tx, project.id, this.#now());
+                            if (changed > 0) this.#publishedProject(project.id);
+                        });
+                    }
+                    this.scheduleInitialization(project.id);
+                })
+                .catch(() => undefined);
+        }
     }
 
     async setAvatar(
@@ -932,16 +1127,39 @@ export class ProjectRepository {
         projectId: string,
         request: CreateProjectWorkspaceRequest,
         creatorSessionId?: string,
+        options: { createdBy?: ProjectCreator; githubToken?: string } = {},
     ): Promise<ProjectWorkspace | undefined> {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
+        if (
+            project.createdBy === undefined
+                ? options.createdBy !== undefined
+                : options.createdBy === undefined ||
+                  request.identity !== options.createdBy.profileId ||
+                  project.createdBy.instanceId !== options.createdBy.instanceId ||
+                  project.createdBy.profileId !== options.createdBy.profileId
+        ) {
+            throw new Error("That human profile does not own the managed project.");
+        }
+        if (request.secret !== undefined && project.remoteSource?.kind !== "github") {
+            throw new Error("GitHub credentials can only be used with a GitHub project.");
+        }
         const name = validateProjectName(request.name);
         const requestedId =
             request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
         const requestedRef = requestedBaseRef(request.baseRef);
         const retry = this.#retriedWorkspace(projectId, requestedId, requestedRef);
         if (retry !== undefined) return retry;
-
+        if (options.githubToken !== undefined && options.createdBy !== undefined) {
+            await this.refreshGitCredential(projectId, options.createdBy, options.githubToken);
+        }
+        if (
+            options.createdBy !== undefined &&
+            project.requiredSecretKind === "github" &&
+            this.gitAuthentication(projectId, options.createdBy) === undefined
+        ) {
+            throw new Error("GitHub credentials are unavailable for this managed project.");
+        }
         const workspaceRoot = join(this.#workspacesDirectory, project.storageKey);
         const workspaceId = requestedId ?? createId();
         const gitRefs = workspaceGitRefSnapshot(project.path);
@@ -950,6 +1168,7 @@ export class ProjectRepository {
         const reservation = this.#mutate((tx) => {
             const result = workspaceReserve(tx, {
                 ...(requestedRef === undefined ? {} : { baseRef: requestedRef }),
+                ...(options.createdBy === undefined ? {} : { createdBy: options.createdBy }),
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 id: workspaceId,
                 isBranchUnavailable: (branch) => this.#gitBranchExists(gitRefs, branch),
@@ -978,6 +1197,42 @@ export class ProjectRepository {
             });
         }
         return workspace;
+    }
+
+    async refreshGitCredential(
+        projectId: string,
+        creator: ProjectCreator,
+        githubToken: string,
+    ): Promise<GitAuthentication> {
+        const project = this.getProject(projectId);
+        if (
+            project?.remoteSource?.kind !== "github" ||
+            project.createdBy?.instanceId !== creator.instanceId ||
+            project.createdBy.profileId !== creator.profileId
+        ) {
+            throw new Error("That human profile does not own a managed GitHub project.");
+        }
+        const authentication = await this.#gitCredentialBroker.register({
+            creator,
+            projectId,
+            repository: project.remoteSource.repository,
+            token: githubToken,
+        });
+        if (project.initializationStatus === "failed") {
+            this.#mutate((tx) => {
+                const changed = projectRetryInitialization(tx, project.id, this.#now());
+                if (changed > 0) this.#publishedProject(project.id);
+            });
+            this.scheduleInitialization(project.id);
+        }
+        return authentication;
+    }
+
+    gitAuthentication(
+        projectId: string,
+        creator: ProjectCreator,
+    ): GitCommandAuthentication | undefined {
+        return this.#gitCredentialBroker.authentication(projectId, creator);
     }
 
     getOwnedWorkspace(
@@ -1238,7 +1493,7 @@ export class ProjectRepository {
             }
         }
         const now = this.#now();
-        return this.#mutate((tx) => {
+        const archived = this.#mutate((tx) => {
             const changed = projectArchive(tx, projectId, now, expectedVersion);
             if (changed === 0) {
                 if (expectedVersion !== undefined) {
@@ -1248,6 +1503,8 @@ export class ProjectRepository {
             }
             return this.#publishedProject(projectId);
         });
+        if (archived?.archivedAt !== undefined) this.#gitCredentialBroker.revoke(projectId);
+        return archived;
     }
 
     unarchiveProject(projectId: string): Project | undefined {
@@ -1348,6 +1605,10 @@ export class ProjectRepository {
             return;
         }
         try {
+            if (project.remoteSource !== undefined) {
+                await this.#cloneRemoteProject(project);
+                if (this.#closed) return;
+            }
             // A new project learns its presence and worktree capability here rather than waiting
             // for the next daemon start, because the desktop offers "Create worktree" immediately.
             await this.#reconcileProjectGitFacts(project);
@@ -1426,6 +1687,93 @@ export class ProjectRepository {
         }
     }
 
+    async #cloneRemoteProject(project: Project): Promise<void> {
+        if (project.remoteSource === undefined) return;
+        const stagingRoot = join(this.#managedProjectsDirectory, ".rig", "clones");
+        const stagingPath = join(stagingRoot, project.id);
+        if (existsSync(project.path)) {
+            const topLevel = await readGitTopLevel(this.#probeGit, project.path);
+            if (topLevel !== project.path) {
+                throw new Error("The managed project folder is not the expected Git repository.");
+            }
+            const origin = await this.#probeGit(project.path, ["remote", "get-url", "origin"]);
+            if (!remoteSourceUrlMatches(origin, project.remoteSource)) {
+                throw new Error("The managed project folder has a different origin repository.");
+            }
+            this.#markCloneReady(project.id);
+            return;
+        }
+        if (project.createdBy === undefined) {
+            throw new Error("The managed project has no human creator profile.");
+        }
+        const profile = this.#resolveProfile?.(project.createdBy.profileId);
+        if (profile === undefined || profile.parentInstanceId !== project.createdBy.instanceId) {
+            throw new Error("The managed project's human creator profile is unavailable.");
+        }
+        const gitAuthentication = this.#daemonGitAuthentication(project.id, project.createdBy);
+        if (project.requiredSecretKind === "github" && gitAuthentication === undefined) {
+            throw new Error(
+                "GitHub credentials are unavailable. Retry the project after GitHub is connected.",
+            );
+        }
+        await mkdir(stagingRoot, { recursive: true });
+        await rm(stagingPath, { force: true, recursive: true });
+        try {
+            await this.#cloneRemote({
+                destination: stagingPath,
+                ...(gitAuthentication === undefined ? {} : { gitAuthentication }),
+                gitIdentity: { email: profile.email, name: profile.name },
+                source: project.remoteSource,
+            });
+            if ((await readGitTopLevel(this.#git, stagingPath)) !== stagingPath) {
+                throw new Error("The cloned folder is not a Git repository root.");
+            }
+            if (existsSync(project.path)) {
+                throw new Error("The managed project folder appeared while cloning.");
+            }
+            await rename(stagingPath, project.path);
+            this.#markCloneReady(project.id);
+        } finally {
+            await rm(stagingPath, { force: true, recursive: true });
+        }
+    }
+
+    #localGitSecret(kind: "github"): string | undefined {
+        try {
+            return this.#resolveGitSecret?.(kind);
+        } catch {
+            return undefined;
+        }
+    }
+
+    #markCloneReady(projectId: string): void {
+        this.#mutate((tx) => {
+            const changed = projectMarkCloneReady(tx, projectId, this.#now());
+            if (changed > 0) this.#publishedProject(projectId);
+        });
+    }
+
+    #retriedRemoteProject(
+        id: string,
+        path: string,
+        request: CreateRemoteProjectRequest,
+    ): Project | undefined {
+        const project = queryProject(this.#database, id);
+        if (project === undefined) return undefined;
+        if (
+            project.path !== path ||
+            !remoteProjectSourcesEqual(project.remoteSource, request.source) ||
+            project.requiredSecretKind !== request.secret?.kind ||
+            project.createdBy?.profileId !== request.identity
+        ) {
+            throw new ProjectRegistrationError(
+                "project_id_conflict",
+                "That project ID already names a different project.",
+            );
+        }
+        return project;
+    }
+
     #drainInitializations(): void {
         if (this.#closed) return;
         while (this.#activeInitializations < 2) {
@@ -1434,17 +1782,34 @@ export class ProjectRepository {
             this.#activeInitializations += 1;
             const initialize = () => this.#initialize(projectId);
             const task = this.#taskDrain?.run(initialize) ?? initialize();
+            let initializationRejected = false;
             void task
-                .finally(() => {
-                    this.#activeInitializations -= 1;
-                    this.#initializing.delete(projectId);
-                    this.#drainInitializations();
-                })
                 .catch((error: unknown) => {
+                    initializationRejected = true;
                     if (!isDatabaseFailure(error)) return;
                     setImmediate(() => {
                         throw error;
                     });
+                })
+                .finally(() => {
+                    this.#activeInitializations -= 1;
+                    this.#initializing.delete(projectId);
+                    if (this.#closed) return;
+                    if (
+                        !initializationRejected &&
+                        this.getProject(projectId)?.initializationStatus === "initializing"
+                    ) {
+                        this.#mutate((tx) => {
+                            const changed = projectMarkInitializationFailed(
+                                tx,
+                                projectId,
+                                "Project initialization did not complete.",
+                                this.#now(),
+                            );
+                            if (changed > 0) this.#publishedProject(projectId);
+                        });
+                    }
+                    this.#drainInitializations();
                 });
         }
     }
@@ -1668,16 +2033,26 @@ export class ProjectRepository {
         if (workspace.baseCommit !== undefined && workspace.gitCommonDir.length > 0) {
             return workspace;
         }
-        const gitTopLevel = await readGitTopLevel(this.#git, project.path);
+        if (
+            workspace.createdBy !== undefined &&
+            project.requiredSecretKind === "github" &&
+            this.gitAuthentication(project.id, workspace.createdBy) === undefined
+        ) {
+            throw new Error(
+                "GitHub credentials are unavailable. Retry the workspace from its owner Rig.",
+            );
+        }
+        const git = this.#gitForProject(project);
+        const gitTopLevel = await readGitTopLevel(git, project.path);
         if (gitTopLevel !== project.path) {
             throw new Error("Managed workspaces require a Git repository project.");
         }
         const defaultBranch =
             workspace.baseRef === undefined ? await this.#projectDefaultBranch(project) : undefined;
-        const gitCommonDir = await readGitCommonDir(this.#git, project.path);
+        const gitCommonDir = await readGitCommonDir(git, project.path);
         const base = await resolveWorkspaceBase({
             ...(defaultBranch === undefined ? {} : { defaultBranch }),
-            git: this.#git,
+            git,
             projectPath: project.path,
             ...(workspace.baseRef === undefined ? {} : { requestedRef: workspace.baseRef }),
         });
@@ -1697,6 +2072,25 @@ export class ProjectRepository {
         );
         if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
         return this.getWorkspace(workspace.projectId, workspace.id);
+    }
+
+    #gitForProject(project: Project): GitCommandRunner {
+        if (this.#hasCustomGit || project.createdBy === undefined) return this.#git;
+        const authentication = this.#daemonGitAuthentication(project.id, project.createdBy);
+        if (authentication === undefined) return this.#git;
+        return (cwd, args) =>
+            runGitCommandWithEnvironment(cwd, args, {
+                GIT_CONFIG_GLOBAL: "/dev/null",
+                GIT_CONFIG_NOSYSTEM: "1",
+                ...authentication.environment,
+            });
+    }
+
+    #daemonGitAuthentication(
+        projectId: string,
+        creator: ProjectCreator,
+    ): GitAuthentication | undefined {
+        return this.#gitCredentialBroker.daemonAuthentication(projectId, creator);
     }
 
     async #removeWorkspaceDirectory(project: Project, workspace: ProjectWorkspace): Promise<void> {
@@ -2098,6 +2492,52 @@ export class ProjectRepository {
     }
 }
 
+function remoteProjectSourcesEqual(
+    left: Project["remoteSource"],
+    right: CreateRemoteProjectRequest["source"],
+): boolean {
+    if (left?.kind === "github") {
+        return right.kind === "github" && left.repository === right.repository;
+    }
+    return left?.kind === "git" && right.kind === "git" && left.url === right.url;
+}
+
+function remoteSourceUrlMatches(actual: string, source: ProjectRemoteSource): boolean {
+    try {
+        const expected = remoteUrlForSource(source);
+        const normalizedActual =
+            source.kind === "github"
+                ? remoteUrlForSource({
+                      kind: "github",
+                      repository: githubRepositoryFromUrl(actual),
+                  })
+                : new URL(actual).toString();
+        return source.kind === "github"
+            ? normalizedActual.toLowerCase() === expected.toLowerCase()
+            : normalizedActual === expected;
+    } catch {
+        return false;
+    }
+}
+
+function githubRepositoryFromUrl(value: string): string {
+    const url = new URL(value);
+    if (
+        url.protocol !== "https:" ||
+        url.hostname.toLowerCase() !== "github.com" ||
+        url.username.length > 0 ||
+        url.password.length > 0
+    ) {
+        throw new Error("The GitHub origin is invalid.");
+    }
+    const parts = url.pathname
+        .replace(/\.git$/u, "")
+        .split("/")
+        .filter(Boolean);
+    if (parts.length !== 2) throw new Error("The GitHub origin is invalid.");
+    return `${parts[0]}/${parts[1]}`;
+}
+
 async function readBoundedResponseBytes(
     response: Response,
     maximumBytes: number,
@@ -2150,6 +2590,34 @@ interface WorkspaceGitFactValues extends GitFactValues {
 interface ProjectGitFactValues extends WorkspaceGitFactValues {
     worktreeSupport: string;
     worktreeSupportReason: string | null;
+}
+
+function clientChosenProjectId(value: string): string {
+    try {
+        return clientChosenId(value, "project");
+    } catch {
+        throw new ProjectRegistrationError(
+            "invalid_request",
+            "The project ID must be a cuid2 identity.",
+        );
+    }
+}
+
+function validateManagedProjectFolderName(value: string): string {
+    const name = validateProjectName(value);
+    if (
+        name === "." ||
+        name === ".." ||
+        name === ".rig" ||
+        name.includes("/") ||
+        name.includes("\\")
+    ) {
+        throw new ProjectRegistrationError(
+            "invalid_request",
+            "The managed project name must be one folder name.",
+        );
+    }
+    return name;
 }
 
 /**

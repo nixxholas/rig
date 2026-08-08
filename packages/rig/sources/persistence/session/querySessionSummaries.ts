@@ -28,7 +28,7 @@ export function querySessionSummaries(
         SELECT listed_sessions.*
         FROM (
             SELECT
-                id, owner_instance_id, scope_kind, project_id, workspace_id, folder_id, order_key, archived, track_unread,
+                id, owner_instance_id, profile_id, scope_kind, project_id, workspace_id, folder_id, order_key, archived, track_unread,
                 unread_reason, unread_since_ms, cwd, draft, draft_updated_at_ms,
                 docker_json, secret_ids_json, provider_id, model_id, permission_mode,
                 effort, service_tier, status, title, title_status, title_error, recap,
@@ -61,6 +61,7 @@ export function querySessionSummaries(
         const metadataRunId = readOptionalString(row, "metadata_run_id");
         const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
         const lastEventId = readOptionalString(row, "last_event_id");
+        const profileId = readOptionalString(row, "profile_id");
         const interruptionJson = readOptionalString(row, "interruption_json");
         const draft = readOptionalString(row, "draft");
         const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
@@ -78,6 +79,7 @@ export function querySessionSummaries(
         return {
             id: readString(row, "id"),
             ownerInstanceId: readString(row, "owner_instance_id"),
+            ...(profileId === undefined ? {} : { profileId }),
             archived: readNumber(row, "archived") !== 0,
             scope,
             ...(scope.kind === "project" || scope.kind === "workspace"

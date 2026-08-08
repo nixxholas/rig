@@ -89,6 +89,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     const metadataRunId = readOptionalString(row, "metadata_run_id");
     const activeRunId = readOptionalString(row, "active_run_id");
     const activeSince = readOptionalNumber(row, "active_since_ms");
+    const profileId = readOptionalString(row, "profile_id");
     const permissionMode = parsePermissionMode(readString(row, "permission_mode"));
     const parentSessionId = readOptionalString(row, "parent_session_id");
     const delegatedBySessionId = readOptionalString(row, "delegated_by_session_id");
@@ -118,6 +119,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         agent,
         agentId: readString(row, "agent_id"),
         ownerInstanceId: readString(row, "owner_instance_id"),
+        ...(profileId === undefined ? {} : { profileId }),
         archived,
         trackUnread,
         ...(unreadReason !== undefined && unreadSince !== undefined

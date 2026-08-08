@@ -5,6 +5,7 @@ export function createCommandEnvironment(
     baseEnvironment: NodeJS.ProcessEnv,
     context: SessionSecretContext | undefined,
     secretIds: readonly string[] | undefined,
+    activatedEnvironment: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
     const hiddenNames = new Set(
         (context?.environmentVariables() ?? []).map((name) => name.toUpperCase()),
@@ -14,6 +15,9 @@ export function createCommandEnvironment(
         if (value !== undefined && !hiddenNames.has(name.toUpperCase())) environment[name] = value;
     }
     for (const [name, value] of Object.entries(resolveSecretEnvironment(context, secretIds))) {
+        environment[name] = value;
+    }
+    for (const [name, value] of Object.entries(activatedEnvironment)) {
         environment[name] = value;
     }
     return environment;

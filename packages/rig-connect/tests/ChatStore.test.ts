@@ -150,6 +150,7 @@ describe("ChatStore", () => {
         const local = before[2];
         const profile = {
             createdAt: 1,
+            email: "steve@example.test",
             id: firstProfileId,
             name: "Steve",
             parentInstanceId: "aparent0000000000000000001",

@@ -1,4 +1,10 @@
-import type { GitRepositoryFacts, ProjectWorkspace } from "../../../protocol/index.js";
+import { Value } from "@sinclair/typebox/value";
+
+import {
+    projectCreatorSchema,
+    type GitRepositoryFacts,
+    type ProjectWorkspace,
+} from "../../../protocol/index.js";
 import type { projectWorkspaces } from "../../database/schema.js";
 
 type WorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -11,6 +17,14 @@ export function workspaceReadRow(row: WorkspaceRow): ProjectWorkspace {
         ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
         branch: row.branch,
         createdAt: row.createdAtMs,
+        ...(row.creatorInstanceId === null || row.creatorProfileId === null
+            ? {}
+            : {
+                  createdBy: Value.Decode(projectCreatorSchema, {
+                      instanceId: row.creatorInstanceId,
+                      profileId: row.creatorProfileId,
+                  }),
+              }),
         ...(row.error === null ? {} : { error: row.error }),
         ...(git === undefined ? {} : { git }),
         gitCommonDir: row.gitCommonDir,

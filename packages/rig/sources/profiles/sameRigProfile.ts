@@ -3,6 +3,7 @@ import type { RigProfile, RigProfilePhoto } from "../protocol/index.js";
 export function sameRigProfile(first: RigProfile, second: RigProfile): boolean {
     return (
         first.createdAt === second.createdAt &&
+        first.email === second.email &&
         first.id === second.id &&
         first.name === second.name &&
         first.parentInstanceId === second.parentInstanceId &&

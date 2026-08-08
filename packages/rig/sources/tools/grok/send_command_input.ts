@@ -38,6 +38,14 @@ Use it to answer a prompt, drive a REPL, or interrupt with Ctrl-C ("\\u0003"). E
         `sending ${quoteVisibleExact(input)} to background command ${task_id}`,
     availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ input }) => input.length > 0,
+    shouldRunInFullAccessInAutoMode: ({ input, task_id }, context) => {
+        const sessionId = parseOptionalTerminalSessionId(task_id);
+        return (
+            input.length > 0 &&
+            sessionId !== undefined &&
+            context.bash?.sessionUsesSecrets?.(sessionId) === true
+        );
+    },
     steerable: true,
     execute: async ({ input, task_id, timeout_ms = 250 }, context, execution) => {
         const sessionId = parseOptionalTerminalSessionId(task_id);

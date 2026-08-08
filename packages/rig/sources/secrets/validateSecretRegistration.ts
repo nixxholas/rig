@@ -5,6 +5,7 @@ import {
     type SecretRegistration,
     environmentSecretRegistrationSchema,
     githubSecretRegistrationSchema,
+    PROJECT_GIT_SECRET_ID,
 } from "./types.js";
 
 export function validateSecretRegistration(secret: SecretRegistration): void {
@@ -37,6 +38,11 @@ export function validateSecretRegistration(secret: SecretRegistration): void {
 export function validateEnvironmentSecretRegistration(secret: EnvironmentSecretRegistration): void {
     if (secret.id === "github") {
         throw new Error("Secret ID 'github' is reserved for GitHub CLI credentials.");
+    }
+    if (secret.id === PROJECT_GIT_SECRET_ID) {
+        throw new Error(
+            `Secret ID '${PROJECT_GIT_SECRET_ID}' is reserved for managed project Git access.`,
+        );
     }
     if (secret.description.trim().length === 0) {
         throw new Error(`Secret '${secret.id}' must have a description.`);

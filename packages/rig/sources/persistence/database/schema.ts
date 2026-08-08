@@ -55,6 +55,7 @@ export const rigProfiles = sqliteTable(
         version: integer("version").notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
+        email: text("email").notNull(),
     },
     (table) => [index("rig_profiles_parent_instance").on(table.parentInstanceId, table.id)],
 );
@@ -133,6 +134,10 @@ export const projects = sqliteTable(
         defaultDockerImage: text("default_docker_image"),
         defaultComputeGeneration: integer("default_compute_generation").notNull().default(0),
         userMutationVersion: integer("user_mutation_version").notNull().default(1),
+        remoteSourceJson: text("remote_source_json"),
+        requiredSecretKind: text("required_secret_kind"),
+        creatorInstanceId: text("creator_instance_id"),
+        creatorProfileId: text("creator_profile_id"),
     },
     (table) => [
         index("projects_updated").on(desc(table.updatedAtMs)),
@@ -174,6 +179,8 @@ export const projectWorkspaces = sqliteTable(
         nameConfigured: integer("name_configured", { mode: "boolean" }).notNull(),
         /** Branch Rig manages for this worktree; it follows the name and outlives storage_key. */
         branch: text("branch").notNull(),
+        creatorInstanceId: text("creator_instance_id"),
+        creatorProfileId: text("creator_profile_id"),
     },
     (table) => [
         unique().on(table.projectId, table.storageKey),
@@ -287,6 +294,7 @@ export const sessions = sqliteTable(
         /** When a chat started out belonging nowhere. Null once it has been filed, or never was. */
         unsortedSinceMs: integer("unsorted_since_ms"),
         ownerInstanceId: text("owner_instance_id").notNull(),
+        profileId: text("profile_id"),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),

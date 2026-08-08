@@ -24,7 +24,7 @@ describe("replicateProfileForP2pRequest", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const profile = profiles.create({ name: "Steve" });
+        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
         const requests: P2pHttpRequest[] = [];
         const network = {
             fetch: vi.fn(
@@ -64,7 +64,7 @@ describe("replicateProfileForP2pRequest", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const profile = profiles.create({ name: "Steve" });
+        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
         let authoritativeProfile = profile;
         const requests: P2pHttpRequest[] = [];
         const network = {
@@ -115,7 +115,7 @@ describe("replicateProfileForP2pRequest", () => {
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const profile = profiles.create({ name: "Steve" });
+        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
         const fetch = vi.fn(async () => ({
             response: response(200, { profile }),
             transport: "iroh" as const,

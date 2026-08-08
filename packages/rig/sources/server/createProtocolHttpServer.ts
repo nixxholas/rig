@@ -20,6 +20,7 @@ import type {
     ChangeServiceTierRequest,
     ChangeSessionGoalStatusRequest,
     CancelScheduledMessageResponse,
+    CreateRemoteProjectRequest,
     CompactSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -134,6 +135,8 @@ import {
     happyCloudSessionIdSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
+    createRemoteProjectRequestSchema,
+    projectGitSecretSchema,
     SESSION_DRAFT_MAX_LENGTH,
     submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
@@ -334,6 +337,8 @@ export interface ProtocolHttpServerOptions {
     p2pStatus?: () => P2pStatus;
     canP2pPeerConfigure?: (peerId: string) => boolean;
     canP2pPeerProvision?: (peerId: string) => boolean;
+    /** Authorizes a peer to create and operate its remote projects, workspaces, and sessions. */
+    canP2pPeerUseRemoteWork?: (peerId: string) => boolean;
     profiles?: RigProfileStore;
     replaceP2pCredentials?: (
         authenticatedOwnerId: string,
@@ -411,6 +416,7 @@ export function createProtocolHttpServer(
         p2pStatus: options.p2pStatus,
         canP2pPeerConfigure: options.canP2pPeerConfigure,
         canP2pPeerProvision: options.canP2pPeerProvision,
+        canP2pPeerUseRemoteWork: options.canP2pPeerUseRemoteWork,
         profiles: options.profiles,
         replaceP2pCredentials: options.replaceP2pCredentials,
         resolveModelCatalog: options.resolveModelCatalog,
@@ -503,6 +509,7 @@ export function createProtocolHttpServer(
 interface ProtocolServerRuntimeConfig {
     canP2pPeerConfigure: ProtocolHttpServerOptions["canP2pPeerConfigure"];
     canP2pPeerProvision: ProtocolHttpServerOptions["canP2pPeerProvision"];
+    canP2pPeerUseRemoteWork: ProtocolHttpServerOptions["canP2pPeerUseRemoteWork"];
     inferenceMaxRetries: number;
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
@@ -548,6 +555,20 @@ interface AppliedDaemonSettings {
 }
 
 const GLOBAL_SECURITY_POLICY_REQUEST_MAX_BYTES = GLOBAL_SECURITY_MD_MAX_BYTES * 6 + 1024;
+const temporaryGitSecretSchema = Type.Object(
+    {
+        kind: Type.Literal("github"),
+        token: Type.String({ maxLength: 65_536, minLength: 1 }),
+    },
+    { additionalProperties: false },
+);
+const remoteProjectCreationTransportSchema = Type.Object(
+    {
+        ...createRemoteProjectRequestSchema.properties,
+        temporaryGitSecret: Type.Optional(temporaryGitSecretSchema),
+    },
+    { additionalProperties: false },
+);
 const pluginAppResourceReadBodySchema = Type.Object(
     { uri: Type.String({ minLength: 1 }) },
     { additionalProperties: false },
@@ -757,6 +778,7 @@ async function handleRequest(
                         : await normalizeRigProfilePhoto(input.photo);
                 sendJson<RigProfileResponse>(response, 201, {
                     profile: profiles.create({
+                        email: input.email,
                         name: input.name,
                         ...(photo === undefined ? {} : { photo }),
                     }),
@@ -789,6 +811,7 @@ async function handleRequest(
                         ? input.photo
                         : await normalizeRigProfilePhoto(input.photo);
                 const profile = profiles.update(route.profileId, {
+                    ...(input.email === undefined ? {} : { email: input.email }),
                     ...(input.name === undefined ? {} : { name: input.name }),
                     ...(photo === undefined ? {} : { photo }),
                 });
@@ -1801,6 +1824,92 @@ async function handleRequest(
         return;
     }
 
+    if (route.name === "project-clone") {
+        if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const decoded = decodeRemoteProjectCreation(await readJson<unknown>(request, 128 * 1024));
+        if (decoded === undefined) {
+            sendProjectRegistrationError(
+                response,
+                400,
+                "invalid_request",
+                "Remote project settings are invalid.",
+            );
+            return;
+        }
+        const peerId = p2pPeerId(request);
+        if (decoded.githubToken !== undefined && peerId === undefined) {
+            sendProjectRegistrationError(
+                response,
+                400,
+                "invalid_request",
+                "Temporary Git credentials are accepted only from an authenticated peer Rig.",
+            );
+            return;
+        }
+        if (!authorizeRemoteProjectCreator(request, response, runtimeConfig, decoded.request)) {
+            return;
+        }
+        let githubToken = decoded.githubToken;
+        if (decoded.request.secret?.kind === "github" && githubToken === undefined) {
+            const existing =
+                decoded.request.projectId === undefined
+                    ? undefined
+                    : store.getProject(decoded.request.projectId);
+            if (peerId !== undefined && existing === undefined) {
+                sendProjectRegistrationError(
+                    response,
+                    409,
+                    "secret_unavailable",
+                    "The temporary GitHub credential was not shared with this Rig.",
+                );
+                return;
+            }
+            if (peerId === undefined)
+                try {
+                    githubToken = store.resolveSpecialSecret("github").GH_TOKEN;
+                } catch {
+                    sendProjectRegistrationError(
+                        response,
+                        409,
+                        "secret_unavailable",
+                        "GitHub credentials are not available on this Rig.",
+                    );
+                    return;
+                }
+        }
+        try {
+            const mutationId = requestMutationId(request);
+            const project = await store.createRemoteProject(decoded.request, {
+                ...(decoded.request.identity === undefined
+                    ? {}
+                    : {
+                          createdBy: {
+                              instanceId:
+                                  peerId ??
+                                  runtimeConfig.profiles!.get(decoded.request.identity)!
+                                      .parentInstanceId,
+                              profileId: decoded.request.identity,
+                          },
+                      }),
+                ...(githubToken === undefined ? {} : { githubToken }),
+                ...(mutationId === undefined ? {} : { mutationId }),
+            });
+            sendJson<ProjectResponse>(response, 202, { project });
+        } catch (error) {
+            if (!(error instanceof ProjectRegistrationError)) throw error;
+            sendProjectRegistrationError(
+                response,
+                projectRegistrationStatus(error),
+                error.code,
+                error.message,
+            );
+        }
+        return;
+    }
+
     if (request.method === "GET" && route.name === "provider-usage") {
         sendJson<ListProviderUsageResponse>(response, 200, {
             providers: (await runtimeConfig.listProviderUsage?.(p2pPeerId(request))) ?? [],
@@ -2184,6 +2293,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "The watch request is invalid." });
             return;
         }
+        const authenticatedOwnerId = p2pPeerId(request);
         for (const requested of body.entities as { projectId?: unknown; workspaceId?: unknown }[]) {
             if (typeof requested?.projectId !== "string") continue;
             const project = store.getProject(requested.projectId);
@@ -2193,10 +2303,31 @@ async function handleRequest(
                     ? store.getWorkspace(requested.projectId, requested.workspaceId)
                     : undefined;
             if (typeof requested.workspaceId === "string" && workspace === undefined) continue;
+            if (
+                authenticatedOwnerId !== undefined &&
+                (project.createdBy?.instanceId !== authenticatedOwnerId ||
+                    (workspace !== undefined &&
+                        workspace.createdBy?.instanceId !== authenticatedOwnerId))
+            ) {
+                continue;
+            }
             const entity = resolveGitTrackedEntity(project, workspace);
             if (entity !== undefined) tracker.watch(entity);
         }
-        sendJson<GitWatchResponse>(response, 200, { snapshots: tracker.liveSnapshots() });
+        sendJson<GitWatchResponse>(response, 200, {
+            snapshots: tracker
+                .liveSnapshots()
+                .filter(
+                    (event) =>
+                        authenticatedOwnerId === undefined ||
+                        globalLiveEventVisibleToOwner(
+                            event,
+                            authenticatedOwnerId,
+                            store,
+                            runtimeConfig,
+                        ),
+                ),
+        });
         return;
     }
 
@@ -2375,28 +2506,84 @@ async function handleRequest(
             return;
         }
         if (request.method === "POST") {
-            const body = await readJson<unknown>(request);
+            const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+            if (transport === undefined) {
+                sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+                return;
+            }
+            if (transport.githubToken !== undefined && p2pPeerId(request) === undefined) {
+                sendJson(response, 400, {
+                    error: "Temporary Git credentials are accepted only from an authenticated peer Rig.",
+                });
+                return;
+            }
+            const body = transport.body;
             if (
-                !hasNoUnknownObjectKeys(body, ["baseRef", "id", "name", "nameConfigured"]) ||
+                !hasNoUnknownObjectKeys(body, [
+                    "baseRef",
+                    "id",
+                    "identity",
+                    "name",
+                    "nameConfigured",
+                    "secret",
+                ]) ||
                 typeof body.name !== "string" ||
                 (body.baseRef !== undefined && typeof body.baseRef !== "string") ||
                 (body.id !== undefined && typeof body.id !== "string") ||
-                (body.nameConfigured !== undefined && typeof body.nameConfigured !== "boolean")
+                (body.identity !== undefined && !Value.Check(rigProfileIdSchema, body.identity)) ||
+                (body.nameConfigured !== undefined && typeof body.nameConfigured !== "boolean") ||
+                (body.secret !== undefined && !Value.Check(projectGitSecretSchema, body.secret))
             ) {
                 sendJson(response, 400, { error: "Workspace settings are invalid." });
                 return;
             }
+            if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
             try {
-                const workspace = await store.createWorkspace(route.projectId, {
-                    ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
-                    ...(body.id === undefined ? {} : { id: body.id }),
-                    name: body.name,
-                    // A client that sends a placeholder name leaves this unset, and the first
-                    // chat inside the workspace names it instead.
-                    ...(body.nameConfigured === undefined
-                        ? {}
-                        : { nameConfigured: body.nameConfigured }),
-                });
+                const peerId = p2pPeerId(request);
+                const createdBy =
+                    body.identity === undefined
+                        ? undefined
+                        : {
+                              instanceId:
+                                  peerId ??
+                                  runtimeConfig.profiles!.get(body.identity)!.parentInstanceId,
+                              profileId: body.identity,
+                          };
+                let githubToken = transport.githubToken;
+                if (
+                    githubToken === undefined &&
+                    peerId === undefined &&
+                    body.secret?.kind === "github"
+                ) {
+                    try {
+                        githubToken = store.resolveSpecialSecret("github").GH_TOKEN;
+                    } catch {
+                        sendJson(response, 409, {
+                            code: "secret_unavailable",
+                            error: "GitHub credentials are not available on this Rig.",
+                        });
+                        return;
+                    }
+                }
+                const workspace = await store.createWorkspace(
+                    route.projectId,
+                    {
+                        ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
+                        ...(body.id === undefined ? {} : { id: body.id }),
+                        ...(body.identity === undefined ? {} : { identity: body.identity }),
+                        name: body.name,
+                        // A client that sends a placeholder name leaves this unset, and the first
+                        // chat inside the workspace names it instead.
+                        ...(body.nameConfigured === undefined
+                            ? {}
+                            : { nameConfigured: body.nameConfigured }),
+                        ...(body.secret === undefined ? {} : { secret: body.secret }),
+                    },
+                    {
+                        ...(createdBy === undefined ? {} : { createdBy }),
+                        ...(githubToken === undefined ? {} : { githubToken }),
+                    },
+                );
                 if (workspace === undefined) {
                     sendJson(response, 404, { error: "Project not found" });
                     return;
@@ -2535,7 +2722,18 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "messages" && route.sessionId === undefined) {
-        const body = await readJson<unknown>(request);
+        const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+        if (transport === undefined) {
+            sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+            return;
+        }
+        if (transport.githubToken !== undefined && p2pPeerId(request) === undefined) {
+            sendJson(response, 400, {
+                error: "Temporary Git credentials are accepted only from an authenticated peer Rig.",
+            });
+            return;
+        }
+        const body = transport.body;
         if (!isSubmitMessageRequest(body)) {
             sendJson(response, 400, { error: "Message settings are invalid." });
             return;
@@ -2598,6 +2796,15 @@ async function handleRequest(
             });
             return;
         }
+        if (
+            authenticatedOwnerId !== undefined &&
+            sessions.some((candidate) => candidate!.snapshot().profileId !== body.identity)
+        ) {
+            sendJson(response, 403, {
+                error: "A broadcast cannot target another human profile's sessions.",
+            });
+            return;
+        }
         if (sessions.some((candidate) => candidate!.isSubagent())) {
             sendJson(response, 409, { error: "Subagent sessions cannot receive broadcasts." });
             return;
@@ -2616,6 +2823,33 @@ async function handleRequest(
             return;
         }
         const { all: _all, sessionIds: _sessionIds, ...message } = broadcast;
+        const githubToken = transport.githubToken;
+        if (
+            authenticatedOwnerId !== undefined &&
+            transport.gitSecretRequested &&
+            githubToken === undefined
+        ) {
+            sendJson(response, 409, {
+                error: "GitHub credentials are not available for this remote operation.",
+            });
+            return;
+        }
+        if (
+            githubToken !== undefined &&
+            authenticatedOwnerId !== undefined &&
+            body.identity !== undefined &&
+            body.identity !== null
+        ) {
+            await Promise.all(
+                sessions.map((candidate) =>
+                    store.refreshSessionGitCredential(
+                        candidate!.id,
+                        { instanceId: authenticatedOwnerId, profileId: body.identity! },
+                        githubToken,
+                    ),
+                ),
+            );
+        }
         sendJson<BroadcastMessageResponse>(response, 202, {
             submissions: sessions.map((candidate) => candidate!.submit(message)),
         });
@@ -2965,7 +3199,19 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "sessions") {
-        const body = await readJson<CreateSessionRequest | null>(request);
+        const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+        if (transport === undefined) {
+            sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+            return;
+        }
+        const authenticatedPeerId = p2pPeerId(request);
+        if (transport.githubToken !== undefined && authenticatedPeerId === undefined) {
+            sendJson(response, 400, {
+                error: "Temporary Git credentials are accepted only from an authenticated peer Rig.",
+            });
+            return;
+        }
+        const body = transport.body as unknown as CreateSessionRequest | null;
         if (body === null || typeof body !== "object" || Array.isArray(body)) {
             sendJson(response, 400, { error: "Session settings must be a JSON object." });
             return;
@@ -3006,6 +3252,10 @@ async function handleRequest(
             sendJson(response, 400, { error: "The project ID must be a cuid2 identity." });
             return;
         }
+        if (body.identity !== undefined && !Value.Check(rigProfileIdSchema, body.identity)) {
+            sendJson(response, 400, { error: "The human profile ID is invalid." });
+            return;
+        }
         if (
             body.scope !== undefined &&
             (!Value.Check(sessionScopeSchema, body.scope) ||
@@ -3018,23 +3268,64 @@ async function handleRequest(
             });
             return;
         }
+        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!authorizeRemoteSessionTarget(request, response, store, body)) return;
         try {
+            const effectiveBody =
+                authenticatedPeerId !== undefined &&
+                body.scope === undefined &&
+                body.projectId === undefined &&
+                body.workspaceId === undefined
+                    ? { ...body, scope: { kind: "unsorted" as const } }
+                    : body;
             const sessionRequest =
-                body.scope === undefined
-                    ? configureSessionRequest(body, defaultDocker, () =>
-                          store.queryProjectSettings(body.cwd),
+                effectiveBody.scope === undefined
+                    ? configureSessionRequest(effectiveBody, defaultDocker, () =>
+                          store.queryProjectSettings(effectiveBody.cwd),
                       )
                     : (() => {
-                          const { docker: _docker, local: _local, ...folderRequest } = body;
+                          const {
+                              docker: _docker,
+                              local: _local,
+                              ...folderRequest
+                          } = effectiveBody;
                           return folderRequest;
                       })();
-            const authenticatedOwnerId = p2pPeerId(request);
-            const creationOptions =
-                authenticatedOwnerId === undefined ? {} : { ownerInstanceId: authenticatedOwnerId };
+            const authenticatedOwnerId = authenticatedPeerId;
+            const creationOptions = {
+                ...(authenticatedOwnerId === undefined
+                    ? {}
+                    : { ownerInstanceId: authenticatedOwnerId }),
+                ...(body.identity === undefined ? {} : { profileId: body.identity }),
+            };
+            const githubToken = transport.githubToken;
+            const existingSession = body.id === undefined ? undefined : store.get(body.id);
+            if (
+                authenticatedOwnerId !== undefined &&
+                transport.gitSecretRequested &&
+                githubToken === undefined &&
+                existingSession === undefined
+            ) {
+                sendJson(response, 409, {
+                    error: "GitHub credentials are not available for this remote operation.",
+                });
+                return;
+            }
             const session =
                 body.id === undefined
                     ? store.create(sessionRequest, creationOptions)
                     : store.createWithId(body.id, sessionRequest, creationOptions);
+            if (
+                githubToken !== undefined &&
+                authenticatedOwnerId !== undefined &&
+                body.identity !== undefined
+            ) {
+                await store.refreshSessionGitCredential(
+                    session.id,
+                    { instanceId: authenticatedOwnerId, profileId: body.identity },
+                    githubToken,
+                );
+            }
             sendJson<CreateSessionResponse>(response, 201, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3587,12 +3878,18 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "messages") {
-        const body = await readJson<unknown>(request);
+        const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+        if (transport === undefined) {
+            sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+            return;
+        }
+        const body = transport.body;
         if (!isSubmitMessageRequest(body)) {
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!authorizeSessionProfile(request, response, session.snapshot(), body.identity)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -3603,6 +3900,20 @@ async function handleRequest(
                 });
                 return;
             }
+        }
+        if (
+            !(await prepareSessionGitCredential(
+                request,
+                response,
+                store,
+                session.id,
+                session.snapshot(),
+                body.identity,
+                transport.githubToken,
+                transport.gitSecretRequested,
+            ))
+        ) {
+            return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         // A user working in an explicitly archived session makes it visible again.
@@ -3619,7 +3930,12 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "context") {
-        const body = await readJson<unknown>(request);
+        const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+        if (transport === undefined) {
+            sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+            return;
+        }
+        const body = transport.body;
         if (!Value.Check(submitContextMessageRequestSchema, body)) {
             sendJson(response, 400, {
                 error: "A context note accepts only message text and optional submission identities; run settings are not allowed.",
@@ -3627,6 +3943,7 @@ async function handleRequest(
             return;
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!authorizeSessionProfile(request, response, session.snapshot(), body.identity)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted?.data.delivery === "context") {
@@ -3638,6 +3955,20 @@ async function handleRequest(
                 });
                 return;
             }
+        }
+        if (
+            !(await prepareSessionGitCredential(
+                request,
+                response,
+                store,
+                session.id,
+                session.snapshot(),
+                body.identity,
+                transport.githubToken,
+                transport.gitSecretRequested,
+            ))
+        ) {
+            return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         const mutationId = body.mutationId ?? requestMutationId(request);
@@ -3698,12 +4029,44 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "steer") {
-        const body = await readJson<unknown>(request);
+        const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+        if (transport === undefined) {
+            sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+            return;
+        }
+        const body = transport.body;
         if (!isSubmitMessageRequest(body)) {
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!authorizeSessionProfile(request, response, session.snapshot(), body.identity)) return;
+        if (body.clientSubmissionId !== undefined) {
+            const submitted = session.events.messageSubmission(body.clientSubmissionId);
+            if (submitted !== undefined) {
+                sendJson<SteerMessageResponse>(response, 202, {
+                    delivery: submitted.data.delivery === "steer" ? "steer" : "run",
+                    eventId: submitted.id,
+                    runId: submitted.data.runId,
+                    sessionId: session.id,
+                });
+                return;
+            }
+        }
+        if (
+            !(await prepareSessionGitCredential(
+                request,
+                response,
+                store,
+                session.id,
+                session.snapshot(),
+                body.identity,
+                transport.githubToken,
+                transport.gitSecretRequested,
+            ))
+        ) {
+            return;
+        }
         try {
             sendJson<SteerMessageResponse>(response, 202, session.steer(body));
         } catch (error) {
@@ -4409,6 +4772,7 @@ function matchRoute(pathname: string):
               | "folders"
               | "plugins"
               | "projects"
+              | "project-clone"
               | "provider-usage"
               | "secret-registrations"
               | "sessions"
@@ -4635,6 +4999,7 @@ function matchRoute(pathname: string):
     if (pathname === "/plugin-catalogs/github") return { name: "plugin-catalog" };
     if (pathname === "/folders") return { name: "folders" };
     if (pathname === "/projects") return { name: "projects" };
+    if (pathname === "/projects/clone") return { name: "project-clone" };
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
@@ -5122,7 +5487,12 @@ function projectRegistrationStatus(error: ProjectRegistrationError): number {
     if (error.code === "path_missing") return 404;
     if (error.code === "path_inaccessible") return 403;
     if (error.code === "invalid_request") return 400;
-    if (error.code === "project_id_conflict" || error.code === "managed_workspace_unavailable") {
+    if (
+        error.code === "project_id_conflict" ||
+        error.code === "project_path_conflict" ||
+        error.code === "managed_workspace_unavailable" ||
+        error.code === "secret_unavailable"
+    ) {
         return 409;
     }
     return 422;
@@ -5841,21 +6211,48 @@ function buildGroupCatalog(
         }))
         .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
         .filter((summary) => !summary.archived);
-    const projects = store.listProjects().filter((project) => project.archivedAt === undefined);
+    const projects = store
+        .listProjects()
+        .filter(
+            (project) =>
+                project.archivedAt === undefined &&
+                (ownerInstanceId === undefined ||
+                    project.createdBy?.instanceId === ownerInstanceId),
+        );
     const projectIds = new Set(projects.map((project) => project.id));
     const workspaces = store
         .listWorkspaces()
         .filter(
             (workspace) =>
                 projectIds.has(workspace.projectId) &&
+                (ownerInstanceId === undefined ||
+                    workspace.createdBy?.instanceId === ownerInstanceId) &&
                 workspace.archivedAt === undefined &&
                 workspace.status !== "archiving" &&
                 workspace.status !== "archived",
         );
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+    const visibleSessions =
+        ownerInstanceId === undefined
+            ? sessions
+            : sessions.filter((session) => {
+                  if (session.scope.kind === "project") {
+                      return projectIds.has(session.scope.projectId);
+                  }
+                  if (session.scope.kind === "workspace") {
+                      return (
+                          projectIds.has(session.scope.projectId) &&
+                          workspaceIds.has(session.scope.workspaceId)
+                      );
+                  }
+                  return session.scope.kind === "unsorted";
+              });
     return {
         catalog: modelCatalog,
-        folders: store.listFolders().filter((folder) => folder.archivedAt === undefined),
+        folders:
+            ownerInstanceId === undefined
+                ? store.listFolders().filter((folder) => folder.archivedAt === undefined)
+                : [],
         identity,
         presence: store.presence.state(),
         protocolVersion: RIG_PROTOCOL_VERSION,
@@ -5874,7 +6271,7 @@ function buildGroupCatalog(
                       },
                   ],
         ),
-        sessions,
+        sessions: visibleSessions,
         sessionsComplete: true,
         workspaces,
     };
@@ -6044,6 +6441,120 @@ function p2pPeerId(request: IncomingMessage): string | undefined {
     return typeof value === "string" ? value : undefined;
 }
 
+function decodeRemoteProjectCreation(
+    value: unknown,
+): { githubToken?: string; request: CreateRemoteProjectRequest } | undefined {
+    if (!Value.Check(remoteProjectCreationTransportSchema, value)) return undefined;
+    const decoded = Value.Decode(remoteProjectCreationTransportSchema, value);
+    const { temporaryGitSecret, ...request } = decoded;
+    return {
+        ...(temporaryGitSecret === undefined ? {} : { githubToken: temporaryGitSecret.token }),
+        request,
+    };
+}
+
+function decodeTemporaryGitCredential(value: unknown):
+    | {
+          body: Record<string, unknown>;
+          githubToken?: string;
+          gitSecretRequested: boolean;
+      }
+    | undefined {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        return { body: value as never, gitSecretRequested: false };
+    }
+    const record = value as Record<string, unknown>;
+    const hasGitSecret = Object.hasOwn(record, "gitSecret");
+    if (hasGitSecret && !Value.Check(projectGitSecretSchema, record.gitSecret)) {
+        return undefined;
+    }
+    const { gitSecret: _gitSecret, temporaryGitSecret, ...body } = record;
+    const gitSecretRequested = hasGitSecret || Value.Check(projectGitSecretSchema, body.secret);
+    if (temporaryGitSecret === undefined) {
+        return { body, gitSecretRequested };
+    }
+    if (!Value.Check(temporaryGitSecretSchema, temporaryGitSecret)) return undefined;
+    if (!gitSecretRequested) return undefined;
+    return { body, githubToken: temporaryGitSecret.token, gitSecretRequested };
+}
+
+function authorizeRemoteProjectCreator(
+    request: IncomingMessage,
+    response: ServerResponse,
+    runtimeConfig: ProtocolServerRuntimeConfig,
+    body: CreateRemoteProjectRequest,
+): boolean {
+    const peerId = p2pPeerId(request);
+    if (peerId !== undefined) {
+        if (body.identity === undefined) {
+            sendJson(response, 400, {
+                code: "profile_required",
+                error: "A registered human profile is required to create a remote project.",
+            });
+            return false;
+        }
+        if (
+            runtimeConfig.canP2pPeerUseRemoteWork?.(peerId) !== true ||
+            runtimeConfig.profiles?.owns(body.identity, peerId) !== true
+        ) {
+            sendJson(response, 403, {
+                code: "profile_not_owned",
+                error: "That human profile is not owned by the authenticated peer Rig.",
+            });
+            return false;
+        }
+        return true;
+    }
+    if (body.identity === undefined) return true;
+    if (runtimeConfig.profiles?.isLocal(body.identity) === true) return true;
+    sendJson(response, 403, {
+        code: "profile_not_owned",
+        error: "That human profile is not owned by this Rig.",
+    });
+    return false;
+}
+
+function authorizeRemoteSessionTarget(
+    request: IncomingMessage,
+    response: ServerResponse,
+    store: SessionStore,
+    body: CreateSessionRequest,
+): boolean {
+    const peerId = p2pPeerId(request);
+    if (peerId === undefined) return true;
+    if (body.scope?.kind === "folder") {
+        sendJson(response, 400, {
+            error: "Remote sessions may use Unsorted or an owned project or workspace.",
+        });
+        return false;
+    }
+    if (body.projectId === undefined && body.workspaceId === undefined) return true;
+    const workspace =
+        body.workspaceId === undefined
+            ? undefined
+            : store.listWorkspaces().find((candidate) => candidate.id === body.workspaceId);
+    const projectId = body.projectId ?? workspace?.projectId;
+    const project = projectId === undefined ? undefined : store.getProject(projectId);
+    const creator = workspace?.createdBy ?? project?.createdBy;
+    if (
+        project === undefined ||
+        (body.workspaceId !== undefined && workspace === undefined) ||
+        (body.projectId !== undefined &&
+            workspace !== undefined &&
+            workspace.projectId !== body.projectId) ||
+        body.identity === undefined ||
+        creator?.instanceId !== peerId ||
+        creator.profileId !== body.identity
+    ) {
+        sendJson(response, 403, {
+            code: "profile_not_owned",
+            error: "That project or workspace is not owned by this human profile.",
+        });
+        return false;
+    }
+    return true;
+}
+
 function globalLiveEventVisibleToOwner(
     event: GlobalEvent,
     ownerInstanceId: string,
@@ -6052,6 +6563,15 @@ function globalLiveEventVisibleToOwner(
 ): boolean {
     if ("sessionId" in event) {
         return store.get(event.sessionId)?.snapshot().ownerInstanceId === ownerInstanceId;
+    }
+    if ("projectId" in event) {
+        if ("workspaceId" in event) {
+            return (
+                store.getWorkspace(event.projectId, event.workspaceId)?.createdBy?.instanceId ===
+                ownerInstanceId
+            );
+        }
+        return store.getProject(event.projectId)?.createdBy?.instanceId === ownerInstanceId;
     }
     if (event.type === "profile_changed") {
         return (
@@ -6080,8 +6600,7 @@ function authorizeMessageProfile(
             return false;
         }
         if (
-            (runtimeConfig.canP2pPeerProvision?.(peerId) ??
-                runtimeConfig.canP2pPeerConfigure?.(peerId)) !== true ||
+            runtimeConfig.canP2pPeerUseRemoteWork?.(peerId) !== true ||
             runtimeConfig.profiles?.owns(profileId, peerId) !== true
         ) {
             sendJson(response, 403, {
@@ -6101,4 +6620,59 @@ function authorizeMessageProfile(
         return false;
     }
     return true;
+}
+
+async function prepareSessionGitCredential(
+    request: IncomingMessage,
+    response: ServerResponse,
+    store: SessionStore,
+    sessionId: string,
+    session: { profileId?: string },
+    identity: string | null | undefined,
+    githubToken: string | undefined,
+    gitSecretRequested: boolean,
+): Promise<boolean> {
+    const peerId = p2pPeerId(request);
+    if (!authorizeSessionProfile(request, response, session, identity)) return false;
+    if (githubToken === undefined) {
+        if (gitSecretRequested && peerId !== undefined) {
+            sendJson(response, 409, {
+                error: "GitHub credentials are not available for this remote operation.",
+            });
+            return false;
+        }
+        return true;
+    }
+    if (peerId === undefined || identity === undefined || identity === null) {
+        sendJson(response, 400, {
+            error: "Temporary Git credentials are accepted only from an authenticated human profile.",
+        });
+        return false;
+    }
+    try {
+        await store.refreshSessionGitCredential(
+            sessionId,
+            { instanceId: peerId, profileId: identity },
+            githubToken,
+        );
+        return true;
+    } catch (error) {
+        if (isDatabaseFailure(error)) throw error;
+        sendJson(response, 409, { error: errorToMessage(error) });
+        return false;
+    }
+}
+
+function authorizeSessionProfile(
+    request: IncomingMessage,
+    response: ServerResponse,
+    session: { profileId?: string },
+    identity: string | null | undefined,
+): boolean {
+    if (p2pPeerId(request) === undefined || session.profileId === identity) return true;
+    sendJson(response, 403, {
+        code: "profile_not_owned",
+        error: "That session belongs to another human profile.",
+    });
+    return false;
 }

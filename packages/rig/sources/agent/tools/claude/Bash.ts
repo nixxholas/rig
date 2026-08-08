@@ -33,7 +33,7 @@ export const claudeBashTool = defineTool({
 - Use the \`gh\` CLI for GitHub operations.
 - Commit or push only when the user asks.
 
-Rig extension: \`secrets\` injects selected session secret bundles. \`dangerouslyDisableSandbox\` requests one reviewed full-access execution in Auto mode; it never bypasses Read only or Workspace write mode.
+Rig extension: \`secrets\` selects session secret bundles for this command and always requires reviewed Full-access execution. Model-available environment secrets are injected only into the selected command. Managed credentials such as project Git access activate a proxy without exposing the source credential. \`dangerouslyDisableSandbox\` requests one reviewed Full-access execution in Auto mode; neither mechanism bypasses Read only or Workspace write mode.
 
 Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPUT_MAX_BYTES / 1024}KB.`,
     arguments: Type.Object(
@@ -66,7 +66,7 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
             secrets: Type.Optional(
                 Type.Array(Type.String(), {
                     description:
-                        "IDs of attached secret bundles to inject for this command. Use an empty array for none.",
+                        "IDs of attached secret bundles to use for this command. Selecting any secret requires reviewed Full-access execution. Use an empty array for none.",
                 }),
             ),
             dangerouslyDisableSandbox: Type.Optional(
@@ -80,13 +80,17 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     ),
     returnType: shellToolOutputSchema,
     autoPermissionInstructions:
-        "For Bash, request full-access execution with dangerouslyDisableSandbox: true only when the workspace sandbox blocks necessary work. The command remains sandboxed when this field is false or omitted.",
-    describeAutoPermissionAction: ({ command }, context) =>
-        summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+        "For Bash, request full-access execution with dangerouslyDisableSandbox: true only when the workspace sandbox blocks necessary work. Selecting any attached secret also requires reviewed Full-access execution automatically. Commands without either remain sandboxed.",
+    describeAutoPermissionAction: ({ command, secrets }, context) =>
+        describeShellActionWithSecrets(
+            summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+            secrets,
+        ),
     availableToPermissionReviewer: true,
-    shouldReviewInAutoMode: ({ dangerouslyDisableSandbox }) => dangerouslyDisableSandbox === true,
-    shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox }) =>
-        dangerouslyDisableSandbox === true,
+    shouldReviewInAutoMode: ({ dangerouslyDisableSandbox, secrets }) =>
+        dangerouslyDisableSandbox === true || (secrets?.length ?? 0) > 0,
+    shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox, secrets }) =>
+        dangerouslyDisableSandbox === true || (secrets?.length ?? 0) > 0,
     steerable: true,
     execute: async ({ command, run_in_background, secrets, timeout, tty }, context, execution) => {
         const options: Parameters<typeof runShellCommand>[1] = {
@@ -124,3 +128,12 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     toUI: (result) => summarizeShellOutput(result),
     locks: [],
 });
+
+function describeShellActionWithSecrets(
+    action: string,
+    secrets: readonly string[] | undefined,
+): string {
+    return secrets === undefined || secrets.length === 0
+        ? action
+        : `${action}. Secrets: ${secrets.map((secret) => JSON.stringify(secret)).join(", ")}`;
+}

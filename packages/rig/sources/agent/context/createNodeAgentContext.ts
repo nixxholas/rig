@@ -20,6 +20,7 @@ import { resolve } from "node:path";
 
 export interface CreateNodeAgentContextOptions {
     cwd: string;
+    environment?: NodeJS.ProcessEnv;
     folders?: FolderContext;
     goals?: GoalContext;
     processManager: NativeProcessManager;
@@ -44,6 +45,7 @@ export function createNodeAgentContext(options: CreateNodeAgentContextOptions): 
         }),
         bash: createNodeBashContext({
             cwd: options.cwd,
+            ...(options.environment === undefined ? {} : { environment: options.environment }),
             processManager: options.processManager,
             permissions,
             ...(options.plugins?.network === undefined

@@ -1,5 +1,10 @@
 export { SecretRegistry } from "./SecretRegistry.js";
-export { SessionSecretContext } from "./SessionSecretContext.js";
+export {
+    SessionSecretContext,
+    type ActivatedCommandSecrets,
+    type RuntimeCommandSecret,
+    type RuntimeCommandSecretLease,
+} from "./SessionSecretContext.js";
 export {
     GITHUB_SECRET_REFRESH_INTERVAL_MS,
     GitHubSecretSync,
@@ -15,6 +20,7 @@ export {
     environmentSecretRegistrationSchema,
     environmentSecretUpdateSchema,
     githubSecretRegistrationSchema,
+    PROJECT_GIT_SECRET_ID,
     secretRegistrationSchema,
     specialSecretKindSchema,
 } from "./types.js";

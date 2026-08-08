@@ -66,6 +66,7 @@ import type {
     MutationId,
     Project,
     ProjectRegistrationErrorCode,
+    ProjectRemoteSource,
     ProjectWorkspace,
     ProtocolSession,
     RemoteTerminalGroupState,
@@ -535,11 +536,15 @@ export interface SendMessageInput {
     content?: readonly ContentBlock[];
     displayText?: string;
     identity?: string | null;
+    /** Shares the native GitHub credential for this one remote operation. */
+    gitSecret?: { kind: "github" };
     text: string;
 }
 
 export interface SendContextMessageInput {
     identity?: string | null;
+    /** Shares the native GitHub credential for this one remote operation. */
+    gitSecret?: { kind: "github" };
     text: string;
 }
 
@@ -570,6 +575,10 @@ export interface CreateSessionInput {
     appendSystemPrompt?: string;
     cwd: string;
     effort?: string;
+    /** Human profile responsible for this session. Required when creating it on a peer Rig. */
+    identity?: string;
+    /** Shares the native GitHub credential for this one remote operation. */
+    gitSecret?: { kind: "github" };
     local?: boolean;
     modelId?: string;
     permissionMode?: string;
@@ -592,8 +601,12 @@ export interface CreateSessionInput {
 export interface CreateWorkspaceInput {
     /** Explicit base to fork; the project's main branch on the remote is used when it is absent. */
     baseRef?: string;
+    /** Human profile that owns the workspace. Required when creating it on a peer Rig. */
+    identity?: string;
     name: string;
     projectId: string;
+    /** Refreshes the peer daemon's memory-only GitHub authentication for a managed project. */
+    secret?: { kind: "github" };
 }
 
 export interface TerminalPresence {
@@ -608,6 +621,16 @@ export interface ProjectAddOptions {
     signal?: AbortSignal;
 }
 
+export interface CreateRemoteProjectInput {
+    /** Human profile responsible for this clone and its Git identity. */
+    identity: string;
+    name: string;
+    /** Reuses a failed managed project reservation, including after reconnecting. */
+    projectId?: string;
+    secret?: { kind: "github" };
+    source: ProjectRemoteSource;
+}
+
 export interface RigProjects {
     /**
      * Registers a Git top-level folder and returns Rig's authoritative project entity.
@@ -616,6 +639,8 @@ export interface RigProjects {
      * daemon commits still converges on the entity that was already created.
      */
     add(path: string, options?: ProjectAddOptions): Promise<Project>;
+    /** Creates a managed project immediately and tracks its background clone in the catalog. */
+    clone(input: CreateRemoteProjectInput): MutationId;
 }
 
 export class ProjectRegistrationError extends Error {
@@ -985,6 +1010,77 @@ interface GroupEntry {
     subscribers: Set<GroupSubscriber>;
 }
 
+function gitSecretForSessionCreate(
+    groups: GroupEntry | undefined,
+    input: CreateSessionInput,
+): { kind: "github" } | undefined {
+    const projects = groups?.store.projects() ?? [];
+    const project =
+        input.projectId !== undefined
+            ? projects.find((candidate) => candidate.id === input.projectId)
+            : input.workspaceId !== undefined
+              ? projects.find((candidate) =>
+                    candidate.workspaces.some((workspace) => workspace.id === input.workspaceId),
+                )
+              : projects.find(
+                    (candidate) =>
+                        candidate.path === input.cwd ||
+                        candidate.workspaces.some((workspace) => workspace.path === input.cwd),
+                );
+    return project?.requiredSecretKind === "github" ? { kind: "github" } : undefined;
+}
+
+function profileIdForSessionCreate(
+    groups: GroupEntry | undefined,
+    input: CreateSessionInput,
+): string | undefined {
+    const projects = groups?.store.projects() ?? [];
+    const project =
+        input.projectId !== undefined
+            ? projects.find((candidate) => candidate.id === input.projectId)
+            : input.workspaceId !== undefined
+              ? projects.find((candidate) =>
+                    candidate.workspaces.some((workspace) => workspace.id === input.workspaceId),
+                )
+              : projects.find(
+                    (candidate) =>
+                        candidate.path === input.cwd ||
+                        candidate.workspaces.some((workspace) => workspace.path === input.cwd),
+                );
+    return project?.createdBy?.profileId;
+}
+
+function gitSecretForSession(
+    groups: GroupEntry | undefined,
+    sessionId: string,
+): { kind: "github" } | undefined {
+    const project = groups?.store
+        .projects()
+        .find(
+            (candidate) =>
+                candidate.sessions.some((session) => session.id === sessionId) ||
+                candidate.workspaces.some((workspace) =>
+                    workspace.sessions.some((session) => session.id === sessionId),
+                ),
+        );
+    return project?.requiredSecretKind === "github" ? { kind: "github" } : undefined;
+}
+
+function profileIdForSession(
+    groups: GroupEntry | undefined,
+    sessionId: string,
+): string | undefined {
+    for (const project of groups?.store.projects() ?? []) {
+        const direct = project.sessions.find((session) => session.id === sessionId);
+        if (direct !== undefined) return direct.profileId;
+        for (const workspace of project.workspaces) {
+            const nested = workspace.sessions.find((session) => session.id === sessionId);
+            if (nested !== undefined) return nested.profileId;
+        }
+    }
+    return undefined;
+}
+
 interface HappyCloudSubscriber extends RigHappyCloudSubscriptionOptions {
     closed: boolean;
 }
@@ -1097,6 +1193,9 @@ interface GitWatchEntity {
 /** Creates the one client a UI shares across its group and session views. */
 export function connectRig(options: ConnectRigOptions): RigConnection {
     const request = options.fetch ?? globalThis.fetch;
+    const usesPeerEndpoint = /\/p2p\/peers\/[^/]+\/api\/?$/u.test(
+        new URL(options.endpoint).pathname,
+    );
     const wait = options.wait ?? defaultWait;
     const now = options.now ?? Date.now;
     const nextMutationId = orderedUuidV7(now, options.randomValues);
@@ -1114,6 +1213,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const knownGroupVersions = new Map<string, number>();
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
+    let groupCatalogMutationLoad: Promise<void> | undefined;
     let happyCloudEntry: HappyCloudEntry | undefined;
     let p2pEntry: P2pEntry | undefined;
     let profilesEntry: ProfilesEntry | undefined;
@@ -2144,6 +2244,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         queueGitWatchSync();
     };
 
+    const ensureGroupCatalogForMutation = (): Promise<void> => {
+        const entry = createGroupEntry();
+        if (entry.store.state().connection === "live") return Promise.resolve();
+        groupCatalogMutationLoad ??= loadCatalog(entry).finally(() => {
+            groupCatalogMutationLoad = undefined;
+        });
+        return groupCatalogMutationLoad;
+    };
+
     const reportCatalogError = (entry: GroupEntry, error: unknown): void => {
         if (closed || entry.controller.signal.aborted) return;
         publishGroups(entry, entry.store.setConnection("closed"));
@@ -2958,6 +3067,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             // asking for them keeps it loaded with no view open.
             options.onSessionFinished === undefined &&
             inboxEntry === undefined &&
+            // Session-only clients still need project ownership and credential requirements for
+            // deterministic remote sends, including the first message after a daemon restart.
+            sessionEntries.size === 0 &&
             // The folder tree arrives in the same opening catalog, so a folder view keeps it
             // loaded exactly as an inbox view does.
             folderEntry === undefined &&
@@ -3572,6 +3684,56 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
 
     const projects: RigProjects = {
+        clone: (input) => {
+            const id = input.projectId ?? nextEntityId();
+            const createdAt = now();
+            const target: GroupTarget = { kind: "project", projectId: id };
+            const optimistic: Project = {
+                createdAt,
+                id,
+                initializationAttempt: 0,
+                initializationStatus: "initializing",
+                kind: "regular",
+                name: input.name,
+                nameSource: "user",
+                orderKey: "",
+                path: "",
+                presence: "missing",
+                remoteSource: input.source,
+                ...(input.secret === undefined ? {} : { requiredSecretKind: input.secret.kind }),
+                settings: {},
+                storageKey: "",
+                updatedAt: createdAt,
+                version: 0,
+                worktreeSupport: "unknown",
+            };
+            return enqueue({
+                acknowledged: false,
+                action: "create_project",
+                applyOptimistic: (publish) => {
+                    if (groupsEntry === undefined) return () => undefined;
+                    const changed = groupsEntry.store.applyOptimisticProjectCreate(optimistic);
+                    if (publish) publishGroups(groupsEntry, changed.deltas);
+                    return changed.undo;
+                },
+                entityKey: groupKey(target),
+                id,
+                matchesAuthoritative: (data) => responseEntity(data, "project")?.id === id,
+                prepare: () => ({
+                    body: {
+                        identity: input.identity,
+                        name: input.name,
+                        projectId: id,
+                        ...(input.secret === undefined ? {} : { secret: input.secret }),
+                        source: input.source,
+                    },
+                    headers: { "x-rig-mutation-id": id },
+                    method: "POST",
+                    url: endpointUrl(options.endpoint, "projects/clone"),
+                }),
+                undo: () => undefined,
+            });
+        },
         add: async (path, addOptions = {}) => {
             const projectId = addOptions.projectId ?? nextEntityId();
             const operation = combinedSignal(rootController.signal, addOptions.signal);
@@ -4736,13 +4898,25 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             entityKey: sessionKey(id),
             id,
-            prepare: () => ({
-                body: { ...input, id },
-                headers: { "x-rig-mutation-id": id },
-                method: "POST",
-                url: endpointUrl(options.endpoint, "sessions"),
-            }),
+            prepare: () => {
+                const identity = input.identity ?? profileIdForSessionCreate(groupsEntry, input);
+                const gitSecret = input.gitSecret ?? gitSecretForSessionCreate(groupsEntry, input);
+                return {
+                    body: {
+                        ...input,
+                        id,
+                        ...(identity === undefined ? {} : { identity }),
+                        ...(gitSecret === undefined ? {} : { gitSecret }),
+                    },
+                    headers: { "x-rig-mutation-id": id },
+                    method: "POST" as const,
+                    url: endpointUrl(options.endpoint, "sessions"),
+                };
+            },
             ready: async () => {
+                if (usesPeerEndpoint && input.scope === undefined) {
+                    await ensureGroupCatalogForMutation();
+                }
                 if (input.scope?.kind !== "folder") return;
                 const pending = pendingFolderCreates.get(input.scope.folderId);
                 if (pending === undefined) return;
@@ -4793,19 +4967,33 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             expectsWorkspaceResponse: true,
             id,
             matchesAuthoritative: (data) => responseEntity(data, "workspace")?.id === id,
-            prepare: () => ({
-                body: {
-                    ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-                    id,
-                    name: input.name,
-                },
-                headers: { "x-rig-mutation-id": id },
-                method: "POST",
-                url: endpointUrl(
-                    options.endpoint,
-                    `projects/${encodeURIComponent(input.projectId)}/workspaces`,
-                ),
-            }),
+            prepare: () => {
+                const project = groupsEntry?.store
+                    .projects()
+                    .find((candidate) => candidate.id === input.projectId);
+                const identity = input.identity ?? project?.createdBy?.profileId;
+                const secret =
+                    input.secret ??
+                    (project?.requiredSecretKind === "github"
+                        ? ({ kind: "github" } as const)
+                        : undefined);
+                return {
+                    body: {
+                        ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+                        id,
+                        ...(identity === undefined ? {} : { identity }),
+                        name: input.name,
+                        ...(secret === undefined ? {} : { secret }),
+                    },
+                    headers: { "x-rig-mutation-id": id },
+                    method: "POST" as const,
+                    url: endpointUrl(
+                        options.endpoint,
+                        `projects/${encodeURIComponent(input.projectId)}/workspaces`,
+                    ),
+                };
+            },
+            ...(usesPeerEndpoint ? { ready: ensureGroupCatalogForMutation } : {}),
             undo: () => undefined,
         });
     };
@@ -4887,6 +5075,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 
     const sendMessage = (sessionId: string, message: string | SendMessageInput): MutationId => {
         const input = typeof message === "string" ? { text: message } : message;
+        const optimisticIdentity =
+            input.identity === undefined
+                ? sessionEntries.get(sessionId)?.store.session().profileId
+                : input.identity;
         const id = nextMutationId();
         const key = sessionKey(sessionId);
         const expectedRunId = sessionEntries.get(sessionId)?.store.session().activeTurn?.runId;
@@ -4906,9 +5098,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         id,
                         input.text,
                         now(),
-                        input.identity ?? null,
+                        optimisticIdentity ?? null,
                     );
-                    if (input.identity !== undefined && input.identity !== null) {
+                    if (optimisticIdentity !== undefined && optimisticIdentity !== null) {
                         ensureProfilesForSession(entry);
                     }
                     undos.push(changed.undo);
@@ -4926,6 +5118,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             prepare: () => {
                 expectedEventId ??= currentSessionCursor(sessionId);
+                const identity =
+                    input.identity === undefined
+                        ? (sessionEntries.get(sessionId)?.store.session().profileId ??
+                          profileIdForSession(groupsEntry, sessionId))
+                        : input.identity;
+                const gitSecret = input.gitSecret ?? gitSecretForSession(groupsEntry, sessionId);
                 return {
                     body: {
                         clientSubmissionId: id,
@@ -4933,9 +5131,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         ...(input.displayText === undefined
                             ? {}
                             : { displayText: input.displayText }),
-                        ...(input.identity === undefined || input.identity === null
-                            ? {}
-                            : { identity: input.identity }),
+                        ...(identity === undefined || identity === null ? {} : { identity }),
+                        ...(gitSecret === undefined ? {} : { gitSecret }),
                         ...(expectedRunId === undefined ? {} : { expectedRunId }),
                         mutationId: id,
                         text: input.text,
@@ -4948,6 +5145,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     ),
                 };
             },
+            ...(usesPeerEndpoint ? { ready: ensureGroupCatalogForMutation } : {}),
         };
         return enqueue(mutation);
     };
@@ -4957,6 +5155,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         message: string | SendContextMessageInput,
     ): MutationId => {
         const input = typeof message === "string" ? { text: message } : message;
+        const optimisticIdentity =
+            input.identity === undefined
+                ? sessionEntries.get(sessionId)?.store.session().profileId
+                : input.identity;
         const id = nextMutationId();
         const key = sessionKey(sessionId);
         let expectedEventId: string | undefined;
@@ -4976,9 +5178,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         id,
                         input.text,
                         now(),
-                        input.identity ?? null,
+                        optimisticIdentity ?? null,
                     );
-                    if (input.identity !== undefined && input.identity !== null) {
+                    if (optimisticIdentity !== undefined && optimisticIdentity !== null) {
                         ensureProfilesForSession(entry);
                     }
                     undos.push(changed.undo);
@@ -4995,12 +5197,17 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             prepare: () => {
                 expectedEventId ??= currentSessionCursor(sessionId);
+                const identity =
+                    input.identity === undefined
+                        ? (sessionEntries.get(sessionId)?.store.session().profileId ??
+                          profileIdForSession(groupsEntry, sessionId))
+                        : input.identity;
+                const gitSecret = input.gitSecret ?? gitSecretForSession(groupsEntry, sessionId);
                 return {
                     body: {
                         clientSubmissionId: id,
-                        ...(input.identity === undefined || input.identity === null
-                            ? {}
-                            : { identity: input.identity }),
+                        ...(identity === undefined || identity === null ? {} : { identity }),
+                        ...(gitSecret === undefined ? {} : { gitSecret }),
                         mutationId: id,
                         text: input.text,
                     },
@@ -5012,6 +5219,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     ),
                 };
             },
+            ...(usesPeerEndpoint ? { ready: ensureGroupCatalogForMutation } : {}),
         };
         return enqueue(mutation);
     };

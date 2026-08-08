@@ -44,6 +44,123 @@ describe("createNodeAgentContext", () => {
         expect(processManager.activeCount()).toBe(0);
     });
 
+    it("injects the session Git identity into shell subprocesses", async () => {
+        const cwd = await makeTempDir();
+        const context = createNodeAgentContext({
+            cwd,
+            environment: {
+                ...process.env,
+                GIT_AUTHOR_EMAIL: "steve@example.com",
+                GIT_AUTHOR_NAME: "Steve Korshakov",
+                GIT_COMMITTER_EMAIL: "steve@example.com",
+                GIT_COMMITTER_NAME: "Steve Korshakov",
+            },
+            permissionMode: "full_access",
+            processManager: new NativeProcessManager(),
+        });
+        const script =
+            "process.stdout.write(JSON.stringify({authorEmail:process.env.GIT_AUTHOR_EMAIL,authorName:process.env.GIT_AUTHOR_NAME,committerEmail:process.env.GIT_COMMITTER_EMAIL,committerName:process.env.GIT_COMMITTER_NAME}))";
+
+        const result = await context.bash.run({
+            command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+        });
+
+        expect(JSON.parse(result.stdout)).toEqual({
+            authorEmail: "steve@example.com",
+            authorName: "Steve Korshakov",
+            committerEmail: "steve@example.com",
+            committerName: "Steve Korshakov",
+        });
+    });
+
+    it("keeps a daemon-owned Git broker behind Full access", async () => {
+        const cwd = await makeTempDir();
+        const sockets = new Set<import("node:net").Socket>();
+        const broker = createServer((socket) => {
+            socket.end(
+                "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nbroker-ok\n",
+            );
+        });
+        broker.on("connection", (socket) => {
+            sockets.add(socket);
+            socket.once("close", () => sockets.delete(socket));
+        });
+        await new Promise<void>((resolve, reject) => {
+            broker.once("error", reject);
+            broker.listen(0, "127.0.0.1", () => {
+                broker.off("error", reject);
+                resolve();
+            });
+        });
+        const address = broker.address();
+        if (address === null || typeof address === "string") {
+            throw new Error("Missing credential broker test port.");
+        }
+        const context = createNodeAgentContext({
+            cwd,
+            processManager: new NativeProcessManager(),
+        });
+        const script = `const request=require("node:http").get("http://127.0.0.1:${String(address.port)}/",response=>response.pipe(process.stdout));request.setTimeout(2000,()=>request.destroy(new Error("timeout")));request.on("error",error=>{console.error(error.message);process.exitCode=1})`;
+
+        try {
+            const restricted = await context.bash.run({
+                command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+            });
+            expect(restricted.exitCode).not.toBe(0);
+
+            context.permissions!.setMode("full_access");
+            const fullAccess = await context.bash.run({
+                command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+            });
+            expect(fullAccess).toMatchObject({ exitCode: 0, stdout: "broker-ok\n" });
+        } finally {
+            for (const socket of sockets) socket.destroy();
+            await new Promise<void>((resolve) => broker.close(() => resolve()));
+        }
+    }, 10_000);
+
+    it("injects a broker capability only when the project Git secret is selected", async () => {
+        const cwd = await makeTempDir();
+        const capability = "c".repeat(64);
+        let active = 0;
+        let activations = 0;
+        const secrets = new SessionSecretContext(new SecretRegistry());
+        secrets.setRuntimeSecret({
+            activate: () => {
+                active += 1;
+                activations += 1;
+                return {
+                    environment: {},
+                    release: () => {
+                        active -= 1;
+                    },
+                };
+            },
+            description: "Git access for this managed project",
+            environment: {
+                GIT_CONFIG_KEY_1: `url.http://127.0.0.1:41000/${capability}/github.com/slopus/rig.git.insteadOf`,
+            },
+            id: "project-git",
+            trustedLoopbackPorts: [41_000],
+        });
+        const context = createNodeAgentContext({
+            cwd,
+            permissionMode: "full_access",
+            processManager: new NativeProcessManager(),
+            secrets,
+        });
+        const command = 'printf %s "${GIT_CONFIG_KEY_1-}"';
+
+        await expect(context.bash.run({ command })).resolves.toMatchObject({ stdout: "" });
+        expect({ active, activations }).toEqual({ active: 0, activations: 0 });
+        await expect(
+            context.bash.run({ command, secrets: ["project-git"] }),
+        ).resolves.toMatchObject({
+            stdout: "url.http://127.0.0.1/[Rig Git authentication]/github.com/slopus/rig.git.insteadOf",
+        });
+        expect({ active, activations }).toEqual({ active: 0, activations: 1 });
+    });
+
     it("rejects attacker-selected shells outside Full access", async () => {
         const cwd = await makeTempDir();
         const context = createNodeAgentContext({
@@ -155,6 +272,42 @@ describe("createNodeAgentContext", () => {
                 restoreEnvironment(name, previousValues[index]),
             );
         }
+    });
+
+    it("rejects command secrets unless the exact command has Full access", async () => {
+        const cwd = await makeTempDir();
+        const registry = new SecretRegistry([
+            {
+                description: "Service API credentials",
+                environment: { MANAGED_SECRET_TEST_TOKEN: "registered-token" },
+                id: "service",
+            },
+        ]);
+        const context = createNodeAgentContext({
+            cwd,
+            permissionMode: "auto",
+            processManager: new NativeProcessManager(),
+            secrets: new SessionSecretContext(registry, ["service"]),
+        });
+
+        await expect(context.bash.run({ command: "true", secrets: ["service"] })).rejects.toThrow(
+            "Secrets require Full access",
+        );
+        context.permissions?.setMode("full_access");
+        await expect(
+            context.bash.run({ command: "true", secrets: ["service"] }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+
+        const sessionId = await context.bash.startSession({
+            command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+            secrets: ["service"],
+        });
+        context.permissions?.setMode("workspace_write");
+        await expect(context.bash.writeSession(sessionId, "git push\n")).rejects.toThrow(
+            "Secrets require Full access",
+        );
+        context.permissions?.setMode("full_access");
+        await context.bash.killSession(sessionId);
     });
 
     it("keeps yielded shell sessions alive for polling and stdin", async () => {

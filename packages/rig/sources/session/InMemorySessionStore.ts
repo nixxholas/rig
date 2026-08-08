@@ -9,6 +9,7 @@ import type {
     ChangeServiceTierRequest,
     CreateFolderRequest,
     CreateProjectWorkspaceRequest,
+    CreateRemoteProjectRequest,
     CreateSessionRequest,
     Folder,
     GetTimelineRequest,
@@ -16,6 +17,7 @@ import type {
     ModelCatalog,
     MoveFolderRequest,
     Project,
+    ProjectCreator,
     ProjectSettingsUpdate,
     ProjectWorkspace,
     ReorderRequest,
@@ -63,6 +65,7 @@ import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import {
     ProjectRepository,
     type ProjectAvatarAsset,
+    type ProjectRepositoryOptions,
     type ProjectSessionSettings,
 } from "../project/ProjectRepository.js";
 import { FolderRepository } from "../folders/FolderRepository.js";
@@ -95,9 +98,11 @@ import {
     scheduleSessionWorkspaceTransfer,
 } from "./transferSessionWorkspace.js";
 import { workspaceRunReadiness } from "./workspaceRunReadiness.js";
+import { queryRigProfile } from "../persistence/profile/queryRigProfiles.js";
 import { createWorkspaceReadyWaiters } from "./workspaceReadyWaiters.js";
 
 export interface InMemorySessionStoreOptions {
+    projectClone?: ProjectRepositoryOptions["cloneRemote"];
     createRuntime?: InMemorySessionOptions["createRuntime"];
     defaultDocker?: DockerExecutionConfig;
     localInstanceId?: string;
@@ -172,11 +177,15 @@ export class InMemorySessionStore implements SessionStore {
             applet: (name) => this.applets.get(name),
         });
         this.#projects = new ProjectRepository({
+            ...(options.projectClone === undefined ? {} : { cloneRemote: options.projectClone }),
             database: this.#database,
+            localInstanceId: this.#localInstanceId,
             ...(options.homeDirectory === undefined
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#projectEvent(event),
+            resolveGitSecret: (kind) => this.#secrets.resolveSpecial(kind).GH_TOKEN,
+            resolveProfile: (profileId) => queryRigProfile(this.#database, profileId),
             ...(options.onWorkspaceBranchError === undefined
                 ? {}
                 : { onWorkspaceBranchError: options.onWorkspaceBranchError }),
@@ -262,8 +271,25 @@ export class InMemorySessionStore implements SessionStore {
                     undefined
                         ? undefined
                         : this.archiveWorkspace(projectId, workspaceId),
-                createOwnedWorkspace: (ownerSessionId, projectId, request) =>
-                    this.#projects.createWorkspace(projectId, request, ownerSessionId),
+                createOwnedWorkspace: (ownerSessionId, projectId, request) => {
+                    const owner = this.get(ownerSessionId)?.snapshot();
+                    const createdBy =
+                        owner?.profileId === undefined
+                            ? undefined
+                            : {
+                                  instanceId: owner.ownerInstanceId,
+                                  profileId: owner.profileId,
+                              };
+                    return this.#projects.createWorkspace(
+                        projectId,
+                        {
+                            ...request,
+                            ...(createdBy === undefined ? {} : { identity: createdBy.profileId }),
+                        },
+                        ownerSessionId,
+                        createdBy === undefined ? {} : { createdBy },
+                    );
+                },
                 configureWorkspaceRequest: (request) => this.#configureWorkspaceRequest(request),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
@@ -490,6 +516,10 @@ export class InMemorySessionStore implements SessionStore {
                 ? { projectSecretIds: this.#projectSecrets(sourceSnapshot.scope.projectId) }
                 : {}),
             ownerInstanceId: state.ownerInstanceId,
+            ...(state.profileId === undefined ? {} : { profileId: state.profileId }),
+            resolveGitAuthentication: (projectId, creator) =>
+                this.#projects.gitAuthentication(projectId, creator),
+            resolveProfile: (profileId) => queryRigProfile(this.#database, profileId),
             secretRegistry: this.#secrets,
             restore: {
                 ...forkState,
@@ -532,6 +562,13 @@ export class InMemorySessionStore implements SessionStore {
             (options.ownerInstanceId === undefined
                 ? this.#localInstanceId
                 : validOwnerInstanceId(options.ownerInstanceId));
+        const profileId = inherited?.profileId ?? options.profileId ?? request.identity;
+        if (profileId !== undefined) {
+            const profile = queryRigProfile(this.#database, profileId);
+            if (profile?.parentInstanceId !== ownerInstanceId) {
+                throw new Error("The session profile is not owned by the session's Rig.");
+            }
+        }
         const inheritedWorkspace =
             inherited?.scope.kind === "workspace"
                 ? this.#projects.getWorkspace(
@@ -638,6 +675,26 @@ export class InMemorySessionStore implements SessionStore {
             };
         })();
         try {
+            if (
+                profileId !== undefined &&
+                (resolved.scope.kind === "project" || resolved.scope.kind === "workspace")
+            ) {
+                const project = this.#projects.getProject(resolved.scope.projectId);
+                const workspace =
+                    resolved.scope.kind === "workspace"
+                        ? this.#projects.getWorkspace(
+                              resolved.scope.projectId,
+                              resolved.scope.workspaceId,
+                          )
+                        : undefined;
+                const creator = workspace?.createdBy ?? project?.createdBy;
+                if (
+                    creator !== undefined &&
+                    (creator.instanceId !== ownerInstanceId || creator.profileId !== profileId)
+                ) {
+                    throw new Error("That project or workspace belongs to another human profile.");
+                }
+            }
             if (resolved.scope.kind === "workspace") {
                 this.#assertWorkspaceAcceptingSessions(resolved.scope.workspaceId);
             }
@@ -668,6 +725,11 @@ export class InMemorySessionStore implements SessionStore {
                     this.#newLastSessionOrderKey(resolved.scope),
                 ),
                 ownerInstanceId,
+                ...(profileId === undefined ? {} : { profileId }),
+                resolveGitAuthentication: (candidateProjectId, creator) =>
+                    this.#projects.gitAuthentication(candidateProjectId, creator),
+                resolveProfile: (candidateProfileId) =>
+                    queryRigProfile(this.#database, candidateProfileId),
                 ...(projectId === undefined
                     ? {}
                     : { projectSecretIds: this.#projectSecrets(projectId) }),
@@ -882,7 +944,12 @@ export class InMemorySessionStore implements SessionStore {
 
     registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary {
         this.#secrets.register(request);
+        this.#projects.retryRemoteProjects(request.kind);
         return this.#secrets.reference(request.kind);
+    }
+
+    resolveSpecialSecret(kind: SpecialSecretKind): NodeJS.ProcessEnv {
+        return this.#secrets.resolveSpecial(kind);
     }
 
     unregisterSecret(secretId: string): boolean {
@@ -1062,6 +1129,19 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.registerProject(request);
     }
 
+    createRemoteProject(
+        request: CreateRemoteProjectRequest,
+        options?: { createdBy?: ProjectCreator; githubToken?: string; mutationId?: string },
+    ): Promise<Project> {
+        return this.#projects.createRemoteProject(request, {
+            ...options,
+            createdBy: options?.createdBy ?? {
+                instanceId: this.#localInstanceId,
+                profileId: request.identity,
+            },
+        });
+    }
+
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
         return this.#projects.getWorkspace(projectId, workspaceId);
     }
@@ -1150,8 +1230,31 @@ export class InMemorySessionStore implements SessionStore {
     createWorkspace(
         projectId: string,
         request: CreateProjectWorkspaceRequest,
+        options: { createdBy?: ProjectCreator; githubToken?: string } = {},
     ): Promise<ProjectWorkspace | undefined> {
-        return this.#projects.createWorkspace(projectId, request);
+        return this.#projects.createWorkspace(projectId, request, undefined, options);
+    }
+
+    async refreshSessionGitCredential(
+        sessionId: string,
+        creator: ProjectCreator,
+        githubToken: string,
+    ): Promise<boolean> {
+        const session = this.get(sessionId);
+        if (session === undefined) return false;
+        const snapshot = session.snapshot();
+        if (
+            snapshot.ownerInstanceId !== creator.instanceId ||
+            snapshot.profileId !== creator.profileId
+        ) {
+            throw new Error("That session belongs to another human profile.");
+        }
+        if (snapshot.projectId === undefined) return false;
+        const project = this.#projects.getProject(snapshot.projectId);
+        if (project?.remoteSource?.kind !== "github") return false;
+        await this.#projects.refreshGitCredential(snapshot.projectId, creator, githubToken);
+        session.refreshGitCommandSecret();
+        return true;
     }
 
     /*

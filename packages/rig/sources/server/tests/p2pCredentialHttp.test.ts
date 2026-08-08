@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { P2pCredentialVersionConflictError } from "../../credentials/P2pCredentialStore.js";
 import { createModelCatalog } from "../../model-catalog/createModelCatalog.js";
+import { RigProfileStore } from "../../profiles/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import type { P2pEncryptedCredentialSnapshot } from "../../protocol/index.js";
@@ -13,6 +14,7 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 const LOCAL_ID = "alocalinstance00000000001";
 const OWNER_ID = "aremoteinstance0000000001";
 const OTHER_ID = "aotherinstance00000000001";
+const OWNER_PROFILE_ID = "aownerprofile0000000000001";
 
 describe("P2P inference credentials", () => {
     const close: (() => Promise<void>)[] = [];
@@ -31,6 +33,23 @@ describe("P2P inference credentials", () => {
             modelCatalog,
             resolveModelCatalog: () => modelCatalog,
         });
+        const profiles = new RigProfileStore({
+            database: store,
+            localInstanceId: LOCAL_ID,
+            publish: () => undefined,
+        });
+        profiles.replicate(
+            {
+                createdAt: 1,
+                email: "steve@example.test",
+                id: OWNER_PROFILE_ID,
+                name: "Steve",
+                parentInstanceId: OWNER_ID,
+                updatedAt: 1,
+                version: 1,
+            },
+            OWNER_ID,
+        );
         const replace = vi.fn(() => ({ changed: true, version: 1 }));
         const remoteCatalog = {
             ...modelCatalog,
@@ -41,7 +60,10 @@ describe("P2P inference credentials", () => {
         };
         const started = await startServer(
             createProtocolHttpServer({
+                canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
+                canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID,
                 modelCatalog,
+                profiles,
                 replaceP2pCredentials: replace,
                 resolveModelCatalog: () => remoteCatalog,
                 store,
@@ -113,11 +135,19 @@ describe("P2P inference credentials", () => {
             started.socketPath,
             "POST",
             "/sessions",
-            JSON.stringify({ cwd: "/tmp/p2p-owner-session" }),
+            JSON.stringify({
+                cwd: "/tmp/p2p-owner-session",
+                identity: OWNER_PROFILE_ID,
+            }),
             OWNER_ID,
         );
         expect(created).toMatchObject({
-            body: { session: { ownerInstanceId: OWNER_ID } },
+            body: {
+                session: {
+                    ownerInstanceId: OWNER_ID,
+                    profileId: OWNER_PROFILE_ID,
+                },
+            },
             status: 201,
         });
         const sessionId = (created.body as { session: { id: string } }).session.id;
@@ -136,21 +166,52 @@ describe("P2P inference credentials", () => {
             modelCatalog,
             resolveModelCatalog: () => modelCatalog,
         });
+        const profiles = new RigProfileStore({
+            database: store,
+            localInstanceId: LOCAL_ID,
+            publish: () => undefined,
+        });
+        profiles.replicate(
+            {
+                createdAt: 1,
+                email: "steve@example.test",
+                id: OWNER_PROFILE_ID,
+                name: "Steve",
+                parentInstanceId: OWNER_ID,
+                updatedAt: 1,
+                version: 1,
+            },
+            OWNER_ID,
+        );
+        const otherProfileId = "aotherprofile0000000000001";
+        profiles.replicate(
+            {
+                createdAt: 1,
+                email: "other@example.test",
+                id: otherProfileId,
+                name: "Other",
+                parentInstanceId: OTHER_ID,
+                updatedAt: 1,
+                version: 1,
+            },
+            OTHER_ID,
+        );
         const otherSession = store.create(
             { cwd: "/tmp/p2p-other-session" },
-            { ownerInstanceId: OTHER_ID },
+            { ownerInstanceId: OTHER_ID, profileId: otherProfileId },
         );
         const ownerSession = store.create(
             { cwd: "/tmp/p2p-owner-session" },
-            { ownerInstanceId: OWNER_ID },
+            { ownerInstanceId: OWNER_ID, profileId: OWNER_PROFILE_ID },
         );
         const ownerSubmit = vi.spyOn(ownerSession, "submit");
         const otherSubmit = vi.spyOn(otherSession, "submit");
         const started = await startServer(
             createProtocolHttpServer({
                 canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
+                canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID,
                 modelCatalog,
-                profiles: { owns: () => true } as never,
+                profiles,
                 store,
                 token: "secret",
             }),
@@ -167,7 +228,7 @@ describe("P2P inference credentials", () => {
                 "/messages",
                 JSON.stringify({
                     all: true,
-                    identity: "aownerprofile0000000000001",
+                    identity: OWNER_PROFILE_ID,
                     text: "Only my own sessions.",
                 }),
                 OWNER_ID,
@@ -185,7 +246,7 @@ describe("P2P inference credentials", () => {
                 "POST",
                 "/messages",
                 JSON.stringify({
-                    identity: "aownerprofile0000000000001",
+                    identity: OWNER_PROFILE_ID,
                     sessionIds: [otherSession.id],
                     text: "This must be refused.",
                 }),

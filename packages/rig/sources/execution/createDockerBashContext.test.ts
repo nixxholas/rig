@@ -7,7 +7,7 @@ import type { BashSessionExit } from "../agent/context/BashContext.js";
 import { createPermissionContext } from "../permissions/index.js";
 import { SecretRegistry, SessionSecretContext } from "../secrets/index.js";
 import { BASH_SESSION_STOP_GRACE_MS } from "../agent/context/bashSessionLimits.js";
-import { createDockerBashContext } from "./createDockerBashContext.js";
+import { createDockerBashContext, dockerTrustedLoopbackPorts } from "./createDockerBashContext.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
 
 describe("createDockerBashContext", () => {
@@ -359,6 +359,89 @@ describe("createDockerBashContext", () => {
         expect(fake.foregroundCommands[3]).not.toContain("docker-database");
         fake.foregroundStreams[3]?.end();
         await context.readSession(4, { waitMs: 1_000 });
+    });
+
+    it("rejects command secrets before starting Docker unless the command has Full access", async () => {
+        const fake = createFakeDockerEnvironment();
+        const registry = new SecretRegistry([
+            {
+                description: "Service credentials",
+                environment: { SERVICE_TOKEN: "docker-secret" },
+                id: "service",
+            },
+        ]);
+        let active = 0;
+        const secrets = new SessionSecretContext(registry, ["service"]);
+        secrets.setRuntimeSecret({
+            activate: () => {
+                active += 1;
+                return {
+                    environment: {},
+                    release: () => {
+                        active -= 1;
+                    },
+                };
+            },
+            description: "Managed project Git access",
+            environment: {},
+            id: "project-git",
+        });
+        const permissions = createPermissionContext("auto");
+        const context = createDockerBashContext(fake.environment, permissions, secrets);
+
+        await expect(
+            context.startSession({ command: "use-secret", secrets: ["project-git"] }),
+        ).rejects.toThrow("Secrets require Full access");
+        expect(fake.foregroundCommands).toEqual([]);
+        expect(active).toBe(0);
+
+        permissions.setMode("full_access");
+        const sessionId = await context.startSession({
+            command: "use-secret",
+            secrets: ["project-git"],
+        });
+        expect(active).toBe(1);
+        permissions.setMode("read_only");
+        await expect(context.writeSession(sessionId, "git push\n")).rejects.toThrow(
+            "Secrets require Full access",
+        );
+        fake.foregroundStreams[0]?.end();
+        await context.readSession(sessionId, { waitMs: 1_000 });
+        expect(active).toBe(0);
+    });
+
+    it("injects the session Git identity into every Docker exec", async () => {
+        const fake = createFakeDockerEnvironment();
+        const context = createDockerBashContext(
+            fake.environment,
+            createPermissionContext("full_access"),
+            undefined,
+            undefined,
+            {
+                GIT_AUTHOR_EMAIL: "steve@example.com",
+                GIT_AUTHOR_NAME: "Steve Korshakov",
+                GIT_COMMITTER_EMAIL: "steve@example.com",
+                GIT_COMMITTER_NAME: "Steve Korshakov",
+            },
+        );
+
+        await context.startSession({ command: "git-identity" });
+
+        expect(fake.foregroundEnvironments[0]).toEqual([
+            "GIT_AUTHOR_EMAIL=steve@example.com",
+            "GIT_AUTHOR_NAME=Steve Korshakov",
+            "GIT_COMMITTER_EMAIL=steve@example.com",
+            "GIT_COMMITTER_NAME=Steve Korshakov",
+        ]);
+        fake.foregroundStreams[0]?.end();
+        await context.readSession(1, { waitMs: 1_000 });
+    });
+
+    it("bridges a Git broker only for Full access Docker commands", () => {
+        for (const mode of ["read_only", "workspace_write", "auto"] as const) {
+            expect(dockerTrustedLoopbackPorts(mode, [47_321])).toEqual([]);
+        }
+        expect(dockerTrustedLoopbackPorts("full_access", [47_321])).toEqual([47_321]);
     });
 });
 

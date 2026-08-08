@@ -49,10 +49,11 @@ export class RigProfileStore {
         return this.#database.query((tx) => queryRigProfile(tx, profileId));
     }
 
-    create(input: { name: string; photo?: RigProfilePhoto }): RigProfile {
+    create(input: { email: string; name: string; photo?: RigProfilePhoto }): RigProfile {
         const now = this.#now();
         const profile: RigProfile = {
             createdAt: now,
+            email: input.email,
             id: createId(),
             name: input.name,
             parentInstanceId: this.#localInstanceId,
@@ -84,6 +85,7 @@ export class RigProfileStore {
             const { photo: currentPhoto, ...withoutPhoto } = current;
             const next: RigProfile = {
                 ...withoutPhoto,
+                ...(input.email === undefined ? {} : { email: input.email }),
                 ...(input.name === undefined ? {} : { name: input.name }),
                 ...(input.photo === undefined
                     ? currentPhoto === undefined

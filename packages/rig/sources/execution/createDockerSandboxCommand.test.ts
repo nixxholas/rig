@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createDockerSandboxCommand } from "./createDockerSandboxCommand.js";
+import {
+    createDockerNetworkRelayScript,
+    createDockerSandboxCommand,
+} from "./createDockerSandboxCommand.js";
 
 const runtime = {
     bwrapPath: "/usr/bin/bwrap",
@@ -40,7 +43,31 @@ describe("createDockerSandboxCommand", () => {
         expect(script).toContain("TCP-LISTEN:1080,bind=127.0.0.1");
         expect(script).toContain("TCP-LISTEN:443,bind=127.0.0.1");
         expect(script).toContain("command-secret");
+        expect(script).toContain("kill $RIG_INTERNAL_NETWORK_RELAY_PIDS");
+        expect(script).not.toContain("jobs -p");
         expect(script).toContain("curl https://example.com");
+    });
+
+    it("starts only selected loopback relays for a Full access command", () => {
+        const script = createDockerNetworkRelayScript(
+            "git fetch origin",
+            {
+                authenticationToken: "command-secret",
+                http: "/workspace/.rig-network/command-1/http.sock",
+                loopback: [
+                    {
+                        path: "/workspace/.rig-network/command-1/loopback-443.sock",
+                        port: 443,
+                    },
+                ],
+                socks: "/workspace/.rig-network/command-1/socks.sock",
+            },
+            { includeProxyPorts: false },
+        );
+
+        expect(script).toContain("TCP-LISTEN:443,bind=127.0.0.1");
+        expect(script).not.toContain("TCP-LISTEN:3128");
+        expect(script).not.toContain("TCP-LISTEN:1080");
     });
 
     it("makes the workspace read-only and isolates networking in Read only mode", () => {

@@ -15,4 +15,5 @@ export {
     normalizeRigProfilePhoto,
 } from "./normalizeRigProfilePhoto.js";
 export { sameRigProfile } from "./sameRigProfile.js";
+export { gitIdentityEnvironment } from "./gitIdentityEnvironment.js";
 export { validateRigProfilePhoto } from "./validateRigProfilePhoto.js";

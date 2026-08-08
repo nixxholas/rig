@@ -61,6 +61,7 @@ import type {
     Folder,
     ModelCatalog,
     ProtocolSession,
+    RigProfile,
     ReadBackgroundProcessResponse,
     RewindSessionResponse,
     RunShellCommandRequest,
@@ -110,6 +111,9 @@ import {
 import { clampSessionDraftTimestamp } from "./impl/clampSessionDraftTimestamp.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { sessionUnreadStateAfterEvent } from "./impl/sessionUnreadStateAfterEvent.js";
+import { gitIdentityEnvironment } from "../profiles/gitIdentityEnvironment.js";
+import type { GitCommandAuthentication } from "../git/GitCredentialBroker.js";
+import { PROJECT_GIT_SECRET_ID, projectGitCommandSecret } from "../git/projectGitCommandSecret.js";
 import { IDLE_SESSION_ACTIVITY, sessionActivityAfterEvent } from "./sessionActivityAfterEvent.js";
 import { aggregateSessionTokenCount } from "./usage/aggregateSessionTokenCount.js";
 import { sessionTokenCountAfterEvent } from "./usage/sessionTokenCountAfterEvent.js";
@@ -273,6 +277,7 @@ export interface PersistedSessionState {
     agentId: string;
     /** Stable Rig identity whose credentials and usage this session consumes. */
     ownerInstanceId: string;
+    profileId?: string;
     archived?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
@@ -437,6 +442,12 @@ export interface InMemorySessionOptions {
     modelCatalog: ModelCatalog;
     /** Stable Rig identity whose credentials and usage this session consumes. */
     ownerInstanceId?: string;
+    profileId?: string;
+    resolveGitAuthentication?: (
+        projectId: string,
+        creator: { instanceId: string; profileId: string },
+    ) => GitCommandAuthentication | undefined;
+    resolveProfile?: (profileId: string) => RigProfile | undefined;
     metadata?: SessionAgentMetadata;
     mcpToolProvider?: McpToolProvider;
     onAppendEvent?: (event: SessionEvent) => void;
@@ -592,6 +603,14 @@ export class InMemorySession {
     #agentMetadata: SessionAgentMetadata;
     #agentId: string;
     readonly #ownerInstanceId: string;
+    readonly #profileId: string | undefined;
+    readonly #resolveGitAuthentication:
+        | ((
+              projectId: string,
+              creator: { instanceId: string; profileId: string },
+          ) => GitCommandAuthentication | undefined)
+        | undefined;
+    readonly #resolveProfile: ((profileId: string) => RigProfile | undefined) | undefined;
     #createEventId: () => EventId;
     #createdAt: number;
     #createRuntime: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
@@ -764,7 +783,14 @@ export class InMemorySession {
         const secretRegistry = options.secretRegistry ?? new SecretRegistry();
         const secretIds = options.restore?.secretIds ?? options.request.secretIds ?? [];
         if (options.restore === undefined) {
-            for (const secretId of secretIds) secretRegistry.reference(secretId);
+            for (const secretId of secretIds) {
+                const reference = secretRegistry.reference(secretId);
+                if (reference.availableToModel === false) {
+                    throw new Error(
+                        `Secret '${secretId}' is managed by Rig and cannot be attached to agent commands.`,
+                    );
+                }
+            }
         }
         this.#secrets = new SessionSecretContext(
             secretRegistry,
@@ -787,6 +813,9 @@ export class InMemorySession {
         this.#agentId = options.restore?.agentId ?? createId();
         this.#ownerInstanceId =
             options.restore?.ownerInstanceId ?? options.ownerInstanceId ?? createId();
+        this.#profileId = options.restore?.profileId ?? options.profileId;
+        this.#resolveGitAuthentication = options.resolveGitAuthentication;
+        this.#resolveProfile = options.resolveProfile;
         this.#archived = options.restore?.archived === true;
         const restoredBindingProvider = options.restore?.credentialBindingId
             ? this.#modelCatalog.providers.find(
@@ -4278,6 +4307,10 @@ export class InMemorySession {
               };
     }
 
+    refreshGitCommandSecret(): void {
+        this.#syncGitCommandSecret();
+    }
+
     snapshot(): ProtocolSession {
         const snapshot = this.#agentSnapshot();
         const lastEventId = this.events.lastEventId();
@@ -4288,6 +4321,7 @@ export class InMemorySession {
             ...(activeTurn === undefined ? {} : { activeTurn }),
             agentId: this.#agentId,
             ownerInstanceId: this.#ownerInstanceId,
+            ...(this.#profileId === undefined ? {} : { profileId: this.#profileId }),
             ...(this.#git === undefined ? {} : { git: structuredClone(this.#git) }),
             archived: this.#archived,
             scope: { ...this.#scope },
@@ -4366,6 +4400,7 @@ export class InMemorySession {
             id: this.id,
             archived: this.#archived,
             ownerInstanceId: this.#ownerInstanceId,
+            ...(this.#profileId === undefined ? {} : { profileId: this.#profileId }),
             scope: { ...this.#scope },
             ...scopeConvenienceFields(this.#scope),
             trackUnread: this.#request.trackUnread === true,
@@ -4434,6 +4469,7 @@ export class InMemorySession {
             agentId: this.#agentId,
             credentialBindingId: this.#credentialBindingId,
             ownerInstanceId: this.#ownerInstanceId,
+            ...(this.#profileId === undefined ? {} : { profileId: this.#profileId }),
             archived: this.#archived,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -6851,9 +6887,22 @@ export class InMemorySession {
         ]
             .filter((value): value is string => value !== undefined && value.length > 0)
             .join("\n\n");
+        const profile =
+            this.#profileId === undefined ? undefined : this.#resolveProfile?.(this.#profileId);
+        if (this.#profileId !== undefined && profile === undefined) {
+            throw new Error("The session's human profile is unavailable.");
+        }
+        this.#syncGitCommandSecret();
         const options: CreateCodingAssistantAgentOptions = {
             agentId: this.#agentId,
             ownerInstanceId: this.#ownerInstanceId,
+            ...(profile === undefined
+                ? {}
+                : {
+                      shellEnvironment: {
+                          ...gitIdentityEnvironment(profile),
+                      },
+                  }),
             ...(this.projectIdentity() === undefined
                 ? {}
                 : { attachmentScope: { ...this.projectIdentity()!, sessionId: this.id } }),
@@ -7060,6 +7109,21 @@ export class InMemorySession {
         this.#tools = snapshot.tools;
         this.#saveSession();
         return runtime;
+    }
+
+    #syncGitCommandSecret(): void {
+        const projectId = this.projectIdentity()?.projectId;
+        const gitAuthentication =
+            projectId === undefined || this.#profileId === undefined
+                ? undefined
+                : this.#resolveGitAuthentication?.(projectId, {
+                      instanceId: this.#ownerInstanceId,
+                      profileId: this.#profileId,
+                  });
+        this.#secrets.removeRuntimeSecret(PROJECT_GIT_SECRET_ID);
+        if (gitAuthentication !== undefined) {
+            this.#secrets.setRuntimeSecret(projectGitCommandSecret(gitAuthentication));
+        }
     }
 
     #applyIntegrationConfiguration(queued: PersistedQueuedRun): void {

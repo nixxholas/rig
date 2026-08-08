@@ -43,6 +43,9 @@ import { p2pProvisionedProviders } from "./migrations/38-p2p-provisioned-provide
 import { sessionOwner } from "./migrations/39-session-owner.js";
 import { p2pCredentialSnapshots } from "./migrations/40-p2p-credential-snapshots.js";
 import { sessionCredentialBinding } from "./migrations/41-session-credential-binding.js";
+import { remoteProjects } from "./migrations/42-remote-projects.js";
+import { profileGitIdentity } from "./migrations/43-profile-git-identity.js";
+import { remoteWorkspaces } from "./migrations/44-remote-workspaces.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -93,6 +96,9 @@ const migrations: readonly SessionDatabaseMigration[] = [
     (database, context) => sessionOwner(database, context.localInstanceId),
     p2pCredentialSnapshots,
     sessionCredentialBinding,
+    remoteProjects,
+    profileGitIdentity,
+    remoteWorkspaces,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

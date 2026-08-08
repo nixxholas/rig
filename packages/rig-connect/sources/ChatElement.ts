@@ -268,6 +268,8 @@ export interface SessionState {
     sessionId: string;
     /** Stable Rig identity whose credentials and usage this session consumes. */
     ownerInstanceId: string;
+    /** Human profile whose Git identity this session uses. */
+    profileId?: string;
     agentId?: string;
     agent?: SessionAgentMetadata;
     lastEventId?: string;
@@ -355,6 +357,7 @@ export type MutationAction =
     | "move_folder"
     | "archive_folder"
     | "move_session"
+    | "create_project"
     | "create_workspace"
     | "archive_workspace"
     | "create_session"

@@ -67,3 +67,17 @@ export function validateManagedNetworkLoopbackPorts(ports: readonly number[]): v
         }
     }
 }
+
+export function withTrustedLoopbackPorts(
+    policy: ManagedNetworkPolicy | undefined,
+    trustedPorts: readonly number[] | undefined,
+): ManagedNetworkPolicy | undefined {
+    if (trustedPorts === undefined || trustedPorts.length === 0) return policy;
+    validateManagedNetworkLoopbackPorts(trustedPorts);
+    return {
+        ...policy,
+        allowedLoopbackPorts: [
+            ...new Set([...(policy?.allowedLoopbackPorts ?? []), ...trustedPorts]),
+        ],
+    };
+}

@@ -101,6 +101,14 @@ describe("SecretRegistry", () => {
         const instructions = createSecretInstructions(context);
         expect(instructions).toBeUndefined();
         expect(() => context.resolve(["github"])).toThrow("not attached");
+        expect(() => context.attach("github")).toThrow(
+            "managed by Rig and cannot be attached to agent commands",
+        );
+
+        const restored = new SessionSecretContext(registry, ["github"], ["github"]);
+        expect(restored.ids()).toEqual([]);
+        expect(restored.references()).toEqual([]);
+        expect(() => restored.resolve(["github"])).toThrow("not attached");
 
         registry.register({ kind: "github", token: "rotated-token" });
         expect(registry.resolve(["github"])).toEqual({ GH_TOKEN: "rotated-token" });
@@ -108,6 +116,76 @@ describe("SecretRegistry", () => {
         expect(registry.unregisterSpecial("github")).toBe(true);
         expect(context.references()).toEqual([]);
         expect(() => context.resolve(["github"])).toThrow("not attached");
+    });
+
+    it("exposes a runtime command secret without attaching or persisting it", () => {
+        const context = new SessionSecretContext(new SecretRegistry());
+        let activations = 0;
+        context.setRuntimeSecret({
+            activate: () => {
+                activations += 1;
+                return {
+                    environment: {},
+                    release: () => {
+                        activations -= 1;
+                    },
+                };
+            },
+            description: "Git access for this managed project",
+            environment: {
+                GIT_CONFIG_KEY_1:
+                    "url.http://127.0.0.1:43123/capability/github.com/slopus/rig.git.insteadOf",
+                GIT_CONFIG_VALUE_1: "https://github.com/slopus/rig.git",
+            },
+            id: "project-git",
+            trustedLoopbackPorts: [43_123],
+        });
+
+        expect(context.ids()).toEqual([]);
+        expect(context.references()).toEqual([
+            {
+                description: "Git access for this managed project",
+                environmentVariables: ["GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"],
+                id: "project-git",
+            },
+        ]);
+        expect(context.resolve(["project-git"])).toEqual({
+            GIT_CONFIG_KEY_1:
+                "url.http://127.0.0.1:43123/capability/github.com/slopus/rig.git.insteadOf",
+            GIT_CONFIG_VALUE_1: "https://github.com/slopus/rig.git",
+        });
+        expect(context.trustedLoopbackPorts(["project-git"])).toEqual([43_123]);
+        expect(context.trustedLoopbackPorts([])).toEqual([]);
+        const activated = context.activate(["project-git"]);
+        expect(activations).toBe(1);
+        activated.release();
+        activated.release();
+        expect(activations).toBe(0);
+    });
+
+    it("keeps unknown restored environment IDs pending while dropping hidden registrations", () => {
+        const registry = new SecretRegistry();
+        const context = new SessionSecretContext(registry, ["later"]);
+
+        expect(context.ids()).toEqual(["later"]);
+        expect(context.references()).toEqual([]);
+
+        registry.register({
+            description: "Registered after restore",
+            environment: { LATER_TOKEN: "value" },
+            id: "later",
+        });
+        expect(context.references()).toEqual([
+            {
+                description: "Registered after restore",
+                environmentVariables: ["LATER_TOKEN"],
+                id: "later",
+            },
+        ]);
+
+        registry.register({ kind: "github", token: "hidden" });
+        const hidden = new SessionSecretContext(registry, ["github"]);
+        expect(hidden.ids()).toEqual([]);
     });
 
     it("reserves special secret IDs for their exact schemas", () => {
@@ -121,6 +199,16 @@ describe("SecretRegistry", () => {
                     },
                 ]),
         ).toThrow("reserved for GitHub CLI credentials");
+        expect(
+            () =>
+                new SecretRegistry([
+                    {
+                        description: "Spoofed project Git access",
+                        environment: { GH_TOKEN: "token" },
+                        id: "project-git",
+                    },
+                ]),
+        ).toThrow("reserved for managed project Git access");
         expect(
             () =>
                 new SecretRegistry([

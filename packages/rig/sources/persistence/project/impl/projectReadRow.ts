@@ -1,5 +1,11 @@
 import type { Project, ProjectAvatar, GitRepositoryFacts } from "../../../protocol/index.js";
 import type { projectAvatarAssets, projects } from "../../database/schema.js";
+import { Value } from "@sinclair/typebox/value";
+import {
+    projectCreatorSchema,
+    projectGitSecretSchema,
+    projectRemoteSourceSchema,
+} from "../../../protocol/index.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectAvatarAssetRow = Pick<
@@ -12,6 +18,16 @@ export function projectReadRow(row: ProjectRow, asset: ProjectAvatarAssetRow): P
     const project: Project = {
         ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
         createdAt: row.createdAtMs,
+        ...(row.creatorInstanceId === null || row.creatorProfileId === null
+            ? {}
+            : {
+                  createdBy: {
+                      ...Value.Decode(projectCreatorSchema, {
+                          instanceId: row.creatorInstanceId,
+                          profileId: row.creatorProfileId,
+                      }),
+                  },
+              }),
         ...(row.defaultBranch === null ? {} : { defaultBranch: row.defaultBranch }),
         ...(git === undefined ? {} : { git }),
         id: row.id,
@@ -23,6 +39,16 @@ export function projectReadRow(row: ProjectRow, asset: ProjectAvatarAssetRow): P
         orderKey: row.orderKey,
         path: row.path,
         presence: row.presence as Project["presence"],
+        ...(row.remoteSourceJson === null
+            ? {}
+            : { remoteSource: readRemoteSource(row.remoteSourceJson) }),
+        ...(row.requiredSecretKind === null
+            ? {}
+            : {
+                  requiredSecretKind: Value.Decode(projectGitSecretSchema, {
+                      kind: row.requiredSecretKind,
+                  }).kind,
+              }),
         settings:
             row.defaultCompute === "local"
                 ? {
@@ -63,6 +89,11 @@ export function projectReadRow(row: ProjectRow, asset: ProjectAvatarAssetRow): P
         };
     }
     return project;
+}
+
+function readRemoteSource(value: string): NonNullable<Project["remoteSource"]> {
+    const parsed: unknown = JSON.parse(value);
+    return Value.Decode(projectRemoteSourceSchema, parsed);
 }
 
 function projectReadGitFacts(row: ProjectRow): GitRepositoryFacts | undefined {

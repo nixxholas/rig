@@ -710,6 +710,7 @@ describe("connectRig mutations", () => {
         const calls: { init?: RequestInit; url: URL }[] = [];
         const profile = {
             createdAt: 1,
+            email: "steve@example.test",
             id: "aprofile000000000000000001",
             name: "Steve",
             parentInstanceId: "aparent0000000000000000001",
@@ -1720,6 +1721,157 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("tracks a managed project from optimistic clone through the authoritative response", async () => {
+        const stream = streamResponse();
+        let request:
+            | { body: Record<string, unknown>; headers: Record<string, string>; path: string }
+            | undefined;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(groupsCatalog()), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+                request = {
+                    body,
+                    headers: Object.fromEntries(new Headers(init?.headers)),
+                    path: url.pathname,
+                };
+                return Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            project: {
+                                ...groupsCatalog().projects[0],
+                                id: body.projectId,
+                                initializationAttempt: 0,
+                                initializationStatus: "ready",
+                                name: body.name,
+                                nameSource: "user",
+                                path: "/home/Projects/Remote",
+                                presence: "present",
+                                remoteSource: body.source,
+                                requiredSecretKind: "github",
+                                storageKey: "remote",
+                                version: 1,
+                            },
+                        }),
+                        { status: 202 },
+                    ),
+                );
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const projectId = rig.projects.clone({
+                identity: "asteveprofile",
+                name: "Remote",
+                secret: { kind: "github" },
+                source: { kind: "github", repository: "slopus/rig" },
+            });
+            expect(connection.projects().find((project) => project.id === projectId)).toMatchObject(
+                {
+                    initializationStatus: "initializing",
+                    presence: "missing",
+                    remoteSource: { kind: "github", repository: "slopus/rig" },
+                },
+            );
+
+            await settle();
+            expect(request).toEqual({
+                body: {
+                    identity: "asteveprofile",
+                    name: "Remote",
+                    projectId,
+                    secret: { kind: "github" },
+                    source: { kind: "github", repository: "slopus/rig" },
+                },
+                headers: expect.objectContaining({ "x-rig-mutation-id": projectId }),
+                path: "/projects/clone",
+            });
+            expect(connection.projects().find((project) => project.id === projectId)).toMatchObject(
+                {
+                    initializationStatus: "ready",
+                    path: "/home/Projects/Remote",
+                    presence: "present",
+                },
+            );
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("refreshes GitHub authentication for messages in a managed remote project", async () => {
+        const catalog = groupsCatalog();
+        catalog.projects = catalog.projects.map((project) => ({
+            ...project,
+            createdBy: {
+                instanceId: "aremoteinstance0000000001",
+                profileId: "asteveprofile",
+            },
+            requiredSecretKind: "github" as const,
+        }));
+        catalog.sessions = [{ ...catalogSession(), profileId: "asteveprofile" }];
+        let messageBody: Record<string, unknown> | undefined;
+        const rig = connectRig({
+            endpoint: "http://daemon.test/p2p/peers/secondary/api",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname.endsWith("/catalog")) {
+                    return Promise.resolve(new Response(JSON.stringify(catalog), { status: 200 }));
+                }
+                if (url.pathname.endsWith("/git/watch")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                if (url.pathname.endsWith("/messages")) {
+                    messageBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                eventId: "event-remote-message",
+                                runId: "run-remote-message",
+                                sessionId: "session-1",
+                            }),
+                            { status: 202 },
+                        ),
+                    );
+                }
+                return Promise.resolve(new Response("{}", { status: 200 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        try {
+            rig.sendMessage("session-1", "Push the branch");
+            await settle();
+
+            expect(messageBody).toMatchObject({
+                gitSecret: { kind: "github" },
+                identity: "asteveprofile",
+                text: "Push the branch",
+            });
+        } finally {
+            rig.close();
+        }
+    });
+
     it("surfaces the daemon error when workspace creation conflicts without an entity", async () => {
         const stream = streamResponse();
         const rejections: MutationRejectedDelta[] = [];
@@ -2304,6 +2456,7 @@ describe("connectRig mutations", () => {
         const stream = streamResponse();
         const profile = {
             createdAt: 1,
+            email: "steve@example.test",
             id: "aprofile000000000000000001",
             name: "Steve",
             parentInstanceId: "aparent0000000000000000001",
@@ -2356,6 +2509,7 @@ describe("connectRig mutations", () => {
         const stream = streamResponse();
         const profile = {
             createdAt: 1,
+            email: "steve@example.test",
             id: "aprofile000000000000000001",
             name: "Steve",
             parentInstanceId: "aparent0000000000000000001",
@@ -2419,6 +2573,7 @@ describe("connectRig mutations", () => {
         const stream = streamResponse();
         const profile = {
             createdAt: 1,
+            email: "steve@example.test",
             id: "aprofile000000000000000001",
             name: "Steve",
             parentInstanceId: "aparent0000000000000000001",
@@ -2500,6 +2655,7 @@ describe("connectRig mutations", () => {
         const catalog = deferred<Response>();
         const existing = {
             createdAt: 1,
+            email: "existing@example.test",
             id: "aprofile000000000000000001",
             name: "Existing",
             parentInstanceId: "aparent0000000000000000001",
@@ -2508,6 +2664,7 @@ describe("connectRig mutations", () => {
         };
         const created = {
             createdAt: 2,
+            email: "created@example.test",
             id: "aprofile000000000000000002",
             name: "Created",
             parentInstanceId: "aparent0000000000000000001",
@@ -2538,7 +2695,9 @@ describe("connectRig mutations", () => {
             stream.write(liveHello());
             await settle();
 
-            await expect(rig.createProfile({ name: "Created" })).resolves.toEqual(created);
+            await expect(
+                rig.createProfile({ email: "created@example.test", name: "Created" }),
+            ).resolves.toEqual(created);
             expect(connection.profiles()).toEqual([]);
             expect(changes).toEqual([]);
 
@@ -2561,6 +2720,7 @@ describe("connectRig mutations", () => {
         const staleMutation = deferred<Response>();
         const profile = (version: number, name: string) => ({
             createdAt: 1,
+            email: "steve@example.test",
             id: "aprofile000000000000000001",
             name,
             parentInstanceId: "aparent0000000000000000001",

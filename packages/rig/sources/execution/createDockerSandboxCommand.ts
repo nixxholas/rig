@@ -69,33 +69,7 @@ export function createDockerSandboxCommand(options: {
     const userCommand =
         options.networkUnixProxySockets === undefined
             ? options.command
-            : [
-                  MANAGED_NETWORK_SOCAT_PREFLIGHT,
-                  authenticatedSocatCommand(
-                      3128,
-                      options.networkUnixProxySockets.http,
-                      options.networkUnixProxySockets.authenticationToken,
-                  ),
-                  authenticatedSocatCommand(
-                      1080,
-                      options.networkUnixProxySockets.socks,
-                      options.networkUnixProxySockets.authenticationToken,
-                  ),
-                  ...(options.networkUnixProxySockets.loopback ?? []).map(({ path, port }) =>
-                      authenticatedSocatCommand(
-                          port,
-                          path,
-                          options.networkUnixProxySockets!.authenticationToken,
-                      ),
-                  ),
-                  `trap 'kill $(jobs -p) 2>/dev/null || true' EXIT`,
-                  readinessCheck([
-                      3128,
-                      1080,
-                      ...(options.networkUnixProxySockets.loopback ?? []).map(({ port }) => port),
-                  ]),
-                  options.command,
-              ].join("\n");
+            : createDockerNetworkRelayScript(options.command, options.networkUnixProxySockets);
     command.push(
         "--unshare-pid",
         "--unshare-user",
@@ -111,13 +85,41 @@ export function createDockerSandboxCommand(options: {
     return command;
 }
 
+export function createDockerNetworkRelayScript(
+    command: string,
+    sockets: NonNullable<
+        Parameters<typeof createDockerSandboxCommand>[0]["networkUnixProxySockets"]
+    >,
+    options: { includeProxyPorts?: boolean } = {},
+): string {
+    const proxyPorts = options.includeProxyPorts === false ? [] : [3128, 1080];
+    return [
+        MANAGED_NETWORK_SOCAT_PREFLIGHT,
+        `RIG_INTERNAL_NETWORK_RELAY_PIDS=''`,
+        ...(options.includeProxyPorts === false
+            ? []
+            : [
+                  authenticatedSocatCommand(3128, sockets.http, sockets.authenticationToken),
+                  authenticatedSocatCommand(1080, sockets.socks, sockets.authenticationToken),
+              ]),
+        ...(sockets.loopback ?? []).map(({ path, port }) =>
+            authenticatedSocatCommand(port, path, sockets.authenticationToken),
+        ),
+        `readonly RIG_INTERNAL_NETWORK_RELAY_PIDS`,
+        `trap 'kill $RIG_INTERNAL_NETWORK_RELAY_PIDS 2>/dev/null || true' EXIT`,
+        readinessCheck([...proxyPorts, ...(sockets.loopback ?? []).map(({ port }) => port)]),
+        command,
+    ].join("\n");
+}
+
 function authenticatedSocatCommand(port: number, socketPath: string, token: string): string {
     const relay = `{ printf %s "$RIG_NETWORK_TOKEN"; cat; } | ` + `socat - "$RIG_NETWORK_ADDRESS"`;
     return (
         `RIG_NETWORK_TOKEN=${shellQuote(token)} ` +
         `RIG_NETWORK_ADDRESS=${shellQuote(`UNIX-CONNECT:${socketPath}`)} ` +
         `socat TCP-LISTEN:${String(port)},bind=127.0.0.1,fork,reuseaddr ` +
-        `SYSTEM:${shellQuote(relay)} >/dev/null 2>&1 &`
+        `SYSTEM:${shellQuote(relay)} >/dev/null 2>&1 &\n` +
+        `RIG_INTERNAL_NETWORK_RELAY_PIDS="$RIG_INTERNAL_NETWORK_RELAY_PIDS $!"`
     );
 }
 

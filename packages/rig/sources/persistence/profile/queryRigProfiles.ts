@@ -18,6 +18,7 @@ function readProfile(row: typeof rigProfiles.$inferSelect): RigProfile {
     const photo: unknown = row.photoJson === null ? undefined : JSON.parse(row.photoJson);
     const profile: unknown = {
         createdAt: row.createdAtMs,
+        email: row.email,
         id: row.id,
         name: row.name,
         parentInstanceId: row.parentInstanceId,

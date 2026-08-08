@@ -15,7 +15,7 @@ export type PrepareP2pHttpRequest = (input: {
     path: string;
     peerId: string;
     signal: AbortSignal;
-}) => Promise<void>;
+}) => Promise<Uint8Array | void>;
 
 export async function proxyP2pHttpRequest(
     network: P2pNetwork,
@@ -35,12 +35,13 @@ export async function proxyP2pHttpRequest(
     response.once("close", abort);
     try {
         const body = await readBody(request);
-        await prepare?.({
+        const preparedBody = await prepare?.({
             body,
             path,
             peerId,
             signal: controller.signal,
         });
+        const forwardedBody = preparedBody ?? body;
         const head = {
             headers: selectP2pRequestHeaders(request.headers),
             method: request.method ?? "GET",
@@ -53,7 +54,7 @@ export async function proxyP2pHttpRequest(
         const { response: forwarded, transport } = await network.fetch(
             peerId,
             {
-                body,
+                body: forwardedBody,
                 ...head,
             },
             controller.signal,

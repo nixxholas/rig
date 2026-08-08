@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AgentContext } from "../agent/context/AgentContext.js";
 import { claudeBashTool } from "../agent/tools/claude/Bash.js";
 import { claudeReadTool } from "../agent/tools/claude/Read.js";
+import { claudeTaskInputTool } from "../agent/tools/claude/TaskInput.js";
 import { claudeWriteTool } from "../agent/tools/claude/Write.js";
 import { codexApplyPatchTool } from "../agent/tools/codex/apply_patch.js";
 import { codexExecCommandTool } from "../agent/tools/codex/exec_command.js";
@@ -14,6 +15,7 @@ import { codexViewImageTool } from "../agent/tools/codex/view_image.js";
 import { codexWriteStdinTool } from "../agent/tools/codex/write_stdin.js";
 import { grokReadFileTool } from "../agent/tools/grok/read_file.js";
 import { grokRunTerminalCommandTool } from "../tools/grok/run_terminal_command.js";
+import { grokSendCommandInputTool } from "../tools/grok/send_command_input.js";
 import { grokSearchReplaceTool } from "../agent/tools/grok/search_replace.js";
 import { codexWorkflowTool } from "../tools/workflows/workflowTools.js";
 
@@ -28,12 +30,30 @@ describe("tool-owned Auto permission policies", () => {
         );
     });
 
-    it("keeps ordinary shells sandboxed and reviews only explicit escalation or input", async () => {
+    it("keeps ordinary shells sandboxed and reviews explicit escalation or secret use", async () => {
         const context = await makeContext(temporaryDirectories);
+        const secretSessions = new Set<number>();
+        Object.assign(context, {
+            bash: {
+                sessionUsesSecrets: (sessionId: number) => secretSessions.has(sessionId),
+            },
+        });
 
         expect(
             await codexExecCommandTool.shouldReviewInAutoMode({ cmd: "pnpm test" }, context),
         ).toBe(false);
+        expect(
+            await codexExecCommandTool.shouldReviewInAutoMode(
+                { cmd: "git fetch", secrets: ["project-git"] },
+                context,
+            ),
+        ).toBe(true);
+        expect(
+            await codexExecCommandTool.shouldRunInFullAccessInAutoMode(
+                { cmd: "git fetch", secrets: ["project-git"] },
+                context,
+            ),
+        ).toBe(true);
         expect(
             await codexExecCommandTool.shouldRunInFullAccessInAutoMode(
                 { cmd: "pnpm test", sandbox_permissions: "require_escalated" },
@@ -43,6 +63,18 @@ describe("tool-owned Auto permission policies", () => {
         expect(await claudeBashTool.shouldReviewInAutoMode({ command: "pnpm test" }, context)).toBe(
             false,
         );
+        expect(
+            await claudeBashTool.shouldReviewInAutoMode(
+                { command: "git fetch", secrets: ["project-git"] },
+                context,
+            ),
+        ).toBe(true);
+        expect(
+            await claudeBashTool.shouldRunInFullAccessInAutoMode(
+                { command: "git fetch", secrets: ["project-git"] },
+                context,
+            ),
+        ).toBe(true);
         expect(
             await claudeBashTool.shouldRunInFullAccessInAutoMode(
                 { command: "pnpm test", dangerouslyDisableSandbox: true },
@@ -59,6 +91,18 @@ describe("tool-owned Auto permission policies", () => {
                 context,
             ),
         ).toBe(false);
+        const grokSecret = {
+            background: false,
+            command: "git fetch",
+            description: "Fetch the project origin.",
+            secrets: ["project-git"],
+        };
+        expect(await grokRunTerminalCommandTool.shouldReviewInAutoMode(grokSecret, context)).toBe(
+            true,
+        );
+        expect(
+            await grokRunTerminalCommandTool.shouldRunInFullAccessInAutoMode(grokSecret, context),
+        ).toBe(true);
         const grokEscalation = {
             background: false,
             command: "pnpm test",
@@ -93,6 +137,25 @@ describe("tool-owned Auto permission policies", () => {
                 context,
             ),
         ).toBe(false);
+        secretSessions.add(1);
+        expect(
+            await codexWriteStdinTool.shouldRunInFullAccessInAutoMode(
+                { chars: "git push\n", session_id: 1 },
+                context,
+            ),
+        ).toBe(true);
+        expect(
+            await claudeTaskInputTool.shouldRunInFullAccessInAutoMode(
+                { input: "git push\n", task_id: "1" },
+                context,
+            ),
+        ).toBe(true);
+        expect(
+            await grokSendCommandInputTool.shouldRunInFullAccessInAutoMode(
+                { input: "git push\n", task_id: "1" },
+                context,
+            ),
+        ).toBe(true);
         expect(
             codexWriteStdinTool.describeAutoPermissionAction?.(
                 { chars: "deploy\n", session_id: 1 },

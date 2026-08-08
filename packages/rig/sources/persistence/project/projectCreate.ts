@@ -5,6 +5,7 @@ import { projectNameKey, projectStorageKey } from "../../project/projectIdentity
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import type { ProjectCreator, ProjectRemoteSource } from "../../protocol/index.js";
 
 export interface ProjectCreateInput {
     baseName: string;
@@ -12,6 +13,9 @@ export interface ProjectCreateInput {
     kind: "home" | "regular";
     now: number;
     path: string;
+    createdBy?: ProjectCreator;
+    remoteSource?: ProjectRemoteSource;
+    requiredSecretKind?: "github";
 }
 
 export function projectCreate(tx: TX, input: ProjectCreateInput): void {
@@ -55,10 +59,22 @@ export function projectCreate(tx: TX, input: ProjectCreateInput): void {
                 kind: input.kind,
                 name,
                 nameKey: projectNameKey(name),
-                nameSource: "folder",
+                nameSource: input.remoteSource === undefined ? "folder" : "user",
                 orderKey: generateKeyBetween(null, first?.orderKey ?? null),
                 path: input.path,
-                presence: "present",
+                presence: input.remoteSource === undefined ? "present" : "missing",
+                ...(input.createdBy === undefined
+                    ? {}
+                    : {
+                          creatorInstanceId: input.createdBy.instanceId,
+                          creatorProfileId: input.createdBy.profileId,
+                      }),
+                ...(input.remoteSource === undefined
+                    ? {}
+                    : { remoteSourceJson: JSON.stringify(input.remoteSource) }),
+                ...(input.requiredSecretKind === undefined
+                    ? {}
+                    : { requiredSecretKind: input.requiredSecretKind }),
                 storageKey,
                 updatedAtMs: input.now,
                 userMutationVersion: 1,

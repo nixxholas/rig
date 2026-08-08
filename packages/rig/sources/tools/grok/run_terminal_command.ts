@@ -39,7 +39,7 @@ Usage notes:
         secrets: Type.Optional(
             Type.Array(Type.String(), {
                 description:
-                    "IDs of attached secret bundles to inject for this command. Use an empty array for none.",
+                    "IDs of attached secret bundles to use for this command. Selecting any secret requires reviewed Full-access execution. Use an empty array for none.",
             }),
         ),
         tty: Type.Optional(
@@ -64,14 +64,17 @@ Usage notes:
         task_id: Type.Optional(Type.String()),
     }),
     autoPermissionInstructions:
-        'For run_terminal_command, request full-access execution with sandbox_permissions: "require_escalated". Explain why in the description. Keep sandbox_permissions at "use_default" or omit it for ordinary commands.',
-    describeAutoPermissionAction: ({ command }, context) =>
-        summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+        'For run_terminal_command, request full-access execution with sandbox_permissions: "require_escalated". Explain why in the description. Selecting any attached secret also requires reviewed Full-access execution automatically. Keep sandbox_permissions at "use_default" or omit it for ordinary commands without secrets.',
+    describeAutoPermissionAction: ({ command, secrets }, context) =>
+        describeShellActionWithSecrets(
+            summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+            secrets,
+        ),
     availableToPermissionReviewer: true,
-    shouldReviewInAutoMode: ({ sandbox_permissions }) =>
-        sandbox_permissions === "require_escalated",
-    shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
-        sandbox_permissions === "require_escalated",
+    shouldReviewInAutoMode: ({ sandbox_permissions, secrets }) =>
+        sandbox_permissions === "require_escalated" || (secrets?.length ?? 0) > 0,
+    shouldRunInFullAccessInAutoMode: ({ sandbox_permissions, secrets }) =>
+        sandbox_permissions === "require_escalated" || (secrets?.length ?? 0) > 0,
     steerable: true,
     execute: async ({ background, command, secrets, timeout, tty }, context, execution) => {
         const options: Parameters<typeof runShellCommand>[1] = { maxOutputBytes: 512_000 };
@@ -129,3 +132,12 @@ Usage notes:
     toUI: (result) => summarizeTextOutput(result.text),
     locks: [],
 });
+
+function describeShellActionWithSecrets(
+    action: string,
+    secrets: readonly string[] | undefined,
+): string {
+    return secrets === undefined || secrets.length === 0
+        ? action
+        : `${action}. Secrets: ${secrets.map((secret) => JSON.stringify(secret)).join(", ")}`;
+}

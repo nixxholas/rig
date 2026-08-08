@@ -23,9 +23,13 @@ describe("RigProfileStore", () => {
             publish: (event) => events.push(event),
         });
 
-        const created = profiles.create({ name: "Steve 🧑‍💻" });
+        const created = profiles.create({
+            email: "steve@example.test",
+            name: "Steve 🧑‍💻",
+        });
         expect(created).toMatchObject({
             createdAt: 1_000,
+            email: "steve@example.test",
             name: "Steve 🧑‍💻",
             parentInstanceId: LOCAL_INSTANCE,
             updatedAt: 1_000,
@@ -42,6 +46,7 @@ describe("RigProfileStore", () => {
 
         now = 2_000;
         const updated = profiles.update(created.id, {
+            email: "steve@happy.engineering",
             name: "Steve Korshakov",
             photo: {
                 bytes: 3,
@@ -54,6 +59,7 @@ describe("RigProfileStore", () => {
         });
         expect(updated).toMatchObject({
             createdAt: 1_000,
+            email: "steve@happy.engineering",
             name: "Steve Korshakov",
             parentInstanceId: LOCAL_INSTANCE,
             updatedAt: 2_000,
@@ -72,6 +78,7 @@ describe("RigProfileStore", () => {
         });
         const profile = {
             createdAt: 1_000,
+            email: "remote@example.test",
             id: "aprofile000000000000000001",
             name: "Remote person",
             parentInstanceId: REMOTE_INSTANCE,
@@ -101,6 +108,7 @@ describe("RigProfileStore", () => {
         });
         const profile = {
             createdAt: 1_000,
+            email: "remote@example.test",
             id: "aprofile000000000000000002",
             name: "Remote person",
             parentInstanceId: REMOTE_INSTANCE,

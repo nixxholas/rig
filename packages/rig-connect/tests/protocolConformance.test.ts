@@ -641,6 +641,7 @@ describe("protocol conformance", () => {
     it("decodes the same parent-owned human profile", () => {
         const profile = {
             createdAt: 1,
+            email: "steve@example.test",
             id: "aprofile000000000000000001",
             name: "Steve 🧑‍💻",
             parentInstanceId: "aparent0000000000000000001",

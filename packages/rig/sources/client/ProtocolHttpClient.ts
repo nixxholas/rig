@@ -23,6 +23,7 @@ import type {
     ChangeSessionGoalStatusRequest,
     CompactSessionResponse,
     CreateProjectWorkspaceRequest,
+    CreateRemoteProjectRequest,
     CreateSessionRequest,
     CreateSessionResponse,
     DisconnectSessionTerminalResponse,
@@ -670,6 +671,18 @@ export class ProtocolHttpClient {
 
     registerProject(request: RegisterProjectRequest): Promise<ProjectResponse> {
         return this.#requestJson("POST", "/projects", request);
+    }
+
+    createRemoteProject(
+        request: CreateRemoteProjectRequest,
+        mutationId?: string,
+    ): Promise<ProjectResponse> {
+        return this.#requestJson(
+            "POST",
+            "/projects/clone",
+            request,
+            mutationId === undefined ? undefined : { "x-rig-mutation-id": mutationId },
+        );
     }
 
     getProject(projectId: string): Promise<ProjectResponse> {

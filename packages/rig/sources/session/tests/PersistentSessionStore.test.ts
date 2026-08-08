@@ -23,10 +23,222 @@ import type {
 import { PersistentSessionStore } from "../PersistentSessionStore.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { GitCommandRunner } from "../../git/types.js";
+import { RigProfileStore } from "../../profiles/index.js";
 
 const execFile = promisify(execFileCallback);
 
 describe("PersistentSessionStore", () => {
+    it("persists a remote human profile on sessions and injects its Git identity into every runtime", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const localInstanceId = "alocalprofiletest000000001";
+        const remoteInstanceId = "aremoteprofiletest00000001";
+        let capturedEnvironment: Readonly<Record<string, string>> | undefined;
+        let store: PersistentSessionStore | undefined;
+        try {
+            store = new PersistentSessionStore({
+                createRuntime: (options) => {
+                    capturedEnvironment = options.shellEnvironment;
+                    throw new Error("Captured profile environment.");
+                },
+                databasePath,
+                localInstanceId,
+                resolveModelCatalog: () => testModelCatalog(),
+            });
+            const profiles = new RigProfileStore({
+                database: store,
+                localInstanceId,
+                publish: () => undefined,
+            });
+            const profile = {
+                createdAt: 1,
+                email: "steve@example.test",
+                id: "asteveprofile0000000000001",
+                name: "Steve Korshakov",
+                parentInstanceId: remoteInstanceId,
+                updatedAt: 1,
+                version: 1,
+            } as const;
+            profiles.replicate(profile, remoteInstanceId);
+            const session = store.create(
+                {
+                    cwd: "/tmp/rig-profile-session",
+                    identity: profile.id,
+                },
+                { ownerInstanceId: remoteInstanceId, profileId: profile.id },
+            );
+            const fork = store.fork(session.id);
+
+            expect(session.snapshot().profileId).toBe(profile.id);
+            expect(fork?.snapshot().profileId).toBe(profile.id);
+            await expect(session.compact()).rejects.toThrow("Captured profile environment.");
+            expect(capturedEnvironment).toEqual({
+                GIT_AUTHOR_EMAIL: profile.email,
+                GIT_AUTHOR_NAME: profile.name,
+                GIT_COMMITTER_EMAIL: profile.email,
+                GIT_COMMITTER_NAME: profile.name,
+            });
+
+            const sessionId = session.id;
+            store.close();
+            store = new PersistentSessionStore({
+                createRuntime: (options) => {
+                    capturedEnvironment = options.shellEnvironment;
+                    throw new Error("Captured restored profile environment.");
+                },
+                databasePath,
+                localInstanceId,
+                resolveModelCatalog: () => testModelCatalog(),
+            });
+            const restored = store.get(sessionId);
+            expect(restored?.snapshot().profileId).toBe(profile.id);
+            await expect(restored?.compact()).rejects.toThrow(
+                "Captured restored profile environment.",
+            );
+            expect(capturedEnvironment).toEqual({
+                GIT_AUTHOR_EMAIL: profile.email,
+                GIT_AUTHOR_NAME: profile.name,
+                GIT_COMMITTER_EMAIL: profile.email,
+                GIT_COMMITTER_NAME: profile.name,
+            });
+        } finally {
+            store?.close();
+            await cleanup();
+        }
+    });
+
+    it("gives remote project sessions a broker capability without exposing the GitHub token", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const home = await mkdtemp(join(tmpdir(), "rig-remote-session-home-"));
+        const localInstanceId = "alocalgitbroker0000000001";
+        const remoteInstanceId = "aremotegitbroker000000001";
+        let captured:
+            | {
+                  shellEnvironment?: Readonly<Record<string, string>>;
+                  projectGitEnvironment?: NodeJS.ProcessEnv;
+                  projectGitLoopbackPorts?: readonly number[];
+                  secretIds?: readonly string[];
+                  secretReferences?: readonly {
+                      description: string;
+                      environmentVariables: readonly string[];
+                      id: string;
+                  }[];
+              }
+            | undefined;
+        let store: PersistentSessionStore | undefined;
+        try {
+            store = new PersistentSessionStore({
+                createRuntime: (options) => {
+                    const projectGit = options.secrets?.activate(["project-git"]) ?? {
+                        environment: {},
+                        release: () => {},
+                    };
+                    captured = {
+                        ...(options.shellEnvironment === undefined
+                            ? {}
+                            : { shellEnvironment: options.shellEnvironment }),
+                        ...(options.secrets === undefined
+                            ? {}
+                            : {
+                                  projectGitEnvironment: projectGit.environment,
+                                  projectGitLoopbackPorts: options.secrets.trustedLoopbackPorts([
+                                      "project-git",
+                                  ]),
+                                  secretIds: options.secrets.ids(),
+                                  secretReferences: options.secrets.references(),
+                              }),
+                    };
+                    projectGit.release();
+                    throw new Error("Captured brokered Git environment.");
+                },
+                databasePath,
+                homeDirectory: home,
+                localInstanceId,
+                projectClone: async ({ destination }) => createGitRepository(destination),
+                resolveModelCatalog: () => testModelCatalog(),
+            });
+            const profiles = new RigProfileStore({
+                database: store,
+                localInstanceId,
+                publish: () => undefined,
+            });
+            const profile = {
+                createdAt: 1,
+                email: "steve@example.test",
+                id: "agitbrokerprofile0000000001",
+                name: "Steve Korshakov",
+                parentInstanceId: remoteInstanceId,
+                updatedAt: 1,
+                version: 1,
+            } as const;
+            profiles.replicate(profile, remoteInstanceId);
+            const project = await store.createRemoteProject(
+                {
+                    identity: profile.id,
+                    name: "Brokered project",
+                    secret: { kind: "github" },
+                    source: { kind: "github", repository: "slopus/rig" },
+                },
+                {
+                    createdBy: { instanceId: remoteInstanceId, profileId: profile.id },
+                    githubToken: "initial-github-token",
+                },
+            );
+            await expect
+                .poll(() => store?.getProject(project.id)?.initializationStatus)
+                .toBe("ready");
+            const session = store.create(
+                { cwd: project.path, identity: profile.id },
+                { ownerInstanceId: remoteInstanceId, profileId: profile.id },
+            );
+            await store.refreshSessionGitCredential(
+                session.id,
+                { instanceId: remoteInstanceId, profileId: profile.id },
+                "rotated-github-token",
+            );
+
+            await expect(session.compact()).rejects.toThrow("Captured brokered Git environment.");
+            expect(JSON.stringify(captured)).not.toContain("initial-github-token");
+            expect(JSON.stringify(captured)).not.toContain("rotated-github-token");
+            expect(captured?.shellEnvironment).toMatchObject({
+                GIT_AUTHOR_EMAIL: profile.email,
+                GIT_AUTHOR_NAME: profile.name,
+            });
+            expect(captured?.shellEnvironment).not.toHaveProperty("GIT_CONFIG_KEY_1");
+            expect(captured?.projectGitEnvironment).toMatchObject({
+                GIT_CONFIG_VALUE_1: "https://github.com/slopus/rig.git",
+            });
+            expect(captured?.projectGitEnvironment?.GIT_CONFIG_KEY_1).toMatch(
+                /^url\.http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{64}\/github\.com\/slopus\/rig\.git\.insteadOf$/u,
+            );
+            expect(captured?.projectGitLoopbackPorts).toEqual([expect.any(Number)]);
+            expect(captured?.secretIds).toEqual([]);
+            expect(captured?.secretReferences).toEqual([
+                {
+                    description: expect.stringContaining("credential proxy"),
+                    environmentVariables: [
+                        "GCM_INTERACTIVE",
+                        "GIT_CONFIG_COUNT",
+                        "GIT_CONFIG_KEY_0",
+                        "GIT_CONFIG_KEY_1",
+                        "GIT_CONFIG_VALUE_0",
+                        "GIT_CONFIG_VALUE_1",
+                        "GIT_TERMINAL_PROMPT",
+                    ],
+                    id: "project-git",
+                },
+            ]);
+        } finally {
+            store?.close();
+            await Promise.all([
+                cleanup(),
+                rm(home, {
+                    force: true,
+                    recursive: true,
+                }),
+            ]);
+        }
+    });
+
     it("persists an explicit session owner and keeps it when a session is forked or restored", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const localInstanceId = "alocalinstance00000000001";
@@ -1113,7 +1325,16 @@ describe("PersistentSessionStore", () => {
         try {
             const store = new PersistentSessionStore({ databasePath });
             store.registerSpecialSecret({ kind: "github", token: "runtime-only-token" });
+            expect(() =>
+                store.create({
+                    cwd: "/tmp/rig-github-secret-rejected-session",
+                    secretIds: ["github"],
+                }),
+            ).toThrow("managed by Rig and cannot be attached to agent commands");
             const session = store.create({ cwd: "/tmp/rig-github-secret-session" });
+            expect(() => store.attachSecret(session.id, "github", "session")).toThrow(
+                "managed by Rig and cannot be attached to agent commands",
+            );
             expect(store.listSecrets()).toEqual([
                 {
                     availableToModel: false,

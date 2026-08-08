@@ -11,10 +11,12 @@ import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
 import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
+import type { ProjectCreator } from "../../protocol/index.js";
 
 export interface WorkspaceReserveInput {
     baseCommit?: string;
     baseRef?: string;
+    createdBy?: ProjectCreator;
     creatorSessionId?: string;
     gitCommonDir?: string;
     id: string;
@@ -40,6 +42,8 @@ export function workspaceReserve(
         const retry = tx
             .select({
                 baseRef: projectWorkspaces.baseRef,
+                creatorInstanceId: projectWorkspaces.creatorInstanceId,
+                creatorProfileId: projectWorkspaces.creatorProfileId,
                 id: projectWorkspaces.id,
                 projectId: projectWorkspaces.projectId,
             })
@@ -53,6 +57,15 @@ export function workspaceReserve(
             if (input.baseRef !== undefined && retry.baseRef !== input.baseRef) {
                 throw new Error(
                     "That workspace ID already names a workspace with a different base.",
+                );
+            }
+            if (
+                input.createdBy !== undefined &&
+                (retry.creatorInstanceId !== input.createdBy.instanceId ||
+                    retry.creatorProfileId !== input.createdBy.profileId)
+            ) {
+                throw new Error(
+                    "That workspace ID already names a workspace owned by another human profile.",
                 );
             }
             return { created: false, workspaceId: retry.id };
@@ -101,6 +114,8 @@ export function workspaceReserve(
                 baseCommit: input.baseCommit ?? null,
                 baseRef: input.baseRef ?? null,
                 branch,
+                creatorInstanceId: input.createdBy?.instanceId,
+                creatorProfileId: input.createdBy?.profileId,
                 creatorSessionId: input.creatorSessionId,
                 createdAtMs: input.now,
                 gitAhead: 0,

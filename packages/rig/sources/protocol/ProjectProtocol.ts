@@ -29,11 +29,46 @@ import type { Folder, FolderEvent } from "./FolderProtocol.js";
 import type { HappyCloudChangedEvent } from "./HappyCloudProtocol.js";
 import type { P2pStatusChangedEvent } from "./P2pProtocol.js";
 import type { RigProfileChangedEvent } from "./ProfileProtocol.js";
+import { rigProfileIdSchema } from "./ProfileProtocol.js";
+import { p2pInstanceIdSchema } from "./P2pIdentityProtocol.js";
 
 export type ProjectKind = "regular" | "home";
 export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
 export type ProjectNameSource = "folder" | "git_remote" | "user";
 export type ProjectAvatarSource = "repository" | "hosting" | "user";
+
+export const projectRemoteSourceSchema = Type.Union([
+    Type.Object(
+        {
+            kind: Type.Literal("github"),
+            repository: githubRepositorySchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            kind: Type.Literal("git"),
+            url: Type.String({ maxLength: 16_384, minLength: 1 }),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export type ProjectRemoteSource = Static<typeof projectRemoteSourceSchema>;
+
+export const projectGitSecretSchema = Type.Object(
+    { kind: Type.Literal("github") },
+    { additionalProperties: false },
+);
+export type ProjectGitSecret = Static<typeof projectGitSecretSchema>;
+
+export const projectCreatorSchema = Type.Object(
+    {
+        instanceId: p2pInstanceIdSchema,
+        profileId: rigProfileIdSchema,
+    },
+    { additionalProperties: false },
+);
+export type ProjectCreator = Static<typeof projectCreatorSchema>;
 
 /** A folder-backed operation targets either a project root or one workspace inside it. */
 export interface ProjectScope {
@@ -195,6 +230,7 @@ export interface Project {
     avatar?: ProjectAvatar;
     avatarBuiltin?: "home";
     createdAt: number;
+    createdBy?: ProjectCreator;
     /** Branch new workspaces are cut from, decided once when the project was added. */
     defaultBranch?: string;
     git?: GitRepositoryFacts;
@@ -208,6 +244,10 @@ export interface Project {
     orderKey: string;
     path: string;
     presence: ProjectPresence;
+    /** Remote repository Rig manages in this project's fixed folder. */
+    remoteSource?: ProjectRemoteSource;
+    /** Credential kind needed to retry the clone. Secret material is never persisted. */
+    requiredSecretKind?: "github";
     settings: ProjectSettings;
     storageKey: string;
     updatedAt: number;
@@ -230,6 +270,8 @@ export interface ProjectWorkspace {
     /** Branch Rig manages for this worktree; it follows the workspace name. */
     branch: string;
     createdAt: number;
+    /** Human profile that owns this remote workspace. */
+    createdBy?: ProjectCreator;
     error?: string;
     git?: GitRepositoryFacts;
     gitCommonDir: string;
@@ -251,9 +293,13 @@ export interface CreateProjectWorkspaceRequest {
     baseRef?: string;
     /** Client-chosen cuid2 identity. Repeating it returns the same workspace. */
     id?: string;
+    /** Human profile that owns the workspace. Required for remote creation. */
+    identity?: string;
     name: string;
     /** Whether `name` was chosen deliberately, which keeps the first chat from replacing it. */
     nameConfigured?: boolean;
+    /** Credential kind to share temporarily with a remote Rig. */
+    secret?: ProjectGitSecret;
 }
 
 export const registerProjectRequestSchema = Type.Object(
@@ -265,6 +311,18 @@ export const registerProjectRequestSchema = Type.Object(
 );
 export type RegisterProjectRequest = Static<typeof registerProjectRequestSchema>;
 
+export const createRemoteProjectRequestSchema = Type.Object(
+    {
+        identity: rigProfileIdSchema,
+        name: Type.String({ maxLength: 100, minLength: 1 }),
+        projectId: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+        secret: Type.Optional(projectGitSecretSchema),
+        source: projectRemoteSourceSchema,
+    },
+    { additionalProperties: false },
+);
+export type CreateRemoteProjectRequest = Static<typeof createRemoteProjectRequestSchema>;
+
 export const projectRegistrationErrorCodeSchema = Type.Union([
     Type.Literal("invalid_request"),
     Type.Literal("path_missing"),
@@ -273,6 +331,9 @@ export const projectRegistrationErrorCodeSchema = Type.Union([
     Type.Literal("not_git_repository"),
     Type.Literal("not_git_top_level"),
     Type.Literal("project_id_conflict"),
+    Type.Literal("project_path_conflict"),
+    Type.Literal("secret_unavailable"),
+    Type.Literal("unsupported_git_source"),
     Type.Literal("managed_workspace_unavailable"),
 ]);
 export type ProjectRegistrationErrorCode = Static<typeof projectRegistrationErrorCodeSchema>;

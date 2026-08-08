@@ -23,6 +23,7 @@ import { posix } from "node:path";
 
 export interface CreateDockerAgentContextOptions {
     docker: DockerExecutionConfig;
+    environment?: Readonly<Record<string, string>>;
     folders?: FolderContext;
     goals?: GoalContext;
     permissionMode?: PermissionMode;
@@ -49,6 +50,7 @@ export function createDockerAgentContext(options: CreateDockerAgentContextOption
             permissions,
             options.secrets,
             options.plugins?.network,
+            options.environment,
         ),
         docsPath: CONTAINER_DOCS_PATH,
         fileReads: createFileReadState(),

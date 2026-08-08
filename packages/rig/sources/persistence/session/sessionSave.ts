@@ -46,6 +46,7 @@ export function sessionSave(
             modelId: state.modelId,
             modelsJson: JSON.stringify(state.models),
             ownerInstanceId: state.ownerInstanceId,
+            profileId: state.profileId ?? null,
             nextTaskId: state.nextTaskId,
             orderKey: state.orderKey,
             parentSessionId: state.agent.parentSessionId ?? null,
@@ -99,6 +100,7 @@ export function sessionSave(
             createdAtMs: _createdAtMs,
             id: _id,
             ownerInstanceId: _ownerInstanceId,
+            profileId: _profileId,
             ...updates
         } = values;
         tx.insert(sessions)

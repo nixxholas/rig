@@ -45,6 +45,8 @@ Use it to answer a prompt, drive a REPL, or interrupt with Ctrl-C ("\\u0003"). E
         `sending ${quoteVisibleExact(input)} to background command ${task_id}`,
     availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ input }) => input.length > 0,
+    shouldRunInFullAccessInAutoMode: ({ input, task_id }, context) =>
+        input.length > 0 && secretTask(task_id, context.bash?.sessionUsesSecrets),
     steerable: true,
     execute: async ({ input, task_id, timeout = 250 }, context, execution) => {
         const sessionId = parseBackgroundTaskId(task_id);
@@ -81,3 +83,14 @@ Use it to answer a prompt, drive a REPL, or interrupt with Ctrl-C ("\\u0003"). E
             : "Sent input; the background command has finished.",
     locks: [],
 });
+
+function secretTask(
+    taskId: string,
+    sessionUsesSecrets: ((sessionId: number) => boolean) | undefined,
+): boolean {
+    try {
+        return sessionUsesSecrets?.(parseBackgroundTaskId(taskId)) === true;
+    } catch {
+        return false;
+    }
+}

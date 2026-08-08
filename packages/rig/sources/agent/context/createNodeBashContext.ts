@@ -36,9 +36,12 @@ import {
 import { createCommandEnvironment, type SessionSecretContext } from "../../secrets/index.js";
 import { errorToMessage } from "../../errorToMessage.js";
 import { formatManagedNetworkDenial } from "./formatManagedNetworkDenial.js";
+import { redactGitAuthenticationText } from "../../git/GitCredentialBroker.js";
+import { assertCanUseCommandSecrets } from "./assertCanUseCommandSecrets.js";
 
 export interface CreateNodeBashContextOptions {
     cwd: string;
+    environment?: NodeJS.ProcessEnv;
     loadManagedNetworkPolicy?: typeof loadProjectManagedNetworkPolicy;
     networkInterceptor?: ManagedNetworkInterceptor;
     processManager: NativeProcessManager;
@@ -70,12 +73,14 @@ interface NodeBashSession {
     /** A read has already returned this session's final status. */
     exitObserved: boolean;
     process: ManagedProcess;
+    redactionEnvironment: NodeJS.ProcessEnv;
     managedNetwork?: SandboxedProcessNetwork;
     result?: ProcessRunResult;
     sessionId: number;
     stderrOffset: number;
     stdoutOffset: number;
     timedOut: boolean;
+    usesSecrets: boolean;
 }
 
 export function createNodeBashContext(options: CreateNodeBashContextOptions): BashContext {
@@ -209,6 +214,8 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         const stdoutDeltaBytes =
             processSnapshot.stdoutDeltaBytes ??
             Buffer.byteLength(processSnapshot.stdoutDelta, "utf8");
+        const redact = (text: string) =>
+            redactGitAuthenticationText(text, session.redactionEnvironment);
         return {
             command: session.command,
             cwd: session.cwd,
@@ -220,8 +227,8 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     : session.result.killed
                       ? "killed"
                       : "completed",
-            stderr: session.result?.stderr ?? processSnapshot.stderr,
-            stderrDelta,
+            stderr: redact(session.result?.stderr ?? processSnapshot.stderr),
+            stderrDelta: redact(stderrDelta),
             ...(processSnapshot.stderrBytes === undefined
                 ? {}
                 : { stderrBytes: processSnapshot.stderrBytes }),
@@ -230,8 +237,8 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 : { stderrOmittedBytes: processSnapshot.stderrOmittedBytes }),
             stderrDeltaBytes,
             stderrDeltaOmittedBytes: processSnapshot.stderrDeltaOmittedBytes ?? 0,
-            stdout: session.result?.stdout ?? processSnapshot.stdout,
-            stdoutDelta: processSnapshot.stdoutDelta,
+            stdout: redact(session.result?.stdout ?? processSnapshot.stdout),
+            stdoutDelta: redact(processSnapshot.stdoutDelta),
             ...(processSnapshot.stdoutBytes === undefined
                 ? {}
                 : { stdoutBytes: processSnapshot.stdoutBytes }),
@@ -292,11 +299,12 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             const permissionMode = options.permissions.mode;
             const permissionRevision = options.permissions.revision;
             assertCanUseCustomShell(permissionMode, runOptions.shell);
+            assertCanUseCommandSecrets(permissionMode, runOptions.secrets);
             const cwd = runCwd(runOptions.cwd);
-            const shell = runOptions.shell ?? resolveSystemShell();
+            const shell = runOptions.shell ?? resolveSystemShell(options.environment);
             const toolEnvironment = await createToolEnvironment(
                 permissionMode,
-                globalThis.process.env,
+                options.environment,
                 { cwd: options.cwd },
             );
             const networkPolicy = shouldApplyManagedNetworkPolicy(permissionMode)
@@ -319,11 +327,23 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 await managedNetwork?.close();
                 throw error;
             }
-            const commandEnvironment = createCommandEnvironment(
-                toolEnvironment,
-                options.secrets,
-                runOptions.secrets,
-            );
+            const activatedSecrets = options.secrets?.activate(runOptions.secrets) ?? {
+                environment: {},
+                release: () => {},
+            };
+            let commandEnvironment: NodeJS.ProcessEnv;
+            try {
+                commandEnvironment = createCommandEnvironment(
+                    toolEnvironment,
+                    options.secrets,
+                    runOptions.secrets,
+                    activatedSecrets.environment,
+                );
+            } catch (error) {
+                activatedSecrets.release();
+                await managedNetwork?.close();
+                throw error;
+            }
             const processRunOptions: Parameters<NativeProcessManager["run"]>[0] = {
                 command: sandboxedCommand.command,
                 cwd,
@@ -357,6 +377,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     sandboxedCommand.protectedCreatePaths ?? [],
                 );
             } catch (error) {
+                activatedSecrets.release();
                 await cleanUpCommandResources(
                     { stop: async () => false },
                     managedNetwork,
@@ -370,6 +391,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 assertPermissionRevision(options.permissions, permissionRevision);
                 result = await options.processManager.run(processRunOptions);
             } finally {
+                activatedSecrets.release();
                 stopObservingNetworkDenials?.();
                 runOptions.signal?.removeEventListener("abort", abortFromCaller);
                 cleanup = await cleanUpCommandResources(
@@ -385,8 +407,11 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             const networkDenialMessage =
                 networkDenial === undefined ? "" : formatManagedNetworkDenial(networkDenial);
             return {
-                stdout: result.stdout,
-                stderr: `${result.stderr}${networkDenialMessage}${protectedPathMessage}${cleanup.errorMessage ?? ""}`,
+                stdout: redactGitAuthenticationText(result.stdout, commandEnvironment),
+                stderr: redactGitAuthenticationText(
+                    `${result.stderr}${networkDenialMessage}${protectedPathMessage}${cleanup.errorMessage ?? ""}`,
+                    commandEnvironment,
+                ),
                 exitCode:
                     networkDenial !== undefined ||
                     cleanup.errorMessage !== undefined ||
@@ -401,14 +426,15 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             // start must not cost the user a running one.
             const permissionMode = options.permissions.mode;
             assertCanUseCustomShell(permissionMode, runOptions.shell);
+            assertCanUseCommandSecrets(permissionMode, runOptions.secrets);
             const releaseSessionStart = reserveSessionStart();
             try {
                 const permissionRevision = options.permissions.revision;
                 const cwd = runCwd(runOptions.cwd);
-                const shell = runOptions.shell ?? resolveSystemShell();
+                const shell = runOptions.shell ?? resolveSystemShell(options.environment);
                 const toolEnvironment = await createToolEnvironment(
                     permissionMode,
-                    globalThis.process.env,
+                    options.environment,
                     { cwd: options.cwd },
                 );
                 const networkPolicy = shouldApplyManagedNetworkPolicy(permissionMode)
@@ -433,11 +459,23 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     await managedNetwork?.close();
                     throw error;
                 }
-                const commandEnvironment = createCommandEnvironment(
-                    toolEnvironment,
-                    options.secrets,
-                    runOptions.secrets,
-                );
+                const activatedSecrets = options.secrets?.activate(runOptions.secrets) ?? {
+                    environment: {},
+                    release: () => {},
+                };
+                let commandEnvironment: NodeJS.ProcessEnv;
+                try {
+                    commandEnvironment = createCommandEnvironment(
+                        toolEnvironment,
+                        options.secrets,
+                        runOptions.secrets,
+                        activatedSecrets.environment,
+                    );
+                } catch (error) {
+                    activatedSecrets.release();
+                    await managedNetwork?.close();
+                    throw error;
+                }
                 const processStartOptions: Parameters<NativeProcessManager["start"]>[0] = {
                     command: sandboxedCommand.command,
                     cwd,
@@ -458,6 +496,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                         sandboxedCommand.protectedCreatePaths ?? [],
                     );
                 } catch (error) {
+                    activatedSecrets.release();
                     await cleanUpCommandResources(
                         { stop: async () => false },
                         managedNetwork,
@@ -470,6 +509,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     assertPermissionRevision(options.permissions, permissionRevision);
                     process = options.processManager.start(processStartOptions);
                 } catch (error) {
+                    activatedSecrets.release();
                     await cleanUpCommandResources(
                         protectedPathMonitor,
                         managedNetwork,
@@ -478,6 +518,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     throw error;
                 }
                 const completion = process.wait();
+                void completion.then(activatedSecrets.release, activatedSecrets.release);
                 const sessionId = nextSessionId;
                 nextSessionId += 1;
                 const session: NodeBashSession = {
@@ -487,11 +528,13 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     cwd,
                     exitObserved: false,
                     process,
+                    redactionEnvironment: commandEnvironment,
                     ...(managedNetwork === undefined ? {} : { managedNetwork }),
                     sessionId,
                     stderrOffset: 0,
                     stdoutOffset: 0,
                     timedOut: false,
+                    usesSecrets: (runOptions.secrets?.length ?? 0) > 0,
                 };
                 let networkDenial: ManagedNetworkBlockedRequest | undefined;
                 const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
@@ -560,9 +603,15 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         setSessionExitListener(listener) {
             onSessionExit = listener;
         },
+        sessionUsesSecrets(sessionId) {
+            return sessions.get(sessionId)?.usesSecrets === true;
+        },
         supportsSessionInput: true,
         async writeSession(sessionId, data) {
             const session = sessions.get(sessionId);
+            if (session?.usesSecrets === true) {
+                assertCanUseCommandSecrets(options.permissions.mode, ["selected"]);
+            }
             return session?.process.writeStdin(data) ?? false;
         },
     };

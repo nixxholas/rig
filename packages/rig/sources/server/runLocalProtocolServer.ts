@@ -87,6 +87,7 @@ import {
     P2pCredentialRuntimeRegistry,
     P2pCredentialStore,
 } from "../credentials/index.js";
+import { prepareRemoteWorkGitSecret } from "./prepareRemoteWorkGitSecret.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -804,6 +805,8 @@ async function runOwnedLocalProtocolServer(
                     loadedConfig.config.p2p.exposeApi ||
                     ((isP2pCredentialPath(request.path) || isP2pProfilePath(request.path)) &&
                         isTrustedP2pPeer(peerId)) ||
+                    (canP2pPeerConfigure(peerId) &&
+                        isP2pRemoteWorkPath(request.path, request.method)) ||
                     (canP2pPeerConfigure(peerId) && isP2pConfigurationPath(request.path)),
                 socketPath,
                 token,
@@ -1034,6 +1037,7 @@ async function runOwnedLocalProtocolServer(
                     ? {}
                     : {
                           prepareP2pRequest: async ({ body, path, peerId, signal }) => {
+                              if (!isTrustedP2pPeer(peerId)) return undefined;
                               await p2pCredentialReplicator?.ensureForRequest(peerId, signal);
                               await replicateProfileForP2pRequest({
                                   body,
@@ -1049,10 +1053,12 @@ async function runOwnedLocalProtocolServer(
                                   profiles: rigProfiles!,
                                   signal,
                               });
+                              return prepareRemoteWorkGitSecret(path, body, activeStore);
                           },
                       }),
                 canP2pPeerConfigure,
                 canP2pPeerProvision: isTrustedP2pPeer,
+                canP2pPeerUseRemoteWork: canP2pPeerConfigure,
                 plugins,
                 ...(worklets === undefined ? {} : { worklets }),
                 getProviderQuota: (providerId, ownerInstanceId, credential) =>
@@ -1212,6 +1218,23 @@ function isP2pProfilePath(path: string): boolean {
 
 function isP2pCredentialPath(path: string): boolean {
     return new URL(path, "http://rig.local").pathname === "/inference-credentials";
+}
+
+export function isP2pRemoteWorkPath(path: string, method: string): boolean {
+    const pathname = new URL(path, "http://rig.local").pathname;
+    return (
+        (method === "POST" &&
+            (pathname === "/projects/clone" ||
+                /^\/projects\/[^/]+\/workspaces$/u.test(pathname) ||
+                pathname === "/sessions" ||
+                pathname === "/messages" ||
+                /^\/sessions\/[^/]+\/(?:context|messages|steer)$/u.test(pathname))) ||
+        (method === "GET" &&
+            (pathname === "/catalog" ||
+                pathname === "/events/live" ||
+                /^\/sessions\/[^/]+\/state$/u.test(pathname))) ||
+        (method === "POST" && pathname === "/git/watch")
+    );
 }
 
 async function writeRegistry(path: string, payload: unknown): Promise<void> {

@@ -38,6 +38,15 @@ export { resolveWorkspaceBase, type WorkspaceBase } from "./resolveWorkspaceBase
 export { resolveGitExecutable, resetResolvedGitExecutable } from "./resolveGitExecutable.js";
 export { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
 export { runGitCommand } from "./runGitCommand.js";
+export { runGitCommandWithEnvironment } from "./runGitCommand.js";
+export {
+    GitCredentialBroker,
+    type GitAuthentication,
+    type GitCommandAuthentication,
+    type GitCommandAuthenticationLease,
+    type RegisterGitCredential,
+} from "./GitCredentialBroker.js";
+export { PROJECT_GIT_SECRET_ID, projectGitCommandSecret } from "./projectGitCommandSecret.js";
 export { runSandboxedGitCommand } from "./runSandboxedGitCommand.js";
 export { runScanGit, type ScanGitResult } from "./runScanGit.js";
 export { scanGitRepository, type ScanGitRepositoryOptions } from "./scanGitRepository.js";

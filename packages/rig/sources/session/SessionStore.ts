@@ -5,6 +5,7 @@ import type {
     ChangeServiceTierRequest,
     CreateFolderRequest,
     CreateProjectWorkspaceRequest,
+    CreateRemoteProjectRequest,
     CreateSessionRequest,
     Folder,
     ListFoldersResponse,
@@ -12,6 +13,7 @@ import type {
     GitRepositoryFacts,
     MoveFolderRequest,
     Project,
+    ProjectCreator,
     ProjectSettingsUpdate,
     ProjectWorkspace,
     RegisterProjectRequest,
@@ -44,6 +46,7 @@ import type { WorkletStore } from "../worklets/index.js";
 /** Internal server-side attributes for a new root session. */
 export interface SessionCreationOptions {
     ownerInstanceId?: string;
+    profileId?: string;
 }
 
 export interface SessionStore {
@@ -85,7 +88,12 @@ export interface SessionStore {
     createWorkspace(
         projectId: string,
         request: CreateProjectWorkspaceRequest,
+        options?: { createdBy?: ProjectCreator; githubToken?: string },
     ): Promise<ProjectWorkspace | undefined>;
+    createRemoteProject(
+        request: CreateRemoteProjectRequest,
+        options?: { createdBy?: ProjectCreator; githubToken?: string; mutationId?: string },
+    ): Promise<Project>;
     detachSecret(
         sessionId: string,
         secretId: string,
@@ -195,6 +203,12 @@ export interface SessionStore {
     clearProjectAvatar(projectId: string): Project | undefined;
     registerSecret(request: RegisterSecretRequest): SecretSummary;
     registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary;
+    resolveSpecialSecret(kind: SpecialSecretKind): NodeJS.ProcessEnv;
+    refreshSessionGitCredential(
+        sessionId: string,
+        creator: ProjectCreator,
+        githubToken: string,
+    ): Promise<boolean>;
     /** The agents a scope covers and when each of them worked, waited, or asked. */
     timeline(request: GetTimelineRequest): readonly TimelineAgent[];
     transferSession(

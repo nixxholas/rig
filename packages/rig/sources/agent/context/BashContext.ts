@@ -85,6 +85,7 @@ export interface BashContext {
         options?: BashSessionReadOptions,
     ): Promise<BashSessionSnapshot | undefined>;
     run(options: BashRunOptions): Promise<BashRunResult>;
+    sessionUsesSecrets?(sessionId: number): boolean;
     setActiveSessionCountListener?(listener: ((count: number) => void) | undefined): void;
     /** Reports commands that ended without anyone waiting to hear about it. */
     setSessionExitListener?(listener: ((exit: BashSessionExit) => void) | undefined): void;

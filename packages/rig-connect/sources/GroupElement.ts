@@ -10,6 +10,8 @@ import type {
     SessionUnreadReason,
     SessionUnreadState,
     SessionScope,
+    ProjectRemoteSource,
+    ProjectCreator,
 } from "./protocol.js";
 
 export interface GroupUsage {
@@ -48,6 +50,8 @@ export interface GroupSession {
     readonly modelId: string;
     /** Rig whose credential catalog this chat is bound to. */
     readonly ownerInstanceId: string;
+    /** Human profile whose Git identity this chat uses. */
+    readonly profileId?: string;
     readonly orderKey: string;
     readonly permissionMode: string;
     readonly scope: Extract<SessionScope, { kind: "project" | "workspace" }>;
@@ -73,6 +77,7 @@ export interface GroupSession {
  * every client then has to join. Doing it once here is the point of the library.
  */
 export interface ProjectGroup {
+    readonly createdBy?: ProjectCreator;
     readonly id: string;
     readonly kind: "regular" | "home";
     readonly name: string;
@@ -80,6 +85,10 @@ export interface ProjectGroup {
     readonly orderKey: string;
     readonly path: string;
     readonly presence: "present" | "missing";
+    readonly initializationError?: string;
+    readonly initializationStatus: "initializing" | "ready" | "failed";
+    readonly remoteSource?: ProjectRemoteSource;
+    readonly requiredSecretKind?: "github";
     readonly avatar?: {
         readonly height: number;
         readonly url: string;
@@ -99,6 +108,8 @@ export interface ProjectGroup {
 }
 
 export interface WorkspaceGroup {
+    /** Human profile that owns this remote worktree. */
+    readonly createdBy?: ProjectCreator;
     readonly id: string;
     readonly name: string;
     readonly branch?: string;

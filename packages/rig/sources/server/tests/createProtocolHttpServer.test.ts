@@ -38,6 +38,7 @@ import { createTestSocketDirectory } from "../../testing/createTestSocketDirecto
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 import { CURRENT_SESSION_DATABASE_VERSION } from "../../persistence/database/migrateSessionDatabase.js";
+import { RigProfileStore } from "../../profiles/index.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -864,6 +865,62 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("starts managed project clones through the API without exposing GitHub credentials", async () => {
+        const localInstanceId = "alocalcloneapi00000000001";
+        const store = new PersistentSessionStore({ databasePath: ":memory:", localInstanceId });
+        const profiles = new RigProfileStore({
+            database: store,
+            localInstanceId,
+            publish: () => undefined,
+        });
+        const profile = profiles.create({
+            email: "steve@example.test",
+            name: "Steve Korshakov",
+        });
+        const session = store.create({ cwd: "/tmp/rig-managed-project-api" });
+        const project = store.getProject(session.snapshot().projectId!)!;
+        store.registerSpecialSecret({ kind: "github", token: "api-token" });
+        const create = vi.spyOn(store, "createRemoteProject").mockResolvedValue(project);
+        const { close, socketPath } = await startServer({ profiles, store });
+        const request = {
+            identity: profile.id,
+            name: "Managed API",
+            projectId: createId(),
+            secret: { kind: "github" as const },
+            source: { kind: "github" as const, repository: "slopus/rig" },
+        };
+        try {
+            const response = await requestRawJson(socketPath, "/projects/clone", {
+                body: JSON.stringify(request),
+                headers: { "x-rig-mutation-id": "clone-mutation" },
+                method: "POST",
+            });
+
+            expect(response.statusCode).toBe(202);
+            expect(JSON.parse(response.body)).toEqual({ project });
+            expect(response.body).not.toContain("api-token");
+            expect(create).toHaveBeenCalledWith(request, {
+                createdBy: { instanceId: localInstanceId, profileId: profile.id },
+                githubToken: "api-token",
+                mutationId: "clone-mutation",
+            });
+
+            const injected = await requestRawJson(socketPath, "/projects/clone", {
+                body: JSON.stringify({
+                    ...request,
+                    temporaryGitSecret: { kind: "github", token: "injected-token" },
+                }),
+                method: "POST",
+            });
+            expect(injected.statusCode).toBe(400);
+            expect(injected.body).not.toContain("injected-token");
+            expect(create).toHaveBeenCalledTimes(1);
+        } finally {
+            await close();
+            store.close();
+        }
+    });
+
     it("lists, renames, snapshots, and updates project avatars", async () => {
         const store = new InMemorySessionStore();
         const { client, close } = await startServer({ store });
@@ -1261,6 +1318,7 @@ describe("createProtocolHttpServer", () => {
             environment: { SERVICE_TOKEN: "secret-value" },
             id: "service",
         });
+        store.registerSpecialSecret({ kind: "github", token: "native-token" });
         const { client, close } = await startServer({ store });
         try {
             const created = await client.createSession({ cwd: "/tmp/secret-project" });
@@ -1268,6 +1326,9 @@ describe("createProtocolHttpServer", () => {
 
             await expect(client.attachSecret(created.session.id, "missing")).rejects.toThrow(
                 "not registered",
+            );
+            await expect(client.attachSecret(created.session.id, "github")).rejects.toThrow(
+                "managed by Rig and cannot be attached to agent commands",
             );
             const sessionAttached = await client.attachSecret(created.session.id, "service");
             expect(sessionAttached.session).toMatchObject({
@@ -3589,6 +3650,7 @@ async function startServer(
         onShutdown?: () => void;
         onReloadHappy?: () => boolean | Promise<boolean>;
         onStartInspector?: () => Promise<{ inspectorUrl: string }>;
+        profiles?: RigProfileStore;
         store?: SessionStore;
         taskDrain?: TrackedTaskDrain;
     } = {},
@@ -3630,6 +3692,7 @@ async function startServer(
                       options.onDaemonSettingsChange!(config.settings),
               }),
         store,
+        ...(options.profiles === undefined ? {} : { profiles: options.profiles }),
         ...(options.taskDrain === undefined ? {} : { taskDrain: options.taskDrain }),
         token: "secret",
     });
