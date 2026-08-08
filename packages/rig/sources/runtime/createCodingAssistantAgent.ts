@@ -49,6 +49,7 @@ import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import type { SlotContext } from "../agent/context/SlotContext.js";
+import type { FolderContext } from "../agent/context/FolderContext.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
 import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
 import type { SchedulingContext } from "../scheduling/index.js";
@@ -81,6 +82,7 @@ export interface CreateCodingAssistantAgentOptions {
     effort?: string;
     executor?: Executor;
     env?: NodeJS.ProcessEnv;
+    folders?: FolderContext;
     goals?: GoalContext;
     instructions?: string;
     identity?: Identity;
@@ -122,6 +124,7 @@ export function createCodingAssistantAgent(
     const agentId = options.agentId ?? createId();
     const workflowsEnabled = options.workflows !== undefined && options.workflowsEnabled !== false;
     const sharedContextOptions = {
+        ...(options.folders !== undefined ? { folders: options.folders } : {}),
         ...(options.goals !== undefined ? { goals: options.goals } : {}),
         ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
         ...(options.plugins !== undefined ? { plugins: options.plugins } : {}),
@@ -324,6 +327,7 @@ export function createCodingAssistantAgent(
         ...baseTools,
         ...selectCommonToolsForModel({
             ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
+            hasFolderContext: options.folders !== undefined,
             hasWorkspaceContext: options.workspaces !== undefined,
             isSubagent: options.isSubagent === true,
             searchTools,

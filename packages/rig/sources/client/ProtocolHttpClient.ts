@@ -46,13 +46,19 @@ import type {
     HappyCloudProfileCiphertextResponse,
     HappyCloudSessionBlobResponse,
     HappyCloudStatus,
+    CreateFolderRequest,
+    FolderResponse,
     GoalSessionResponse,
+    MoveFolderRequest,
+    SetSessionFolderRequest,
+    UpdateFolderRequest,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
     ListModelsResponse,
     ListFileTreeRequest,
     ListFileTreeResponse,
     ListProjectFilePathsResponse,
+    ListFoldersResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
     ListSecretsResponse,
@@ -609,6 +615,41 @@ export class ProtocolHttpClient {
         }
         const suffix = parameters.size === 0 ? "" : `?${parameters.toString()}`;
         return this.#requestJson("GET", `/sessions${suffix}`);
+    }
+
+    listFolders(): Promise<ListFoldersResponse> {
+        return this.#requestJson("GET", "/folders");
+    }
+
+    createFolder(request: CreateFolderRequest): Promise<FolderResponse> {
+        return this.#requestJson("POST", "/folders", request);
+    }
+
+    getFolder(folderId: string): Promise<FolderResponse> {
+        return this.#requestJson("GET", `/folders/${encodeURIComponent(folderId)}`);
+    }
+
+    updateFolder(folderId: string, request: UpdateFolderRequest): Promise<FolderResponse> {
+        return this.#requestJson("PATCH", `/folders/${encodeURIComponent(folderId)}`, request);
+    }
+
+    moveFolder(folderId: string, request: MoveFolderRequest): Promise<FolderResponse> {
+        return this.#requestJson("POST", `/folders/${encodeURIComponent(folderId)}/move`, request);
+    }
+
+    archiveFolder(folderId: string): Promise<FolderResponse> {
+        return this.#requestJson("POST", `/folders/${encodeURIComponent(folderId)}/archive`);
+    }
+
+    setSessionFolder(
+        sessionId: string,
+        request: SetSessionFolderRequest,
+    ): Promise<{ session: ProtocolSession }> {
+        return this.#requestJson(
+            "PUT",
+            `/sessions/${encodeURIComponent(sessionId)}/folder`,
+            request,
+        );
     }
 
     listProjects(): Promise<ListProjectsResponse> {

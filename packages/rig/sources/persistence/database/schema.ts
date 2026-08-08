@@ -140,6 +140,31 @@ export const projectWorkspaces = sqliteTable(
     ],
 );
 
+export const folders = sqliteTable(
+    "folders",
+    {
+        id: text("id").primaryKey(),
+        /** Virtual parent. Null places the folder at the root of the tree. */
+        parentId: text("parent_id"),
+        name: text("name").notNull(),
+        description: text("description"),
+        rules: text("rules"),
+        /** A single emoji. Pictures and built-in icons are not stored yet. */
+        icon: text("icon"),
+        orderKey: text("order_key").notNull(),
+        /** Flat storage directory named after the folder's own id. */
+        path: text("path").notNull().unique(),
+        version: integer("version").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+        archivedAtMs: integer("archived_at_ms"),
+    },
+    (table) => [
+        foreignKey({ columns: [table.parentId], foreignColumns: [table.id] }),
+        index("folders_parent_order").on(table.parentId, table.orderKey),
+    ],
+);
+
 export const sessions = sqliteTable(
     "sessions",
     {
@@ -211,6 +236,10 @@ export const sessions = sqliteTable(
         workspaceQueueWaiting: integer("workspace_queue_waiting", { mode: "boolean" })
             .notNull()
             .default(false),
+        /** Folder this chat filed itself into. Null keeps it in Unsorted. */
+        folderId: text("folder_id").references(() => folders.id),
+        /** When a chat started out belonging nowhere. Null once it has been filed, or never was. */
+        unsortedSinceMs: integer("unsorted_since_ms"),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),
@@ -231,6 +260,7 @@ export const sessions = sqliteTable(
             sql`${table.updatedAtMs} DESC`,
         ),
         index("sessions_parent_order").on(table.projectId, table.workspaceId, table.orderKey),
+        index("sessions_folder").on(table.folderId, desc(table.updatedAtMs)),
     ],
 );
 

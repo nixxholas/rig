@@ -120,6 +120,11 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
         opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
         opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
+        opened.database.run(sql.raw("DROP INDEX sessions_unsorted"));
+        opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
+        opened.database.run(sql.raw("DROP INDEX sessions_folder"));
+        opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
+        opened.database.run(sql.raw("DROP TABLE folders"));
         opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
         migrateSessionDatabase(opened.database);

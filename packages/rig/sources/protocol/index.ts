@@ -139,6 +139,29 @@ export {
     type WriteProjectFileRequest,
     type WriteProjectFileResponse,
 } from "./ProjectFileProtocol.js";
+export {
+    createFolderRequestSchema,
+    folderSchema,
+    folderErrorCodeSchema,
+    folderErrorResponseSchema,
+    moveFolderRequestSchema,
+    setSessionFolderRequestSchema,
+    updateFolderRequestSchema,
+    FOLDER_ICON_MAX_LENGTH,
+    FOLDER_NAME_MAX_LENGTH,
+    FOLDER_TEXT_MAX_LENGTH,
+    UNSORTED_SESSION_ARCHIVE_AFTER_MS,
+    type CreateFolderRequest,
+    type Folder,
+    type FolderErrorCode,
+    type FolderErrorResponse,
+    type FolderEvent,
+    type FolderResponse,
+    type ListFoldersResponse,
+    type MoveFolderRequest,
+    type SetSessionFolderRequest,
+    type UpdateFolderRequest,
+} from "./FolderProtocol.js";
 export type { McpServerSummary } from "../mcp/index.js";
 export type { SessionTask, TaskStatus } from "../tasks/index.js";
 export type {

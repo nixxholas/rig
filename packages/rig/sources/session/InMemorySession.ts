@@ -27,7 +27,9 @@ import type { Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { BashSessionExit } from "../agent/context/BashContext.js";
 import { BASH_SESSION_STOP_GRACE_MS } from "../agent/context/bashSessionLimits.js";
 import type { BashContext } from "../agent/context/BashContext.js";
+import type { FolderContext } from "../agent/context/FolderContext.js";
 import type { SlotContext } from "../agent/context/SlotContext.js";
+import { FolderError, type FolderRepository } from "../folders/FolderRepository.js";
 import type { SlotEntryStore } from "../slots/index.js";
 import type { AppletStore } from "../applets/index.js";
 import {
@@ -53,6 +55,7 @@ import type {
     SessionConfigurationField,
     CreateSessionRequest,
     EventId,
+    Folder,
     ModelCatalog,
     ProtocolSession,
     ReadBackgroundProcessResponse,
@@ -276,6 +279,13 @@ export interface PersistedSessionState {
     contextMessages?: readonly Message[];
     createdAt?: number;
     effort?: string;
+    /**
+     * Folder this chat was filed into, absent while it is still Unsorted.
+     *
+     * Read back when a session is restored. Filing is the only thing that writes the column, so a
+     * saved session never carries it back and cannot undo a chat that was filed meanwhile.
+     */
+    folderId?: string;
     serviceTier?: ServiceTier;
     id: string;
     instructions?: string;
@@ -410,6 +420,8 @@ export interface InMemorySessionOptions {
     deferEventNotification?: (notify: () => void) => void;
     emitCreatedEvent?: boolean;
     events?: readonly SessionEvent[];
+    /** The folder tree this session's agent may read, rearrange, and file this chat into. */
+    folders?: FolderRepository;
     initialContextMessages?: readonly Message[];
     id?: string;
     lastEventId?: EventId;
@@ -602,6 +614,8 @@ export class InMemorySession {
         shadowed: new Map(),
     };
     #externalToolWaiters = new Map<string, ExternalToolWaiter>();
+    #folderId: string | undefined;
+    #folders: FolderRepository | undefined;
     #instructions: string | undefined;
     #interruption: SessionInterruption | undefined;
     #lastMessageAt: number | undefined;
@@ -720,6 +734,7 @@ export class InMemorySession {
         this.#persistence = options.persistence;
         this.#presence = options.presence;
         this.#slotStores = options.slotStores;
+        this.#folders = options.folders;
         this.#request = {
             ...options.request,
             trackUnread: options.restore?.trackUnread ?? options.request.trackUnread ?? false,
@@ -780,6 +795,7 @@ export class InMemorySession {
         );
         this.#projectId = options.restore?.projectId ?? options.projectId ?? createId();
         this.#workspaceId = options.restore?.workspaceId ?? options.workspaceId;
+        this.#folderId = options.restore?.folderId;
         // A subagent belongs to the session that started it, not to any ordered
         // list, so it holds no position no matter what a caller or an older
         // stored row supplies. An empty key is how "no position" is stored.
@@ -2178,6 +2194,23 @@ export class InMemorySession {
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
         };
+    }
+
+    /**
+     * Files this chat into a folder, or returns it to Unsorted with `null`.
+     *
+     * The folder tree stores which chat sits where, so the row is written there first and the
+     * session only carries what was already accepted. A chat with no folder is Unsorted and is put
+     * away on its own once it has been there long enough.
+     */
+    fileIntoFolder(folderId: string | null): Folder | undefined {
+        const folders = this.#folderRepository();
+        folders.setSessionFolder(this.id, folderId);
+        const filed = folderId === null ? undefined : folders.getFolder(folderId);
+        if (this.#folderId === (folderId ?? undefined)) return filed;
+        this.#folderId = folderId ?? undefined;
+        this.#append("session_updated", { session: this.snapshot() });
+        return filed;
     }
 
     setArchived(archived: boolean, mutationId?: string): ProtocolSession {
@@ -4013,6 +4046,7 @@ export class InMemorySession {
             agentId: this.#agentId,
             ...(this.#git === undefined ? {} : { git: structuredClone(this.#git) }),
             archived: this.#archived,
+            ...(this.#folderId === undefined ? {} : { folderId: this.#folderId }),
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             trackUnread: this.#request.trackUnread === true,
@@ -4087,6 +4121,7 @@ export class InMemorySession {
         return {
             id: this.id,
             archived: this.#archived,
+            ...(this.#folderId === undefined ? {} : { folderId: this.#folderId }),
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             trackUnread: this.#request.trackUnread === true,
@@ -6432,6 +6467,26 @@ export class InMemorySession {
         this.#appendAgentMessage(runId, message);
     }
 
+    /** The folder tree handed to this session's tools, with this chat as the one being filed. */
+    #folderContext(): FolderContext {
+        const folders = this.#folderRepository();
+        return {
+            create: (request) => folders.createFolder(request),
+            list: () => folders.listFolders(),
+            move: (folderId, request) => requireFolder(folders.moveFolder(folderId, request)),
+            setCurrentChatFolder: (folderId) => this.fileIntoFolder(folderId),
+            update: (folderId, request) => requireFolder(folders.updateFolder(folderId, request)),
+        };
+    }
+
+    #folderRepository(): FolderRepository {
+        const folders = this.#folders;
+        if (folders === undefined) {
+            throw new Error("Folders are unavailable in this session.");
+        }
+        return folders;
+    }
+
     /** The slot and applet surface handed to this session's tools, with this session as author. */
     #slotContext(): SlotContext {
         const stores = this.#slotStores;
@@ -6552,6 +6607,7 @@ export class InMemorySession {
                 request: (request, requestOptions) =>
                     this.requestUserInput(request, requestOptions),
             },
+            ...(this.#folders === undefined ? {} : { folders: this.#folderContext() }),
             ...(this.#slotStores === undefined ? {} : { slots: this.#slotContext() }),
             sessionId: this.#agentMetadata.rootSessionId,
             startDate: toLocalDate(this.events.firstMessageCreatedAt() ?? this.#createdAt),
@@ -8123,4 +8179,12 @@ function limitInspectionText(text: string | undefined): string | undefined {
 
 function isSignalAborted(signal: AbortSignal | undefined): boolean {
     return signal?.aborted === true;
+}
+
+/** The folder a tree change answered with, or the failure that says it was never there. */
+function requireFolder(folder: Folder | undefined): Folder {
+    if (folder === undefined) {
+        throw new FolderError("folder_not_found", "That folder was not found.");
+    }
+    return folder;
 }

@@ -88,6 +88,7 @@ export type {
     FileSystemReadOptions,
     FileSystemStat,
 } from "./context/FileSystemContext.js";
+export type { FolderContext } from "./context/FolderContext.js";
 export type { GoalContext } from "./context/GoalContext.js";
 export type {
     ChatHistoryAgentSummary,

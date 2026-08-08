@@ -5,9 +5,11 @@ import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 describe("selectCommonToolsForModel", () => {
     it("gives primary agents all scheduling tools", () => {
         expect(
-            selectCommonToolsForModel({ hasWorkspaceContext: true, isSubagent: false }).map(
-                (tool) => tool.name,
-            ),
+            selectCommonToolsForModel({
+                hasFolderContext: false,
+                hasWorkspaceContext: true,
+                isSubagent: false,
+            }).map((tool) => tool.name),
         ).toEqual([
             "attach",
             "transfer_session",
@@ -35,9 +37,11 @@ describe("selectCommonToolsForModel", () => {
 
     it("never gives schedule_message to subagents", () => {
         expect(
-            selectCommonToolsForModel({ hasWorkspaceContext: true, isSubagent: true }).map(
-                (tool) => tool.name,
-            ),
+            selectCommonToolsForModel({
+                hasFolderContext: false,
+                hasWorkspaceContext: true,
+                isSubagent: true,
+            }).map((tool) => tool.name),
         ).toEqual([
             "attach",
             "wait",
@@ -62,9 +66,39 @@ describe("selectCommonToolsForModel", () => {
 
     it("never gives transfer_session to a session without workspace context", () => {
         expect(
-            selectCommonToolsForModel({ hasWorkspaceContext: false, isSubagent: false }).map(
-                (tool) => tool.name,
-            ),
+            selectCommonToolsForModel({
+                hasFolderContext: false,
+                hasWorkspaceContext: false,
+                isSubagent: false,
+            }).map((tool) => tool.name),
         ).not.toContain("transfer_session");
+    });
+
+    it("gives folder tools to a session that can reach the folder tree", () => {
+        expect(
+            selectCommonToolsForModel({
+                hasFolderContext: true,
+                hasWorkspaceContext: true,
+                isSubagent: false,
+            }).map((tool) => tool.name),
+        ).toEqual(
+            expect.arrayContaining([
+                "create_folder",
+                "list_folders",
+                "update_folder",
+                "move_folder",
+                "set_chat_folder",
+            ]),
+        );
+    });
+
+    it("keeps folder tools away from a session without folders", () => {
+        expect(
+            selectCommonToolsForModel({
+                hasFolderContext: false,
+                hasWorkspaceContext: true,
+                isSubagent: false,
+            }).map((tool) => tool.name),
+        ).not.toContain("create_folder");
     });
 });

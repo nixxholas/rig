@@ -1,19 +1,26 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
+import {
+    createEventIdFactory,
+    isLiveGlobalEvent,
+    UNSORTED_SESSION_ARCHIVE_AFTER_MS,
+} from "../protocol/index.js";
 import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateFolderRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
     EventId,
+    Folder,
     GetTimelineRequest,
     GitChangeSnapshot,
     GitRepositoryFacts,
     GlobalEventQueueEntry,
     ModelCatalog,
+    MoveFolderRequest,
     Project,
     ProjectSettingsUpdate,
     ProjectWorkspace,
@@ -32,6 +39,7 @@ import type {
     TimelineAgent,
     TransferSessionRequest,
     TransferSessionResponse,
+    UpdateFolderRequest,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import {
@@ -67,6 +75,7 @@ import {
     type ProjectAvatarAsset,
     type ProjectSessionSettings,
 } from "../project/ProjectRepository.js";
+import { FolderRepository } from "../folders/FolderRepository.js";
 import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
@@ -131,6 +140,7 @@ import { queryProjectSecretIds } from "../persistence/session/queryProjectSecret
 import { queryRootSessionIdsForProject } from "../persistence/session/queryRootSessionIdsForProject.js";
 import { queryWorkspaceSessions } from "../persistence/session/queryWorkspaceSessions.js";
 import { queryWorkspaceQueuedSessionIds } from "../persistence/session/queryWorkspaceQueuedSessionIds.js";
+import { queryExpiredUnsortedSessions } from "../persistence/session/queryExpiredUnsortedSessions.js";
 import { querySecretRegistrations } from "../persistence/session/querySecretRegistrations.js";
 import { querySessionEvents } from "../persistence/session/querySessionEvents.js";
 import { querySessionHasEarlierTranscriptMessage } from "../persistence/session/querySessionHasEarlierTranscriptMessage.js";
@@ -171,6 +181,13 @@ import { createWorkspaceReadyWaiters } from "./workspaceReadyWaiters.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
 const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
+/**
+ * How often the daemon looks for Unsorted chats that have run out of time. A chat has a whole day
+ * to file itself, so looking once an hour puts it away close enough to the moment it expires.
+ */
+const UNSORTED_SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
+/** How many Unsorted chats one sweep may put away, so a long backlog is worked through in batches. */
+const UNSORTED_SWEEP_LIMIT = 100;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -216,6 +233,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         | undefined;
     #globalEventQueue: GlobalEventQueue;
     #precommittedGlobalEvents = new Map<EventId, GlobalEventQueueEntry | null>();
+    #folders: FolderRepository;
     #projects: ProjectRepository;
     #workspaceReadyWaiters!: ReturnType<typeof createWorkspaceReadyWaiters>;
     #secrets: SecretRegistry;
@@ -223,6 +241,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #sessions = new Map<string, WeakRef<InMemorySession>>();
     readonly #workspaceTransferReservations = new Map<string, string>();
     #scheduledMessageTimer: ReturnType<typeof setTimeout> | undefined;
+    #unsortedSweepTimer: ReturnType<typeof setInterval> | undefined;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
         reference: WeakRef<InMemorySession>;
@@ -324,6 +343,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ? {}
                 : { workspacesDirectory: options.workspacesDirectory }),
         });
+        this.#folders = new FolderRepository({
+            database: this.#database,
+            ...(options.homeDirectory === undefined
+                ? {}
+                : { homeDirectory: options.homeDirectory }),
+            now: this.#now,
+            onEvent: (event) => this.#publishGlobalEvent(event),
+            transaction: (body) => this.#transaction(body),
+        });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
             this.#projects.getWorkspace(projectId, workspaceId),
         );
@@ -403,6 +431,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#repairInterruptedTitleGenerations();
         this.repairInterruptedSessions("crash");
         this.#armScheduledMessageTimer();
+        this.#armUnsortedSweepTimer();
         const recover = () => this.#recoverProjectWorkspaces();
         const recovery = this.#taskDrain?.run(recover) ?? recover();
         void recovery.catch((error: unknown) => {
@@ -486,6 +515,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#scheduledMessageTimer !== undefined) {
             clearTimeout(this.#scheduledMessageTimer);
             this.#scheduledMessageTimer = undefined;
+        }
+        if (this.#unsortedSweepTimer !== undefined) {
+            clearInterval(this.#unsortedSweepTimer);
+            this.#unsortedSweepTimer = undefined;
         }
         void this.remoteTerminals.close();
         this.#workspaceReadyWaiters.close();
@@ -602,6 +635,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : {}),
                 onAppendEvent: (event) => this.#appendEvent(event),
                 persistence: this,
+                folders: this.#folders,
                 slotStores: { entries: this.slots, applets: this.applets },
                 request: source.requestForSubagent(),
                 projectId: sourceSnapshot.projectId,
@@ -728,6 +762,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
                 ),
                 persistence: this,
+                folders: this.#folders,
                 slotStores: { entries: this.slots, applets: this.applets },
                 projectId: ownership.project.id,
                 projectSecretIds: this.#projectSecrets(ownership.project.id),
@@ -955,6 +990,46 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             if (identity.workspaceId !== target.workspaceId) continue;
             session.recordGitState(git);
         }
+    }
+
+    listFolders(): readonly Folder[] {
+        return this.#folders.listFolders();
+    }
+
+    getFolder(folderId: string): Folder | undefined {
+        return this.#folders.getFolder(folderId);
+    }
+
+    createFolder(request: CreateFolderRequest): Folder {
+        return this.#folders.createFolder(request);
+    }
+
+    updateFolder(
+        folderId: string,
+        request: UpdateFolderRequest,
+        expectedVersion?: number,
+    ): Folder | undefined {
+        return this.#folders.updateFolder(folderId, request, expectedVersion);
+    }
+
+    moveFolder(
+        folderId: string,
+        request: MoveFolderRequest,
+        expectedVersion?: number,
+    ): Folder | undefined {
+        return this.#folders.moveFolder(folderId, request, expectedVersion);
+    }
+
+    archiveFolder(folderId: string): Folder | undefined {
+        return this.#folders.archiveFolder(folderId);
+    }
+
+    setSessionFolder(sessionId: string, folderId: string | null): InMemorySession | undefined {
+        this.#assertAcceptingMutations();
+        const session = this.get(sessionId);
+        if (session === undefined) return undefined;
+        session.fileIntoFolder(folderId);
+        return session;
     }
 
     listProjects(): readonly Project[] {
@@ -1302,6 +1377,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearTimeout(this.#scheduledMessageTimer);
             this.#scheduledMessageTimer = undefined;
         }
+        if (this.#unsortedSweepTimer !== undefined) {
+            clearInterval(this.#unsortedSweepTimer);
+            this.#unsortedSweepTimer = undefined;
+        }
         const closingSessions = new Set(this.#cachedSessions());
         const cleanup = [
             ...[...closingSessions].map((session) => session.beginShutdown()),
@@ -1507,6 +1586,51 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }, delay);
     }
 
+    /**
+     * Puts away the Unsorted chats that have run out of time.
+     *
+     * A chat can start belonging nowhere and file itself into a folder while the user talks to it.
+     * One that never does is archived a day after it began waiting, through the same archival every
+     * other chat goes through, so Unsorted holds only the work somebody is still sorting. A chat
+     * that never started out Unsorted, which is every chat a project or workspace holds, is not
+     * swept at all.
+     */
+    archiveExpiredUnsortedSessions(): void {
+        if (!this.#client.open) return;
+        const unsortedBefore = this.#now() - UNSORTED_SESSION_ARCHIVE_AFTER_MS;
+        const expired = queryExpiredUnsortedSessions(
+            this.#tx(),
+            unsortedBefore,
+            UNSORTED_SWEEP_LIMIT,
+        );
+        for (const sessionId of expired) {
+            if (!this.#client.open) return;
+            this.get(sessionId)?.setArchived(true);
+        }
+    }
+
+    #armUnsortedSweepTimer(): void {
+        // The first pass waits for the constructor to finish, the way other startup maintenance
+        // does, so opening the store never blocks on working through a backlog of stale chats.
+        setImmediate(() => this.#sweepUnsortedSessions());
+        this.#unsortedSweepTimer = setInterval(
+            () => this.#sweepUnsortedSessions(),
+            UNSORTED_SWEEP_INTERVAL_MS,
+        );
+        this.#unsortedSweepTimer.unref();
+    }
+
+    #sweepUnsortedSessions(): void {
+        try {
+            this.archiveExpiredUnsortedSessions();
+        } catch (error) {
+            // Sweeping runs on its own, outside any request. A database that could not answer is
+            // still fatal; one chat that refused to be put away must not take the daemon down.
+            if (!this.#client.open) return;
+            if (isDatabaseFailure(error)) throw error;
+        }
+    }
+
     #deliverDueScheduledMessages(): void {
         for (;;) {
             const next = queryNextPendingScheduledMessage(this.#tx());
@@ -1682,6 +1806,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : { mcpToolProvider: this.#mcpToolProvider }),
             onAppendEvent: (event) => this.#appendEvent(event),
             persistence: this,
+            folders: this.#folders,
             slotStores: { entries: this.slots, applets: this.applets },
             projectSecretIds: queryProjectSecretIds(this.#tx(), loaded.projectId),
             projectId: loaded.projectId,

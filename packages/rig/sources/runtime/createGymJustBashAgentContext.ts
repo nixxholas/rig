@@ -3,6 +3,7 @@ import { Bash, InMemoryFs, MountableFs, ReadWriteFs } from "just-bash";
 import {
     createJustBashAgentContext,
     type AgentContext,
+    type FolderContext,
     type GoalContext,
     type TaskContext,
     type UserInputContext,
@@ -16,6 +17,7 @@ import type { SessionSecretContext } from "../secrets/index.js";
 import type { WorkflowContext } from "../workflows/index.js";
 
 export interface CreateGymJustBashAgentContextOptions {
+    folders?: FolderContext;
     goals?: GoalContext;
     permissionMode?: PermissionMode;
     protectedPaths?: readonly string[];
@@ -50,6 +52,7 @@ export function createGymJustBashAgentContext(
     context.fs.home = "/home/rig";
     if (options.secrets !== undefined) context.secrets = options.secrets;
     if (options.userInput !== undefined) context.userInput = options.userInput;
+    if (options.folders !== undefined) context.folders = options.folders;
     if (options.goals !== undefined) context.goals = options.goals;
     if (options.tasks !== undefined) context.tasks = options.tasks;
     if (options.workflows !== undefined) context.workflows = options.workflows;

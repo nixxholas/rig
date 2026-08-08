@@ -4,11 +4,14 @@ import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateFolderRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    Folder,
     GetTimelineRequest,
     GitRepositoryFacts,
     ModelCatalog,
+    MoveFolderRequest,
     Project,
     ProjectSettingsUpdate,
     ProjectWorkspace,
@@ -23,6 +26,7 @@ import type {
     TimelineScope,
     TransferSessionRequest,
     TransferSessionResponse,
+    UpdateFolderRequest,
 } from "../protocol/index.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
@@ -49,6 +53,7 @@ import {
     type ProjectAvatarAsset,
     type ProjectSessionSettings,
 } from "../project/ProjectRepository.js";
+import { FolderRepository } from "../folders/FolderRepository.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
@@ -107,6 +112,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly #database: SessionDatabase;
     readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
+    readonly #folders: FolderRepository;
     readonly #projects: ProjectRepository;
     #workspaceReadyWaiters!: ReturnType<typeof createWorkspaceReadyWaiters>;
     readonly dataEpoch: string;
@@ -162,6 +168,14 @@ export class InMemorySessionStore implements SessionStore {
             ...(options.workspacesDirectory === undefined
                 ? {}
                 : { workspacesDirectory: options.workspacesDirectory }),
+        });
+        this.#folders = new FolderRepository({
+            database: this.#database,
+            ...(options.homeDirectory === undefined
+                ? {}
+                : { homeDirectory: options.homeDirectory }),
+            onEvent: (event) => this.#publishGlobalEvent(event),
+            transaction: (body) => this.#transaction(body),
         });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
             this.#projects.getWorkspace(projectId, workspaceId),
@@ -404,6 +418,7 @@ export class InMemorySessionStore implements SessionStore {
                 : {}),
             request: source.requestForSubagent(),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
+            folders: this.#folders,
             slotStores: { entries: this.slots, applets: this.applets },
             projectId: sourceSnapshot.projectId,
             projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
@@ -516,6 +531,7 @@ export class InMemorySessionStore implements SessionStore {
             projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,
             secretRegistry: this.#secrets,
+            folders: this.#folders,
             slotStores: { entries: this.slots, applets: this.applets },
             ...(ownership.workspace === undefined ? {} : { workspaceId: ownership.workspace.id }),
         });
@@ -715,6 +731,45 @@ export class InMemorySessionStore implements SessionStore {
         facts: GitRepositoryFacts,
     ): void {
         this.#projects.applyGitFacts(target, facts);
+    }
+
+    listFolders(): readonly Folder[] {
+        return this.#folders.listFolders();
+    }
+
+    getFolder(folderId: string): Folder | undefined {
+        return this.#folders.getFolder(folderId);
+    }
+
+    createFolder(request: CreateFolderRequest): Folder {
+        return this.#folders.createFolder(request);
+    }
+
+    updateFolder(
+        folderId: string,
+        request: UpdateFolderRequest,
+        expectedVersion?: number,
+    ): Folder | undefined {
+        return this.#folders.updateFolder(folderId, request, expectedVersion);
+    }
+
+    moveFolder(
+        folderId: string,
+        request: MoveFolderRequest,
+        expectedVersion?: number,
+    ): Folder | undefined {
+        return this.#folders.moveFolder(folderId, request, expectedVersion);
+    }
+
+    archiveFolder(folderId: string): Folder | undefined {
+        return this.#folders.archiveFolder(folderId);
+    }
+
+    setSessionFolder(sessionId: string, folderId: string | null): InMemorySession | undefined {
+        const session = this.#sessions.get(sessionId);
+        if (session === undefined) return undefined;
+        session.fileIntoFolder(folderId);
+        return session;
     }
 
     listProjects(): readonly Project[] {

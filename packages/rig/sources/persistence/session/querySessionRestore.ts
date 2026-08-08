@@ -101,6 +101,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     const id = readString(row, "id");
     const projectId = readString(row, "project_id");
     const workspaceId = readOptionalString(row, "workspace_id");
+    const folderId = readOptionalString(row, "folder_id");
     const workspaceTransfer = parseWorkspaceTransferState(
         readString(row, "workspace_transfer_json"),
     );
@@ -130,6 +131,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         ...(draft === undefined ? {} : { draft }),
         ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
         elapsedMs: readNumber(row, "elapsed_ms"),
+        ...(folderId === undefined ? {} : { folderId }),
         ...(dockerJson === undefined
             ? {}
             : { docker: JSON.parse(dockerJson) as DockerExecutionConfig }),

@@ -1,5 +1,6 @@
 import type { NativeProcessManager } from "../../processes/index.js";
 import type { AgentContext } from "./AgentContext.js";
+import type { FolderContext } from "./FolderContext.js";
 import type { GoalContext } from "./GoalContext.js";
 import { createFileReadState } from "./FileReadState.js";
 import { createNodeBashContext } from "./createNodeBashContext.js";
@@ -19,6 +20,7 @@ import { resolve } from "node:path";
 
 export interface CreateNodeAgentContextOptions {
     cwd: string;
+    folders?: FolderContext;
     goals?: GoalContext;
     processManager: NativeProcessManager;
     permissionMode?: PermissionMode;
@@ -55,6 +57,7 @@ export function createNodeAgentContext(options: CreateNodeAgentContextOptions): 
     };
     if (options.secrets !== undefined) context.secrets = options.secrets;
     if (options.userInput !== undefined) context.userInput = options.userInput;
+    if (options.folders !== undefined) context.folders = options.folders;
     if (options.goals !== undefined) context.goals = options.goals;
     if (options.tasks !== undefined) context.tasks = options.tasks;
     if (options.workflows !== undefined) context.workflows = options.workflows;

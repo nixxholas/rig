@@ -3,10 +3,13 @@ import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateFolderRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    Folder,
     GetTimelineRequest,
     GitRepositoryFacts,
+    MoveFolderRequest,
     Project,
     ProjectSettingsUpdate,
     ProjectWorkspace,
@@ -19,6 +22,7 @@ import type {
     TimelineAgent,
     TransferSessionRequest,
     TransferSessionResponse,
+    UpdateFolderRequest,
 } from "../protocol/index.js";
 import type { AgentTreeUsage } from "../agent/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
@@ -96,6 +100,24 @@ export interface SessionStore {
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
     ): void;
+    /** The whole folder tree, every parent ahead of what is nested under it. */
+    listFolders(): readonly Folder[];
+    getFolder(folderId: string): Folder | undefined;
+    createFolder(request: CreateFolderRequest): Folder;
+    updateFolder(
+        folderId: string,
+        request: UpdateFolderRequest,
+        expectedVersion?: number,
+    ): Folder | undefined;
+    moveFolder(
+        folderId: string,
+        request: MoveFolderRequest,
+        expectedVersion?: number,
+    ): Folder | undefined;
+    /** Puts a folder away together with everything nested under it. */
+    archiveFolder(folderId: string): Folder | undefined;
+    /** Files one chat into a folder, or takes it back out into Unsorted with `null`. */
+    setSessionFolder(sessionId: string, folderId: string | null): InMemorySession | undefined;
     listProjects(): readonly Project[];
     listWorkspaces(projectId?: string): readonly ProjectWorkspace[];
     registerProject(request: RegisterProjectRequest): Promise<Project>;

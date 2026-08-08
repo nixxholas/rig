@@ -2,6 +2,7 @@ import type { BashContext } from "./BashContext.js";
 import type { ChatHistoryContext } from "./ChatHistoryContext.js";
 import type { FileReadState } from "./FileReadState.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
+import type { FolderContext } from "./FolderContext.js";
 import type { GoalContext } from "./GoalContext.js";
 import type { PluginContext } from "./PluginContext.js";
 import type { SlotContext } from "./SlotContext.js";
@@ -32,6 +33,8 @@ export interface AgentContext {
     /** Absolute path to Rig's bundled read-only documentation in this execution environment. */
     docsPath?: string;
     fileReads?: FileReadState;
+    /** The folder tree, and the folder this chat files itself into. */
+    folders?: FolderContext;
     goals?: GoalContext;
     permissions?: PermissionContext;
     plugins?: PluginContext;

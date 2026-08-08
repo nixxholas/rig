@@ -318,6 +318,8 @@ export interface ProtocolSession {
     /** Git state of the session's directory, when it is inside a repository. */
     git?: GitChangeSnapshot;
     archived: boolean;
+    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    folderId?: string;
     projectId: string;
     workspaceId?: string;
     trackUnread?: boolean;
@@ -569,6 +571,8 @@ export interface SubagentSummary {
 export interface SessionSummary {
     id: string;
     archived: boolean;
+    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    folderId?: string;
     projectId: string;
     workspaceId?: string;
     trackUnread?: boolean;

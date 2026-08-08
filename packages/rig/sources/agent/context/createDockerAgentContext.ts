@@ -1,4 +1,5 @@
 import type { AgentContext } from "./AgentContext.js";
+import type { FolderContext } from "./FolderContext.js";
 import type { GoalContext } from "./GoalContext.js";
 import type { TaskContext } from "./TaskContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
@@ -22,6 +23,7 @@ import { posix } from "node:path";
 
 export interface CreateDockerAgentContextOptions {
     docker: DockerExecutionConfig;
+    folders?: FolderContext;
     goals?: GoalContext;
     permissionMode?: PermissionMode;
     plugins?: PluginContext;
@@ -55,6 +57,7 @@ export function createDockerAgentContext(options: CreateDockerAgentContextOption
     };
     if (options.secrets !== undefined) context.secrets = options.secrets;
     if (options.userInput !== undefined) context.userInput = options.userInput;
+    if (options.folders !== undefined) context.folders = options.folders;
     if (options.goals !== undefined) context.goals = options.goals;
     if (options.tasks !== undefined) context.tasks = options.tasks;
     if (options.workflows !== undefined) context.workflows = options.workflows;

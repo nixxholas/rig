@@ -27,7 +27,7 @@ export function querySessionSummaries(
         SELECT listed_sessions.*
         FROM (
             SELECT
-                id, project_id, workspace_id, order_key, archived, track_unread,
+                id, project_id, workspace_id, folder_id, order_key, archived, track_unread,
                 unread_reason, unread_since_ms, cwd, draft, draft_updated_at_ms,
                 docker_json, secret_ids_json, provider_id, model_id, permission_mode,
                 effort, service_tier, status, title, title_status, title_error, recap,
@@ -71,12 +71,14 @@ export function querySessionSummaries(
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
         const workspaceId = readOptionalString(row, "workspace_id");
+        const folderId = readOptionalString(row, "folder_id");
         // An empty stored key means the session has no place in an ordered
         // list, which the protocol says by leaving the position out.
         const orderKey = readString(row, "order_key");
         return {
             id: readString(row, "id"),
             archived: readNumber(row, "archived") !== 0,
+            ...(folderId === undefined ? {} : { folderId }),
             projectId: readString(row, "project_id"),
             ...(orderKey === "" ? {} : { orderKey }),
             ...(workspaceId === undefined ? {} : { workspaceId }),

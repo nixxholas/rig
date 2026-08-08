@@ -20,12 +20,16 @@ export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase
                AND (
                    name LIKE 'happy_cloud_%'
                    OR name LIKE 'scope_share%'
-                   OR name IN ('p2p_peer_pairings', 'p2p_peers')
+                   OR name IN ('folders', 'p2p_peer_pairings', 'p2p_peers')
                )`,
         ),
     )) {
         database.run(sql.raw(`DROP TABLE "${table.name}"`));
     }
+    database.run(sql.raw("DROP INDEX IF EXISTS sessions_unsorted"));
+    database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
+    database.run(sql.raw("DROP INDEX IF EXISTS sessions_folder"));
+    database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
     database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
     database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
     database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));

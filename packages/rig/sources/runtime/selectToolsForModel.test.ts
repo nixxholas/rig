@@ -57,6 +57,7 @@ describe("selectToolsForModel", () => {
             locks: [],
         });
         const names = selectCommonToolsForModel({
+            hasFolderContext: false,
             hasWorkspaceContext: false,
             isSubagent: false,
             searchTools: [searchTool],

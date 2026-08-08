@@ -250,6 +250,9 @@ import {
     writeProjectFile,
 } from "./projectFileApi.js";
 import { listGitWorkingTreeFiles } from "../git/listGitWorkingTreeFiles.js";
+import { serveFolderRequest } from "./folderApi.js";
+import { FolderError } from "../folders/FolderRepository.js";
+import { setSessionFolderRequestSchema } from "../protocol/index.js";
 import { createNodeFileSystemContext } from "../agent/context/createNodeFileSystemContext.js";
 import {
     FileTreeChangedError,
@@ -1444,6 +1447,28 @@ async function handleRequest(
         } catch (error) {
             sendJson(response, 400, { error: errorToMessage(error) });
         }
+        return;
+    }
+
+    const routeName = route.name;
+    if (
+        routeName === "folders" ||
+        routeName === "folder" ||
+        routeName === "folder-archive" ||
+        routeName === "folder-move"
+    ) {
+        await serveFolderRequest(
+            store,
+            {
+                name: routeName,
+                ...("folderId" in route && route.folderId !== undefined
+                    ? { folderId: route.folderId }
+                    : {}),
+            },
+            request,
+            response,
+            (limitBytes) => readJson<unknown>(request, limitBytes),
+        );
         return;
     }
 
@@ -2742,6 +2767,34 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "PUT" && route.name === "folder") {
+        const body = await readJson<unknown>(request, 8 * 1024);
+        if (!Value.Check(setSessionFolderRequestSchema, body)) {
+            sendJson(response, 400, {
+                error: "The folder must be named, or null to return this chat to Unsorted.",
+            });
+            return;
+        }
+        try {
+            const filed = store.setSessionFolder(sessionId, body.folderId);
+            if (filed === undefined) {
+                sendJson(response, 404, { error: "That chat is gone." });
+                return;
+            }
+            sendJson(response, 200, { session: filed.snapshot() });
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            if (error instanceof FolderError) {
+                sendJson(response, error.code === "folder_not_found" ? 404 : 400, {
+                    error: error.message,
+                });
+                return;
+            }
+            throw error;
+        }
+        return;
+    }
+
     if (request.method === "POST" && route.name === "reorder") {
         if (session.isSubagent()) {
             sendJson(response, 409, {
@@ -3858,6 +3911,7 @@ function matchRoute(pathname: string):
               | "models"
               | "presence"
               | "plugin-catalog"
+              | "folders"
               | "plugins"
               | "projects"
               | "provider-usage"
@@ -3915,6 +3969,11 @@ function matchRoute(pathname: string):
           generation: string;
           name: "plugin-app-storage";
           operation: "delete" | "get" | "list" | "set";
+          sessionId?: undefined;
+      }
+    | {
+          folderId: string;
+          name: "folder" | "folder-archive" | "folder-move";
           sessionId?: undefined;
       }
     | {
@@ -3978,6 +4037,7 @@ function matchRoute(pathname: string):
               | "effort"
               | "events"
               | "external-tool-calls"
+              | "folder"
               | "fork"
               | "goal"
               | "messages"
@@ -4055,6 +4115,7 @@ function matchRoute(pathname: string):
     if (pathname === "/presence") return { name: "presence" };
     if (pathname === "/plugins") return { name: "plugins" };
     if (pathname === "/plugin-catalogs/github") return { name: "plugin-catalog" };
+    if (pathname === "/folders") return { name: "folders" };
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
@@ -4166,6 +4227,17 @@ function matchRoute(pathname: string):
             assetHash: decodeURIComponent(globalParts[1]),
             name: "project-asset",
         };
+    }
+    if (globalParts[0] === "folders" && globalParts[1] !== undefined) {
+        const folderId = decodeURIComponent(globalParts[1]);
+        if (globalParts.length === 2) return { folderId, name: "folder" };
+        if (globalParts.length === 3 && globalParts[2] === "archive") {
+            return { folderId, name: "folder-archive" };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "move") {
+            return { folderId, name: "folder-move" };
+        }
+        return undefined;
     }
     if (globalParts[0] === "projects" && globalParts[1] !== undefined) {
         const projectId = decodeURIComponent(globalParts[1]);
@@ -4286,6 +4358,9 @@ function matchRoute(pathname: string):
     if (parts.length === 2) return { name: "session", sessionId };
     if (parts.length === 3 && parts[2] === "reorder") {
         return { name: "reorder", sessionId };
+    }
+    if (parts.length === 3 && parts[2] === "folder") {
+        return { name: "folder", sessionId };
     }
     if (parts.length === 4 && parts[2] === "terminal-connections" && parts[3] !== undefined) {
         return {
@@ -4647,6 +4722,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
         (method === "POST" && routeName === "user-input") ||
         (method === "DELETE" && routeName === "secret") ||
         (method === "PUT" && routeName === "draft") ||
+        (method === "PUT" && routeName === "folder") ||
         (method === "PATCH" &&
             ["effort", "model", "permissions", "service-tier"].includes(routeName))
     );
@@ -4688,6 +4764,10 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "sessions") return request.method === "POST";
+    if (route.name === "folders") return request.method !== "GET";
+    if (["folder", "folder-archive", "folder-move"].includes(route.name)) {
+        return request.method !== "GET";
+    }
     if (route.name === "projects") return request.method !== "GET";
     if (
         [
@@ -5007,6 +5087,7 @@ function buildGroupCatalog(
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
     return {
         catalog: modelCatalog,
+        folders: store.listFolders().filter((folder) => folder.archivedAt === undefined),
         identity,
         presence: store.presence.state(),
         protocolVersion: RIG_PROTOCOL_VERSION,

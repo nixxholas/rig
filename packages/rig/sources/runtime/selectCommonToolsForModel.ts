@@ -13,6 +13,7 @@ import { appletListTool } from "../tools/applets/applet_list.js";
 import { appletRevertTool } from "../tools/applets/applet_revert.js";
 import { appletUpdateTool } from "../tools/applets/applet_update.js";
 import { attachTool } from "../tools/attachments/attach.js";
+import { folderTools } from "../tools/folders/folderTools.js";
 import { createGeminiTools } from "../tools/gemini/createGeminiTools.js";
 import { transferSessionTool } from "../tools/workspaces/transfer_session.js";
 
@@ -26,6 +27,8 @@ export function selectCommonToolsForModel(options: {
      * family had to be taught about it separately.
      */
     geminiApiKey?: string;
+    /** Whether this conversation can reach the folder tree it lives in. */
+    hasFolderContext: boolean;
     hasWorkspaceContext: boolean;
     isSubagent: boolean;
     searchTools?: readonly AnyDefinedTool[];
@@ -49,5 +52,6 @@ export function selectCommonToolsForModel(options: {
         appletUpdateTool,
         appletRevertTool,
         appletListTool,
+        ...(options.hasFolderContext ? folderTools : []),
     ] as readonly AnyDefinedTool[];
 }
