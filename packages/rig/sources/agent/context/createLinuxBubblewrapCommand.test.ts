@@ -421,6 +421,26 @@ describe("createLinuxBubblewrapCommand", () => {
         expect(bindMode(result.args, "/")).toBe("--ro-bind");
     });
 
+    it("does not add project metadata to an application-owned data directory", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-bwrap-application-data-"));
+        temporaryDirectories.push(cwd);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: cwd,
+            cwd,
+            mode: "workspace_write",
+            protectProjectMetadata: false,
+            shell: "/bin/sh",
+            temporaryDirectory: join(cwd, "tmp"),
+        });
+
+        expect(result.projectConfigPlaceholder).toBeUndefined();
+        expect(bindMode(result.args, join(cwd, "rig.toml"))).toBeUndefined();
+        expect(result.protectedCreatePaths).not.toContain(join(cwd, ".git"));
+    });
+
     it("ignores a granted socket that does not exist", async () => {
         const cwd = await mkdtemp(join(tmpdir(), "rig-bwrap-socket-missing-"));
         temporaryDirectories.push(cwd);

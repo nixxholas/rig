@@ -35,6 +35,7 @@ export async function createMacOsSeatbeltCommand(options: {
     networkAllowedLoopbackPorts?: readonly number[];
     networkFullAccess?: boolean;
     path?: string;
+    protectProjectMetadata?: boolean;
     protectedPaths?: readonly string[];
     shell: string;
     temporaryDirectory?: string;
@@ -52,7 +53,12 @@ export async function createMacOsSeatbeltCommand(options: {
     const projectCandidates =
         options.mode === "read_only"
             ? []
-            : [options.cwd, ...(await findGitWritablePaths(options.cwd))];
+            : [
+                  options.cwd,
+                  ...(options.protectProjectMetadata === false
+                      ? []
+                      : await findGitWritablePaths(options.cwd)),
+              ];
     // Space the command's own declared permissions grant it, on top of its workspace. Read only
     // withholds the workspace, so it is never widened past it either.
     const grantedWritableCandidates =
@@ -100,7 +106,9 @@ export async function createMacOsSeatbeltCommand(options: {
             !neverGrantedSocketRoots.some((root) => isAtOrAbove(root, path)),
     );
     const protectedCandidates = [
-        ...PROTECTED_WORKSPACE_NAMES.map((name) => join(options.cwd, name)),
+        ...(options.protectProjectMetadata === false
+            ? []
+            : PROTECTED_WORKSPACE_NAMES.map((name) => join(options.cwd, name))),
         join(temporaryDirectory, `rig-${process.getuid?.() ?? 0}`),
         environment.RIG_SERVER_DIRECTORY,
         environment.RIG_SERVER_SOCKET_PATH,

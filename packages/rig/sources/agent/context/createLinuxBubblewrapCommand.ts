@@ -45,6 +45,7 @@ export async function createLinuxBubblewrapCommand(options: {
         socks: string;
     };
     path?: string;
+    protectProjectMetadata?: boolean;
     protectedPaths?: readonly string[];
     shell: string;
     temporaryDirectory?: string;
@@ -60,13 +61,15 @@ export async function createLinuxBubblewrapCommand(options: {
     const temporaryDirectory = options.temporaryDirectory ?? tmpdir();
     const privateTemporaryRoot = await resolvePotentialPath("/tmp");
     const canonicalCwd = await resolvePotentialPath(options.cwd);
-    const projectConfigCandidates = [
-        join(options.cwd, "rig.toml"),
-        await resolvePotentialPath(join(options.cwd, "rig.toml")),
-    ];
+    const protectProjectMetadata = options.protectProjectMetadata !== false;
+    const projectConfigCandidates = protectProjectMetadata
+        ? [join(options.cwd, "rig.toml"), await resolvePotentialPath(join(options.cwd, "rig.toml"))]
+        : [];
     const projectConfigPath = join(canonicalCwd, "rig.toml");
     const gitWritablePaths =
-        options.mode === "read_only" ? [] : await findGitWritablePaths(options.cwd);
+        options.mode === "read_only" || !protectProjectMetadata
+            ? []
+            : await findGitWritablePaths(options.cwd);
     const gitMetadataRoot = gitWritablePaths.at(-1);
     const gitExcludePath =
         gitMetadataRoot === undefined
@@ -101,7 +104,9 @@ export async function createLinuxBubblewrapCommand(options: {
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ].filter((path) => existsSync(path) && path !== privateTemporaryRoot);
     const protectedCandidates = [
-        ...PROTECTED_WORKSPACE_NAMES.map((name) => join(options.cwd, name)),
+        ...(protectProjectMetadata
+            ? PROTECTED_WORKSPACE_NAMES.map((name) => join(options.cwd, name))
+            : []),
         join(temporaryDirectory, `rig-${options.uid ?? process.getuid?.() ?? 0}`),
         environment.RIG_SERVER_DIRECTORY,
         environment.RIG_SERVER_SOCKET_PATH,
@@ -116,10 +121,12 @@ export async function createLinuxBubblewrapCommand(options: {
     const protectedCreateCandidates = [
         ...allProtectedPaths,
         ...(await Promise.all(
-            PROTECTED_CREATE_ONLY_WORKSPACE_NAMES.flatMap((name) => {
-                const path = join(options.cwd, name);
-                return [path, resolvePotentialPath(path)];
-            }),
+            (protectProjectMetadata ? PROTECTED_CREATE_ONLY_WORKSPACE_NAMES : []).flatMap(
+                (name) => {
+                    const path = join(options.cwd, name);
+                    return [path, resolvePotentialPath(path)];
+                },
+            ),
         )),
     ];
     const commandCwd = await resolvePotentialPath(options.commandCwd);
@@ -183,7 +190,7 @@ export async function createLinuxBubblewrapCommand(options: {
                   requestedCommand,
               ].join("\n");
     const projectConfigPlaceholder =
-        options.mode !== "read_only"
+        protectProjectMetadata && options.mode !== "read_only"
             ? await prepareProjectConfigPlaceholder(projectConfigPath, gitExcludePath)
             : undefined;
     const protectedPaths = [

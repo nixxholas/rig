@@ -153,6 +153,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
             // what another worklet runs, and so running under that worklet's granted permissions
             // instead of the ones its own install was reviewed against.
             protectedPaths: [getWorkletsDirectory(environment), getRigHome(environment)],
+            protectProjectMetadata: false,
             shell: environment.SHELL?.trim() || "/bin/sh",
             temporaryDirectory,
             unixSocketPaths: [socketPath],

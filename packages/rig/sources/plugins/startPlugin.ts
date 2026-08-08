@@ -321,6 +321,7 @@ async function startNativePluginProcess(
         commandCwd: dataDirectory,
         cwd: dataDirectory,
         mode: "workspace_write",
+        protectProjectMetadata: false,
         shell: environment.SHELL?.trim() || "/bin/sh",
     });
     const child = spawn(command.command, command.args ?? [], {

@@ -60,6 +60,11 @@ export async function createSandboxedCommand(options: {
         socks: string;
     };
     path?: string;
+    /**
+     * Protects project configuration and metadata inside `cwd`. Defaults to true. Callers whose
+     * working directory is application-owned data rather than a project may disable it.
+     */
+    protectProjectMetadata?: boolean;
     protectedPaths?: readonly string[];
     shell: string;
     /** Writable temporary directory visible to this process instead of the host's shared one. */

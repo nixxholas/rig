@@ -17,6 +17,7 @@ export async function createSandboxFilesystemConfig(options: {
     filesystemFullAccess?: boolean;
     homeDirectory?: string;
     mode: PermissionMode;
+    protectProjectMetadata?: boolean;
     protectedPaths?: readonly string[];
     sandboxConfigDirectory?: string;
     temporaryDirectory?: string;
@@ -31,7 +32,9 @@ export async function createSandboxFilesystemConfig(options: {
     const writablePaths = [temporaryDirectory, ...(options.unixSocketPaths ?? [])];
     if (options.mode === "workspace_write" || options.mode === "auto") {
         writablePaths.push(options.cwd);
-        writablePaths.push(...(await findGitWritablePaths(options.cwd)));
+        if (options.protectProjectMetadata !== false) {
+            writablePaths.push(...(await findGitWritablePaths(options.cwd)));
+        }
         // Space a command's own declared permissions grant it. Read only never reaches here, so a
         // mode that withholds the workspace cannot be widened past it.
         writablePaths.push(...(options.additionalWritablePaths ?? []));
