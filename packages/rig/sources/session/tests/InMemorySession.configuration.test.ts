@@ -16,6 +16,235 @@ import { InMemorySession } from "../InMemorySession.js";
  * visible as pending rather than already applied.
  */
 describe("InMemorySession queued configuration", () => {
+    it("discards a cached inference runtime when its credential scope refreshes", () => {
+        const { capableModel, catalog } = testModels();
+        const events: unknown[] = [];
+        const runtimes: CodingAssistantRuntime[] = [];
+        const provider = defineProvider({
+            id: "test",
+            models: [capableModel],
+            stream() {
+                throw new Error("This test only creates runtimes.");
+            },
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => {
+                const runtime = createRuntime(options, provider);
+                runtimes.push(runtime);
+                return runtime;
+            },
+            modelCatalog: {
+                ...catalog,
+                models: [capableModel],
+                providers: [{ models: [capableModel], providerId: "test" }],
+            },
+            onAppendEvent(event) {
+                events.push(event);
+            },
+            request: { cwd: "/tmp/rig-inference-scope-refresh" },
+        });
+
+        const firstContext = session.externalControlContext();
+        const close = vi.spyOn(runtimes[0]!.agent, "close");
+
+        session.refreshInferenceScope({
+            defaultModelId: capableModel.id,
+            defaultProviderId: "test",
+            models: [capableModel, catalog.models[1]!],
+            providers: [
+                { models: [capableModel], providerId: "test" },
+                { models: [catalog.models[1]!], providerId: "extra" },
+            ],
+        });
+
+        expect(close).toHaveBeenCalledOnce();
+        expect(session.externalControlContext()).not.toBe(firstContext);
+        expect(runtimes).toHaveLength(2);
+        expect(runtimes[1]).not.toBe(runtimes[0]);
+        expect(events).toContainEqual(
+            expect.objectContaining({
+                data: expect.objectContaining({
+                    session: expect.objectContaining({
+                        modelCatalog: expect.objectContaining({
+                            providers: [
+                                expect.objectContaining({ providerId: "test" }),
+                                expect.objectContaining({ providerId: "extra" }),
+                            ],
+                        }),
+                    }),
+                }),
+                type: "session_updated",
+            }),
+        );
+    });
+
+    it("aborts active inference before retiring a rotated credential runtime", async () => {
+        const runtimes: CodingAssistantRuntime[] = [];
+        const { catalog } = testModels();
+        const { release, session, started } = runningSession({
+            onRuntime(runtime) {
+                runtimes.push(runtime);
+            },
+        });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+        const close = vi.spyOn(runtimes[0]!.agent, "close");
+        expect(session.snapshot().status).toBe("running");
+
+        session.refreshInferenceScope(structuredClone(catalog));
+
+        expect(close).not.toHaveBeenCalled();
+
+        await vi.waitFor(() => {
+            expect(close).toHaveBeenCalledOnce();
+            expect(session.events.since(undefined)).toContainEqual(
+                expect.objectContaining({
+                    data: expect.objectContaining({ stopReason: "aborted" }),
+                    type: "run_finished",
+                }),
+            );
+        });
+        expect(runtimes).toHaveLength(1);
+        expect(session.snapshot().status).toBe("aborted");
+        release.resolve();
+        await session.beginShutdown();
+    });
+
+    it("falls back durably when a credential refresh removes the selected provider", () => {
+        const { capableModel, limitedModel } = testModels();
+        const events: unknown[] = [];
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog: {
+                defaultModelId: capableModel.id,
+                defaultProviderId: "capable",
+                models: [capableModel, limitedModel],
+                providers: [
+                    { models: [capableModel], providerId: "capable" },
+                    { models: [limitedModel], providerId: "removed" },
+                ],
+            },
+            onAppendEvent(event) {
+                events.push(event);
+            },
+            request: {
+                cwd: "/tmp/rig-inference-scope-fallback",
+                modelId: limitedModel.id,
+                providerId: "removed",
+            },
+        });
+
+        session.refreshInferenceScope({
+            defaultModelId: capableModel.id,
+            defaultProviderId: "capable",
+            models: [capableModel],
+            providers: [{ models: [capableModel], providerId: "capable" }],
+        });
+
+        expect(session.snapshot()).toMatchObject({
+            modelId: capableModel.id,
+            providerId: "capable",
+        });
+        expect(events).toContainEqual(
+            expect.objectContaining({
+                data: expect.objectContaining({
+                    changed: ["model"],
+                    modelId: capableModel.id,
+                    providerId: "capable",
+                }),
+                type: "session_configuration_changed",
+            }),
+        );
+    });
+
+    it("keeps the persisted credential binding when an owner ID collides with an extra", () => {
+        const { capableModel } = testModels();
+        const ownerInstanceId = "aownerinstance00000000001";
+        const extraOwnerInstanceId = "aextrainstance00000000001";
+        const extraProviderId = `codex@${extraOwnerInstanceId}`;
+        const credential = (
+            bindingId: string,
+            credentialOwnerInstanceId: string,
+            sourceProviderId: string,
+            relation: "owner" | "extra",
+        ) => ({
+            bindingId,
+            ownerInstanceId: credentialOwnerInstanceId,
+            ownerName: credentialOwnerInstanceId,
+            relation,
+            sourceProviderId,
+            visibility: "shared" as const,
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog: {
+                defaultModelId: capableModel.id,
+                defaultProviderId: extraProviderId,
+                models: [capableModel],
+                providers: [
+                    {
+                        credential: credential(
+                            `${extraOwnerInstanceId}:codex`,
+                            extraOwnerInstanceId,
+                            "codex",
+                            "extra",
+                        ),
+                        models: [capableModel],
+                        providerId: extraProviderId,
+                    },
+                ],
+            },
+            ownerInstanceId,
+            request: {
+                cwd: "/tmp/rig-inference-binding-collision",
+                modelId: capableModel.id,
+                providerId: extraProviderId,
+            },
+        });
+
+        const collidingCatalog: ModelCatalog = {
+            defaultModelId: capableModel.id,
+            defaultProviderId: extraProviderId,
+            models: [capableModel],
+            providers: [
+                {
+                    credential: credential(
+                        `${ownerInstanceId}:${extraProviderId}`,
+                        ownerInstanceId,
+                        extraProviderId,
+                        "owner",
+                    ),
+                    models: [capableModel],
+                    providerId: extraProviderId,
+                },
+                {
+                    credential: credential(
+                        `${extraOwnerInstanceId}:codex`,
+                        extraOwnerInstanceId,
+                        "codex",
+                        "extra",
+                    ),
+                    models: [capableModel],
+                    providerId: `${extraProviderId}-2`,
+                },
+            ],
+        };
+        const savedBeforeCollision = session.state();
+        session.refreshInferenceScope(collidingCatalog);
+
+        expect(session.snapshot().providerId).toBe(`${extraProviderId}-2`);
+        expect(session.state().credentialBindingId).toBe(`${extraOwnerInstanceId}:codex`);
+
+        const restored = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog: collidingCatalog,
+            request: { cwd: "/tmp/rig-inference-binding-collision" },
+            restore: savedBeforeCollision,
+        });
+        expect(restored.snapshot().providerId).toBe(`${extraProviderId}-2`);
+    });
+
     it("publishes a reduced permission mode before awaiting process shutdown", async () => {
         const processManager = new NativeProcessManager();
         let runtime: CodingAssistantRuntime | undefined;
@@ -377,6 +606,7 @@ describe("InMemorySession queued configuration", () => {
                     type: "primary",
                 },
                 agentId: "parent-agent",
+                ownerInstanceId: "alocalinstance00000000001",
                 cwd: "/tmp/rig-subagent-context",
                 id: "parent-session",
                 messages: [

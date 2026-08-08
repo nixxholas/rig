@@ -40,6 +40,8 @@ import type {
 } from "../external-tools/index.js";
 import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { ScheduledMessage } from "../scheduling/index.js";
+import { p2pInstanceIdSchema } from "./P2pIdentityProtocol.js";
+import { p2pCredentialVisibilitySchema } from "./P2pCredentialProtocol.js";
 import { rigProfileIdentitySchema } from "./ProfileProtocol.js";
 
 export type SessionStatus =
@@ -219,12 +221,32 @@ export interface SessionInterruption {
     runId?: string;
 }
 
+export const providerCredentialProvenanceSchema = Type.Object(
+    {
+        bindingId: Type.String({ maxLength: 512, minLength: 1 }),
+        ownerInstanceId: p2pInstanceIdSchema,
+        ownerName: Type.String({ maxLength: 128, minLength: 1 }),
+        relation: Type.Union([Type.Literal("owner"), Type.Literal("extra")]),
+        sourceProviderId: Type.String({ maxLength: 256, minLength: 1 }),
+        visibility: p2pCredentialVisibilitySchema,
+    },
+    { additionalProperties: false },
+);
+export type ProviderCredentialProvenance = Static<typeof providerCredentialProvenanceSchema>;
+
 export interface ProviderModelCatalog {
+    /**
+     * The credential source that makes this provider available in the current
+     * session. It is absent for daemon-wide catalogs that have no owner scope.
+     */
+    credential?: ProviderCredentialProvenance;
     disabledReason?: "not_authenticated" | "not_enabled" | "no_models";
     providerId: string;
     providerType?: ProviderModelCompatibilityType;
     models: readonly Model[];
     serviceTiers?: readonly ServiceTier[];
+    /** Human-readable provider source label for owner-scoped catalogs. */
+    title?: string;
 }
 
 export interface ModelCatalog {
@@ -364,6 +386,8 @@ export interface ProtocolSession {
     activity: SessionActivity;
     activeTurn?: SessionActiveTurn;
     agentId: string;
+    /** Stable Rig identity whose credentials and usage this session consumes. */
+    ownerInstanceId: string;
     /** Git state of the session's directory, when it is inside a repository. */
     git?: GitChangeSnapshot;
     archived: boolean;
@@ -393,6 +417,8 @@ export interface ProtocolSession {
     sessionSecretIds: readonly string[];
     environment?: SessionExecutionEnvironment;
     modelLocked: boolean;
+    /** The owner-scoped provider catalog used to validate and run this session. */
+    modelCatalog: ModelCatalog;
     models: readonly Model[];
     status: SessionStatus;
     title?: string;
@@ -623,6 +649,8 @@ export interface SubagentSummary {
 
 export interface SessionSummary {
     id: string;
+    /** Stable Rig identity whose credentials and usage this session consumes. */
+    ownerInstanceId: string;
     archived: boolean;
     /** The only project, workspace, folder, or Unsorted collection containing this chat. */
     scope: SessionScope;
@@ -884,6 +912,7 @@ export interface ListProviderUsageResponse {
 }
 
 export interface ProviderUsageEntry {
+    credential?: ProviderCredentialProvenance;
     providerId: string;
     /** The last reading, or null when the provider has never answered. */
     usage: ProviderUsage | null;

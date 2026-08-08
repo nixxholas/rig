@@ -8,7 +8,7 @@ import type {
 } from "../../../session/InMemorySession.js";
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
-import { projects, sessions } from "../../database/schema.js";
+import { projects, sessionCredentialBindings, sessions } from "../../database/schema.js";
 import { querySessionRestore } from "../querySessionRestore.js";
 import {
     sessionAcceptQueuedRun,
@@ -306,6 +306,7 @@ function createDatabase() {
             id: "session-1",
             interrupted: false,
             modelId: "model",
+            ownerInstanceId: "alocalinstance00000000001",
             modelsJson: "[]",
             nextTaskId: 1,
             orderKey: "a0",
@@ -324,6 +325,13 @@ function createDatabase() {
             updatedAtMs: 1,
             workflowsEnabled: true,
             workflowsJson: "[]",
+        })
+        .run();
+    opened.database
+        .insert(sessionCredentialBindings)
+        .values({
+            bindingId: "alocalinstance00000000001:codex",
+            sessionId: "session-1",
         })
         .run();
     return opened;

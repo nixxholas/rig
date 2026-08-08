@@ -28,6 +28,7 @@ import type {
     DisconnectSessionTerminalResponse,
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
+    GlobalEvent,
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
     GetGlobalSecurityPolicyResponse,
@@ -66,6 +67,7 @@ import type {
     ListSessionsResponse,
     ListSubagentsResponse,
     ModelCatalog,
+    ProviderCredentialProvenance,
     ProjectResponse,
     ProjectRegistrationErrorResponse,
     ProjectScope,
@@ -297,11 +299,17 @@ import {
 import type { P2pNetwork } from "../p2p/index.js";
 import type { P2pPairingServiceContract } from "../p2p/P2pPairingService.js";
 import {
+    P2pCredentialVersionConflictError,
+    type P2pCredentialReplaceResult,
+} from "../credentials/P2pCredentialStore.js";
+import {
     answerP2pVerificationRequestSchema,
     joinP2pInvitationRequestSchema,
+    p2pEncryptedCredentialSnapshotSchema,
     p2pInstanceIdSchema,
     type CreateP2pInvitationResponse,
     type JoinP2pInvitationResponse,
+    type P2pEncryptedCredentialSnapshot,
     type P2pPairingState,
 } from "../protocol/index.js";
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
@@ -319,18 +327,30 @@ export interface ProtocolHttpServerOptions {
     happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
+    resolveModelCatalog?: (ownerInstanceId: string) => ModelCatalog;
     p2pNetwork?: P2pNetwork;
     p2pPairing?: P2pPairingServiceContract;
     p2pNode?: () => DaemonConfig["p2p"];
     p2pStatus?: () => P2pStatus;
     canP2pPeerConfigure?: (peerId: string) => boolean;
+    canP2pPeerProvision?: (peerId: string) => boolean;
     profiles?: RigProfileStore;
+    replaceP2pCredentials?: (
+        authenticatedOwnerId: string,
+        envelope: P2pEncryptedCredentialSnapshot,
+    ) => P2pCredentialReplaceResult;
     prepareP2pRequest?: PrepareP2pHttpRequest;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
-    getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
+    getProviderQuota?: (
+        providerId: string,
+        ownerInstanceId: string,
+        credential?: ProviderCredentialProvenance,
+    ) => Promise<ProviderQuota | undefined>;
     /** Hands out the usage the daemon polls for every configured provider. */
-    listProviderUsage?: () => readonly ProviderUsageEntry[];
+    listProviderUsage?: (
+        ownerInstanceId?: string,
+    ) => readonly ProviderUsageEntry[] | Promise<readonly ProviderUsageEntry[]>;
     onDaemonConfigChange?: (
         config: DaemonConfig,
     ) => AppliedDaemonSettings | undefined | Promise<AppliedDaemonSettings | undefined>;
@@ -390,7 +410,10 @@ export function createProtocolHttpServer(
         p2pNode: options.p2pNode,
         p2pStatus: options.p2pStatus,
         canP2pPeerConfigure: options.canP2pPeerConfigure,
+        canP2pPeerProvision: options.canP2pPeerProvision,
         profiles: options.profiles,
+        replaceP2pCredentials: options.replaceP2pCredentials,
+        resolveModelCatalog: options.resolveModelCatalog,
         prepareP2pRequest: options.prepareP2pRequest,
         happyCloud: options.happyCloud,
         onDaemonConfigChange: options.onDaemonConfigChange,
@@ -479,17 +502,20 @@ export function createProtocolHttpServer(
 
 interface ProtocolServerRuntimeConfig {
     canP2pPeerConfigure: ProtocolHttpServerOptions["canP2pPeerConfigure"];
+    canP2pPeerProvision: ProtocolHttpServerOptions["canP2pPeerProvision"];
     inferenceMaxRetries: number;
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
     globalInstructionsPath: string;
     globalSecurityPolicyPath: string;
-    listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
+    listProviderUsage: ProtocolHttpServerOptions["listProviderUsage"];
     p2pNetwork: P2pNetwork | undefined;
     p2pPairing: P2pPairingServiceContract | undefined;
     p2pNode: (() => DaemonConfig["p2p"]) | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
     profiles: RigProfileStore | undefined;
+    replaceP2pCredentials: ProtocolHttpServerOptions["replaceP2pCredentials"];
+    resolveModelCatalog: ProtocolHttpServerOptions["resolveModelCatalog"];
     prepareP2pRequest: PrepareP2pHttpRequest | undefined;
     happyCloud: HappyCloudServiceContract | undefined;
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
@@ -552,7 +578,13 @@ async function handleRequest(
     onShutdown: (() => void) | undefined,
     defaultDocker: DockerExecutionConfig | undefined,
     taskDrain: TaskDrain | undefined,
-    getProviderQuota: ((providerId: string) => Promise<ProviderQuota | undefined>) | undefined,
+    getProviderQuota:
+        | ((
+              providerId: string,
+              ownerInstanceId: string,
+              credential?: ProviderCredentialProvenance,
+          ) => Promise<ProviderQuota | undefined>)
+        | undefined,
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     sessionTerminals: SessionTerminalTracker,
     appletContextTokens: AppletContextTokenStore,
@@ -622,6 +654,46 @@ async function handleRequest(
         );
         return;
     }
+    if (route.name === "inference-credentials") {
+        if (request.method !== "PUT") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const authenticatedOwnerId = p2pPeerId(request);
+        if (authenticatedOwnerId === undefined) {
+            sendJson(response, 403, {
+                error: "Inference credentials must arrive from an authenticated peer Rig.",
+            });
+            return;
+        }
+        if (runtimeConfig.replaceP2pCredentials === undefined) {
+            sendJson(response, 503, { error: "P2P inference credentials are unavailable." });
+            return;
+        }
+        const body = await readJson<unknown>(request, 8 * 1024 * 1024);
+        if (!Value.Check(p2pEncryptedCredentialSnapshotSchema, body)) {
+            sendJson(response, 400, { error: "The encrypted credential snapshot is invalid." });
+            return;
+        }
+        try {
+            sendJson(
+                response,
+                200,
+                runtimeConfig.replaceP2pCredentials(authenticatedOwnerId, body),
+            );
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            if (error instanceof P2pCredentialVersionConflictError) {
+                sendJson(response, 409, {
+                    error: errorToMessage(error),
+                    version: error.currentVersion,
+                });
+                return;
+            }
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
+        return;
+    }
     if (route.name === "profiles" || route.name === "profile") {
         const profiles = runtimeConfig.profiles;
         if (profiles === undefined) {
@@ -631,10 +703,11 @@ async function handleRequest(
         const authenticatedPeerId = p2pPeerId(request);
         if (
             authenticatedPeerId !== undefined &&
-            runtimeConfig.canP2pPeerConfigure?.(authenticatedPeerId) !== true
+            (runtimeConfig.canP2pPeerProvision?.(authenticatedPeerId) ??
+                runtimeConfig.canP2pPeerConfigure?.(authenticatedPeerId)) !== true
         ) {
             sendJson(response, 403, {
-                error: "Only this secondary Rig's primary may access parent-owned profiles.",
+                error: "That Rig is not trusted to provision its human profiles.",
             });
             return;
         }
@@ -1629,7 +1702,13 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "models") {
-        sendJson<ListModelsResponse>(response, 200, { catalog: modelCatalog });
+        const ownerInstanceId = p2pPeerId(request);
+        sendJson<ListModelsResponse>(response, 200, {
+            catalog:
+                ownerInstanceId === undefined
+                    ? modelCatalog
+                    : (runtimeConfig.resolveModelCatalog?.(ownerInstanceId) ?? modelCatalog),
+        });
         return;
     }
 
@@ -1724,7 +1803,7 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "provider-usage") {
         sendJson<ListProviderUsageResponse>(response, 200, {
-            providers: runtimeConfig.listProviderUsage?.() ?? [],
+            providers: (await runtimeConfig.listProviderUsage?.(p2pPeerId(request))) ?? [],
         });
         return;
     }
@@ -2463,7 +2542,17 @@ async function handleRequest(
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
         const broadcast = body as BroadcastMessageRequest;
-        const allTargets = broadcast.all === true ? store.list({ limit: 501 }) : undefined;
+        const authenticatedOwnerId = p2pPeerId(request);
+        const allTargets =
+            broadcast.all === true
+                ? store
+                      .list({ limit: 501 })
+                      .filter(
+                          (summary) =>
+                              authenticatedOwnerId === undefined ||
+                              summary.ownerInstanceId === authenticatedOwnerId,
+                      )
+                : undefined;
         if (allTargets !== undefined && allTargets.length > 500) {
             sendJson(response, 409, {
                 error: "A single broadcast can target at most 500 sessions.",
@@ -2496,6 +2585,17 @@ async function handleRequest(
         const sessions = targets.map((id) => store.get(id));
         if (sessions.some((candidate) => candidate === undefined)) {
             sendJson(response, 404, { error: "One or more sessions were not found." });
+            return;
+        }
+        if (
+            authenticatedOwnerId !== undefined &&
+            sessions.some(
+                (candidate) => candidate!.snapshot().ownerInstanceId !== authenticatedOwnerId,
+            )
+        ) {
+            sendJson(response, 403, {
+                error: "A broadcast cannot target another Rig's sessions.",
+            });
             return;
         }
         if (sessions.some((candidate) => candidate!.isSubagent())) {
@@ -2656,9 +2756,14 @@ async function handleRequest(
         // synchronous pass, so the catalog states exactly the point in the stream
         // that it reflects. A client can then say of any event whether this
         // snapshot already contains it, instead of inferring it from what changed.
+        const ownerInstanceId = p2pPeerId(request);
+        const scopedCatalog =
+            ownerInstanceId === undefined
+                ? modelCatalog
+                : (runtimeConfig.resolveModelCatalog?.(ownerInstanceId) ?? modelCatalog);
         sendJson<GlobalStreamHello>(response, 200, {
             cursor: store.liveEvents.cursor(),
-            ...buildGroupCatalog(store, modelCatalog, identity, sessionTerminals),
+            ...buildGroupCatalog(store, scopedCatalog, identity, sessionTerminals, ownerInstanceId),
         });
         return;
     }
@@ -2672,8 +2777,23 @@ async function handleRequest(
         // Same ordering as the catalog: the stream position is read before the
         // agents, so a client can tell whether a later event is already included.
         const cursor = store.liveEvents.cursor();
+        const authenticatedOwnerId = p2pPeerId(request);
+        const allowedSessionIds =
+            authenticatedOwnerId === undefined
+                ? undefined
+                : new Set(
+                      store
+                          .list()
+                          .filter((session) => session.ownerInstanceId === authenticatedOwnerId)
+                          .map((session) => session.id),
+                  );
         sendJson<GetTimelineResponse>(response, 200, {
-            agents: store.timeline(parsed.request),
+            agents: store
+                .timeline(parsed.request)
+                .filter(
+                    (agent) =>
+                        allowedSessionIds === undefined || allowedSessionIds.has(agent.sessionId),
+                ),
             cursor,
             scope: parsed.request.scope,
         });
@@ -2683,11 +2803,32 @@ async function handleRequest(
     // Outside the durable-log gate on purpose: the live stream is the one
     // subscription a local client always has, whether or not events are stored.
     if (request.method === "GET" && route.name === "live-events-stream") {
-        streamLiveEvents(request, response, store.liveEvents, url.searchParams.get("after"));
+        const authenticatedOwnerId = p2pPeerId(request);
+        streamLiveEvents(
+            request,
+            response,
+            store.liveEvents,
+            url.searchParams.get("after"),
+            authenticatedOwnerId === undefined
+                ? undefined
+                : (entry) =>
+                      globalLiveEventVisibleToOwner(
+                          entry.event,
+                          authenticatedOwnerId,
+                          store,
+                          runtimeConfig,
+                      ),
+        );
         return;
     }
 
     if (isGlobalEventRoute(route.name)) {
+        if (p2pPeerId(request) !== undefined) {
+            sendJson(response, 403, {
+                error: "The daemon-wide durable event log is unavailable over P2P.",
+            });
+            return;
+        }
         const globalEventQueue = runtimeConfig.globalEventQueue;
 
         if (request.method === "GET" && route.name === "global-events") {
@@ -2887,10 +3028,13 @@ async function handleRequest(
                           const { docker: _docker, local: _local, ...folderRequest } = body;
                           return folderRequest;
                       })();
+            const authenticatedOwnerId = p2pPeerId(request);
+            const creationOptions =
+                authenticatedOwnerId === undefined ? {} : { ownerInstanceId: authenticatedOwnerId };
             const session =
                 body.id === undefined
-                    ? store.create(sessionRequest)
-                    : store.createWithId(body.id, sessionRequest);
+                    ? store.create(sessionRequest, creationOptions)
+                    : store.createWithId(body.id, sessionRequest, creationOptions);
             sendJson<CreateSessionResponse>(response, 201, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -2910,7 +3054,14 @@ async function handleRequest(
             });
             return;
         }
-        const summaries = store.list();
+        const authenticatedOwnerId = p2pPeerId(request);
+        const summaries = store
+            .list()
+            .filter(
+                (summary) =>
+                    authenticatedOwnerId === undefined ||
+                    summary.ownerInstanceId === authenticatedOwnerId,
+            );
         const filtered =
             archived === "all"
                 ? summaries
@@ -2933,6 +3084,16 @@ async function handleRequest(
     const session = store.get(sessionId);
     if (session === undefined) {
         sendJson(response, 404, { error: "Session not found" });
+        return;
+    }
+    const authenticatedOwnerId = p2pPeerId(request);
+    if (
+        authenticatedOwnerId !== undefined &&
+        session.snapshot().ownerInstanceId !== authenticatedOwnerId
+    ) {
+        sendJson(response, 403, {
+            error: "That session belongs to another Rig's inference credentials.",
+        });
         return;
     }
 
@@ -3242,8 +3403,13 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "current-provider-quota") {
-        const currentProviderId = session.snapshot().providerId;
-        const quota = await getProviderQuota?.(currentProviderId);
+        const snapshot = session.snapshot();
+        const currentProviderId = snapshot.providerId;
+        const credential = providerCredential(snapshot.modelCatalog, currentProviderId);
+        const quota =
+            credential === undefined
+                ? await getProviderQuota?.(currentProviderId, snapshot.ownerInstanceId)
+                : await getProviderQuota?.(currentProviderId, snapshot.ownerInstanceId, credential);
         sendJson<GetCurrentProviderQuotaResponse>(response, 200, {
             currentProviderId,
             ...(quota === undefined ? {} : { quota }),
@@ -3311,6 +3477,7 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "usage") {
+        const ownerInstanceId = session.snapshot().ownerInstanceId;
         const sessionEvents = session.events.all();
         const usage = session.usage(sessionEvents);
         const currentProviderId = session.snapshot().providerId;
@@ -3323,10 +3490,15 @@ async function handleRequest(
             ]),
         ];
         const observedQuotas = session.events.latestProviderQuotas();
+        const modelCatalog = session.snapshot().modelCatalog;
         const quotas = (
             await Promise.all(
                 providerIds.map(async (providerId) => {
-                    const loaded = await getProviderQuota?.(providerId);
+                    const credential = providerCredential(modelCatalog, providerId);
+                    const loaded =
+                        credential === undefined
+                            ? await getProviderQuota?.(providerId, ownerInstanceId)
+                            : await getProviderQuota?.(providerId, ownerInstanceId, credential);
                     // What this session saw the provider say during its own run
                     // can be newer than the daemon's last reading.
                     const observed = observedQuotas.get(providerId);
@@ -4019,6 +4191,13 @@ async function handleRequest(
     sendJson(response, 405, { error: "Method not allowed" });
 }
 
+function providerCredential(
+    catalog: ModelCatalog,
+    providerId: string,
+): ProviderCredentialProvenance | undefined {
+    return catalog.providers.find((provider) => provider.providerId === providerId)?.credential;
+}
+
 function resolveProjectScopeDirectory(
     store: SessionStore,
     scope: ProjectScope,
@@ -4213,6 +4392,7 @@ function matchRoute(pathname: string):
               | "global-security-policy"
               | "debug-inspector"
               | "health"
+              | "inference-credentials"
               | "installation"
               | "p2p-status"
               | "p2p-invitations"
@@ -4407,6 +4587,7 @@ function matchRoute(pathname: string):
     | { name: "workflow-stop"; sessionId: string; workflowRunId: string }
     | undefined {
     if (pathname === "/health") return { name: "health" };
+    if (pathname === "/inference-credentials") return { name: "inference-credentials" };
     if (pathname === "/installation") return { name: "installation" };
     if (pathname === "/p2p/status") return { name: "p2p-status" };
     if (pathname === "/p2p/invitations") return { name: "p2p-invitations" };
@@ -5634,6 +5815,7 @@ function buildGroupCatalog(
     modelCatalog: ModelCatalog,
     identity: DaemonIdentity,
     sessionTerminals: SessionTerminalTracker,
+    ownerInstanceId?: string,
 ): Omit<GlobalStreamHello, "cursor"> {
     const inboxItems = new Map<string, ReturnType<SessionStore["listDurableUserInputs"]>>();
     for (const call of store.listDurableUserInputs()) {
@@ -5642,6 +5824,10 @@ function buildGroupCatalog(
     }
     const sessions = store
         .listActive()
+        .filter(
+            (summary) =>
+                ownerInstanceId === undefined || summary.ownerInstanceId === ownerInstanceId,
+        )
         .map((summary) => ({
             ...summary,
             inboxItems: (inboxItems.get(summary.id) ?? []).map((call) => ({
@@ -5858,6 +6044,25 @@ function p2pPeerId(request: IncomingMessage): string | undefined {
     return typeof value === "string" ? value : undefined;
 }
 
+function globalLiveEventVisibleToOwner(
+    event: GlobalEvent,
+    ownerInstanceId: string,
+    store: SessionStore,
+    runtimeConfig: ProtocolServerRuntimeConfig,
+): boolean {
+    if ("sessionId" in event) {
+        return store.get(event.sessionId)?.snapshot().ownerInstanceId === ownerInstanceId;
+    }
+    if (event.type === "profile_changed") {
+        return (
+            runtimeConfig.profiles?.get(event.data.profileId)?.parentInstanceId === ownerInstanceId
+        );
+    }
+    // Events without a credential owner can contain another owner's project, folder, peer, or
+    // daemon activity. Remote clients reload their owner-scoped catalog instead of receiving it.
+    return false;
+}
+
 function authorizeMessageProfile(
     request: IncomingMessage,
     response: ServerResponse,
@@ -5875,12 +6080,13 @@ function authorizeMessageProfile(
             return false;
         }
         if (
-            runtimeConfig.canP2pPeerConfigure?.(peerId) !== true ||
+            (runtimeConfig.canP2pPeerProvision?.(peerId) ??
+                runtimeConfig.canP2pPeerConfigure?.(peerId)) !== true ||
             runtimeConfig.profiles?.owns(profileId, peerId) !== true
         ) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
-                error: "That human profile is not registered to the authenticated primary Rig.",
+                error: "That human profile is not registered to the authenticated peer Rig.",
             });
             return false;
         }

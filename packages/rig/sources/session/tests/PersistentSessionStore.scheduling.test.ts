@@ -350,6 +350,56 @@ describe("persistent scheduling", () => {
         }
     });
 
+    it("rejects known cross-owner scheduled targets before persisting", () => {
+        const localInstanceId = "alocalinstance00000000001";
+        const peerAInstanceId = "apeerainstance000000001";
+        const peerBInstanceId = "apeerbinstance000000001";
+        const store = new PersistentSessionStore({
+            databasePath: ":memory:",
+            localInstanceId,
+            modelCatalog: gymCatalog(),
+        });
+        try {
+            const sender = store.create(gymSessionRequest("/tmp/rig-schedule-peer-a"), {
+                ownerInstanceId: peerAInstanceId,
+            });
+            const sameOwner = store.create(gymSessionRequest("/tmp/rig-schedule-peer-a-target"), {
+                ownerInstanceId: peerAInstanceId,
+            });
+            const otherOwner = store.create(gymSessionRequest("/tmp/rig-schedule-peer-b-target"), {
+                ownerInstanceId: peerBInstanceId,
+            });
+            const local = store.create(gymSessionRequest("/tmp/rig-schedule-local"));
+            const dueAt = Date.now() + 60_000;
+
+            expect(() =>
+                sender.scheduleMessage({
+                    dueAt,
+                    message: "Do not cross the owner boundary.",
+                    targetAgentId: otherOwner.snapshot().agentId,
+                }),
+            ).toThrow("No available agent has that agent ID.");
+            expect(sender.scheduledMessages()).toEqual([]);
+
+            expect(
+                sender.scheduleMessage({
+                    dueAt,
+                    message: "Same owner.",
+                    targetAgentId: sameOwner.snapshot().agentId,
+                }),
+            ).toMatchObject({ status: "pending" });
+            expect(
+                local.scheduleMessage({
+                    dueAt,
+                    message: "Local operator.",
+                    targetAgentId: otherOwner.snapshot().agentId,
+                }),
+            ).toMatchObject({ status: "pending" });
+        } finally {
+            store.close();
+        }
+    });
+
     it("keeps cancelled scheduled messages across restart without delivering them", async () => {
         const databasePath = await createDatabasePath();
         let now = 1_700_000_000_000;

@@ -119,6 +119,7 @@ function createRestoredSession(
     const restore: PersistedSessionState = {
         agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
         agentId: "agent",
+        ownerInstanceId: "alocalinstance00000000001",
         contextMessages: messages,
         cwd: "/tmp/rig-rewind-test",
         id: "session-1",

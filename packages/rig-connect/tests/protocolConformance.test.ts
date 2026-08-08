@@ -22,6 +22,7 @@ import {
     discoverPluginCatalogRequestSchema as daemonDiscoverPluginCatalogRequestSchema,
     discoverPluginCatalogResponseSchema as daemonDiscoverPluginCatalogResponseSchema,
     installPluginRequestSchema as daemonInstallPluginRequestSchema,
+    providerCredentialProvenanceSchema as daemonProviderCredentialProvenanceSchema,
     rigProfileSchema as daemonRigProfileSchema,
     rigCliInstallationInspectionSchema as daemonRigCliInstallationInspectionSchema,
     rigDaemonInstallationDiscoverySchema as daemonRigDaemonInstallationDiscoverySchema,
@@ -52,6 +53,7 @@ import {
     moveSessionRequestSchema,
     projectWorkspaceSchema,
     sessionScopeSchema,
+    providerCredentialProvenanceSchema,
     systemNoticePayloadSchema,
     updateFolderRequestSchema,
 } from "@/protocol.js";
@@ -155,6 +157,14 @@ type _ApplicationReadEvents = {
     >;
 };
 type _Session = Assignable<local.ProtocolSession, daemon.ProtocolSession>;
+type _ProviderCredentialProvenance = Assignable<
+    local.ProviderCredentialProvenance,
+    daemon.ProviderCredentialProvenance
+>;
+type _DaemonProviderCredentialProvenance = Assignable<
+    daemon.ProviderCredentialProvenance,
+    local.ProviderCredentialProvenance
+>;
 type _TranscriptWindow = Assignable<local.SessionTranscriptWindow, daemon.SessionTranscriptWindow>;
 type _TranscriptTurn = Assignable<local.SessionTranscriptTurn, daemon.SessionTranscriptTurn>;
 type _GlobalHello = Assignable<local.GlobalStreamHello, daemon.GlobalStreamHello>;
@@ -284,6 +294,37 @@ type _DaemonRigDaemonInstallationDiscovery = Assignable<
 >;
 
 describe("protocol conformance", () => {
+    it("keeps credential provenance bounded and identical to the daemon", () => {
+        const provenance: local.ProviderCredentialProvenance = {
+            bindingId: "rigowner:codex",
+            ownerInstanceId: "rigowner",
+            ownerName: "Steve's Rig",
+            relation: "owner",
+            sourceProviderId: "codex",
+            visibility: "owner_only",
+        };
+
+        expect(providerCredentialProvenanceSchema).toStrictEqual(
+            daemonProviderCredentialProvenanceSchema,
+        );
+        expect(Value.Decode(providerCredentialProvenanceSchema, provenance)).toEqual(provenance);
+        expect(Value.Decode(daemonProviderCredentialProvenanceSchema, provenance)).toEqual(
+            provenance,
+        );
+        expect(
+            Value.Check(providerCredentialProvenanceSchema, {
+                ...provenance,
+                visibility: "private",
+            }),
+        ).toBe(false);
+        expect(
+            Value.Check(providerCredentialProvenanceSchema, {
+                ...provenance,
+                unexpected: true,
+            }),
+        ).toBe(false);
+    });
+
     it("keeps the browser-safe compute error schema structurally identical to the daemon source", () => {
         expect(computeServiceErrorSchema).toEqual(happyComputeErrorSchema);
     });

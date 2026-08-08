@@ -46,6 +46,8 @@ export interface GroupSession {
     readonly id: string;
     readonly lastMessageAt?: number;
     readonly modelId: string;
+    /** Rig whose credential catalog this chat is bound to. */
+    readonly ownerInstanceId: string;
     readonly orderKey: string;
     readonly permissionMode: string;
     readonly scope: Extract<SessionScope, { kind: "project" | "workspace" }>;

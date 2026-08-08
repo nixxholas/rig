@@ -52,7 +52,7 @@ function liveHello(): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
         gap: false,
-        protocolVersion: 6,
+        protocolVersion: 14,
         resumed: false,
     })}\n\n`;
 }
@@ -69,8 +69,15 @@ function sessionStateBody(paged: boolean): SessionStateResponse {
             cwd: "/work",
             id: "session-1",
             modelLocked: false,
+            modelCatalog: {
+                defaultModelId: "sonnet-5",
+                defaultProviderId: "claude",
+                models: [],
+                providers: [],
+            },
             modelId: "sonnet-5",
             models: [],
+            ownerInstanceId: "alocalinstance00000000001",
             orderKey: "a0",
             pendingUserInputs: [],
             permissionMode: "auto",

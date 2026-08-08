@@ -1,7 +1,7 @@
 import { and, eq, gte, sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
-import { sessionContextMessages, sessions } from "../database/schema.js";
+import { sessionContextMessages, sessionCredentialBindings, sessions } from "../database/schema.js";
 import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
@@ -45,6 +45,7 @@ export function sessionSave(
             metadataUpdatedAtMs: state.metadataUpdatedAt ?? null,
             modelId: state.modelId,
             modelsJson: JSON.stringify(state.models),
+            ownerInstanceId: state.ownerInstanceId,
             nextTaskId: state.nextTaskId,
             orderKey: state.orderKey,
             parentSessionId: state.agent.parentSessionId ?? null,
@@ -94,10 +95,24 @@ export function sessionSave(
             workspaceQueueWaiting: state.workspaceQueueWaiting === true,
             workspaceTransferJson: JSON.stringify(state.workspaceTransfer ?? { status: "idle" }),
         };
-        const { createdAtMs: _createdAtMs, id: _id, ...updates } = values;
+        const {
+            createdAtMs: _createdAtMs,
+            id: _id,
+            ownerInstanceId: _ownerInstanceId,
+            ...updates
+        } = values;
         tx.insert(sessions)
             .values(values)
             .onConflictDoUpdate({ set: updates, target: sessions.id })
+            .run();
+        const credentialBindingId =
+            state.credentialBindingId ?? `${state.ownerInstanceId}:${state.providerId}`;
+        tx.insert(sessionCredentialBindings)
+            .values({ bindingId: credentialBindingId, sessionId: state.id })
+            .onConflictDoUpdate({
+                set: { bindingId: credentialBindingId },
+                target: sessionCredentialBindings.sessionId,
+            })
             .run();
         replaceContextMessages(tx, state.id, input.contextMessages);
     });

@@ -23,6 +23,7 @@ export function serializeProviders(
                     ...(provider.excludeModels === undefined
                         ? {}
                         : { exclude_models: provider.excludeModels }),
+                    ...(provider.p2pShare === undefined ? {} : { p2p_share: provider.p2pShare }),
                     ...serializeProviderFields(provider),
                 },
             ]),
@@ -42,6 +43,7 @@ function isBuiltInProvider(id: string, provider: Pick<ConfigProvider, "type">): 
 function serializeProviderFields(provider: PartialConfigProvider): Record<string, unknown> {
     if (provider.type === "codex") {
         return {
+            ...(provider.apiKey === undefined ? {} : { api_key: provider.apiKey }),
             ...(provider.authFile === undefined ? {} : { auth_file: provider.authFile }),
             ...(provider.baseUrl === undefined ? {} : { base_url: provider.baseUrl }),
             ...(provider.transport === undefined ? {} : { transport: provider.transport }),
@@ -49,6 +51,8 @@ function serializeProviderFields(provider: PartialConfigProvider): Record<string
     }
     if (provider.type === "claude") {
         return {
+            ...(provider.apiKey === undefined ? {} : { api_key: provider.apiKey }),
+            ...(provider.authToken === undefined ? {} : { auth_token: provider.authToken }),
             ...(provider.configDir === undefined ? {} : { config_dir: provider.configDir }),
             ...(provider.executable === undefined ? {} : { executable: provider.executable }),
             ...(provider.oauthToken === undefined ? {} : { oauth_token: provider.oauthToken }),
@@ -56,6 +60,7 @@ function serializeProviderFields(provider: PartialConfigProvider): Record<string
     }
     if (provider.type === "grok") {
         return {
+            ...(provider.apiKey === undefined ? {} : { api_key: provider.apiKey }),
             ...(provider.authFile === undefined ? {} : { auth_file: provider.authFile }),
             ...(provider.baseUrl === undefined ? {} : { base_url: provider.baseUrl }),
         };

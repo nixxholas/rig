@@ -11,13 +11,14 @@ export function grokExecution(options: {
     resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }): ExecutorProvider {
+    const apiKey = options.config.apiKey ?? options.apiKey;
     const baseUrl = options.config.baseUrl ?? options.env.RIG_GROK_BASE_URL;
     const build = (): ExecutorProvider["native"] => {
         return async () => {
             const credential =
                 (await GrokApiKeyCredential.tryLoad({
                     env: options.env,
-                    ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+                    ...(apiKey === undefined ? {} : { apiKey }),
                     ...(options.config.authFile === undefined
                         ? {}
                         : { authFile: options.config.authFile }),

@@ -98,6 +98,7 @@ export interface AgentSessionRepository {
 }
 
 export interface AgentSessionManagerOptions {
+    localInstanceId?: string;
     maxActive?: number;
     maxDepth?: number;
     repository: AgentSessionRepository;
@@ -112,12 +113,14 @@ export class AgentSessionManager {
     readonly #lastSuccessfulModelByProvider = new Map<string, string>();
     readonly #lastSuccessfulProviderByModel = new Map<string, string>();
     readonly #latestBackgroundRunBySession = new Map<string, string>();
+    readonly #localInstanceId: string | undefined;
     readonly #pendingBackgroundRuns = new Map<string, string>();
     readonly #slotReservations = new Map<string, number>();
     readonly #stoppedExplicitly = new Set<string>();
     readonly #taskDrain: TaskDrain | undefined;
 
     constructor(options: AgentSessionManagerOptions) {
+        this.#localInstanceId = options.localInstanceId;
         this.#repository = options.repository;
         this.#taskDrain = options.taskDrain;
         this.maxActive = options.maxActive ?? DEFAULT_MAX_ACTIVE_SUBAGENTS;
@@ -531,8 +534,14 @@ export class AgentSessionManager {
         messageId: string,
     ): void {
         const sender = this.#current(senderSessionId);
-        const target = this.#target(targetAgentId);
+        const target = this.#targetForSender(sender, targetAgentId);
         this.#deliverAgentMessage(sender, target, message, messageId);
+    }
+
+    assertCanScheduleMessage(senderSessionId: string, targetAgentId: string): void {
+        const target = this.#repository.findByAgentId?.(targetAgentId);
+        if (target === undefined) return;
+        this.#assertTargetAvailableToSender(this.#current(senderSessionId), target);
     }
 
     async changeSubagentPermissionModes(
@@ -1184,7 +1193,7 @@ export class AgentSessionManager {
 
     #info(senderSessionId: string, targetAgentId: string): AgentCommunicationInfo {
         const sender = this.#current(senderSessionId);
-        const target = this.#target(targetAgentId);
+        const target = this.#targetForSender(sender, targetAgentId);
         const identity = target.agentIdentity();
         const path = resolveSharedAgentPath(
             sender.agentCommunicationLocation(),
@@ -1207,7 +1216,7 @@ export class AgentSessionManager {
         messageId?: string,
     ): { delivered: true } {
         const sender = this.#current(senderSessionId);
-        const target = this.#target(targetAgentId);
+        const target = this.#targetForSender(sender, targetAgentId);
         this.#deliverAgentMessage(sender, target, message, messageId);
         return { delivered: true };
     }
@@ -1218,7 +1227,7 @@ export class AgentSessionManager {
         readOnly: boolean,
     ): Promise<void> {
         const sender = this.#current(senderSessionId);
-        const target = this.#target(targetAgentId);
+        const target = this.#targetForSender(sender, targetAgentId);
         await this.#changeChildPermissionMode(sender, target, readOnly);
     }
 
@@ -1296,6 +1305,21 @@ export class AgentSessionManager {
         const target = this.#repository.findByAgentId?.(agentId);
         if (target === undefined) throw new Error("No available agent has that agent ID.");
         return target;
+    }
+
+    #targetForSender(sender: InMemorySession, agentId: string): InMemorySession {
+        const target = this.#target(agentId);
+        this.#assertTargetAvailableToSender(sender, target);
+        return target;
+    }
+
+    #assertTargetAvailableToSender(sender: InMemorySession, target: InMemorySession): void {
+        if (
+            sender.ownerInstanceId !== this.#localInstanceId &&
+            sender.ownerInstanceId !== target.ownerInstanceId
+        ) {
+            throw new Error("No available agent has that agent ID.");
+        }
     }
 
     #activeDescendantsOf(parentSessionId: string): readonly InMemorySession[] {

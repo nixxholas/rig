@@ -529,6 +529,7 @@ function storedSession(
     return {
         agent: { depth: 0, rootSessionId: overrides.id, type: "primary" },
         agentId: `agent-of-${overrides.id}`,
+        ownerInstanceId: "alocalinstance00000000001",
         messages: [],
         modelId: "openai/gpt-5.5",
         models: [],

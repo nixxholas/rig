@@ -23,6 +23,7 @@ import type {
 import type { DockerExecutionConfig, DockerMountConfig } from "../execution/index.js";
 import { p2pPeerNameSchema } from "../p2p/P2pPeer.js";
 import { p2pInstanceIdSchema } from "../protocol/P2pIdentityProtocol.js";
+import { p2pShareSchema } from "../protocol/P2pCredentialProtocol.js";
 import { protectedPathsSchema } from "./configPermissions.js";
 
 const irohRelayUrlSchema = Type.String({ pattern: "^https?://" });
@@ -518,17 +519,21 @@ function readProviders(
             ...(enabledValue === undefined ? {} : { enabled: enabledValue }),
             ...readOptionalStringArray(rawProvider, "exclude_models", "excludeModels"),
             ...readOptionalStringArray(rawProvider, "include_models", "includeModels"),
+            ...readProviderP2pShare(id, rawProvider),
         };
         if (type === "codex") {
             dropUnknownKeys(rawProvider, `providers.${id}`, [
+                "api_key",
                 "auth_file",
                 "base_url",
                 "enabled",
                 "exclude_models",
                 "include_models",
+                "p2p_share",
                 "transport",
                 "type",
             ]);
+            const apiKey = readProviderString(id, rawProvider, "api_key");
             const authFile = readProviderString(id, rawProvider, "auth_file");
             const baseUrl = readProviderString(id, rawProvider, "base_url");
             const transport = readProviderString(id, rawProvider, "transport");
@@ -542,6 +547,7 @@ function readProviders(
             }
             providers[id] = {
                 ...common,
+                ...(apiKey === undefined ? {} : { apiKey }),
                 ...(authFile === undefined ? {} : { authFile }),
                 ...(baseUrl === undefined ? {} : { baseUrl }),
                 ...(transport === undefined
@@ -556,17 +562,21 @@ function readProviders(
 
         if (type === "grok") {
             dropUnknownKeys(rawProvider, `providers.${id}`, [
+                "api_key",
                 "auth_file",
                 "base_url",
                 "enabled",
                 "exclude_models",
                 "include_models",
+                "p2p_share",
                 "type",
             ]);
+            const apiKey = readProviderString(id, rawProvider, "api_key");
             const authFile = readProviderString(id, rawProvider, "auth_file");
             const baseUrl = readProviderString(id, rawProvider, "base_url");
             providers[id] = {
                 ...common,
+                ...(apiKey === undefined ? {} : { apiKey }),
                 ...(authFile === undefined ? {} : { authFile }),
                 ...(baseUrl === undefined ? {} : { baseUrl }),
                 type,
@@ -576,19 +586,26 @@ function readProviders(
 
         if (type === "claude") {
             dropUnknownKeys(rawProvider, `providers.${id}`, [
+                "api_key",
+                "auth_token",
                 "config_dir",
                 "enabled",
                 "exclude_models",
                 "executable",
                 "include_models",
                 "oauth_token",
+                "p2p_share",
                 "type",
             ]);
+            const apiKey = readProviderString(id, rawProvider, "api_key");
+            const authToken = readProviderString(id, rawProvider, "auth_token");
             const configDir = readProviderString(id, rawProvider, "config_dir");
             const executable = readProviderString(id, rawProvider, "executable");
             const oauthToken = readProviderString(id, rawProvider, "oauth_token");
             providers[id] = {
                 ...common,
+                ...(apiKey === undefined ? {} : { apiKey }),
+                ...(authToken === undefined ? {} : { authToken }),
                 ...(configDir === undefined ? {} : { configDir }),
                 ...(executable === undefined ? {} : { executable }),
                 ...(oauthToken === undefined ? {} : { oauthToken }),
@@ -604,6 +621,7 @@ function readProviders(
             "exclude_models",
             "include_models",
             "model_overrides",
+            "p2p_share",
             "region",
             "search_model",
             "type",
@@ -627,6 +645,18 @@ function readProviders(
         ...(defaultEnable === undefined ? {} : { defaultEnable }),
         providers,
     };
+}
+
+function readProviderP2pShare(
+    id: string,
+    table: TomlTable,
+): Partial<Pick<PartialConfigProvider, "p2pShare">> {
+    const p2pShare = readProviderString(id, table, "p2p_share");
+    if (p2pShare === undefined) return {};
+    if (!Value.Check(p2pShareSchema, p2pShare)) {
+        throw new Error(`providers.${id}.p2p_share must be "owner_only", "shared", or "disabled".`);
+    }
+    return { p2pShare };
 }
 
 function readProviderType(id: string, table: TomlTable): "bedrock" | "claude" | "codex" | "grok" {

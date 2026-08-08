@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { readGrokAuthStore, type GrokAuthRecord } from "@/vendors/grok/impl/auth.js";
@@ -18,10 +18,15 @@ export async function writeGrokAuthRecord(
 ): Promise<void> {
     const store = await readGrokAuthStore(path);
     const next = { ...store, [scope]: { ...store[scope], ...patch } };
+    await mkdir(dirname(path), { mode: 0o700, recursive: true });
     const staged = join(dirname(path), `.${randomUUID()}.auth.json`);
-    await writeFile(staged, `${JSON.stringify(next, null, 2)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-    });
-    await rename(staged, path);
+    try {
+        await writeFile(staged, `${JSON.stringify(next, null, 2)}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+        });
+        await rename(staged, path);
+    } finally {
+        await rm(staged, { force: true });
+    }
 }

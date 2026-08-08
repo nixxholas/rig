@@ -23,7 +23,10 @@ import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import type { SessionStore } from "../../session/SessionStore.js";
 import { WorkspaceTransferTargetRestoreError } from "../../git/prepareWorkspaceTransfer.js";
-import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
+import {
+    createProtocolHttpServer,
+    type ProtocolHttpServerOptions,
+} from "../createProtocolHttpServer.js";
 import type { FileSearchServiceContract } from "../../file-search/FileSearchService.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import { CONTAINER_DOCS_PATH, getBundledDocsRoot } from "../../execution/getBundledDocsRoot.js";
@@ -1201,9 +1204,53 @@ describe("createProtocolHttpServer", () => {
                 currentProviderId: "codex",
                 quota: sessionQuota,
             });
-            expect(getProviderQuota).toHaveBeenCalledWith("codex");
+            expect(getProviderQuota).toHaveBeenCalledWith("codex", created.session.ownerInstanceId);
         } finally {
             await close();
+        }
+    });
+
+    it("routes current quota through the selected credential binding", async () => {
+        const localInstanceId = createId();
+        const credentialOwnerInstanceId = createId();
+        const providerId = `codex@${credentialOwnerInstanceId}`;
+        const credential = {
+            bindingId: `${credentialOwnerInstanceId}:codex`,
+            ownerInstanceId: credentialOwnerInstanceId,
+            ownerName: "Shared Rig",
+            relation: "extra" as const,
+            sourceProviderId: "codex",
+            visibility: "shared" as const,
+        };
+        const modelCatalog = {
+            defaultModelId: modelOpenaiGpt55.id,
+            defaultProviderId: providerId,
+            models: [modelOpenaiGpt55],
+            providers: [
+                {
+                    credential,
+                    models: [modelOpenaiGpt55],
+                    providerId,
+                    providerType: "codex" as const,
+                },
+            ],
+        };
+        const store = new InMemorySessionStore({ localInstanceId, modelCatalog });
+        const getProviderQuota = vi.fn(async () => undefined);
+        const { client, close } = await startServer({ getProviderQuota, store });
+        try {
+            const created = await client.createSession({ cwd: "/tmp/binding-provider-quota" });
+
+            await client.getCurrentProviderQuota(created.session.id);
+
+            expect(getProviderQuota).toHaveBeenCalledWith(providerId, localInstanceId, credential);
+
+            getProviderQuota.mockClear();
+            await client.getSessionUsage(created.session.id);
+            expect(getProviderQuota).toHaveBeenCalledWith(providerId, localInstanceId, credential);
+        } finally {
+            await close();
+            store.close();
         }
     });
 
@@ -1348,7 +1395,7 @@ describe("createProtocolHttpServer", () => {
                     },
                 ],
             });
-            expect(getProviderQuota).toHaveBeenCalledWith("codex");
+            expect(getProviderQuota).toHaveBeenCalledWith("codex", created.session.ownerInstanceId);
         } finally {
             await close();
         }
@@ -1585,8 +1632,11 @@ describe("createProtocolHttpServer", () => {
                 expect.objectContaining({ providerId: "claude" }),
                 expect.objectContaining({ providerId: "codex" }),
             ]);
-            expect(getProviderQuota).toHaveBeenCalledWith("claude");
-            expect(getProviderQuota).toHaveBeenCalledWith("codex");
+            expect(getProviderQuota).toHaveBeenCalledWith(
+                "claude",
+                created.session.ownerInstanceId,
+            );
+            expect(getProviderQuota).toHaveBeenCalledWith("codex", created.session.ownerInstanceId);
         } finally {
             await close();
         }
@@ -3526,7 +3576,7 @@ async function startServer(
         defaultDocker?: DockerExecutionConfig;
         fileSearchService?: FileSearchServiceContract;
         globalEventQueue?: GlobalEventQueue;
-        getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
+        getProviderQuota?: ProtocolHttpServerOptions["getProviderQuota"];
         onDaemonSettingsChange?: (settings: {
             inferenceMaxRetries: number;
             durableGlobalEventQueue: boolean;
@@ -3748,6 +3798,7 @@ function readOnlySubagentState(): PersistedSessionState {
             type: "subagent",
         },
         agentId: "agent-2",
+        ownerInstanceId: "alocalinstance00000000001",
         cwd: "/tmp/rig-protocol-test",
         id: "subagent-1",
         messages: [],
@@ -3773,6 +3824,7 @@ function completedPrimaryState(id: string): PersistedSessionState {
     return {
         agent: { depth: 0, rootSessionId: id, type: "primary" },
         agentId: `${id}-agent`,
+        ownerInstanceId: "alocalinstance00000000001",
         cwd: "/tmp/rig-protocol-test",
         id,
         messages: [],
@@ -3805,6 +3857,7 @@ function pausedGoalState(): PersistedSessionState {
     return {
         agent: { depth: 0, rootSessionId: "goal-session", type: "primary" },
         agentId: "goal-agent",
+        ownerInstanceId: "alocalinstance00000000001",
         cwd: "/tmp/rig-protocol-test",
         goal: {
             createdAt: 1,

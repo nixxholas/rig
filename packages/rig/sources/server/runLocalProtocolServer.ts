@@ -1,5 +1,6 @@
 import { chmod, open } from "node:fs/promises";
 import { createServer } from "node:http";
+import { join } from "node:path";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
@@ -37,6 +38,7 @@ import {
     type ProviderUsageTracker,
 } from "../executor/createProviderUsageTracker.js";
 import { createProviderUsageService } from "../executor/createProviderUsageService.js";
+import { createCredentialBindingUsageRouter } from "../executor/createCredentialBindingUsageRouter.js";
 import { loadConfiguredProviderUsage } from "../executor/loadConfiguredProviderUsage.js";
 import { gracefulShutdown } from "../concurrency/index.js";
 import { disableUnavailableProviders } from "../executor/disableUnavailableProviders.js";
@@ -78,6 +80,12 @@ import {
     RigProfileStore,
 } from "../profiles/index.js";
 import { GitHubSecretSync } from "../secrets/index.js";
+import {
+    createLocalCredentialSnapshot,
+    P2pCredentialReplicator,
+    P2pCredentialRuntimeRegistry,
+    P2pCredentialStore,
+} from "../credentials/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -147,6 +155,9 @@ async function runOwnedLocalProtocolServer(
     let p2pNetwork: P2pNetwork | undefined;
     let p2pPairingService: P2pPairingService | undefined;
     let p2pProfileReplicator: P2pProfileReplicator | undefined;
+    let p2pCredentialReplicator: P2pCredentialReplicator | undefined;
+    let p2pCredentialRuntimeRegistry: P2pCredentialRuntimeRegistry | undefined;
+    let p2pCredentialStore: P2pCredentialStore | undefined;
     let rigProfiles: RigProfileStore | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
@@ -347,6 +358,10 @@ async function runOwnedLocalProtocolServer(
             );
         }
         const loadedConfig = await loadConfig({ cwd: process.cwd() });
+        // Session inference ownership is keyed by the same durable identity used to authenticate
+        // P2P transport. Starting without it would make credential ownership unstable across
+        // restarts, so identity initialization is now part of the daemon's core startup.
+        const p2pIdentity = await loadOrCreateP2pIdentity(paths.p2pIdentityPath);
         const machineProtectedPaths = [
             ...new Set([
                 ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
@@ -398,6 +413,14 @@ async function runOwnedLocalProtocolServer(
             cwd: process.cwd(),
             disabledProviderReasons,
             providers: loadedConfig.config.providers,
+        });
+        const credentialUsageRouter = createCredentialBindingUsageRouter({
+            localInstanceId: p2pIdentity.instanceId,
+            localProviders: availableProviders,
+            localQuotaService: providerQuotaService,
+            localUsageService: providerUsageService,
+            observeLocalUsage: (usage) => providerUsageTracker?.observe(usage),
+            resolveScope: (ownerInstanceId) => p2pCredentialRuntimeRegistry?.scope(ownerInstanceId),
         });
         const pluginMcpRegistry = new PluginMcpRegistry();
         const workletToolRegistry = new WorkletToolRegistry();
@@ -523,26 +546,34 @@ async function runOwnedLocalProtocolServer(
                 ),
         });
         store = new PersistentSessionStore({
-            createRuntime: (options) =>
-                createCodingAssistantAgent({
+            createRuntime: (options) => {
+                const ownerInstanceId = options.ownerInstanceId ?? p2pIdentity.instanceId;
+                const scopedProviders =
+                    p2pCredentialRuntimeRegistry?.providers(ownerInstanceId) ?? availableProviders;
+                return createCodingAssistantAgent({
                     ...options,
                     // What a provider says about the account while it answers is
                     // both the daemon's freshest reading and the session's, so
                     // the session is told the complete merged picture.
                     onAccountUsage: (usage) => {
-                        const merged = providerUsageService.record(usage);
-                        providerUsageTracker?.observe(merged);
+                        const merged = credentialUsageRouter.record(ownerInstanceId, usage);
                         options.onAccountUsage?.(merged);
                     },
                     plugins,
                     worklets: workletsFor(options.sessionId ?? options.agentId ?? "standalone"),
                     providerUsage: {
-                        current: async () => (await providerUsageTracker?.refreshAll()) ?? [],
+                        current: () =>
+                            Promise.all(
+                                Object.keys(scopedProviders).map((providerId) =>
+                                    credentialUsageRouter.entry(ownerInstanceId, providerId),
+                                ),
+                            ),
                     },
-                    providers: availableProviders,
+                    providers: scopedProviders,
                     protectedPaths: resolveProtectedPaths(options.cwd, machineProtectedPaths),
                     resolveInferenceMaxRetries: () => runtimeSettings.inferenceMaxRetries,
-                }),
+                });
+            },
             databasePath: paths.databasePath,
             ...(loadedConfig.config.docker === undefined
                 ? {}
@@ -550,7 +581,10 @@ async function runOwnedLocalProtocolServer(
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
             presence: createConfiguredPresenceStore(loadedConfig.config.presence),
             mcpToolProvider,
+            localInstanceId: p2pIdentity.instanceId,
             modelCatalog,
+            resolveModelCatalog: (ownerInstanceId) =>
+                p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
             workspacesDirectory: getManagedWorkspacesDirectory(),
             workspaceFeatures: {
                 crossWorkspace: loadedConfig.config.features.crossWorkspace,
@@ -635,6 +669,13 @@ async function runOwnedLocalProtocolServer(
                 return false;
             }
         };
+        const isTrustedP2pPeer = (peerId: string): boolean => {
+            try {
+                return p2pPeerTrustStore.peers().some((peer) => peer.instanceId === peerId);
+            } catch {
+                return false;
+            }
+        };
         const setP2pPrimaryIfUnset = (primaryId: string): Promise<void> => {
             const assignment = assignP2pPrimary.then(async () => {
                 if (p2pNode.primaryId !== undefined) return;
@@ -655,29 +696,29 @@ async function runOwnedLocalProtocolServer(
                 { error: errorToMessage(error) },
             );
         }
-        const p2pIdentity = await loadOrCreateP2pIdentity(paths.p2pIdentityPath).catch(
-            (error: unknown) => {
-                daemonLog.record(
-                    "warning",
-                    "p2p_identity_unavailable",
-                    "P2P identity and pairing are unavailable.",
-                    { error: errorToMessage(error) },
-                );
-                return undefined;
+        p2pCredentialStore = new P2pCredentialStore({
+            database: activeStore,
+            identity: p2pIdentity,
+        });
+        p2pCredentialRuntimeRegistry = new P2pCredentialRuntimeRegistry({
+            localCatalog: modelCatalog,
+            localInstanceId: p2pIdentity.instanceId,
+            localName: () => p2pNode.name,
+            localProviders: availableProviders,
+            peers: () => p2pPeerTrustStore.peers(),
+            runtimeDirectory: join(paths.directory, "p2p-credential-runtime"),
+            store: p2pCredentialStore,
+        });
+        rigProfiles = new RigProfileStore({
+            database: activeStore,
+            localInstanceId: p2pIdentity.instanceId,
+            publish: (event) => {
+                activeStore.globalEventQueue.publishLive(event);
+                activeStore.liveEvents.publish(event);
+                p2pProfileReplicator?.syncProfile(event.data.profileId, event.data.version);
             },
-        );
-        if (p2pIdentity !== undefined) {
-            rigProfiles = new RigProfileStore({
-                database: activeStore,
-                localInstanceId: p2pIdentity.instanceId,
-                publish: (event) => {
-                    activeStore.globalEventQueue.publishLive(event);
-                    activeStore.liveEvents.publish(event);
-                    p2pProfileReplicator?.syncProfile(event.data.profileId, event.data.version);
-                },
-            });
-        }
-        if (p2pIdentity !== undefined) {
+        });
+        {
             try {
                 const irohSecret = await loadOrCreateIrohSecretKey(paths.irohSecretKeyPath);
                 p2pPairingService = new P2pPairingService({
@@ -687,6 +728,8 @@ async function runOwnedLocalProtocolServer(
                     onPeerTrusted: (peer) => {
                         p2pNetwork?.addTrustedPeer(peer);
                         p2pProfileReplicator?.peerChanged(peer.instanceId);
+                        p2pCredentialRuntimeRegistry?.refresh();
+                        p2pCredentialReplicator?.peerChanged(peer.instanceId);
                     },
                     peerTrustStore: p2pPeerTrustStore,
                     setPrimaryIfUnset: setP2pPrimaryIfUnset,
@@ -709,6 +752,7 @@ async function runOwnedLocalProtocolServer(
             }
         }
         const createP2pStatusEventId = createEventIdFactory();
+        const credentialConnectedPeers = new Set<string>();
         const publishP2pStatus = (status: P2pStatus): void => {
             const event: GlobalLiveEvent = {
                 createdAt: Date.now(),
@@ -718,6 +762,24 @@ async function runOwnedLocalProtocolServer(
             };
             activeStore.globalEventQueue.publishLive(event);
             activeStore.liveEvents.publish(event);
+            const connected = new Set(
+                status.transports.flatMap((transport) =>
+                    transport.state === "ready"
+                        ? transport.peers.flatMap((peer) =>
+                              peer.status === "connected" && peer.peerId !== undefined
+                                  ? [peer.peerId]
+                                  : [],
+                          )
+                        : [],
+                ),
+            );
+            for (const peerId of connected) {
+                if (!credentialConnectedPeers.has(peerId)) {
+                    p2pCredentialReplicator?.peerChanged(peerId);
+                }
+            }
+            credentialConnectedPeers.clear();
+            for (const peerId of connected) credentialConnectedPeers.add(peerId);
         };
         p2pNetwork = await P2pNetwork.create({
             config: loadedConfig.config.p2p,
@@ -737,13 +799,42 @@ async function runOwnedLocalProtocolServer(
             serveRequest: createServeP2pHttpRequest({
                 allowRequest: (peerId, request) =>
                     loadedConfig.config.p2p.exposeApi ||
-                    (canP2pPeerConfigure(peerId) &&
-                        (isP2pConfigurationPath(request.path) || isP2pProfilePath(request.path))),
+                    ((isP2pCredentialPath(request.path) || isP2pProfilePath(request.path)) &&
+                        isTrustedP2pPeer(peerId)) ||
+                    (canP2pPeerConfigure(peerId) && isP2pConfigurationPath(request.path)),
                 socketPath,
                 token,
             }),
             serveTunnel: createServeP2pTunnel({ socketPath, token }),
         });
+        p2pCredentialReplicator = new P2pCredentialReplicator({
+            listPeers: () => p2pPeerTrustStore.peers(),
+            network: p2pNetwork,
+            onError: (peerId, error) => {
+                daemonLog.record(
+                    "warning",
+                    "p2p_credential_replication_failed",
+                    "Rig could not synchronize inference credentials with a peer Rig.",
+                    { error: errorToMessage(error), peerId },
+                );
+            },
+            snapshot: async () =>
+                p2pCredentialStore!.prepareOwnSnapshot(
+                    await createLocalCredentialSnapshot({
+                        credentialRecoveryDirectory: join(
+                            paths.directory,
+                            "p2p-credential-owner-recovery",
+                        ),
+                        owner: {
+                            instanceId: p2pIdentity.instanceId,
+                            publicKey: p2pIdentity.publicKey,
+                        },
+                        providers: availableProviders,
+                    }),
+                ),
+            store: p2pCredentialStore,
+        });
+        p2pCredentialReplicator.syncAll();
         if (rigProfiles !== undefined && p2pIdentity !== undefined) {
             p2pProfileReplicator = new P2pProfileReplicator({
                 listPeerIds: () => p2pPeerTrustStore.peers().map((peer) => peer.instanceId),
@@ -781,6 +872,7 @@ async function runOwnedLocalProtocolServer(
         shutdown.register("p2p", async () => {
             await p2pPairingService?.close();
             await p2pProfileReplicator?.close();
+            await p2pCredentialReplicator?.close();
             await p2pNetwork?.close();
         });
         const startedPluginManager = (pluginManager = new PluginManager({
@@ -897,17 +989,50 @@ async function runOwnedLocalProtocolServer(
                     : { globalEventQueue: store.globalEventQueue }),
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
+                resolveModelCatalog: (ownerInstanceId) =>
+                    p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
                 happyCloud: store.happyCloud,
                 p2pNetwork,
                 ...(p2pPairingService === undefined ? {} : { p2pPairing: p2pPairingService }),
                 p2pNode: () => ({ ...p2pNode }),
                 p2pStatus: () => p2pNetwork?.status() ?? { name: p2pNode.name, transports: [] },
                 ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
+                replaceP2pCredentials: (authenticatedOwnerId, envelope) => {
+                    if (
+                        store === undefined ||
+                        p2pCredentialRuntimeRegistry === undefined ||
+                        p2pCredentialStore === undefined
+                    ) {
+                        throw new Error("P2P credential provisioning is unavailable.");
+                    }
+                    const peer = p2pPeerTrustStore
+                        .peers()
+                        .find((candidate) => candidate.instanceId === authenticatedOwnerId);
+                    if (peer === undefined) {
+                        throw new Error("That credential owner is not a trusted peer Rig.");
+                    }
+                    const result = p2pCredentialStore.replaceEncrypted(
+                        authenticatedOwnerId,
+                        peer.publicKey,
+                        envelope,
+                    );
+                    const runtimeChanged = p2pCredentialRuntimeRegistry.refresh();
+                    if (runtimeChanged) {
+                        credentialUsageRouter.clearProvisionedCaches();
+                        for (const session of store.loadedSessions()) {
+                            session.refreshInferenceScope(
+                                p2pCredentialRuntimeRegistry.catalog(session.ownerInstanceId),
+                            );
+                        }
+                    }
+                    return result;
+                },
                 ...(rigProfiles === undefined || p2pNetwork === undefined
                     ? {}
                     : {
-                          prepareP2pRequest: ({ body, path, peerId, signal }) =>
-                              replicateProfileForP2pRequest({
+                          prepareP2pRequest: async ({ body, path, peerId, signal }) => {
+                              await p2pCredentialReplicator?.ensureForRequest(peerId, signal);
+                              await replicateProfileForP2pRequest({
                                   body,
                                   network: p2pNetwork!,
                                   onSynchronized: (synchronizedPeerId, profileId, version) =>
@@ -920,13 +1045,26 @@ async function runOwnedLocalProtocolServer(
                                   peerId,
                                   profiles: rigProfiles!,
                                   signal,
-                              }),
+                              });
+                          },
                       }),
                 canP2pPeerConfigure,
+                canP2pPeerProvision: isTrustedP2pPeer,
                 plugins,
                 ...(worklets === undefined ? {} : { worklets }),
-                getProviderQuota: (providerId) => providerQuotaService.get(providerId),
-                listProviderUsage: () => providerUsageTracker?.all() ?? [],
+                getProviderQuota: (providerId, ownerInstanceId, credential) =>
+                    credentialUsageRouter.quota(ownerInstanceId, providerId, credential),
+                listProviderUsage: async (ownerInstanceId) => {
+                    const resolvedOwnerInstanceId = ownerInstanceId ?? p2pIdentity.instanceId;
+                    const providers =
+                        p2pCredentialRuntimeRegistry?.providers(resolvedOwnerInstanceId) ??
+                        availableProviders;
+                    return Promise.all(
+                        Object.keys(providers).map((providerId) =>
+                            credentialUsageRouter.entry(resolvedOwnerInstanceId, providerId),
+                        ),
+                    );
+                },
                 onDaemonConfigChange: async (config) => {
                     await writeDaemonSettings(config.settings, {}, config.p2p.name);
                     const globalEventQueue = store?.setDurableGlobalEventQueue(
@@ -1067,6 +1205,10 @@ function isP2pConfigurationPath(path: string): boolean {
 function isP2pProfilePath(path: string): boolean {
     const pathname = new URL(path, "http://rig.local").pathname;
     return pathname === "/profiles" || /^\/profiles\/[a-z][a-z0-9]+$/u.test(pathname);
+}
+
+function isP2pCredentialPath(path: string): boolean {
+    return new URL(path, "http://rig.local").pathname === "/inference-credentials";
 }
 
 async function writeRegistry(path: string, payload: unknown): Promise<void> {

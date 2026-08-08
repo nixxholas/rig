@@ -585,12 +585,38 @@ export interface ModelSummary {
     thinkingLevels: readonly string[];
 }
 
+export const p2pInstanceIdSchema = Type.String({
+    maxLength: 32,
+    minLength: 2,
+    pattern: "^[a-z][a-z0-9]+$",
+});
+export const p2pCredentialVisibilitySchema = Type.Union([
+    Type.Literal("owner_only"),
+    Type.Literal("shared"),
+]);
+export type P2pCredentialVisibility = Static<typeof p2pCredentialVisibilitySchema>;
+
+export const providerCredentialProvenanceSchema = Type.Object(
+    {
+        bindingId: Type.String({ maxLength: 512, minLength: 1 }),
+        ownerInstanceId: p2pInstanceIdSchema,
+        ownerName: Type.String({ maxLength: 128, minLength: 1 }),
+        relation: Type.Union([Type.Literal("owner"), Type.Literal("extra")]),
+        sourceProviderId: Type.String({ maxLength: 256, minLength: 1 }),
+        visibility: p2pCredentialVisibilitySchema,
+    },
+    { additionalProperties: false },
+);
+export type ProviderCredentialProvenance = Static<typeof providerCredentialProvenanceSchema>;
+
 export interface ProviderModelCatalog {
+    credential?: ProviderCredentialProvenance;
     disabledReason?: "not_authenticated" | "not_enabled" | "no_models";
     providerId: string;
     providerType?: string;
     models: readonly ModelSummary[];
     serviceTiers?: readonly string[];
+    title?: string;
 }
 
 export interface ModelCatalog {
@@ -909,6 +935,7 @@ export interface ProtocolSession {
     activeTurn?: SessionActiveTurn;
     agentId?: string;
     agent?: SessionAgentMetadata;
+    ownerInstanceId: string;
     archived: boolean;
     appendSystemPrompt?: string;
     /** The only project, workspace, folder, or Unsorted collection containing this chat. */
@@ -934,6 +961,7 @@ export interface ProtocolSession {
     sessionSecretIds?: readonly string[];
     environment?: SessionExecutionEnvironment;
     modelLocked: boolean;
+    modelCatalog: ModelCatalog;
     models: readonly ModelSummary[];
     snapshot: { messages: readonly Message[] };
     status: SessionStatus;
@@ -1345,6 +1373,7 @@ export interface GitRepositoryFacts {
 
 export interface SessionSummary {
     id: string;
+    ownerInstanceId: string;
     archived: boolean;
     /** The only project, workspace, folder, or Unsorted collection containing this chat. */
     scope: SessionScope;
@@ -2286,11 +2315,6 @@ export const rigProfileIdSchema = Type.String({
     minLength: 2,
     pattern: "^[a-z][a-z0-9]+$",
 });
-const p2pInstanceIdSchema = Type.String({
-    maxLength: 32,
-    minLength: 2,
-    pattern: "^[a-z][a-z0-9]+$",
-});
 export const rigProfilePhotoInputSchema = Type.Object(
     {
         data: Type.String({
@@ -2864,6 +2888,7 @@ export interface ProviderUsage {
 }
 
 export interface ProviderUsageEntry {
+    credential?: ProviderCredentialProvenance;
     providerId: string;
     usage: ProviderUsage | null;
     checkedAt: number | null;

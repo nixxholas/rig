@@ -926,6 +926,7 @@ export class GroupStore {
             cwd: session.cwd,
             id: session.id,
             modelId: session.modelId,
+            ownerInstanceId: session.ownerInstanceId,
             orderKey: session.orderKey ?? "",
             permissionMode: session.permissionMode,
             scope: session.scope as Extract<

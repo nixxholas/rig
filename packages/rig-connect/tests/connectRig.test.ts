@@ -53,8 +53,15 @@ function sessionState(modelId = "old-model"): SessionStateResponse {
             id: "session-1",
             lastEventId: "01900000-0000-7000-8000-000000000001",
             modelLocked: false,
+            modelCatalog: {
+                defaultModelId: modelId,
+                defaultProviderId: "codex",
+                models: [],
+                providers: [],
+            },
             modelId,
             models: [],
+            ownerInstanceId: "alocalinstance00000000001",
             orderKey: "a",
             pendingUserInputs: [],
             permissionMode: "auto",
@@ -140,7 +147,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
             since: 0,
         },
         identity: { version: "test" },
-        protocolVersion: 6,
+        protocolVersion: 14,
         projects: [
             {
                 createdAt: 1,
@@ -205,7 +212,7 @@ function liveHello(
     return `event: hello\ndata: ${JSON.stringify({
         cursor,
         gap: options.gap ?? false,
-        protocolVersion: 6,
+        protocolVersion: 14,
         resumed: options.resumed ?? false,
     })}\n\n`;
 }
@@ -2654,6 +2661,7 @@ describe("connectRig and chats that finish", () => {
                     cwd: "/work",
                     id: "session-1",
                     modelId: "sonnet-5",
+                    ownerInstanceId: "alocalinstance00000000001",
                     orderKey: "a",
                     permissionMode: "auto",
                     scope: { kind: "project", projectId: "project-1" },

@@ -1,4 +1,5 @@
 import { BaseCredential } from "@/core/BaseCredential.js";
+import { unlink } from "node:fs/promises";
 import {
     GROK_OAUTH_SCOPE,
     getGrokAuthPath,
@@ -19,13 +20,15 @@ export type GrokSessionCredentialValue = {
 export interface GrokSessionCredentialLoadOptions {
     authFile?: string;
     env?: NodeJS.ProcessEnv;
+    recoveryAuthFile?: string;
 }
 
 export class GrokSessionCredential extends BaseCredential<
     "grok-session",
     GrokSessionCredentialValue
 > {
-    private readonly authPath: string;
+    private authPath: string;
+    private readonly recoveryAuthFile: string | undefined;
     private record: GrokAuthRecord;
     private inFlight: Promise<boolean> | undefined;
 
@@ -37,7 +40,19 @@ export class GrokSessionCredential extends BaseCredential<
             ...(options.authFile === undefined ? {} : { authFile: options.authFile }),
             env,
         });
-        const store = await readGrokAuthStore(authPath);
+        let selectedAuthPath = authPath;
+        if (options.recoveryAuthFile !== undefined) {
+            const recovered = (await readGrokAuthStore(options.recoveryAuthFile))[GROK_OAUTH_SCOPE];
+            if (recovered !== undefined) {
+                try {
+                    await writeGrokAuthRecord(authPath, GROK_OAUTH_SCOPE, recovered);
+                    await unlink(options.recoveryAuthFile).catch(() => undefined);
+                } catch {
+                    selectedAuthPath = options.recoveryAuthFile;
+                }
+            }
+        }
+        const store = await readGrokAuthStore(selectedAuthPath);
         const session = store[GROK_OAUTH_SCOPE];
         if (typeof session?.key !== "string" || session.key.trim().length === 0) {
             return null;
@@ -45,8 +60,9 @@ export class GrokSessionCredential extends BaseCredential<
 
         return new GrokSessionCredential(
             { source: "session", token: session.key },
-            authPath,
+            selectedAuthPath,
             session,
+            options.recoveryAuthFile,
         );
     }
 
@@ -62,6 +78,18 @@ export class GrokSessionCredential extends BaseCredential<
         });
         if (!expired) return;
         await this.refresh();
+    }
+
+    /** Refreshes an exported access lease only when its rotated owner state was saved durably. */
+    async ensureFreshForLease(options: { now?: number } = {}): Promise<void> {
+        const expired = isGrokAuthExpired(this.record, {
+            earlyInvalidationMs: EARLY_REFRESH_MS,
+            ...(options.now === undefined ? {} : { now: options.now }),
+        });
+        if (!expired) return;
+        if (!(await this.refresh())) {
+            throw new Error("Grok could not durably refresh the exported access-token lease.");
+        }
     }
 
     async refreshAfterUnauthorized(): Promise<boolean> {
@@ -104,13 +132,24 @@ export class GrokSessionCredential extends BaseCredential<
             ...(tokens.refreshToken === undefined ? {} : { refresh_token: tokens.refreshToken }),
             ...(tokens.expiresAt === undefined ? {} : { expires_at: tokens.expiresAt }),
         };
-        this.credential.token = tokens.accessToken;
-        this.record = { ...record, ...patch };
         try {
             await writeGrokAuthRecord(this.authPath, GROK_OAUTH_SCOPE, patch);
         } catch {
-            // A refreshed token still works in memory when the store cannot be written.
+            if (this.recoveryAuthFile === undefined || this.recoveryAuthFile === this.authPath) {
+                return false;
+            }
+            try {
+                await writeGrokAuthRecord(this.recoveryAuthFile, GROK_OAUTH_SCOPE, {
+                    ...record,
+                    ...patch,
+                });
+                this.authPath = this.recoveryAuthFile;
+            } catch {
+                return false;
+            }
         }
+        this.credential.token = tokens.accessToken;
+        this.record = { ...record, ...patch };
         return true;
     }
 
@@ -126,10 +165,12 @@ export class GrokSessionCredential extends BaseCredential<
         credential: GrokSessionCredentialValue,
         authPath: string,
         record: GrokAuthRecord,
+        recoveryAuthFile?: string,
     ) {
         super("grok-session", credential);
         this.authPath = authPath;
         this.record = record;
+        this.recoveryAuthFile = recoveryAuthFile;
     }
 }
 

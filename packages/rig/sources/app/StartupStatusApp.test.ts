@@ -116,6 +116,7 @@ describe("StartupStatusApp", () => {
                     createdAt: 1_700_000_000_000,
                     cwd: "/workspace",
                     id: "session-1",
+                    ownerInstanceId: "alocalinstance00000000001",
                     modelId: "gpt-5",
                     orderKey: "a",
                     permissionMode: "workspace_write",

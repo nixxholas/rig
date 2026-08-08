@@ -28,7 +28,10 @@ describe("P2P human profiles", () => {
             publish: () => undefined,
         });
         const localProfile = profiles.create({ name: "Secondary operator" });
-        const session = store.create({ cwd: "/tmp/p2p-profile-secondary" });
+        const session = store.create(
+            { cwd: "/tmp/p2p-profile-secondary" },
+            { ownerInstanceId: PRIMARY_ID },
+        );
         const started = await startServer(
             createProtocolHttpServer({
                 canP2pPeerConfigure: (peerId) => peerId === PRIMARY_ID,

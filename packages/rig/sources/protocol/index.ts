@@ -274,6 +274,7 @@ export type {
     GetSessionUsageResponse,
     ListProviderUsageResponse,
     ProviderUsageEntry,
+    ProviderCredentialProvenance,
     ListSessionsResponse,
     ListSessionsArchivedFilter,
     ListSessionsOptions,
@@ -398,6 +399,7 @@ export type {
     UserInputResolvedEvent,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
+export { providerCredentialProvenanceSchema } from "./SessionProtocol.js";
 export {
     createSlotEntryRequestSchema,
     slotActionSchema,
@@ -455,6 +457,26 @@ export {
     p2pPublicKeySchema,
     type P2pPeerIdentity,
 } from "./P2pIdentityProtocol.js";
+export {
+    p2pCredentialMaterialSchema,
+    p2pCredentialReplaceResponseSchema,
+    p2pCredentialSnapshotSchema,
+    p2pCredentialVersionConflictResponseSchema,
+    p2pCredentialVisibilitySchema,
+    p2pEncryptedCredentialSnapshotSchema,
+    p2pShareSchema,
+    provisionedProviderConfigSchema,
+    provisionedProviderSchema,
+    type P2pCredentialMaterial,
+    type P2pCredentialReplaceResponse,
+    type P2pCredentialSnapshot,
+    type P2pCredentialVersionConflictResponse,
+    type P2pCredentialVisibility,
+    type P2pEncryptedCredentialSnapshot,
+    type P2pShare,
+    type ProvisionedProvider,
+    type ProvisionedProviderConfig,
+} from "./P2pCredentialProtocol.js";
 export {
     p2pPeerConnectionStatusSchema,
     p2pPeerStatusSchema,

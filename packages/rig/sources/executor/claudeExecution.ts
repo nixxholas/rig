@@ -43,8 +43,18 @@ export function claudeExecution(options: {
                           env: environment,
                           oauthToken: options.config.oauthToken,
                       })) ??
-                (await ClaudeApiKeyCredential.tryLoad({ env: environment })) ??
-                (await ClaudeAuthTokenCredential.tryLoad({ env: environment })) ??
+                (await ClaudeApiKeyCredential.tryLoad({
+                    ...(options.config.apiKey === undefined
+                        ? {}
+                        : { apiKey: options.config.apiKey }),
+                    env: environment,
+                })) ??
+                (await ClaudeAuthTokenCredential.tryLoad({
+                    ...(options.config.authToken === undefined
+                        ? {}
+                        : { authToken: options.config.authToken }),
+                    env: environment,
+                })) ??
                 (options.config.oauthToken === undefined
                     ? await ClaudeOAuthCredential.tryLoad({ env: environment })
                     : null) ??

@@ -184,6 +184,7 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
         createdAt: NOW,
         cwd: CWD,
         id: "session-1",
+        ownerInstanceId: "alocalinstance00000000001",
         modelId: "gpt-5",
         orderKey: "a",
         permissionMode: "workspace_write",

@@ -78,6 +78,8 @@ export interface CreateCodingAssistantAgentOptions {
     docker?: DockerExecutionConfig;
     durableSkills?: readonly DurableSkillDefinition[];
     agentId?: string;
+    /** Stable Rig identity whose credentials and usage this runtime consumes. */
+    ownerInstanceId?: string;
     apiKey?: string;
     chatHistory?: ChatHistoryContext;
     effort?: string;

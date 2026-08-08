@@ -35,6 +35,7 @@ export function streamLiveEvents(
     response: ServerResponse,
     queue: LiveGlobalEventQueue,
     afterValue: string | null,
+    includeEvent: (entry: LiveGlobalEventEntry) => boolean = () => true,
 ): void {
     const lastEventId = request.headers["last-event-id"];
     const headerCursor = Array.isArray(lastEventId) ? lastEventId.at(-1) : lastEventId;
@@ -85,7 +86,9 @@ export function streamLiveEvents(
     // A gap already told the client to reload, so replaying into it would only
     // race that reload with events it is about to fetch anyway.
     if (!gap) {
-        for (const entry of missed) writeUpdate(response, entry);
+        for (const entry of missed) {
+            if (includeEvent(entry)) writeUpdate(response, entry);
+        }
         if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) {
             close();
             return;
@@ -94,6 +97,7 @@ export function streamLiveEvents(
 
     unsubscribe = queue.subscribe((entry) => {
         if (closed) return;
+        if (!includeEvent(entry)) return;
         writeUpdate(response, entry);
         if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) close();
     }, close);

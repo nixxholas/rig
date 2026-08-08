@@ -65,6 +65,7 @@ function sessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary
         createdAt: 1_700_000_000_000,
         cwd: "/tmp/rig-monit-test",
         id: "session-1",
+        ownerInstanceId: "alocalinstance00000000001",
         projectId: "project-1",
         orderKey: "a0",
         lastMessageAt: 1_700_000_000_000,

@@ -63,6 +63,7 @@ function session(id: string, projectId: string, workspaceId?: string): SessionSu
         cwd: `/work/${projectId}`,
         id,
         modelId: "sonnet-5",
+        ownerInstanceId: "alocalinstance00000000001",
         orderKey: id,
         permissionMode: "auto",
         scope:
@@ -106,7 +107,7 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
             ],
             since: 0,
         },
-        protocolVersion: 6,
+        protocolVersion: 14,
         projects: [project("p1")],
         sessions: [session("s1", "p1")],
         sessionsComplete: true,

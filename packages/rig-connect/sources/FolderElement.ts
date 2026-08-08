@@ -86,4 +86,6 @@ export type FolderDelta =
     | MutationRejectedDelta;
 
 /** Internal input shared by authoritative and optimistic projections. */
-export type FolderSessionSource = SessionSummary;
+export type FolderSessionSource = Omit<SessionSummary, "ownerInstanceId"> & {
+    readonly ownerInstanceId?: string;
+};

@@ -23,15 +23,18 @@ export function codexExecution(options: {
     resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }): ExecutorProvider {
+    const apiKey = options.config.apiKey ?? options.apiKey;
     const configuredBaseUrl = options.config.baseUrl ?? options.env.RIG_CODEX_BASE_URL;
     const transport = options.config.transport ?? options.env.RIG_CODEX_TRANSPORT;
     const loadNativeConfiguration = async () =>
-        configuredBaseUrl === undefined ? loadNativeCodexProviderConfig(options.env) : null;
+        configuredBaseUrl === undefined && options.config.credentialIsolation !== true
+            ? loadNativeCodexProviderConfig(options.env)
+            : null;
     const loadCredential = async (
         nativeConfiguration: Awaited<ReturnType<typeof loadNativeConfiguration>>,
     ) => {
         const access = resolveNativeCodexCredentialAccess({
-            ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+            ...(apiKey === undefined ? {} : { apiKey }),
             ...(options.config.authFile === undefined ? {} : { authFile: options.config.authFile }),
             ...(configuredBaseUrl === undefined ? {} : { configuredBaseUrl }),
             nativeConfiguration,

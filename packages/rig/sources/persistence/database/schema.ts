@@ -59,6 +59,36 @@ export const rigProfiles = sqliteTable(
     (table) => [index("rig_profiles_parent_instance").on(table.parentInstanceId, table.id)],
 );
 
+export const p2pProvisionedProviders = sqliteTable(
+    "p2p_provisioned_providers",
+    {
+        ownerInstanceId: text("owner_instance_id").notNull(),
+        providerId: text("provider_id").notNull(),
+        publicConfigJson: text("public_config_json").notNull(),
+        encryptedMaterialJson: text("encrypted_material_json"),
+        sourceDigest: text("source_digest").notNull(),
+        visibility: text("visibility").notNull(),
+        position: integer("position").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.ownerInstanceId, table.providerId] }),
+        index("p2p_provisioned_providers_owner_position").on(
+            table.ownerInstanceId,
+            table.position,
+            table.providerId,
+        ),
+    ],
+);
+
+export const p2pCredentialSnapshots = sqliteTable("p2p_credential_snapshots", {
+    ownerInstanceId: text("owner_instance_id").primaryKey(),
+    version: integer("version").notNull(),
+    sourceDigest: text("source_digest").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
 export const projectAvatarAssets = sqliteTable("project_avatar_assets", {
     hash: text("hash").primaryKey(),
     mediaType: text("media_type").notNull(),
@@ -256,6 +286,7 @@ export const sessions = sqliteTable(
             .default(false),
         /** When a chat started out belonging nowhere. Null once it has been filed, or never was. */
         unsortedSinceMs: integer("unsorted_since_ms"),
+        ownerInstanceId: text("owner_instance_id").notNull(),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),
@@ -311,6 +342,13 @@ export const sessionMutations = sqliteTable(
     },
     (table) => [index("session_mutations_created").on(table.createdAtMs, table.mutationId)],
 );
+
+export const sessionCredentialBindings = sqliteTable("session_credential_bindings", {
+    sessionId: text("session_id")
+        .primaryKey()
+        .references(() => sessions.id, { onDelete: "cascade" }),
+    bindingId: text("binding_id").notNull(),
+});
 
 export const sessionEvents = sqliteTable(
     "session_events",

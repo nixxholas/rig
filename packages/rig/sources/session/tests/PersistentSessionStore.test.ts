@@ -27,6 +27,53 @@ import type { GitCommandRunner } from "../../git/types.js";
 const execFile = promisify(execFileCallback);
 
 describe("PersistentSessionStore", () => {
+    it("persists an explicit session owner and keeps it when a session is forked or restored", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const localInstanceId = "alocalinstance00000000001";
+        const remoteInstanceId = "aremoteinstance0000000001";
+        const resolvedOwners: string[] = [];
+        const resolveModelCatalog = (ownerInstanceId: string) => {
+            resolvedOwners.push(ownerInstanceId);
+            return testModelCatalog();
+        };
+        let store: PersistentSessionStore | undefined;
+        try {
+            store = new PersistentSessionStore({
+                databasePath,
+                localInstanceId,
+                resolveModelCatalog,
+            });
+            const session = store.create(
+                { cwd: "/tmp/rig-session-owner" },
+                { ownerInstanceId: remoteInstanceId },
+            );
+            const fork = store.fork(session.id);
+
+            expect(session.snapshot().ownerInstanceId).toBe(remoteInstanceId);
+            expect(fork?.snapshot().ownerInstanceId).toBe(remoteInstanceId);
+            expect(session.state().credentialBindingId).toBe(`${remoteInstanceId}:codex`);
+            expect(resolvedOwners).toEqual([localInstanceId, remoteInstanceId, remoteInstanceId]);
+
+            const sessionId = session.id;
+            store.saveSession({ ...session.state(), ownerInstanceId: localInstanceId });
+            store.close();
+            store = new PersistentSessionStore({
+                databasePath,
+                localInstanceId,
+                resolveModelCatalog,
+            });
+
+            expect(store.get(sessionId)?.state().ownerInstanceId).toBe(remoteInstanceId);
+            expect(store.get(sessionId)?.state().credentialBindingId).toBe(
+                `${remoteInstanceId}:codex`,
+            );
+            expect(store.list()[0]?.ownerInstanceId).toBe(remoteInstanceId);
+        } finally {
+            store?.close();
+            await cleanup();
+        }
+    });
+
     it("reserves sessions and durable runs on an initializing workspace without creating runtimes", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const root = await mkdtemp(join(tmpdir(), "rig-initializing-workspace-"));
@@ -3751,6 +3798,7 @@ function sessionState(overrides: Partial<PersistedSessionState> = {}): Persisted
             type: "primary",
         },
         agentId: "agent-1",
+        ownerInstanceId: "alocalinstance00000000001",
         cwd: "/tmp/rig-persistent-session-test",
         id: "session-1",
         messages: [],

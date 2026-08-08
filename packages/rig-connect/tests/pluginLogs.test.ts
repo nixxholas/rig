@@ -103,7 +103,7 @@ describe("plugin logs", () => {
                 sse("hello", {
                     cursor: "01900000-0000-7000-8000-000000000001",
                     gap: false,
-                    protocolVersion: 6,
+                    protocolVersion: 14,
                     resumed: false,
                 }),
             ),

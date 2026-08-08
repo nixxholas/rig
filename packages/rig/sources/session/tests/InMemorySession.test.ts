@@ -93,6 +93,7 @@ describe("InMemorySession", () => {
                     type: "primary",
                 },
                 agentId: "visible-only-agent",
+                ownerInstanceId: "alocalinstance00000000001",
                 cwd: "/tmp/rig-visible-only-error",
                 id: "visible-only-session",
                 messages: [{ isPartial: false, message: denial, position: 0, runId: "run-1" }],
@@ -239,6 +240,7 @@ describe("InMemorySession", () => {
             restore: {
                 agent: metadata,
                 agentId: "agent-2",
+                ownerInstanceId: "alocalinstance00000000001",
                 cwd: "/tmp/rig-subagent-position",
                 id: "subagent-1",
                 messages: [],

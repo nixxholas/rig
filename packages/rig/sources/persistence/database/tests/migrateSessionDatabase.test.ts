@@ -79,6 +79,26 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
+    it("attributes pre-owner sessions to the local Rig while advancing to session owner schema", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database);
+        opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN owner_instance_id"));
+        opened.database.run(sql.raw("PRAGMA user_version = 38"));
+
+        migrateSessionDatabase(opened.database, {
+            localInstanceId: "alocalinstance00000000001",
+        });
+
+        expect(
+            opened.database
+                .all<{ dflt_value: string | null; name: string }>(
+                    sql.raw("PRAGMA table_info(sessions)"),
+                )
+                .find((column) => column.name === "owner_instance_id"),
+        ).toMatchObject({ dflt_value: "'alocalinstance00000000001'" });
+        opened.client.close();
+    });
+
     it("removes sharing data without removing trusted P2P peers", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database);

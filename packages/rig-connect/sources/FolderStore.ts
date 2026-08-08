@@ -2,6 +2,7 @@ import type {
     FolderDelta,
     FolderNode,
     FolderSession,
+    FolderSessionSource,
     FolderView,
     FoldersState,
 } from "./FolderElement.js";
@@ -21,8 +22,8 @@ const EMPTY_SESSIONS: readonly FolderSession[] = [];
 /** Projects the flat folder/session catalog into the one tree a folder view renders. */
 export class FolderStore {
     #folders = new Map<string, Folder>();
-    #sessions = new Map<string, SessionSummary>();
-    #sessionValues = new Map<string, { source: SessionSummary; value: FolderSession }>();
+    #sessions = new Map<string, FolderSessionSource>();
+    #sessionValues = new Map<string, { source: FolderSessionSource; value: FolderSession }>();
     #nodes = new Map<
         string,
         {
@@ -53,7 +54,7 @@ export class FolderStore {
         return this.#folders.get(folderId);
     }
 
-    sessionSummary(sessionId: string): SessionSummary | undefined {
+    sessionSummary(sessionId: string): FolderSessionSource | undefined {
         return this.#sessions.get(sessionId);
     }
 
@@ -82,7 +83,7 @@ export class FolderStore {
 
     applyCatalogSessions(sessions: readonly SessionSummary[]): FolderDelta[] {
         const previous = this.view();
-        const nextSessions = new Map<string, SessionSummary>();
+        const nextSessions = new Map<string, FolderSessionSource>();
         for (const session of sessions) {
             if (session.orderKey === undefined) continue;
             const known = this.#sessions.get(session.id);
@@ -149,7 +150,7 @@ export class FolderStore {
         const sessionId = "sessionId" in event ? event.sessionId : undefined;
         if (typeof sessionId !== "string") return [];
         const known = this.#sessions.get(sessionId);
-        let updated: SessionSummary | undefined;
+        let updated: FolderSessionSource | undefined;
         if (event.type === "session_current") {
             updated = (event.data as { session: SessionSummary }).session;
         } else if (event.type === "session_created" || event.type === "session_updated") {
@@ -328,7 +329,7 @@ export class FolderStore {
             }
         }
         const previous = new Map<string, Folder>();
-        const previousSessions = new Map<string, SessionSummary>();
+        const previousSessions = new Map<string, FolderSessionSource>();
         const before = this.view();
         for (const id of descendants) {
             const folder = this.#folders.get(id);
@@ -384,7 +385,7 @@ export class FolderStore {
         };
     }
 
-    applyOptimisticSessionCreate(session: SessionSummary): {
+    applyOptimisticSessionCreate(session: FolderSessionSource): {
         deltas: readonly FolderDelta[];
         undo: () => void;
     } {
@@ -422,7 +423,7 @@ export class FolderStore {
               : `${after.orderKey ?? ""}\u0000`;
     }
 
-    #setSession(session: SessionSummary): FolderDelta[] {
+    #setSession(session: FolderSessionSource): FolderDelta[] {
         const known = this.#sessions.get(session.id);
         if (known !== undefined && sameValue(known, session)) return [];
         const wasVisible = isFolderSession(known);
@@ -529,7 +530,7 @@ export class FolderStore {
         return value;
     }
 
-    #session(session: SessionSummary): FolderSession {
+    #session(session: FolderSessionSource): FolderSession {
         const cached = this.#sessionValues.get(session.id);
         if (cached?.source === session) return cached.value;
         const value: FolderSession = {
@@ -573,7 +574,7 @@ function isVisible(folder: Folder | undefined): boolean {
     return folder !== undefined && folder.archivedAt === undefined;
 }
 
-function isFolderSession(session: SessionSummary | undefined): boolean {
+function isFolderSession(session: FolderSessionSource | undefined): boolean {
     return (
         session !== undefined &&
         !session.archived &&

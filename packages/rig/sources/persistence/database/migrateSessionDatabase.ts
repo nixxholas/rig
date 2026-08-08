@@ -39,9 +39,14 @@ import { worklets } from "./migrations/34-worklets.js";
 import { rigProfiles } from "./migrations/35-rig-profiles.js";
 import { sessionScopes } from "./migrations/36-session-scopes.js";
 import { sessionMutations } from "./migrations/37-session-mutations.js";
+import { p2pProvisionedProviders } from "./migrations/38-p2p-provisioned-providers.js";
+import { sessionOwner } from "./migrations/39-session-owner.js";
+import { p2pCredentialSnapshots } from "./migrations/40-p2p-credential-snapshots.js";
+import { sessionCredentialBinding } from "./migrations/41-session-credential-binding.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
+    localInstanceId: string;
 }
 
 type SessionDatabaseMigration = (database: SessionDatabase, context: MigrationContext) => void;
@@ -84,6 +89,10 @@ const migrations: readonly SessionDatabaseMigration[] = [
     rigProfiles,
     sessionScopes,
     sessionMutations,
+    p2pProvisionedProviders,
+    (database, context) => sessionOwner(database, context.localInstanceId),
+    p2pCredentialSnapshots,
+    sessionCredentialBinding,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;
@@ -94,9 +103,10 @@ export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;
 
 export function migrateSessionDatabase(
     database: SessionDatabase,
-    options: { createDataEpoch?: () => string } = {},
+    options: { createDataEpoch?: () => string; localInstanceId?: string } = {},
 ): void {
     const createDataEpoch = options.createDataEpoch ?? createId;
+    const localInstanceId = options.localInstanceId ?? createId();
     database.run(sql.raw("PRAGMA journal_mode = WAL"));
     database.run(sql.raw("PRAGMA synchronous = FULL"));
     database.run(sql.raw("PRAGMA busy_timeout = 5000"));
@@ -123,7 +133,7 @@ export function migrateSessionDatabase(
                     version < CURRENT_SESSION_DATABASE_VERSION;
                     version += 1
                 ) {
-                    migrations[version]!(transaction, { createDataEpoch });
+                    migrations[version]!(transaction, { createDataEpoch, localInstanceId });
                     transaction.run(sql.raw(`PRAGMA user_version = ${String(version + 1)}`));
                 }
                 transaction.run(

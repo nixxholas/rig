@@ -17,6 +17,7 @@ import { claudeExecution } from "./claudeExecution.js";
 import { codexExecution } from "./codexExecution.js";
 import { grokExecution } from "./grokExecution.js";
 import { filterConfiguredProviderModels } from "./filterConfiguredProviderModels.js";
+import { providerCredentialEnvironment } from "./providerCredentialEnvironment.js";
 
 export interface CreateExecutorOptions {
     agentContext: AgentContext;
@@ -141,11 +142,12 @@ function configuredExecutor(
     id: string,
     config: ConfigProvider,
 ): ExecutorProvider | undefined {
+    const env = providerCredentialEnvironment(config, options.env);
     return config.type === "codex"
         ? codexExecution({
               ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
               config,
-              env: options.env,
+              env,
               id,
               ...(options.resolveInferenceMaxRetries === undefined
                   ? {}
@@ -157,7 +159,7 @@ function configuredExecutor(
         : config.type === "claude"
           ? claudeExecution({
                 config,
-                env: options.env,
+                env,
                 id,
                 ...(options.onAccountUsage === undefined
                     ? {}
@@ -171,7 +173,7 @@ function configuredExecutor(
             ? grokExecution({
                   ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                   config,
-                  env: options.env,
+                  env,
                   id,
                   ...(options.resolveInferenceMaxRetries === undefined
                       ? {}
@@ -181,7 +183,7 @@ function configuredExecutor(
             : configuredBedrockExecution({
                   ...(options.sessionId === undefined ? {} : { agentId: options.sessionId }),
                   config,
-                  env: options.env,
+                  env,
                   id,
                   ...(options.resolveInferenceMaxRetries === undefined
                       ? {}

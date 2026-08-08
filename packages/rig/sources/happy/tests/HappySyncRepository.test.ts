@@ -238,6 +238,7 @@ function insertSessions(
                     ? {}
                     : { lastMessageAtMs: row.lastMessageAtMs }),
                 modelId: "model",
+                ownerInstanceId: "alocalinstance00000000001",
                 modelsJson: "[]",
                 nextTaskId: 1,
                 orderKey: `a-${row.id}`,

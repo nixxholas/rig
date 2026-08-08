@@ -61,7 +61,7 @@ function catalog(
             since: 0,
         },
         projects: [],
-        protocolVersion: 11,
+        protocolVersion: 14,
         sessions,
         sessionsComplete: true,
         terminalGroups: [],
@@ -81,6 +81,7 @@ function folderSession(
         id,
         lastEventId,
         modelId: "model",
+        ownerInstanceId: "alocalinstance00000000001",
         orderKey: "a",
         permissionMode: "auto",
         providerId: "codex",
@@ -95,7 +96,7 @@ function liveHello(): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
         gap: false,
-        protocolVersion: 11,
+        protocolVersion: 14,
         resumed: false,
     })}\n\n`;
 }

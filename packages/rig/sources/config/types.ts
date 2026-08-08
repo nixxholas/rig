@@ -4,6 +4,7 @@ import type { DockerExecutionConfig } from "../execution/index.js";
 import type { ServiceTier } from "@slopus/rig-execution";
 import type { BedrockModelOverrides } from "../executor/bedrock-model-overrides.js";
 import type { ConfigPermissions, PartialConfigPermissions } from "./configPermissions.js";
+import type { P2pShare } from "../protocol/P2pCredentialProtocol.js";
 
 export interface ConfigDefaults {
     effort?: string;
@@ -97,9 +98,12 @@ export interface PartialConfigPresence {
 }
 
 interface ConfigProviderBase {
+    /** Internal: this provider must not inherit authentication or routing from this machine. */
+    credentialIsolation?: true;
     enabled: boolean;
     excludeModels?: readonly string[];
     includeModels?: readonly string[];
+    p2pShare?: P2pShare;
 }
 
 export interface ConfigBedrockProvider extends ConfigProviderBase {
@@ -113,6 +117,8 @@ export interface ConfigBedrockProvider extends ConfigProviderBase {
 }
 
 export interface ConfigClaudeProvider extends ConfigProviderBase {
+    apiKey?: string;
+    authToken?: string;
     configDir?: string;
     executable?: string;
     oauthToken?: string;
@@ -120,6 +126,7 @@ export interface ConfigClaudeProvider extends ConfigProviderBase {
 }
 
 export interface ConfigCodexProvider extends ConfigProviderBase {
+    apiKey?: string;
     authFile?: string;
     baseUrl?: string;
     transport?: "auto" | "sse" | "websocket" | "websocket-cached";
@@ -127,6 +134,7 @@ export interface ConfigCodexProvider extends ConfigProviderBase {
 }
 
 export interface ConfigGrokProvider extends ConfigProviderBase {
+    apiKey?: string;
     authFile?: string;
     baseUrl?: string;
     type: "grok";

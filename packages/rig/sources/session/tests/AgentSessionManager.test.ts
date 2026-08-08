@@ -9,6 +9,99 @@ import { AgentSessionManager } from "../AgentSessionManager.js";
 import type { InMemorySession } from "../InMemorySession.js";
 
 describe("AgentSessionManager", () => {
+    it("isolates peer-owned agent lookup, messaging, and scheduling by owner", () => {
+        const deliveredToSameOwner = vi.fn();
+        const deliveredToOtherOwner = vi.fn();
+        const peerA = {
+            agentCommunicationLocation: () => ({
+                cwd: "/workspaces/peer-a",
+                sessionId: "peer-a-session",
+            }),
+            agentIdentity: () => ({
+                agentId: "peer-a-agent",
+                title: "Peer A",
+            }),
+            id: "peer-a-session",
+            ownerInstanceId: "apeerainstance000000001",
+        } as unknown as InMemorySession;
+        const sameOwner = {
+            agentCommunicationLocation: () => ({
+                cwd: "/workspaces/peer-a-target",
+                sessionId: "peer-a-target-session",
+            }),
+            agentIdentity: () => ({
+                agentId: "peer-a-target-agent",
+                title: "Peer A target",
+            }),
+            deliverAgentMessage: deliveredToSameOwner,
+            id: "peer-a-target-session",
+            ownerInstanceId: peerA.ownerInstanceId,
+        } as unknown as InMemorySession;
+        const peerB = {
+            agentCommunicationLocation: () => ({
+                cwd: "/workspaces/peer-b",
+                sessionId: "peer-b-session",
+            }),
+            agentIdentity: () => ({
+                agentId: "peer-b-agent",
+                title: "Peer B",
+            }),
+            deliverAgentMessage: deliveredToOtherOwner,
+            id: "peer-b-session",
+            ownerInstanceId: "apeerbinstance000000001",
+        } as unknown as InMemorySession;
+        const local = {
+            agentCommunicationLocation: () => ({
+                cwd: "/workspaces/local",
+                sessionId: "local-session",
+            }),
+            agentIdentity: () => ({
+                agentId: "local-agent",
+                title: "Local",
+            }),
+            id: "local-session",
+            ownerInstanceId: "alocalinstance00000000001",
+        } as unknown as InMemorySession;
+        const sessions = [peerA, sameOwner, peerB, local];
+        const manager = new AgentSessionManager({
+            localInstanceId: local.ownerInstanceId,
+            repository: {
+                createSubagent: vi.fn(),
+                findByAgentId: (agentId) =>
+                    sessions.find((session) => session.agentIdentity().agentId === agentId),
+                get: (sessionId) => sessions.find((session) => session.id === sessionId),
+                listByRoot: () => [],
+            },
+        });
+
+        const peerCommunication = manager.communicationContext(peerA.id);
+        expect(peerCommunication.info("peer-a-target-agent")).toMatchObject({
+            agentId: "peer-a-target-agent",
+        });
+        expect(peerCommunication.send("peer-a-target-agent", "Same owner.")).toEqual({
+            delivered: true,
+        });
+        expect(() => peerCommunication.info("peer-b-agent")).toThrow(
+            "No available agent has that agent ID.",
+        );
+        expect(() => manager.assertCanScheduleMessage(peerA.id, "peer-b-agent")).toThrow(
+            "No available agent has that agent ID.",
+        );
+        expect(() =>
+            manager.sendScheduledMessage(peerA.id, "peer-b-agent", "Later.", "message-1"),
+        ).toThrow("No available agent has that agent ID.");
+        expect(deliveredToOtherOwner).not.toHaveBeenCalled();
+
+        expect(() => manager.assertCanScheduleMessage(peerA.id, "unknown-agent")).not.toThrow();
+
+        const localCommunication = manager.communicationContext(local.id);
+        expect(localCommunication.info("peer-b-agent")).toMatchObject({
+            agentId: "peer-b-agent",
+        });
+        manager.sendScheduledMessage(local.id, "peer-b-agent", "Local operator.", "message-2");
+        expect(deliveredToOtherOwner).toHaveBeenCalledOnce();
+    });
+
     it("sends agent-authored steering and changes an owned delegate permission mode", async () => {
         const deliverAgentMessage = vi.fn();
         const changePermissionMode = vi.fn(async () => ({ permissionMode: "read_only" }));

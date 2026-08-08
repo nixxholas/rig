@@ -1,6 +1,7 @@
 import { createId } from "@paralleldrive/cuid2";
 
 import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
+import { Value } from "@sinclair/typebox/value";
 import type { Message } from "../agent/types.js";
 import type {
     ChangeEffortRequest,
@@ -36,7 +37,8 @@ import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import { retriedSession } from "./retriedSession.js";
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionCreationOptions, SessionStore } from "./SessionStore.js";
+import { p2pInstanceIdSchema } from "../protocol/P2pIdentityProtocol.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import {
     SecretRegistry,
@@ -98,8 +100,10 @@ import { createWorkspaceReadyWaiters } from "./workspaceReadyWaiters.js";
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
     defaultDocker?: DockerExecutionConfig;
+    localInstanceId?: string;
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
+    resolveModelCatalog?: (ownerInstanceId: string) => ModelCatalog;
     onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     presence?: PresenceStore;
@@ -114,6 +118,8 @@ export class InMemorySessionStore implements SessionStore {
     #createRuntime: InMemorySessionOptions["createRuntime"];
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     #modelCatalog: ModelCatalog;
+    readonly #localInstanceId: string;
+    readonly #resolveModelCatalog: (ownerInstanceId: string) => ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #onWorkspaceCleanupError:
         | ((error: unknown, projectId: string, workspaceId: string) => void)
@@ -142,10 +148,13 @@ export class InMemorySessionStore implements SessionStore {
     #transactionCommitCallbacks: (() => void)[] | undefined;
 
     constructor(options: InMemorySessionStoreOptions = {}) {
+        this.#localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
+        this.#resolveModelCatalog =
+            options.resolveModelCatalog ?? (() => options.modelCatalog ?? createModelCatalog());
         const opened = openSessionDatabase(":memory:");
         this.#client = opened.client;
         this.#database = opened.database;
-        migrateSessionDatabase(this.#database);
+        migrateSessionDatabase(this.#database, { localInstanceId: this.#localInstanceId });
         this.dataEpoch = queryRigDataEpoch(this.#database);
         this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
         if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
@@ -240,12 +249,13 @@ export class InMemorySessionStore implements SessionStore {
             this.liveEvents.publish(event);
         });
         this.#secrets = new SecretRegistry(options.secrets);
-        this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
+        this.#modelCatalog = this.#resolveModelCatalog(this.#localInstanceId);
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#createRuntime = options.createRuntime;
         this.#defaultDocker = options.defaultDocker;
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#agentManager = new AgentSessionManager({
+            localInstanceId: this.#localInstanceId,
             repository: {
                 archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
@@ -369,14 +379,18 @@ export class InMemorySessionStore implements SessionStore {
         return session;
     }
 
-    create(request: CreateSessionRequest): InMemorySession {
-        return this.#createSession(request);
+    create(request: CreateSessionRequest, options: SessionCreationOptions = {}): InMemorySession {
+        return this.#createSession(request, undefined, undefined, undefined, options);
     }
 
-    createWithId(id: string, request: CreateSessionRequest): InMemorySession {
+    createWithId(
+        id: string,
+        request: CreateSessionRequest,
+        options: SessionCreationOptions = {},
+    ): InMemorySession {
         const existing = this.get(id);
         if (existing !== undefined) return retriedSession(existing, request);
-        return this.#createSession(request, undefined, undefined, id);
+        return this.#createSession(request, undefined, undefined, id, options);
     }
 
     detachSecret(
@@ -463,7 +477,7 @@ export class InMemorySessionStore implements SessionStore {
             createEventId: createEventIdFactory(),
             ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
-            modelCatalog: this.#modelCatalog,
+            modelCatalog: this.#modelCatalogFor(state.ownerInstanceId),
             onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
@@ -475,6 +489,7 @@ export class InMemorySessionStore implements SessionStore {
             ...(sourceSnapshot.scope.kind === "project" || sourceSnapshot.scope.kind === "workspace"
                 ? { projectSecretIds: this.#projectSecrets(sourceSnapshot.scope.projectId) }
                 : {}),
+            ownerInstanceId: state.ownerInstanceId,
             secretRegistry: this.#secrets,
             restore: {
                 ...forkState,
@@ -498,6 +513,7 @@ export class InMemorySessionStore implements SessionStore {
         metadata?: SessionAgentMetadata,
         contextMessages?: readonly Message[],
         id?: string,
+        options: SessionCreationOptions = {},
     ): InMemorySession {
         const sessionId = id ?? createId();
         let newUnsortedStorage: { created: boolean; path: string } | undefined;
@@ -511,6 +527,11 @@ export class InMemorySessionStore implements SessionStore {
         if (inherited?.status === "archived") {
             throw new Error("An archived session cannot create a subagent.");
         }
+        const ownerInstanceId =
+            inherited?.ownerInstanceId ??
+            (options.ownerInstanceId === undefined
+                ? this.#localInstanceId
+                : validOwnerInstanceId(options.ownerInstanceId));
         const inheritedWorkspace =
             inherited?.scope.kind === "workspace"
                 ? this.#projects.getWorkspace(
@@ -632,7 +653,7 @@ export class InMemorySessionStore implements SessionStore {
                 ...(this.#createRuntime === undefined
                     ? {}
                     : { createRuntime: this.#createRuntime }),
-                modelCatalog: this.#modelCatalog,
+                modelCatalog: this.#modelCatalogFor(ownerInstanceId),
                 onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
@@ -646,6 +667,7 @@ export class InMemorySessionStore implements SessionStore {
                 orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
                     this.#newLastSessionOrderKey(resolved.scope),
                 ),
+                ownerInstanceId,
                 ...(projectId === undefined
                     ? {}
                     : { projectSecretIds: this.#projectSecrets(projectId) }),
@@ -663,6 +685,12 @@ export class InMemorySessionStore implements SessionStore {
             }
             throw error;
         }
+    }
+
+    #modelCatalogFor(ownerInstanceId: string): ModelCatalog {
+        return ownerInstanceId === this.#localInstanceId
+            ? this.#modelCatalog
+            : this.#resolveModelCatalog(ownerInstanceId);
     }
 
     #inheritWorkspaceName(
@@ -1408,6 +1436,13 @@ export class InMemorySessionStore implements SessionStore {
 
 function compareOrderKeys(left: string, right: string): number {
     return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function validOwnerInstanceId(value: string): string {
+    if (!Value.Check(p2pInstanceIdSchema, value)) {
+        throw new Error("The session owner Rig identity is invalid.");
+    }
+    return value;
 }
 
 /** Keeps only the sessions that have a place in a project's ordered list. */

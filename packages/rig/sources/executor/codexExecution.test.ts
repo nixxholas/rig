@@ -73,7 +73,7 @@ requires_openai_auth = true
         });
     });
 
-    it("keeps explicit Rig authentication and endpoint overrides authoritative", async () => {
+    it("keeps a configured provider credential and endpoint override authoritative", async () => {
         const codexHome = await writeCodexHome({
             auth: { auth_mode: "apikey", OPENAI_API_KEY: "stored" },
             config: `
@@ -86,8 +86,9 @@ experimental_bearer_token = "provider"
 `,
         });
         const definition = codexExecution({
-            apiKey: "explicit",
+            apiKey: "fallback",
             config: {
+                apiKey: "provisioned",
                 baseUrl: "https://example.org/rig",
                 enabled: true,
                 type: "codex",
@@ -103,7 +104,7 @@ experimental_bearer_token = "provider"
 
         expect(provider.endpoint).toBe("https://example.org/rig");
         expect(provider.credential).toMatchObject({
-            credential: { apiKey: "explicit" },
+            credential: { apiKey: "provisioned" },
             name: "codex-api-key",
         });
     });

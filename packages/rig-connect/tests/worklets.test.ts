@@ -195,7 +195,7 @@ function worklet(name = "github-watch"): WorkletSummary {
 }
 
 function hello(cursor: string): string {
-    return sse("hello", { cursor, gap: false, protocolVersion: 6, resumed: false });
+    return sse("hello", { cursor, gap: false, protocolVersion: 14, resumed: false });
 }
 
 function workletsChanged(cursor: string, worklets: readonly WorkletSummary[]): string {

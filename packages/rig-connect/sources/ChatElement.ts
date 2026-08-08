@@ -6,6 +6,7 @@ import type {
     ExternalToolDefinition,
     GitChangeSnapshot,
     McpServerSummary,
+    ModelCatalog,
     ModelSummary,
     PendingSteeringMessage,
     PermissionReviewState,
@@ -265,6 +266,8 @@ export interface SessionState {
     archived: boolean;
     appendSystemPrompt?: string;
     sessionId: string;
+    /** Stable Rig identity whose credentials and usage this session consumes. */
+    ownerInstanceId: string;
     agentId?: string;
     agent?: SessionAgentMetadata;
     lastEventId?: string;
@@ -301,6 +304,8 @@ export interface SessionState {
     permissionMode: string;
     /** True when the session is pinned to its model and cannot switch. */
     modelLocked: boolean;
+    /** Owner-scoped providers with credential attribution and explicit extras. */
+    modelCatalog: ModelCatalog;
     models: readonly ModelSummary[];
     pendingUserInputs: readonly UserInputRequest[];
     pendingSteeringMessages: readonly PendingSteeringMessage[];

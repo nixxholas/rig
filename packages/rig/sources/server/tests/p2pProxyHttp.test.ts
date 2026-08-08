@@ -5,9 +5,12 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { P2pCredentialReplicator, P2pCredentialStore } from "../../credentials/index.js";
+import { createP2pInstanceIdentity } from "../../p2p/P2pIdentity.js";
 import type { P2pHttpRequest, P2pNetwork, P2pTunnelRequestHead } from "../../p2p/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
+import type { PrepareP2pHttpRequest } from "../proxyP2pHttpRequest.js";
 
 const peerId = "aremoteinstance0000000001";
 
@@ -85,6 +88,65 @@ describe("P2P-prefixed daemon HTTP", () => {
         }
     });
 
+    it("forwards the request when optional credential synchronization fails", async () => {
+        const local = createP2pInstanceIdentity(
+            "alocalinstance00000000001",
+            new Uint8Array(32).fill(1),
+        );
+        const remote = createP2pInstanceIdentity(peerId, new Uint8Array(32).fill(2));
+        const onError = vi.fn();
+        const fetch = vi.fn(async (_peerId: string, forwarded: P2pHttpRequest) => {
+            if (forwarded.path === "/inference-credentials") {
+                throw new Error("credential endpoint unavailable");
+            }
+            return {
+                response: {
+                    body: (async function* () {
+                        yield Buffer.from("remote response");
+                    })(),
+                    headers: { "content-type": "text/plain" },
+                    status: 200,
+                },
+                transport: "direct" as const,
+            };
+        });
+        const network = { fetch } as unknown as P2pNetwork;
+        const replicator = new P2pCredentialReplicator({
+            listPeers: () => [{ instanceId: remote.instanceId, publicKey: remote.publicKey }],
+            network,
+            onError,
+            snapshot: () => ({
+                owner: { instanceId: local.instanceId, publicKey: local.publicKey },
+                providers: [],
+                version: 1,
+            }),
+            store: new P2pCredentialStore({
+                database: {
+                    query: <T>() => [] as T,
+                    transaction: <T>() => false as T,
+                },
+                identity: local,
+            }),
+        });
+        const started = await startServer(network, ({ peerId: target, signal }) =>
+            replicator.ensureForRequest(target, signal),
+        );
+        try {
+            const result = await sendRequest(
+                started.socketPath,
+                `/p2p/peers/${peerId}/api/health`,
+                { authorization: "Bearer test-token" },
+            );
+
+            expect(result).toMatchObject({ body: "remote response", status: 200 });
+            expect(fetch).toHaveBeenCalledTimes(2);
+            expect(onError).toHaveBeenCalledOnce();
+        } finally {
+            await started.close();
+            await replicator.close();
+        }
+    });
+
     it("forwards terminal upgrades and scoped browser CONNECT tunnels", async () => {
         const requests: P2pTunnelRequestHead[] = [];
         const openTunnel = vi.fn(async (_peerId, tunnel: P2pTunnelRequestHead) => {
@@ -145,13 +207,20 @@ describe("P2P-prefixed daemon HTTP", () => {
     });
 });
 
-async function startServer(p2pNetwork: P2pNetwork): Promise<{
+async function startServer(
+    p2pNetwork: P2pNetwork,
+    prepareP2pRequest?: PrepareP2pHttpRequest,
+): Promise<{
     close: () => Promise<void>;
     socketPath: string;
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
-    const server = createProtocolHttpServer({ p2pNetwork, token: "test-token" });
+    const server = createProtocolHttpServer({
+        p2pNetwork,
+        ...(prepareP2pRequest === undefined ? {} : { prepareP2pRequest }),
+        token: "test-token",
+    });
     await listen(server, socketPath);
     return {
         close: async () => {

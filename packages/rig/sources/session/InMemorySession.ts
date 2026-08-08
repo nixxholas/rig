@@ -271,11 +271,15 @@ export interface PersistedSessionState {
     activeRunId?: string;
     agent: SessionAgentMetadata;
     agentId: string;
+    /** Stable Rig identity whose credentials and usage this session consumes. */
+    ownerInstanceId: string;
     archived?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     appendSystemPrompt?: string;
     cwd: string;
+    /** Durable credential identity; absent only in synthetic pre-binding restore fixtures. */
+    credentialBindingId?: string;
     docker?: DockerExecutionConfig;
     draft?: string;
     draftUpdatedAt?: number;
@@ -431,6 +435,8 @@ export interface InMemorySessionOptions {
         workspaceId: string;
     }) => void;
     modelCatalog: ModelCatalog;
+    /** Stable Rig identity whose credentials and usage this session consumes. */
+    ownerInstanceId?: string;
     metadata?: SessionAgentMetadata;
     mcpToolProvider?: McpToolProvider;
     onAppendEvent?: (event: SessionEvent) => void;
@@ -566,6 +572,10 @@ export class InMemorySession {
     readonly events: SessionEventLog;
     readonly id: string;
 
+    get ownerInstanceId(): string {
+        return this.#ownerInstanceId;
+    }
+
     #appendSystemPrompt: string | undefined;
     #archived = false;
     #activePartial: PartialMessageState | undefined;
@@ -581,12 +591,14 @@ export class InMemorySession {
     #agentManager: AgentSessionManager | undefined;
     #agentMetadata: SessionAgentMetadata;
     #agentId: string;
+    readonly #ownerInstanceId: string;
     #createEventId: () => EventId;
     #createdAt: number;
     #createRuntime: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
     #compactionController: AbortController | undefined;
     #compactionRunId: string | undefined;
     #contextMessages: Message[] | undefined;
+    #credentialBindingId: string;
     #closing = false;
     #compactionActive = false;
     #debugLogs = new Map<string, DebugLog>();
@@ -672,6 +684,8 @@ export class InMemorySession {
     #unsortedSince: number | undefined;
     #scopeRuntimeRefreshPending = false;
     #scopeRuntimeRefresh: Promise<void> | undefined;
+    #inferenceScopeRefreshCatalog: ModelCatalog | undefined;
+    #inferenceScopeRefresh: Promise<void> | undefined;
     #permissionMode: PermissionMode;
     #queue: PersistedQueuedRun[] = [];
     #recap: string | undefined;
@@ -771,15 +785,32 @@ export class InMemorySession {
             };
         }
         this.#agentId = options.restore?.agentId ?? createId();
+        this.#ownerInstanceId =
+            options.restore?.ownerInstanceId ?? options.ownerInstanceId ?? createId();
         this.#archived = options.restore?.archived === true;
-        const requestedModelId =
-            options.restore?.modelId ??
-            options.request.modelId ??
-            this.#modelCatalog.defaultModelId;
+        const restoredBindingProvider = options.restore?.credentialBindingId
+            ? this.#modelCatalog.providers.find(
+                  (provider) =>
+                      (provider.credential?.bindingId ??
+                          `${this.#ownerInstanceId}:${provider.providerId}`) ===
+                      options.restore!.credentialBindingId,
+              )
+            : undefined;
+        const restoredBindingMissing =
+            options.restore?.credentialBindingId !== undefined &&
+            restoredBindingProvider === undefined;
+        const requestedModelId = restoredBindingMissing
+            ? this.#modelCatalog.defaultModelId
+            : (options.restore?.modelId ??
+              options.request.modelId ??
+              this.#modelCatalog.defaultModelId);
         const requestedProviderId =
-            options.restore?.providerId ??
-            options.request.providerId ??
-            this.#modelCatalog.defaultProviderId;
+            restoredBindingProvider?.providerId ??
+            (restoredBindingMissing
+                ? this.#modelCatalog.defaultProviderId
+                : (options.restore?.providerId ??
+                  options.request.providerId ??
+                  this.#modelCatalog.defaultProviderId));
         const selection = resolveInitialModelSelection(
             this.#modelCatalog,
             requestedModelId,
@@ -787,6 +818,8 @@ export class InMemorySession {
         );
         this.#modelId = selection.model.id;
         this.#providerId = selection.providerId;
+        this.#credentialBindingId =
+            options.restore?.credentialBindingId ?? this.#providerBindingId(selection.providerId);
         this.#permissionMode = parsePermissionMode(
             options.restore?.permissionMode ??
                 options.request.permissionMode ??
@@ -2037,7 +2070,71 @@ export class InMemorySession {
         }
         this.#modelId = model.id;
         this.#providerId = providerId;
+        this.#credentialBindingId = this.#providerBindingId(providerId);
         this.#models = this.#modelsForProvider(providerId);
+    }
+
+    /**
+     * Replaces the inference scope after its credential registry changes.
+     *
+     * Credential revisions are an authorization boundary. A runtime or executor created from an
+     * older revision must never survive a rotation, visibility change, or revocation.
+     */
+    refreshInferenceScope(modelCatalog: ModelCatalog): void {
+        this.#inferenceScopeRefreshCatalog = modelCatalog;
+        if (this.#activeRun !== undefined || this.#compactionActive) {
+            this.#activeRun?.controller.abort();
+            this.#compactionController?.abort();
+            return;
+        }
+        this.#startInferenceScopeRefresh();
+    }
+
+    #applyInferenceScopeRefresh(modelCatalog: ModelCatalog): Promise<void> {
+        const catalogChanged = JSON.stringify(this.#modelCatalog) !== JSON.stringify(modelCatalog);
+        const credentialBindingId = this.#credentialBindingId;
+        const runtime = this.#runtime;
+        const stopProcesses = this.#killRuntimeProcesses({ includeBackground: true });
+        this.#releaseMcpToolLease();
+        this.#runtime = undefined;
+        this.#executor = undefined;
+        this.#mcpLoaded = false;
+        this.#mcpServers = [];
+        this.#mcpToolNames.clear();
+        this.#tools = [];
+        this.#modelCatalog = modelCatalog;
+
+        const reboundProvider = modelCatalog.providers.find(
+            (provider) =>
+                this.#providerBindingId(provider.providerId) === credentialBindingId &&
+                provider.models.some((model) => model.id === this.#modelId),
+        );
+        if (reboundProvider === undefined) {
+            this.#applyConfiguration({
+                modelId: modelCatalog.defaultModelId,
+                providerId: modelCatalog.defaultProviderId,
+            });
+        } else if (reboundProvider.providerId !== this.#providerId) {
+            this.#applyConfiguration({
+                modelId: this.#modelId,
+                providerId: reboundProvider.providerId,
+            });
+        } else {
+            this.#models = this.#modelsForProvider(this.#providerId);
+            if (catalogChanged) {
+                this.#append("session_updated", { session: this.snapshot() });
+            }
+        }
+        return Promise.all([stopProcesses, runtime?.agent.close() ?? Promise.resolve()]).then(
+            () => undefined,
+        );
+    }
+
+    #providerBindingId(providerId: string): string {
+        return (
+            this.#modelCatalog.providers.find((provider) => provider.providerId === providerId)
+                ?.credential?.bindingId ?? `${this.#ownerInstanceId}:${providerId}`
+        );
     }
 
     #modelsAreCompatible(model: Model, providerId: string): boolean {
@@ -2589,6 +2686,7 @@ export class InMemorySession {
         if (request.message.trim().length === 0) {
             throw new Error("Provide a message to schedule.");
         }
+        this.#agentManager?.assertCanScheduleMessage(this.id, request.targetAgentId);
         const now = this.#now();
         const scheduled: ScheduledMessage = {
             createdAt: now,
@@ -3758,6 +3856,7 @@ export class InMemorySession {
         this.#restartMetadataSettlement();
         this.#saveSession();
         try {
+            await this.#settleInferenceScopeRefresh();
             const result = await this.#ensureRuntime().agent.compact(
                 compactSignal,
                 (event) => this.#appendCompactionAgentEvent(compactionRunId, event),
@@ -3796,6 +3895,7 @@ export class InMemorySession {
             if (!this.#closing) {
                 this.#status = previousStatus;
                 this.#restartMetadataSettlement();
+                await this.#settleInferenceScopeRefresh();
                 this.#saveSession();
             }
         }
@@ -4187,6 +4287,7 @@ export class InMemorySession {
             activity: this.activity(),
             ...(activeTurn === undefined ? {} : { activeTurn }),
             agentId: this.#agentId,
+            ownerInstanceId: this.#ownerInstanceId,
             ...(this.#git === undefined ? {} : { git: structuredClone(this.#git) }),
             archived: this.#archived,
             scope: { ...this.#scope },
@@ -4205,6 +4306,7 @@ export class InMemorySession {
             modelId: this.#modelId,
             ...(this.#orderKey === "" ? {} : { orderKey: this.#orderKey }),
             modelLocked: this.#modelLocked(),
+            modelCatalog: this.#modelCatalog,
             models: this.#models,
             projectSecretIds: this.#secrets.projectIds(),
             secretIds: this.#secrets.ids(),
@@ -4263,6 +4365,7 @@ export class InMemorySession {
         return {
             id: this.id,
             archived: this.#archived,
+            ownerInstanceId: this.#ownerInstanceId,
             scope: { ...this.#scope },
             ...scopeConvenienceFields(this.#scope),
             trackUnread: this.#request.trackUnread === true,
@@ -4329,6 +4432,8 @@ export class InMemorySession {
             ...(this.#activeSince === undefined ? {} : { activeSince: this.#activeSince }),
             agent: this.agentMetadata(),
             agentId: this.#agentId,
+            credentialBindingId: this.#credentialBindingId,
+            ownerInstanceId: this.#ownerInstanceId,
             archived: this.#archived,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -5684,6 +5789,7 @@ export class InMemorySession {
         this.#activeSince ??= this.#now();
         let runtime: CodingAssistantRuntime | undefined;
         try {
+            await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
             runtime = this.#ensureRuntime();
             const result = await runtime.agent.run({
@@ -5711,6 +5817,7 @@ export class InMemorySession {
             if (this.#activeRun?.runId === runId) this.#activeRun = undefined;
             this.#syncContextMessages();
             await this.#completePendingWorkspaceTransfer(runId);
+            await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
             this.#saveSession();
         }
@@ -6746,6 +6853,7 @@ export class InMemorySession {
             .join("\n\n");
         const options: CreateCodingAssistantAgentOptions = {
             agentId: this.#agentId,
+            ownerInstanceId: this.#ownerInstanceId,
             ...(this.projectIdentity() === undefined
                 ? {}
                 : { attachmentScope: { ...this.projectIdentity()!, sessionId: this.id } }),
@@ -6942,6 +7050,7 @@ export class InMemorySession {
         this.#runtime = runtime;
         this.#agentId = snapshot.id;
         this.#providerId = runtime.executor.id;
+        this.#credentialBindingId = this.#providerBindingId(this.#providerId);
         this.#modelId = snapshot.modelId;
         this.#effort = snapshot.effort;
         this.#serviceTier = snapshot.serviceTier;
@@ -7533,6 +7642,7 @@ export class InMemorySession {
                 runId: queued.runId,
                 sessionId: this.id,
             });
+            await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
             runtime = this.#ensureRuntime();
             await this.#ensureMcpTools(runtime, controller.signal, queued.interactive !== false);
@@ -7696,6 +7806,7 @@ export class InMemorySession {
                 this.#syncContextMessages();
                 await this.#completePendingWorkspaceTransfer(queued.runId);
             }
+            await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
             this.#saveSession();
             await this.#closeDebugLog(queued);
@@ -7838,6 +7949,37 @@ export class InMemorySession {
     async #settleScopeRuntimeRefresh(): Promise<void> {
         this.#startScopeRuntimeRefresh();
         await this.#scopeRuntimeRefresh;
+    }
+
+    #startInferenceScopeRefresh(): void {
+        if (
+            this.#inferenceScopeRefreshCatalog === undefined ||
+            this.#inferenceScopeRefresh !== undefined ||
+            this.#activeRun !== undefined ||
+            this.#compactionActive
+        ) {
+            return;
+        }
+        const modelCatalog = this.#inferenceScopeRefreshCatalog;
+        this.#inferenceScopeRefreshCatalog = undefined;
+        const operation = this.#applyInferenceScopeRefresh(modelCatalog);
+        const tracked = operation.finally(() => {
+            if (this.#inferenceScopeRefresh === tracked) {
+                this.#inferenceScopeRefresh = undefined;
+            }
+            this.#startInferenceScopeRefresh();
+        });
+        this.#inferenceScopeRefresh = tracked;
+        void tracked.catch(rethrowDatabaseFailure);
+    }
+
+    async #settleInferenceScopeRefresh(): Promise<void> {
+        for (;;) {
+            this.#startInferenceScopeRefresh();
+            const refresh = this.#inferenceScopeRefresh;
+            if (refresh === undefined) return;
+            await refresh;
+        }
     }
 
     #assertAcceptingWork(): void {

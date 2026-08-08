@@ -49,6 +49,7 @@ function createDatabase(): TX {
             id: "session-1",
             interrupted: false,
             modelId: "model",
+            ownerInstanceId: "alocalinstance00000000001",
             modelsJson: "[]",
             nextTaskId: 1,
             orderKey: "a0",

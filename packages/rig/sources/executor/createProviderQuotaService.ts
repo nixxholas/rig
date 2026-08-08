@@ -8,6 +8,7 @@ import {
 
 import type { ConfigProviders } from "../config/types.js";
 import { providerUsageToClaudeQuota } from "./providerUsageToClaudeQuota.js";
+import { providerCredentialEnvironment } from "./providerCredentialEnvironment.js";
 
 export interface ProviderQuotaService {
     get(providerId: string): Promise<ProviderQuota | undefined>;
@@ -26,23 +27,42 @@ export function createProviderQuotaService(
 ): ProviderQuotaService {
     const env = options.env ?? process.env;
     const now = options.now ?? Date.now;
-    const codex = createProviderQuotaCache(
-        options.loadCodexQuota ??
-            (() =>
-                fetchCodexProviderQuota({
-                    ...(env.RIG_CODEX_BASE_URL === undefined
-                        ? {}
-                        : { baseUrl: env.RIG_CODEX_BASE_URL }),
-                    now,
-                    env,
-                })),
-        { now },
-    );
+    const codex = new Map<string, ReturnType<typeof createProviderQuotaCache>>();
 
     return {
         async get(providerId) {
-            if (providerId === "codex") return codex.get();
             const configuredProvider = options.providers?.[providerId];
+            if (
+                (configuredProvider === undefined && providerId === "codex") ||
+                configuredProvider?.type === "codex"
+            ) {
+                const providerEnv =
+                    configuredProvider === undefined
+                        ? env
+                        : providerCredentialEnvironment(configuredProvider, env);
+                let cache = codex.get(providerId);
+                if (cache === undefined) {
+                    cache = createProviderQuotaCache(
+                        options.loadCodexQuota ??
+                            (() =>
+                                configuredProvider?.apiKey === undefined
+                                    ? fetchCodexProviderQuota({
+                                          ...(configuredProvider?.authFile === undefined
+                                              ? {}
+                                              : { authPath: configuredProvider.authFile }),
+                                          ...(env.RIG_CODEX_BASE_URL === undefined
+                                              ? {}
+                                              : { baseUrl: env.RIG_CODEX_BASE_URL }),
+                                          now,
+                                          env: providerEnv,
+                                      })
+                                    : Promise.resolve(unavailableProviderQuota("codex", now()))),
+                        { now },
+                    );
+                    codex.set(providerId, cache);
+                }
+                return cache.get();
+            }
             if (providerId !== "claude" && configuredProvider?.type !== "claude") {
                 return undefined;
             }

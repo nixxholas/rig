@@ -117,6 +117,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         ...(activeSince !== undefined ? { activeSince } : {}),
         agent,
         agentId: readString(row, "agent_id"),
+        ownerInstanceId: readString(row, "owner_instance_id"),
         archived,
         trackUnread,
         ...(unreadReason !== undefined && unreadSince !== undefined
@@ -125,6 +126,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         ...(appendSystemPrompt !== undefined ? { appendSystemPrompt } : {}),
         ...(systemPrompt !== undefined ? { systemPrompt } : {}),
         createdAt: readNumber(row, "created_at_ms"),
+        credentialBindingId: queryCredentialBinding(tx, id),
         cwd: readString(row, "cwd"),
         ...(draft === undefined ? {} : { draft }),
         ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
@@ -277,4 +279,20 @@ function queryQueuedRuns(tx: TX, sessionId: string): PersistedQueuedRun[] {
                 ...config,
             };
         }) as PersistedQueuedRun[];
+}
+
+function queryCredentialBinding(tx: TX, sessionId: string): string {
+    const row = tx.get<Record<string, unknown>>(sql`
+        SELECT binding_id
+        FROM session_credential_bindings
+        WHERE session_id = ${sessionId}
+    `);
+    if (row === undefined) {
+        throw new Error("The saved session credential binding is missing.");
+    }
+    const bindingId = readString(row, "binding_id");
+    if (bindingId.length === 0) {
+        throw new Error("The saved session credential binding is invalid.");
+    }
+    return bindingId;
 }

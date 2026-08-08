@@ -41,6 +41,11 @@ import type { SlotEntryStore } from "../slots/index.js";
 import type { AppletStore } from "../applets/index.js";
 import type { WorkletStore } from "../worklets/index.js";
 
+/** Internal server-side attributes for a new root session. */
+export interface SessionCreationOptions {
+    ownerInstanceId?: string;
+}
+
 export interface SessionStore {
     /** Stable identity for this initialized Rig data generation. */
     readonly dataEpoch: string;
@@ -71,8 +76,12 @@ export interface SessionStore {
         sessionId: string,
         request: ChangeServiceTierRequest,
     ): InMemorySession | undefined;
-    create(request: CreateSessionRequest): InMemorySession;
-    createWithId(id: string, request: CreateSessionRequest): InMemorySession;
+    create(request: CreateSessionRequest, options?: SessionCreationOptions): InMemorySession;
+    createWithId(
+        id: string,
+        request: CreateSessionRequest,
+        options?: SessionCreationOptions,
+    ): InMemorySession;
     createWorkspace(
         projectId: string,
         request: CreateProjectWorkspaceRequest,

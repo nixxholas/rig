@@ -42,6 +42,7 @@ export function createSessionDatabaseFixture(path: string, sessionId = "session-
             id: sessionId,
             interrupted: false,
             modelId: "model",
+            ownerInstanceId: "alocalinstance00000000001",
             modelsJson: "[]",
             nextTaskId: 1,
             orderKey: "a0",

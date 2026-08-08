@@ -356,6 +356,7 @@ function insertSession(
             externalToolsJson: "[]",
             interrupted: false,
             modelId: "openai/gpt-5.6-sol",
+            ownerInstanceId: "alocalinstance00000000001",
             modelsJson: "[]",
             nextTaskId: 1,
             orderKey: overrides.id,

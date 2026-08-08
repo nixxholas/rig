@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createId } from "@paralleldrive/cuid2";
+import { Value } from "@sinclair/typebox/value";
 
 import {
     createEventIdFactory,
@@ -61,7 +62,8 @@ import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import { PersistentGlobalEventQueue } from "../global-event/PersistentGlobalEventQueue.js";
 import { retriedSession } from "./retriedSession.js";
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionCreationOptions, SessionStore } from "./SessionStore.js";
+import { p2pInstanceIdSchema } from "../protocol/P2pIdentityProtocol.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
@@ -206,9 +208,11 @@ export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
     databasePath: string;
     defaultDocker?: DockerExecutionConfig;
+    localInstanceId?: string;
     durableGlobalEventQueue?: boolean;
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
+    resolveModelCatalog?: (ownerInstanceId: string) => ModelCatalog;
     now?: () => number;
     onSessionAccess?: (session: InMemorySession) => void;
     onSessionEvent?: (event: SessionEvent, session: InMemorySession | undefined) => void;
@@ -235,6 +239,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly dataEpoch: string;
     readonly dataSchemaVersion: number;
     #modelCatalog: ModelCatalog;
+    readonly #localInstanceId: string;
+    readonly #resolveModelCatalog: (ownerInstanceId: string) => ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #now: () => number;
     #onSessionAccess: ((session: InMemorySession) => void) | undefined;
@@ -274,6 +280,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly worklets: WorkletStore;
 
     constructor(options: PersistentSessionStoreOptions) {
+        this.#localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
+        this.#resolveModelCatalog =
+            options.resolveModelCatalog ?? (() => options.modelCatalog ?? createModelCatalog());
         this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
         this.presence.onChange((state) => {
             for (const session of this.#cachedSessions()) session.presenceChanged(state);
@@ -287,7 +296,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.liveEvents.publish(event);
         });
         this.#secrets = new SecretRegistry();
-        this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
+        this.#modelCatalog = this.#resolveModelCatalog(this.#localInstanceId);
         this.#createRuntime = options.createRuntime;
         this.#defaultDocker = options.defaultDocker;
         this.#mcpToolProvider = options.mcpToolProvider;
@@ -304,7 +313,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#client = opened.client;
         this.#database = opened.database;
         if (options.databasePath !== ":memory:") chmodSync(options.databasePath, 0o600);
-        migrateSessionDatabase(this.#database);
+        migrateSessionDatabase(this.#database, { localInstanceId: this.#localInstanceId });
         this.dataEpoch = queryRigDataEpoch(this.#database);
         this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
         if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
@@ -405,6 +414,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
         this.#agentManager = new AgentSessionManager({
+            localInstanceId: this.#localInstanceId,
             repository: {
                 archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
@@ -577,9 +587,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         );
     }
 
-    create(request: CreateSessionRequest): InMemorySession {
+    create(request: CreateSessionRequest, options: SessionCreationOptions = {}): InMemorySession {
         this.#assertAcceptingMutations();
-        return this.#createSession(request);
+        return this.#createSession(request, undefined, undefined, undefined, options);
     }
 
     /**
@@ -589,11 +599,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * protocol boundary. Rig's own integrations derive identities of their own,
      * and they reach this method directly.
      */
-    createWithId(id: string, request: CreateSessionRequest): InMemorySession {
+    createWithId(
+        id: string,
+        request: CreateSessionRequest,
+        options: SessionCreationOptions = {},
+    ): InMemorySession {
         this.#assertAcceptingMutations();
         const existing = this.get(id);
         if (existing !== undefined) return retriedSession(existing, request);
-        return this.#createSession(request, undefined, undefined, id);
+        return this.#createSession(request, undefined, undefined, id, options);
     }
 
     detachSecret(
@@ -692,7 +706,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
                 emitCreatedEvent: false,
                 ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
-                modelCatalog: this.#modelCatalog,
+                modelCatalog: this.#modelCatalogFor(state.ownerInstanceId),
                 now: this.#now,
                 onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
                 ...(this.#mcpToolProvider !== undefined
@@ -707,6 +721,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 sourceSnapshot.scope.kind === "workspace"
                     ? { projectSecretIds: this.#projectSecrets(sourceSnapshot.scope.projectId) }
                     : {}),
+                ownerInstanceId: state.ownerInstanceId,
                 secretRegistry: this.#secrets,
                 restore: {
                     ...forkState,
@@ -735,6 +750,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         metadata?: SessionAgentMetadata,
         contextMessages?: readonly Message[],
         id?: string,
+        options: SessionCreationOptions = {},
     ): InMemorySession {
         this.#assertAcceptingMutations();
         const sessionId = id ?? createId();
@@ -752,6 +768,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 if (inherited?.status === "archived") {
                     throw new Error("An archived session cannot create a subagent.");
                 }
+                const ownerInstanceId =
+                    inherited?.ownerInstanceId ??
+                    (options.ownerInstanceId === undefined
+                        ? this.#localInstanceId
+                        : validOwnerInstanceId(options.ownerInstanceId));
                 const inheritedWorkspace =
                     inherited?.scope.kind === "workspace"
                         ? this.#projects.getWorkspace(
@@ -885,7 +906,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         : { createRuntime: this.#createRuntime }),
                     deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
                     emitCreatedEvent: false,
-                    modelCatalog: this.#modelCatalog,
+                    modelCatalog: this.#modelCatalogFor(ownerInstanceId),
                     now: this.#now,
                     onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
                     ...(this.#mcpToolProvider !== undefined
@@ -900,6 +921,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
                         this.#newLastSessionOrderKey(resolved.scope),
                     ),
+                    ownerInstanceId,
                     persistence: this,
                     folders: this.#folders,
                     slotStores: { entries: this.slots, applets: this.applets },
@@ -1590,6 +1612,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     saveSession(state: PersistedSessionState): void {
+        validOwnerInstanceId(state.ownerInstanceId);
         const contextMessages =
             state.contextMessages ??
             state.messages
@@ -1996,6 +2019,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #loadSession(sessionId: string): InMemorySession | undefined {
         const loaded = querySessionRestore(this.#tx(), sessionId);
         if (loaded === undefined) return undefined;
+        const ownerInstanceId = validOwnerInstanceId(loaded.restore.ownerInstanceId);
         const folderPath =
             loaded.restore.scope.kind === "folder"
                 ? this.#folders.folderStoragePath(loaded.restore.scope.folderId)
@@ -2026,7 +2050,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
             events: querySessionEvents(this.#tx(), sessionId, RESTORED_SESSION_EVENT_LIMIT),
             ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
-            modelCatalog: this.#modelCatalog,
+            modelCatalog: this.#modelCatalogFor(ownerInstanceId),
             now: this.#now,
             onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
             ...(this.#mcpToolProvider === undefined
@@ -2044,6 +2068,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                       ),
                   }
                 : {}),
+            ownerInstanceId,
             request,
             secretRegistry: this.#secrets,
             restore,
@@ -2058,6 +2083,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const reference = new WeakRef(session);
         this.#sessions.set(session.id, reference);
         this.#sessionFinalizer.register(session, { id: session.id, reference }, reference);
+    }
+
+    #modelCatalogFor(ownerInstanceId: string): ModelCatalog {
+        return ownerInstanceId === this.#localInstanceId
+            ? this.#modelCatalog
+            : this.#resolveModelCatalog(ownerInstanceId);
     }
 
     #cachedSessions(): InMemorySession[] {
@@ -2313,4 +2344,11 @@ function persistentCodeScope(
 ): Extract<SessionScope, { kind: "project" | "workspace" }> {
     if (scope.kind === "project" || scope.kind === "workspace") return scope;
     throw new Error("This operation is available only for project or workspace chats.");
+}
+
+function validOwnerInstanceId(value: string): string {
+    if (!Value.Check(p2pInstanceIdSchema, value)) {
+        throw new Error("The session owner Rig identity is invalid.");
+    }
+    return value;
 }

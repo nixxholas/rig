@@ -478,20 +478,26 @@ enabled = false
 
 [providers.work_codex]
 type = "codex"
+api_key = "codex-work-key"
 auth_file = "/Users/me/.codex-work/auth.json"
 base_url = "https://chatgpt.example/backend-api"
+p2p_share = "owner_only"
 transport = "sse"
 include_models = ["openai/gpt-5.6-sol"]
 exclude_models = ["openai/gpt-5.4"]
 
 [providers.work_claude]
 type = "claude"
+api_key = "claude-work-key"
+auth_token = "claude-work-auth-token"
 config_dir = "/Users/me/.claude-work"
 executable = "/opt/claude"
 oauth_token = "claude-work-token"
+p2p_share = "shared"
 
 [providers.work_grok]
 type = "grok"
+api_key = "grok-work-key"
 auth_file = "/Users/me/.grok-work/auth.json"
 base_url = "https://grok.example/v1"
 
@@ -523,20 +529,26 @@ search_model = "openai/gpt-5.6-terra"
                     type: "bedrock",
                 },
                 work_claude: {
+                    apiKey: "claude-work-key",
+                    authToken: "claude-work-auth-token",
                     configDir: "/Users/me/.claude-work",
                     executable: "/opt/claude",
                     oauthToken: "claude-work-token",
+                    p2pShare: "shared",
                     type: "claude",
                 },
                 work_codex: {
+                    apiKey: "codex-work-key",
                     authFile: "/Users/me/.codex-work/auth.json",
                     baseUrl: "https://chatgpt.example/backend-api",
                     excludeModels: ["openai/gpt-5.4"],
                     includeModels: ["openai/gpt-5.6-sol"],
+                    p2pShare: "owner_only",
                     transport: "sse",
                     type: "codex",
                 },
                 work_grok: {
+                    apiKey: "grok-work-key",
                     authFile: "/Users/me/.grok-work/auth.json",
                     baseUrl: "https://grok.example/v1",
                     type: "grok",
@@ -559,6 +571,9 @@ search_model = "openai/gpt-5.6-terra"
         );
         expect(() => parseConfigToml("[providers.codex]\nauth_file = 42\n")).toThrow(
             "providers.codex.auth_file must be a string.",
+        );
+        expect(() => parseConfigToml('[providers.codex]\np2p_share = "everyone"\n')).toThrow(
+            'providers.codex.p2p_share must be "owner_only", "shared", or "disabled".',
         );
         expect(() =>
             parseConfigToml(
@@ -1059,10 +1074,12 @@ inference_max_retries = 8
             const runtimePath = join(root, "runtime.toml");
             const providers = {
                 work_codex: {
+                    apiKey: "codex-work-key",
                     authFile: "/Users/me/.codex-work/auth.json",
                     enabled: true,
                     excludeModels: ["openai/gpt-5.4"],
                     includeModels: ["openai/gpt-5.6-sol"],
+                    p2pShare: "owner_only" as const,
                     transport: "websocket" as const,
                     type: "codex" as const,
                 },
@@ -1078,11 +1095,15 @@ inference_max_retries = 8
                     type: "bedrock" as const,
                 },
                 work_claude: {
+                    apiKey: "claude-work-key",
+                    authToken: "claude-work-auth-token",
                     enabled: true,
                     oauthToken: "claude-work-token",
+                    p2pShare: "shared" as const,
                     type: "claude" as const,
                 },
                 work_grok: {
+                    apiKey: "grok-work-key",
                     authFile: "/Users/me/.grok-work/auth.json",
                     baseUrl: "https://grok.example/v1",
                     enabled: true,
