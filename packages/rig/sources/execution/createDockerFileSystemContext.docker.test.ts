@@ -50,7 +50,7 @@ for (const fixture of [
                     `Could not create Docker file-tree fixture: ${result.stderr.toString()}`,
                 );
             }
-        });
+        }, 60_000);
 
         afterAll(async () => {
             if (container === undefined) return;

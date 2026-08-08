@@ -109,6 +109,7 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
                 SHELL: process.env.SHELL,
             },
             mcpRegistry: new PluginMcpRegistry(),
+            startupTimeoutMs: 60_000,
             store,
         });
         cleanup.push(() => manager.close());
