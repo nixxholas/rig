@@ -1,0 +1,13 @@
+{
+    "provenance": "reconstructed-from-vendor",
+    "note": "The ordinary transient 429 Amazon Bedrock returns for a throttled request, in the shape AWS documents for ThrottlingException. It shares its status with the Codex usage 429s and must stay retryable. Request identifiers are placeholders.",
+    "status": 429,
+    "headers": {
+        "content-type": "application/json",
+        "x-amzn-requestid": "00000000-0000-4000-8000-000000000000",
+        "x-amzn-errortype": "ThrottlingException:http://internal.amazon.com/coral/com.amazon.coral.availability/"
+    },
+    "body": {
+        "message": "Too many requests, please wait before trying again."
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "provenance": "reconstructed-from-vanilla",
+    "note": "Field-for-field reconstruction of the 429 the Codex backend returns when the signed-in ChatGPT plan does not include Codex, taken from the body vanilla parses in codex-rs/codex-api/src/api_bridge.rs. Request identifiers are placeholders.",
+    "status": 429,
+    "headers": {
+        "content-type": "application/json",
+        "x-request-id": "req_redacted000000000000000000001"
+    },
+    "body": {
+        "error": {
+            "type": "usage_not_included",
+            "message": "Your plan does not include Codex."
+        }
+    }
+}

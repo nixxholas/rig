@@ -1,0 +1,26 @@
+{
+    "provenance": "reconstructed-from-vanilla",
+    "note": "Field-for-field reconstruction of the exhausted-plan 429 the Codex backend returns, taken from vanilla's own recorded shape in codex-rs/core/tests/suite/client.rs and the headers codex-rs/codex-api/src/rate_limits.rs reads. Account, request, and token identifiers are placeholders.",
+    "status": 429,
+    "headers": {
+        "content-type": "application/json",
+        "x-request-id": "req_redacted000000000000000000000",
+        "x-codex-active-limit": "codex",
+        "x-codex-primary-used-percent": "100.0",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-reset-at": "1704069000",
+        "x-codex-secondary-used-percent": "87.5",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-credits-has-credits": "false",
+        "x-codex-credits-unlimited": "false",
+        "x-codex-credits-balance": ""
+    },
+    "body": {
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "You've hit your usage limit.",
+            "plan_type": "pro",
+            "resets_at": 1704067242
+        }
+    }
+}

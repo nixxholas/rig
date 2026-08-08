@@ -1,3 +1,6 @@
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+
 import {
     extractProviderErrorDiagnostics,
     extractProviderRetryResetAt,
@@ -37,6 +40,15 @@ export function classifyCodexProviderError(
         attempts,
         upstreamMessage: message,
     });
+    const usage = readCodexUsageExhaustion(error);
+    if (usage !== undefined) {
+        const resetAt = usage.resetAt ?? extractProviderRetryResetAt(error);
+        return {
+            type: "out_of_tokens",
+            ...(resetAt === undefined ? {} : { resetAt }),
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+        };
+    }
     const status = diagnostics?.status;
     const normalized = message.toLowerCase();
     const kind = classifyCodexError(message);
@@ -64,6 +76,167 @@ export function classifyCodexProviderError(
         type,
         ...(diagnostics === undefined ? {} : { diagnostics }),
     };
+}
+
+/**
+ * The two 429 bodies that mean the account itself is spent rather than momentarily busy.
+ *
+ * Codex answers an exhausted plan with `usage_limit_reached` and a plan that never included Codex
+ * with `usage_not_included`. Both are terminal upstream — vanilla sets `retry_429: false` and turns
+ * these bodies straight into `UsageLimitReached` and `UsageNotIncluded` — so recognizing them by
+ * body is what separates a spent account from an ordinary throttle that shares the same status.
+ */
+const codexUsageErrorSchema = Type.Object(
+    {
+        type: Type.Union([Type.Literal("usage_limit_reached"), Type.Literal("usage_not_included")]),
+    },
+    { additionalProperties: true },
+);
+
+/**
+ * Read separately so an unexpected value in either field costs only that field. The plan and the
+ * reset time are what make the sentence useful, but neither decides whether the account is spent.
+ */
+const codexUsagePlanSchema = Type.Object(
+    { plan_type: Type.String({ minLength: 1 }) },
+    { additionalProperties: true },
+);
+
+const codexUsageResetSchema = Type.Object(
+    { resets_at: Type.Integer({ minimum: 1 }) },
+    { additionalProperties: true },
+);
+
+export interface CodexUsageExhaustion {
+    kind: "usage_limit_reached" | "usage_not_included";
+    planType?: string;
+    /** Absolute reset time in epoch milliseconds. */
+    resetAt?: number;
+}
+
+const USAGE_NESTING_KEYS = ["error", "cause", "body", "response"] as const;
+const USAGE_TRAVERSAL_LIMIT = 24;
+const CODEX_PRIMARY_RESET_HEADER = "x-codex-primary-reset-at";
+
+/**
+ * Finds the usage body wherever the transport buried it.
+ *
+ * SSE surfaces it as the OpenAI SDK's `APIError`, which copies the body's `type` onto itself and
+ * keeps the full body on `error`. WebSocket wraps a server event whose own `type` is `"error"` and
+ * whose nested `error` carries the usage body. Both matches are collected so the plan and reset
+ * time are read from whichever level actually carried them.
+ */
+export function readCodexUsageExhaustion(error: unknown): CodexUsageExhaustion | undefined {
+    const matches: Record<string, unknown>[] = [];
+    const pending: unknown[] = [error];
+    const seen = new Set<object>();
+    while (pending.length > 0 && seen.size < USAGE_TRAVERSAL_LIMIT) {
+        const candidate = pending.shift();
+        if (typeof candidate !== "object" || candidate === null || seen.has(candidate)) continue;
+        seen.add(candidate);
+        const record = candidate as Record<string, unknown>;
+        for (const key of USAGE_NESTING_KEYS) {
+            if (key in record) pending.push(record[key]);
+        }
+        if (Value.Check(codexUsageErrorSchema, record)) matches.push(record);
+    }
+    const first = matches[0];
+    if (first === undefined) return undefined;
+    const planType = matches.find((match) => Value.Check(codexUsagePlanSchema, match))?.plan_type;
+    const resetSeconds = matches.find((match) =>
+        Value.Check(codexUsageResetSchema, match),
+    )?.resets_at;
+    const headerSeconds = Number(readCodexErrorHeader(error, CODEX_PRIMARY_RESET_HEADER));
+    const seconds =
+        typeof resetSeconds === "number"
+            ? resetSeconds
+            : Number.isSafeInteger(headerSeconds) && headerSeconds > 0
+              ? headerSeconds
+              : undefined;
+    return {
+        kind: first.type as CodexUsageExhaustion["kind"],
+        ...(typeof planType === "string" ? { planType } : {}),
+        ...(seconds === undefined ? {} : { resetAt: seconds * 1_000 }),
+    };
+}
+
+const CODEX_PLAN_NAMES = new Map([
+    ["business", "Business"],
+    ["edu", "Edu"],
+    ["ent26", "Enterprise"],
+    ["enterprise", "Enterprise"],
+    ["enterprise_cbp_automation", "Enterprise Automation"],
+    ["enterprise_cbp_usage_based", "Enterprise Usage Based"],
+    ["free", "Free"],
+    ["go", "Go"],
+    ["plus", "Plus"],
+    ["pro", "Pro"],
+    ["prolite", "Pro Lite"],
+    ["self_serve_business_prolite", "Business Pro Lite"],
+    ["self_serve_business_usage_based", "Business Usage Based"],
+    ["team", "Team"],
+]);
+
+const CODEX_USAGE_NOT_INCLUDED_MESSAGE =
+    "Codex is not included in this ChatGPT plan. Upgrade to Plus to keep using it: " +
+    "https://chatgpt.com/explore/plus.";
+
+/**
+ * Says which account ran out and when it comes back, the way the native client does.
+ *
+ * A spent account is the one failure a person can actually act on, so the sentence names the plan
+ * and the reset time instead of reporting a status code.
+ */
+export function codexUsageExhaustionMessage(
+    usage: CodexUsageExhaustion,
+    now: number = Date.now(),
+): string {
+    if (usage.kind === "usage_not_included") return CODEX_USAGE_NOT_INCLUDED_MESSAGE;
+    const plan = usage.planType === undefined ? undefined : describeCodexPlan(usage.planType);
+    const subject =
+        plan === undefined
+            ? "You've hit your Codex usage limit."
+            : `You've hit your Codex usage limit on the ChatGPT ${plan} plan.`;
+    return usage.resetAt === undefined
+        ? `${subject} Try again later.`
+        : `${subject} Try again at ${formatCodexResetTime(usage.resetAt, now)}.`;
+}
+
+function describeCodexPlan(planType: string): string {
+    const normalized = planType.trim().toLowerCase();
+    return (
+        CODEX_PLAN_NAMES.get(normalized) ??
+        normalized
+            .split(/[_\-\s]+/u)
+            .filter((word) => word.length > 0)
+            .map((word) => word[0]!.toUpperCase() + word.slice(1))
+            .join(" ")
+    );
+}
+
+/**
+ * A reset later today needs only a clock time; anything further out needs the date too.
+ *
+ * The formatter separates the time from its meridiem with a narrow no-break space, which a
+ * terminal is free to render as a missing space, so it is replaced with an ordinary one.
+ */
+function formatCodexResetTime(resetAt: number, now: number): string {
+    const reset = new Date(resetAt);
+    const sameDay = reset.toDateString() === new Date(now).toDateString();
+    return reset
+        .toLocaleString(
+            "en-US",
+            sameDay
+                ? { hour: "numeric", minute: "2-digit" }
+                : {
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      month: "short",
+                      year: "numeric",
+                  },
+        )
+        .replaceAll(/[\u00a0\u202f]/gu, " ");
 }
 
 /** Detects a server rejection that can be retried with a smaller compaction input. */
@@ -102,11 +275,13 @@ const BEDROCK_EXPIRED_SIGNATURE_MESSAGE =
 /**
  * Turns a failure into the sentence shown to a person.
  *
- * An expired AWS signature reads as a bare authorization failure, which tells the reader nothing
- * about the credential that actually went stale, so Bedrock names it the way the native client
- * does. Everything else already describes itself.
+ * An exhausted account and an expired AWS signature both read as bare status codes, which tell the
+ * reader nothing about the account that ran out or the credential that went stale, so each is named
+ * the way the native client names it. Everything else already describes itself.
  */
 export function codexErrorMessage(error: unknown, message: string): string {
+    const usage = readCodexUsageExhaustion(error);
+    if (usage !== undefined) return codexUsageExhaustionMessage(usage);
     if (isCodexUnauthorizedError(error) && message.includes("Signature expired:")) {
         return BEDROCK_EXPIRED_SIGNATURE_MESSAGE;
     }
@@ -175,6 +350,10 @@ function readDetails(
 export function isRetryableCodexStreamError(error: unknown): boolean {
     if (isEmptyResponseError(error)) return true;
     if (hasAbortError(error, new Set())) return false;
+    // A spent account is the one 429 that waiting cannot fix, and retrying it costs the person
+    // minutes of backoff before they are told. Every other 429, including Bedrock throttling,
+    // stays retryable below.
+    if (readCodexUsageExhaustion(error) !== undefined) return false;
     return shouldRetry(error, new Set());
 }
 
@@ -261,7 +440,6 @@ const RETRYABLE_NAMES = new Set([
 ]);
 
 const RETRYABLE_PROVIDER_CODES = new Set([
-    "insufficient_quota",
     "invalid_prompt",
     "invalid_request_error",
     "model_not_found",
@@ -282,6 +460,9 @@ const FATAL_CODES = new Set([
     "image_parse_error",
     "image_too_large",
     "image_too_small",
+    // An account with no credit left answers every attempt the same way, so waiting only delays
+    // the sentence that tells the person to top it up.
+    "insufficient_quota",
     "invalid_base64_image",
     "invalid_image",
     "invalid_image_format",

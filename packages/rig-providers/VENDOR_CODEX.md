@@ -326,13 +326,24 @@ Codex owns inference retries. The outer agent loop must not replay a provider re
 
 The shared inference retry budget defaults to ten retries after the initial request and is capped
 at 100. It can change live through Rig's provider-neutral inference setting. The idle timeout is
-five minutes. Retry precedence is deliberate: explicit fatal provider codes are terminal even
-when `x-should-retry` says `true`; `insufficient_quota`, `invalid_prompt`,
-`invalid_request_error`, `model_not_found`, and `permission_error` are retryable even when that
-header says `false`; for every other code, `x-should-retry` is authoritative. Without a
-directive, 408, 409, 429, 5xx responses, and common DNS, connection, socket, and timeout failures
-are retryable. Abort is always terminal. Bounded `retry-after-ms` or `retry-after` directives
-take precedence over exponential backoff starting at 200 milliseconds with jitter.
+five minutes. Retry precedence is deliberate: an exhausted account is terminal before anything
+else is considered; explicit fatal provider codes are terminal even when `x-should-retry` says
+`true`; `invalid_prompt`, `invalid_request_error`, `model_not_found`, and `permission_error` are
+retryable even when that header says `false`; for every other code, `x-should-retry` is
+authoritative. Without a directive, 408, 409, 429, 5xx responses, and common DNS, connection,
+socket, and timeout failures are retryable. Abort is always terminal. Bounded `retry-after-ms` or
+`retry-after` directives take precedence over exponential backoff starting at 200 milliseconds
+with jitter.
+
+An exhausted account is recognized by body rather than by status, because 429 also carries
+ordinary throttling that waiting does fix. A 429 whose error body is `usage_limit_reached` or
+`usage_not_included`, and any rejection carrying the `insufficient_quota` code, is terminal on its
+first attempt and surfaces as `out_of_tokens`. Vanilla behaves the same way: it sets
+`retry_429: false` and turns those bodies into `UsageLimitReached` and `UsageNotIncluded`. The
+message names the plan and the reset time the way the native client does; the reset time comes
+from the body's `resets_at`, then the `x-codex-primary-reset-at` header, then `retry-after`. Every
+other 429 stays retryable, including a Bedrock `ThrottlingException`, which reaches
+`CodexSession` through the same Responses path and is a genuinely transient rate limit.
 
 Codex may retry a retryable mid-stream failure after output begins. Rig emits `block_reset`
 before the retry and rebuilds the complete provider request, allowing the outer runtime to erase

@@ -223,7 +223,6 @@ describe("Codex stream retries", () => {
     });
 
     it.each([
-        ["insufficient_quota", 429],
         ["invalid_prompt", 400],
         ["invalid_request_error", 400],
         ["model_not_found", 404],
@@ -257,6 +256,11 @@ describe("Codex stream retries", () => {
             code: "cyber_policy",
             headers: { "x-should-retry": "true" },
             status: 500,
+        }),
+        Object.assign(new Error("You exceeded your current quota."), {
+            code: "insufficient_quota",
+            headers: { "x-should-retry": "true" },
+            status: 429,
         }),
         Object.assign(new Error("Request failed."), { code: "context_length_exceeded" }),
         new DOMException("Request was aborted", "AbortError"),
