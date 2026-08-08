@@ -108,7 +108,6 @@ export const projectWorkspaces = sqliteTable(
         storageKey: text("storage_key").notNull(),
         name: text("name").notNull(),
         nameKey: text("name_key").notNull(),
-        title: text("title"),
         orderKey: text("order_key").notNull(),
         kind: text("kind").notNull(),
         status: text("status").notNull(),
@@ -128,6 +127,10 @@ export const projectWorkspaces = sqliteTable(
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
         archivedAtMs: integer("archived_at_ms"),
+        /** Set when the name was chosen on purpose, which stops the first chat from naming it. */
+        nameConfigured: integer("name_configured", { mode: "boolean" }).notNull(),
+        /** Branch Rig manages for this worktree; it follows the name and outlives storage_key. */
+        branch: text("branch").notNull(),
     },
     (table) => [
         unique().on(table.projectId, table.storageKey),

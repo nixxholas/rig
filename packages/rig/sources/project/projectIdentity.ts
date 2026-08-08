@@ -24,6 +24,20 @@ export function folderProjectName(path: string): string {
 }
 
 export function projectStorageKey(value: string): string {
+    return readableKey(value, "project");
+}
+
+/**
+ * The branch Rig manages for a workspace, in the same kebab-case form storage keys are written in.
+ *
+ * A workspace is always a branch, and other software reads that branch name, so it is built from
+ * the workspace's own name rather than from the folder the checkout happens to sit in.
+ */
+export function workspaceBranchName(name: string): string {
+    return `worktree/${readableKey(name, "workspace")}`;
+}
+
+function readableKey(value: string, fallback: string): string {
     const readable = deunicode(transliterateCyrillic(value))
         .normalize("NFKD")
         .replace(/\p{M}/gu, "")
@@ -32,7 +46,7 @@ export function projectStorageKey(value: string): string {
         .replace(/^-+|-+$/gu, "")
         .slice(0, 48)
         .replace(/-+$/gu, "");
-    return readable.length === 0 ? "project" : readable;
+    return readable.length === 0 ? fallback : readable;
 }
 
 function transliterateCyrillic(value: string): string {

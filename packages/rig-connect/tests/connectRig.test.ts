@@ -174,6 +174,7 @@ function catalogSession(): SessionSummary {
 function daemonWorkspace(id: string) {
     return {
         baseRef: "main",
+        branch: `worktree/${id}`,
         createdAt: 2,
         gitCommonDir: "/work/.git",
         id,

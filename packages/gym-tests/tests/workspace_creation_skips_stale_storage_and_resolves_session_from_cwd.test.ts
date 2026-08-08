@@ -39,7 +39,9 @@ describe("managed workspace allocation", () => {
         expect(screen.text).toContain("The workspace was allocated.");
         await expect(gym.readFile("workspace-allocation-result.json")).resolves.toBe(
             JSON.stringify({
-                branch: "worktree/workspace-3",
+                // The folder key steps over the stale directory, while the branch the name asks
+                // for is free: the two identities no longer share one key.
+                branch: "worktree/workspace",
                 storageKey: "workspace-3",
                 workspaceAttached: true,
             }),

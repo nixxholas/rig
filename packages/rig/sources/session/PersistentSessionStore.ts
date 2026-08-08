@@ -182,6 +182,7 @@ export interface PersistentSessionStoreOptions {
     now?: () => number;
     onSessionAccess?: (session: InMemorySession) => void;
     onSessionEvent?: (event: SessionEvent, session: InMemorySession | undefined) => void;
+    onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     presence?: PresenceStore;
     projectGit?: GitCommandRunner;
@@ -306,6 +307,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#projectEvent(event),
+            ...(options.onWorkspaceBranchError === undefined
+                ? {}
+                : { onWorkspaceBranchError: options.onWorkspaceBranchError }),
             ...(options.onWorkspaceCleanupError === undefined
                 ? {}
                 : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
@@ -592,7 +596,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
                 modelCatalog: this.#modelCatalog,
                 now: this.#now,
-                onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
+                onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
                     : {}),
@@ -710,7 +714,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 emitCreatedEvent: false,
                 modelCatalog: this.#modelCatalog,
                 now: this.#now,
-                onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
+                onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
                     : {}),
@@ -1639,7 +1643,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    #inheritWorkspaceTitle(
+    #inheritWorkspaceName(
         metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
     ): void {
         const firstSessionId = queryFirstRootSessionIdForWorkspace(
@@ -1648,7 +1652,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             metadata.workspaceId,
         );
         if (firstSessionId !== metadata.sessionId) return;
-        this.#projects.inheritWorkspaceTitle(
+        this.#projects.inheritWorkspaceName(
             metadata.projectId,
             metadata.workspaceId,
             metadata.title,
@@ -1672,7 +1676,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
             modelCatalog: this.#modelCatalog,
             now: this.#now,
-            onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
+            onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
             ...(this.#mcpToolProvider === undefined
                 ? {}
                 : { mcpToolProvider: this.#mcpToolProvider }),

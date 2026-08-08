@@ -126,6 +126,42 @@ describe("InMemorySession goals", () => {
             '"text":"/review focus on concurrency"',
         );
     });
+
+    it("keeps the name a goal gave a chat after the chat is cleared", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "medium",
+            id: "test/goal-title-model",
+            name: "Goal title model",
+            thinkingLevels: ["medium"],
+        });
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream: () => streamFor(assistantMessage([{ type: "text", text: "Done." }], "stop")),
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => createTestRuntime(options, provider),
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ providerId: provider.id, models: [model] }],
+            },
+            request: { cwd: "/tmp/rig-goal-title", modelId: model.id, providerId: provider.id },
+        });
+
+        session.setGoal({ objective: "Migrate the parser" });
+        const named = session.snapshot().title;
+        expect(named).toBeDefined();
+
+        // A name a chat has been given is the chat's, and clearing it does not take it back.
+        await session.reset();
+        expect(session.snapshot()).toMatchObject({ title: named, titleStatus: "ready" });
+
+        session.setGoal({ objective: "Rewrite the scheduler" });
+        expect(session.snapshot().title).toBe(named);
+    });
 });
 
 function createTestRuntime(

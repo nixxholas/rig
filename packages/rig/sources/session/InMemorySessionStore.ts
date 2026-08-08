@@ -84,6 +84,7 @@ export interface InMemorySessionStoreOptions {
     defaultDocker?: DockerExecutionConfig;
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
+    onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     presence?: PresenceStore;
     secrets?: readonly SecretRegistration[];
@@ -148,6 +149,9 @@ export class InMemorySessionStore implements SessionStore {
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#projectEvent(event),
+            ...(options.onWorkspaceBranchError === undefined
+                ? {}
+                : { onWorkspaceBranchError: options.onWorkspaceBranchError }),
             ...(options.onWorkspaceCleanupError === undefined
                 ? {}
                 : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
@@ -394,7 +398,7 @@ export class InMemorySessionStore implements SessionStore {
             ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             modelCatalog: this.#modelCatalog,
-            onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
+            onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),
@@ -497,7 +501,7 @@ export class InMemorySessionStore implements SessionStore {
             createEventId: createEventIdFactory(),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             modelCatalog: this.#modelCatalog,
-            onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
+            onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),
@@ -519,7 +523,7 @@ export class InMemorySessionStore implements SessionStore {
         return session;
     }
 
-    #inheritWorkspaceTitle(
+    #inheritWorkspaceName(
         metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
     ): void {
         const first = [...this.#sessions.values()]
@@ -537,7 +541,7 @@ export class InMemorySessionStore implements SessionStore {
                     left.id.localeCompare(right.id),
             )[0];
         if (first?.id !== metadata.sessionId) return;
-        this.#projects.inheritWorkspaceTitle(
+        this.#projects.inheritWorkspaceName(
             metadata.projectId,
             metadata.workspaceId,
             metadata.title,

@@ -361,6 +361,7 @@ describe("protocol conformance", () => {
 
     it("validates the exact bounded workspace contract", () => {
         const workspace: local.ProjectWorkspace = {
+            branch: "worktree/workspace-1",
             createdAt: 1,
             error: "x".repeat(PROJECT_WORKSPACE_ERROR_MAX_LENGTH),
             gitCommonDir: "/work/project/.git",

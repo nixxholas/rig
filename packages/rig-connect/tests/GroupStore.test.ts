@@ -38,6 +38,7 @@ function workspace(
     overrides: Partial<ProjectWorkspace> = {},
 ): ProjectWorkspace {
     const base: ProjectWorkspace = {
+        branch: `worktree/${id}`,
         createdAt: 1,
         gitCommonDir: `/work/${projectId}/.git`,
         id,

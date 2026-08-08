@@ -528,6 +528,18 @@ async function runOwnedLocalProtocolServer(
                     );
                 }
             },
+            onWorkspaceBranchError: (error, projectId, workspaceId) => {
+                daemonLog.record(
+                    "warning",
+                    "workspace_branch_rename_failed",
+                    "Rig renamed the workspace, but its Git branch kept the name it already had.",
+                    {
+                        error: errorToMessage(error),
+                        projectId,
+                        workspaceId,
+                    },
+                );
+            },
             onWorkspaceCleanupError: (error, projectId, workspaceId) => {
                 daemonLog.record(
                     "warning",

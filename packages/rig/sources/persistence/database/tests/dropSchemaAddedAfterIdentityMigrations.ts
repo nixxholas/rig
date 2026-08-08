@@ -26,6 +26,9 @@ export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase
     )) {
         database.run(sql.raw(`DROP TABLE "${table.name}"`));
     }
+    database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
+    database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
+    database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
     agentSessionSharing(database);
     sessionShareEntryLog(database);
 }

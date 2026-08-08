@@ -148,6 +148,7 @@ function seed(): SessionDatabase {
         .insert(projectWorkspaces)
         .values({
             baseRef: "main",
+            branch: "worktree/worktree",
             createdAtMs: 1,
             gitAhead: 0,
             gitBehind: 0,
@@ -157,6 +158,7 @@ function seed(): SessionDatabase {
             kind: "worktree",
             name: "Worktree",
             nameKey: "worktree",
+            nameConfigured: false,
             orderKey: "a0",
             path: "/rig-w1",
             presence: "present",

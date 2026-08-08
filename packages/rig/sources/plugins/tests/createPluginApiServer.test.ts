@@ -1065,6 +1065,7 @@ async function createWorkspaceApiFixture(
     const workspaceId = "workspace-1";
     vi.spyOn(store, "listWorkspaces").mockReturnValue([
         {
+            branch: "worktree/plugin-work",
             createdAt: 1,
             gitCommonDir: workspacePath,
             id: workspaceId,

@@ -26,7 +26,7 @@ After the first message in a chat we generate the session title. We should
 generate the workspace name, the chat name, and the branch name — probably
 best generated separately.
 
-On the first message we synchronously run inference and get a snake_case name,
+On the first message we synchronously run inference and get a kebab-case name,
 then rename the whole folder. The three-digit NNN prefix is kept; we change
 only the part after it. Only after that do we launch the real inference
 — the actual agent for the session and so on. Renaming later would not work,

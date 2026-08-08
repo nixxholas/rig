@@ -3397,6 +3397,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const createdAt = now();
         const optimistic: ProjectWorkspace = {
             ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+            // Daemon-owned; the authoritative answer names the branch it actually made.
+            branch: "",
             createdAt,
             // Daemon-owned and unknown until the authoritative answer replaces this row.
             gitCommonDir: "",

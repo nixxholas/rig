@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
 import { projectNameKey, workspaceBranchName } from "../../project/projectIdentity.js";
@@ -8,20 +8,20 @@ import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
 import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
 import { workspaceScope } from "./workspaceScope.js";
 
-export interface WorkspaceRenameResult {
-    /** Branch the workspace should be on once Git has caught up with the new name. */
-    branch: string;
+export interface WorkspaceInheritNameResult {
+    /** Branch the workspace should be on once Git has caught up; absent when nothing changed. */
+    branch?: string;
     changed: number;
-    name: string;
 }
 
 /**
- * Renames a workspace on a person's behalf and moves its branch with the name.
+ * Gives a workspace the name its first chat arrived at, and moves its branch with it.
  *
- * The name is the only name a workspace has, so this also records that a person chose it: a
- * workspace someone has named is never renamed again by its first chat.
+ * Only a workspace created with a placeholder name is named this way. `name_configured` says the
+ * name was already chosen deliberately — by the person, or by the agent that asked for the
+ * workspace — and it makes this a no-op rather than a correction.
  */
-export function workspaceRename(
+export function workspaceInheritName(
     tx: TX,
     input: {
         id: string;
@@ -29,9 +29,8 @@ export function workspaceRename(
         name: string;
         now: number;
         projectId: string;
-        version?: number;
     },
-): WorkspaceRenameResult {
+): WorkspaceInheritNameResult {
     return inTx(tx, (tx) => {
         const name = reserveUniqueWorkspaceName(tx, {
             excludeWorkspaceId: input.id,
@@ -53,13 +52,17 @@ export function workspaceRename(
                     branch,
                     name,
                     nameKey: projectNameKey(name),
-                    nameConfigured: true,
                     updatedAtMs: input.now,
                     version: sql`${projectWorkspaces.version} + 1`,
                 })
-                .where(workspaceScope(input.projectId, input.id, input.version))
+                .where(
+                    and(
+                        workspaceScope(input.projectId, input.id),
+                        eq(projectWorkspaces.nameConfigured, false),
+                    ),
+                )
                 .run().changes,
         );
-        return { branch, changed, name };
+        return { ...(changed === 0 ? {} : { branch }), changed };
     });
 }

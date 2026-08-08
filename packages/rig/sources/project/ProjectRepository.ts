@@ -67,13 +67,14 @@ import { workspaceApplyGitFacts } from "../persistence/project/workspaceApplyGit
 import { workspaceApplyProbe } from "../persistence/project/workspaceApplyProbe.js";
 import { workspaceBeginArchive } from "../persistence/project/workspaceBeginArchive.js";
 import { workspaceCompleteArchive } from "../persistence/project/workspaceCompleteArchive.js";
-import { workspaceInheritTitle } from "../persistence/project/workspaceInheritTitle.js";
+import { workspaceInheritName } from "../persistence/project/workspaceInheritName.js";
 import { workspaceMarkInitializationFailed } from "../persistence/project/workspaceMarkInitializationFailed.js";
 import { workspaceMarkFailed } from "../persistence/project/workspaceMarkFailed.js";
 import { workspaceMarkReady } from "../persistence/project/workspaceMarkReady.js";
 import { workspaceRecordInitialization } from "../persistence/project/workspaceRecordInitialization.js";
 import { workspaceRename } from "../persistence/project/workspaceRename.js";
 import { workspaceReorder } from "../persistence/project/workspaceReorder.js";
+import { workspaceSetBranch } from "../persistence/project/workspaceSetBranch.js";
 import { projectSetDefaultBranch } from "../persistence/project/projectSetDefaultBranch.js";
 import { projectSetSettings } from "../persistence/project/projectSetSettings.js";
 import { inTx } from "../persistence/inTx.js";
@@ -95,6 +96,7 @@ import { readGitCommonDir } from "../git/readGitCommonDir.js";
 import { readGitTopLevel } from "../git/readGitTopLevel.js";
 import { remoteProjectName } from "../git/remoteProjectName.js";
 import { removeGitWorktree } from "../git/removeGitWorktree.js";
+import { renameGitBranch } from "../git/renameGitBranch.js";
 import { resolveWorkspaceBase } from "../git/resolveWorkspaceBase.js";
 import { runGitCommand } from "../git/runGitCommand.js";
 import { runSandboxedGitCommand } from "../git/runSandboxedGitCommand.js";
@@ -165,6 +167,8 @@ export interface ProjectRepositoryOptions {
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
     onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void;
+    /** Moving the branch is best-effort after the new name has already committed. */
+    onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     /** Cleanup is best-effort after logical archival has already committed. */
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     stateDirectory?: string;
@@ -190,6 +194,9 @@ export class ProjectRepository {
     readonly #projectInitializationLocks = new Map<string, AsyncLock>();
     readonly #now: () => number;
     readonly #onEvent: ((event: ProjectEvent | ProjectWorkspaceEvent) => void) | undefined;
+    readonly #onWorkspaceBranchError:
+        | ((error: unknown, projectId: string, workspaceId: string) => void)
+        | undefined;
     readonly #onWorkspaceCleanupError:
         | ((error: unknown, projectId: string, workspaceId: string) => void)
         | undefined;
@@ -212,6 +219,7 @@ export class ProjectRepository {
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
         this.#now = options.now ?? Date.now;
         this.#onEvent = options.onEvent;
+        this.#onWorkspaceBranchError = options.onWorkspaceBranchError;
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#taskDrain = options.taskDrain;
         this.#transactionRunner = options.transaction;
@@ -944,9 +952,13 @@ export class ProjectRepository {
                 ...(requestedRef === undefined ? {} : { baseRef: requestedRef }),
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 id: workspaceId,
+                isBranchUnavailable: (branch) => this.#gitBranchExists(gitRefs, branch),
                 isStorageKeyUnavailable: (storageKey) =>
                     this.#workspaceStorageKeyExists(gitRefs, workspaceRoot, storageKey),
                 name,
+                ...(request.nameConfigured === undefined
+                    ? {}
+                    : { nameConfigured: request.nameConfigured }),
                 now: this.#now(),
                 pathForStorageKey: (storageKey) => join(workspaceRoot, storageKey),
                 projectId,
@@ -1033,6 +1045,14 @@ export class ProjectRepository {
         return existsSync(join(commonDirectory, ...ref.split("/"))) || gitRefs.packedRefs.has(ref);
     }
 
+    /** Whether Git already holds this branch. Packed refs are only seen under `worktree/`. */
+    #gitBranchExists(gitRefs: WorkspaceGitRefSnapshot, branch: string): boolean {
+        const commonDirectory = gitRefs.commonDirectory;
+        if (commonDirectory === undefined) return false;
+        const ref = `refs/heads/${branch}`;
+        return existsSync(join(commonDirectory, ...ref.split("/"))) || gitRefs.packedRefs.has(ref);
+    }
+
     renameWorkspace(
         projectId: string,
         workspaceId: string,
@@ -1046,37 +1066,127 @@ export class ProjectRepository {
             throw new Error("The workspace changed before it could be renamed.");
         }
         const name = validateProjectName(requestedName);
-        return this.#mutate((tx) => {
-            const changed = workspaceRename(
-                tx,
-                projectId,
-                workspaceId,
+        const branchTaken = this.#workspaceBranchProbe(projectId);
+        const renamed = this.#mutate((tx) => {
+            const result = workspaceRename(tx, {
+                id: workspaceId,
+                isBranchUnavailable: branchTaken,
                 name,
-                this.#now(),
-                expectedVersion,
-            );
-            if (changed === 0) {
+                now: this.#now(),
+                projectId,
+                ...(expectedVersion === undefined ? {} : { version: expectedVersion }),
+            });
+            if (result.changed === 0) {
                 if (expectedVersion !== undefined) {
                     throw new Error("The workspace changed before it could be renamed.");
                 }
-                return this.getWorkspace(projectId, workspaceId);
+                return { branch: undefined, workspace: this.getWorkspace(projectId, workspaceId) };
             }
-            return this.#publishedWorkspace(projectId, workspaceId, mutationId);
+            return {
+                branch: result.branch,
+                workspace: this.#publishedWorkspace(projectId, workspaceId, mutationId),
+            };
         });
+        this.#moveWorkspaceBranch(current, renamed.branch);
+        return renamed.workspace;
     }
 
-    inheritWorkspaceTitle(
+    /**
+     * Gives a workspace the name its first chat arrived at.
+     *
+     * A workspace has one name, so the inherited name replaces the placeholder it was created with
+     * instead of sitting beside it. A workspace someone has already named keeps that name.
+     */
+    inheritWorkspaceName(
         projectId: string,
         workspaceId: string,
-        title: string,
+        requestedName: string,
     ): ProjectWorkspace | undefined {
         const current = this.getWorkspace(projectId, workspaceId);
-        if (current === undefined || current.title !== undefined) return current;
-        return this.#mutate((tx) => {
-            const changed = workspaceInheritTitle(tx, projectId, workspaceId, title, this.#now());
-            return changed === 0
-                ? this.getWorkspace(projectId, workspaceId)
-                : this.#publishedWorkspace(projectId, workspaceId);
+        if (current === undefined) return undefined;
+        const name = validateProjectName(requestedName);
+        const branchTaken = this.#workspaceBranchProbe(projectId);
+        const inherited = this.#mutate((tx) => {
+            const result = workspaceInheritName(tx, {
+                id: workspaceId,
+                isBranchUnavailable: branchTaken,
+                name,
+                now: this.#now(),
+                projectId,
+            });
+            return {
+                branch: result.branch,
+                workspace:
+                    result.changed === 0
+                        ? this.getWorkspace(projectId, workspaceId)
+                        : this.#publishedWorkspace(projectId, workspaceId),
+            };
+        });
+        this.#moveWorkspaceBranch(current, inherited.branch);
+        return inherited.workspace;
+    }
+
+    /** Reads the project's branches once so every candidate check is only set membership. */
+    #workspaceBranchProbe(projectId: string): (branch: string) => boolean {
+        const project = this.getProject(projectId);
+        if (project === undefined) return () => false;
+        const gitRefs = workspaceGitRefSnapshot(project.path);
+        return (branch) => this.#gitBranchExists(gitRefs, branch);
+    }
+
+    /**
+     * Moves the worktree's branch to the name the workspace now has.
+     *
+     * The branch is renamed after the name is durable, because the rename is Git's work and a
+     * running agent must not wait for it. Git keeping the old branch is not a failure of the
+     * rename the person asked for, so the name stands and the recorded branch goes back to the one
+     * Git actually has.
+     */
+    #moveWorkspaceBranch(previous: ProjectWorkspace, branch: string | undefined): void {
+        if (branch === undefined || branch === previous.branch) return;
+        if (previous.status !== "ready") return;
+        this.#runBackgroundTask(async () => {
+            await this.#withWorkspaceLifecycleLock(previous.id, async () => {
+                if (this.#closed) return;
+                const workspace = this.getWorkspace(previous.projectId, previous.id);
+                // A later rename may already have moved the recorded branch past this one, and
+                // this hop still runs: that rename starts from this branch, so skipping it would
+                // leave Git a step behind with nothing able to catch it up again.
+                if (workspace === undefined || workspace.status !== "ready") return;
+                try {
+                    // Every worktree of a project shares one set of refs and reflogs, so branch
+                    // work takes the project's Git lock the way worktree creation does.
+                    await this.#projectInitializationLock(previous.projectId).runInLock(
+                        async () =>
+                            await renameGitBranch({
+                                expectedCommonDir: workspace.gitCommonDir,
+                                from: previous.branch,
+                                git: this.#git,
+                                to: branch,
+                                workspacePath: workspace.path,
+                            }),
+                    );
+                } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
+                    if (this.#closed) return;
+                    // A later rename may already have replaced this one, and it owns the recorded
+                    // branch from then on. Reverting it here would strand that rename instead.
+                    if (this.getWorkspace(previous.projectId, previous.id)?.branch !== branch) {
+                        return;
+                    }
+                    this.#onWorkspaceBranchError?.(error, previous.projectId, previous.id);
+                    this.#mutate((tx) => {
+                        const changed = workspaceSetBranch(
+                            tx,
+                            previous.projectId,
+                            previous.id,
+                            previous.branch,
+                            this.#now(),
+                        );
+                        if (changed > 0) this.#publishedWorkspace(previous.projectId, previous.id);
+                    });
+                }
+            });
         });
     }
 
@@ -1648,13 +1758,40 @@ export class ProjectRepository {
         commit: string,
     ): Promise<void> {
         if (this.#closed) return;
+        // The branch may already have followed a rename made while the checkout was reserved.
+        const branch =
+            this.getWorkspace(workspace.projectId, workspace.id)?.branch ?? workspace.branch;
         await createGitWorktree({
-            branch: `worktree/${workspace.storageKey}`,
+            branch,
             commit,
             expectedCommonDir: workspace.gitCommonDir,
             git: this.#git,
             projectPath,
             workspacePath: workspace.path,
+        });
+        // A rename landing during the checkout is not moved by the branch mover, which leaves
+        // workspaces that are not ready alone. The branch Git just created is the real one.
+        if (this.#closed) return;
+        this.#mutate((tx) => {
+            const stored = this.getWorkspace(workspace.projectId, workspace.id);
+            if (stored === undefined || stored.branch === branch) return;
+            const changed = workspaceSetBranch(
+                tx,
+                workspace.projectId,
+                workspace.id,
+                branch,
+                this.#now(),
+            );
+            if (changed > 0) {
+                this.#publishedWorkspace(workspace.projectId, workspace.id);
+                this.#onWorkspaceBranchError?.(
+                    new Error(
+                        `The workspace was renamed while it was being created, so its branch stayed '${branch}'.`,
+                    ),
+                    workspace.projectId,
+                    workspace.id,
+                );
+            }
         });
     }
 

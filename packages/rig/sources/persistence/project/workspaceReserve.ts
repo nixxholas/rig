@@ -1,10 +1,16 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
-import { projectNameKey, projectStorageKey } from "../../project/projectIdentity.js";
+import {
+    projectNameKey,
+    projectStorageKey,
+    workspaceBranchName,
+} from "../../project/projectIdentity.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
+import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
 
 export interface WorkspaceReserveInput {
     baseCommit?: string;
@@ -12,11 +18,14 @@ export interface WorkspaceReserveInput {
     creatorSessionId?: string;
     gitCommonDir?: string;
     id: string;
+    isBranchUnavailable?: (branch: string) => boolean;
     isStorageKeyUnavailable?: (storageKey: string) => boolean;
     name: string;
+    nameConfigured?: boolean;
     now: number;
     pathForStorageKey: (storageKey: string) => string;
     projectId: string;
+    /** Names both the storage key and the branch when Git's refs could not be read in full. */
     storageKeySeed?: string;
 }
 
@@ -49,19 +58,9 @@ export function workspaceReserve(
             return { created: false, workspaceId: retry.id };
         }
 
-        const name = reserveUnique(input.name, (candidate) => {
-            return (
-                tx
-                    .select({ id: projectWorkspaces.id })
-                    .from(projectWorkspaces)
-                    .where(
-                        and(
-                            eq(projectWorkspaces.projectId, input.projectId),
-                            eq(projectWorkspaces.nameKey, projectNameKey(candidate)),
-                        ),
-                    )
-                    .get() !== undefined
-            );
+        const name = reserveUniqueWorkspaceName(tx, {
+            name: input.name,
+            projectId: input.projectId,
         });
         const storageKey = reserveUniqueKey(
             input.storageKeySeed ?? projectStorageKey(input.name),
@@ -81,6 +80,15 @@ export function workspaceReserve(
                 );
             },
         );
+        // A seed carries the workspace's own ID, so an unreadable ref store cannot hide a branch
+        // this reservation would otherwise collide with when the worktree is finally created.
+        const branch = reserveUniqueBranch(tx, {
+            branch: workspaceBranchName(input.storageKeySeed ?? name),
+            ...(input.isBranchUnavailable === undefined
+                ? {}
+                : { isBranchUnavailable: input.isBranchUnavailable }),
+            projectId: input.projectId,
+        });
         const first = tx
             .select({ orderKey: projectWorkspaces.orderKey })
             .from(projectWorkspaces)
@@ -92,6 +100,7 @@ export function workspaceReserve(
             .values({
                 baseCommit: input.baseCommit ?? null,
                 baseRef: input.baseRef ?? null,
+                branch,
                 creatorSessionId: input.creatorSessionId,
                 createdAtMs: input.now,
                 gitAhead: 0,
@@ -104,6 +113,7 @@ export function workspaceReserve(
                 kind: "git_worktree",
                 name,
                 nameKey: projectNameKey(name),
+                nameConfigured: input.nameConfigured ?? false,
                 orderKey: generateKeyBetween(null, first?.orderKey ?? null),
                 path: input.pathForStorageKey(storageKey),
                 presence: "present",
@@ -116,14 +126,6 @@ export function workspaceReserve(
             .run();
         return { created: true, workspaceId: input.id };
     });
-}
-
-function reserveUnique(base: string, taken: (candidate: string) => boolean): string {
-    if (!taken(base)) return base;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${base} (${String(suffix)})`;
-        if (!taken(candidate)) return candidate;
-    }
 }
 
 function reserveUniqueKey(base: string, taken: (candidate: string) => boolean): string {

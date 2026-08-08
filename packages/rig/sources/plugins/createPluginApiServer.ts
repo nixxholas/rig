@@ -1024,6 +1024,9 @@ async function handleRequest(
                     ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
                     ...(body.id === undefined ? {} : { id: body.id }),
                     name: body.name,
+                    // A plugin names the workspace for its own reasons, and a chat must not
+                    // rename it out from under whatever the plugin is tracking.
+                    nameConfigured: true,
                 });
                 if (workspace === undefined) {
                     sendJson(response, 404, { error: "Project not found." });

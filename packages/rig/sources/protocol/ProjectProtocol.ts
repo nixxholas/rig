@@ -224,6 +224,8 @@ export interface ProjectWorkspace {
     /** Immutable commit the workspace was created from; the anchor for its comparison base. */
     baseCommit?: string;
     baseRef?: string;
+    /** Branch Rig manages for this worktree; it follows the workspace name. */
+    branch: string;
     createdAt: number;
     error?: string;
     git?: GitRepositoryFacts;
@@ -237,8 +239,6 @@ export interface ProjectWorkspace {
     projectId: string;
     status: ProjectWorkspaceStatus;
     storageKey: string;
-    /** Stable display title inherited once from the workspace's first chat. */
-    title?: string;
     updatedAt: number;
     version: number;
 }
@@ -249,6 +249,8 @@ export interface CreateProjectWorkspaceRequest {
     /** Client-chosen cuid2 identity. Repeating it returns the same workspace. */
     id?: string;
     name: string;
+    /** Whether `name` was chosen deliberately, which keeps the first chat from replacing it. */
+    nameConfigured?: boolean;
 }
 
 export const registerProjectRequestSchema = Type.Object(

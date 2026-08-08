@@ -9,6 +9,7 @@ export function workspaceReadRow(row: WorkspaceRow): ProjectWorkspace {
         ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
         ...(row.baseCommit === null ? {} : { baseCommit: row.baseCommit }),
         ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+        branch: row.branch,
         createdAt: row.createdAtMs,
         ...(row.error === null ? {} : { error: row.error }),
         ...(git === undefined ? {} : { git }),
@@ -22,7 +23,6 @@ export function workspaceReadRow(row: WorkspaceRow): ProjectWorkspace {
         projectId: row.projectId,
         status: row.status as ProjectWorkspace["status"],
         storageKey: row.storageKey,
-        ...(row.title === null ? {} : { title: row.title }),
         updatedAt: row.updatedAtMs,
         version: row.version,
     };

@@ -3439,7 +3439,6 @@ export class InMemorySession {
     async reset(): Promise<ProtocolSession> {
         this.#shellHistoryRevision += 1;
         this.#clearMetadataSettlement();
-        this.#invalidateSessionMetadata();
         await this.#agentManager?.stopDescendants(this.id);
         const activeRunId = this.#activeRun?.runId;
         await this.abort({ stopDescendants: false });
@@ -3510,6 +3509,10 @@ export class InMemorySession {
         }
 
         this.#shellHistoryRevision += 1;
+        // Naming in flight is reading a transcript that is about to lose turns, and closing the
+        // runtime below would fail its request. Cancelling first keeps that from counting against
+        // the chat as a naming failure.
+        this.#clearMetadataSettlement();
         void this.#killRuntimeProcesses({ includeBackground: true });
         this.#releaseMcpToolLease();
         void this.#runtime?.agent.close();
@@ -3535,7 +3538,6 @@ export class InMemorySession {
                     : [],
             ),
         );
-        this.#invalidateSessionMetadata();
         this.#contextMessages = undefined;
         this.#partialPositions = new Set(
             [...this.#partialPositions].filter((position) => position < target.position),
@@ -7055,20 +7057,6 @@ export class InMemorySession {
         }
     }
 
-    #invalidateSessionMetadata(): void {
-        this.#clearMetadataSettlement();
-        this.#metadataFailures = 0;
-        this.#metadataInitialAttempted = false;
-        this.#metadataNamed = false;
-        this.#metadataRefinementAttempted = false;
-        this.#metadataRunId = undefined;
-        this.#metadataUpdatedAt = undefined;
-        this.#recap = undefined;
-        this.#title = this.#agentMetadata.description;
-        this.#titleError = undefined;
-        this.#titleStatus = this.#title === undefined ? "idle" : "ready";
-    }
-
     #restartMetadataSettlement(): Promise<void> | undefined {
         if (this.#closing || this.#taskDrain?.closing === true) return undefined;
         if (this.isSubagent()) {
@@ -7142,6 +7130,7 @@ export class InMemorySession {
             target.kind === "initial" ? { initial: true } : {},
         );
         if (revision !== this.#metadataRevision || transcript === undefined || this.#closing) {
+            this.#releaseMetadataAttempt(target);
             return;
         }
 
@@ -7200,7 +7189,7 @@ export class InMemorySession {
                     });
                 } catch (error) {
                     if (isDatabaseFailure(error)) throw error;
-                    // Workspace title inheritance is optional enrichment and cannot fail the chat.
+                    // Workspace naming is optional enrichment and cannot fail the chat.
                 }
             }
             completed = true;
@@ -7208,11 +7197,8 @@ export class InMemorySession {
             if (isDatabaseFailure(error)) throw error;
             if (controller.signal.aborted || revision !== this.#metadataRevision) return;
             // Naming can fail for reasons that pass: a busy account, an overloaded model, a
-            // response that arrived empty. The attempt is released so the next settlement can try
-            // again, and the failure count is what eventually ends the attempts.
+            // response that arrived empty. The failure count is what eventually ends the attempts.
             this.#metadataFailures += 1;
-            if (target.kind === "initial") this.#metadataInitialAttempted = false;
-            else this.#metadataRefinementAttempted = false;
             this.#titleStatus = "error";
             this.#titleError = errorToMessage(error);
             this.#append("session_title_changed", {
@@ -7223,7 +7209,21 @@ export class InMemorySession {
             clearTimeout(timeout);
             if (this.#metadataController === controller) this.#metadataController = undefined;
             if (completed) queueMicrotask(() => this.#restartMetadataSettlement());
+            else this.#releaseMetadataAttempt(target);
         }
+    }
+
+    /**
+     * Hands back the one attempt a settlement claimed before it ran.
+     *
+     * A chat gets a limited number of naming attempts, and an attempt that produced no name never
+     * spent one: the run was cancelled by a rewind or a cleared chat, the transcript was not worth
+     * naming yet, or the provider refused. Keeping it claimed would leave the chat unnamed for
+     * good.
+     */
+    #releaseMetadataAttempt(target: MetadataGenerationTarget): void {
+        if (target.kind === "initial") this.#metadataInitialAttempted = false;
+        else this.#metadataRefinementAttempted = false;
     }
 
     async #runQueued(

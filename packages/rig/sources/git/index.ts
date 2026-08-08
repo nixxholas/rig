@@ -27,6 +27,7 @@ export { readGitTopLevel } from "./readGitTopLevel.js";
 export { readGitWorktreeIdentity, type GitWorktreeIdentity } from "./readGitWorktreeIdentity.js";
 export { remoteProjectName } from "./remoteProjectName.js";
 export { removeGitWorktree } from "./removeGitWorktree.js";
+export { renameGitBranch } from "./renameGitBranch.js";
 export {
     resolveGitComparisonBase,
     type GitBaseRunner,

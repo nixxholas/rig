@@ -2057,10 +2057,11 @@ async function handleRequest(
         if (request.method === "POST") {
             const body = await readJson<unknown>(request);
             if (
-                !hasNoUnknownObjectKeys(body, ["baseRef", "id", "name"]) ||
+                !hasNoUnknownObjectKeys(body, ["baseRef", "id", "name", "nameConfigured"]) ||
                 typeof body.name !== "string" ||
                 (body.baseRef !== undefined && typeof body.baseRef !== "string") ||
-                (body.id !== undefined && typeof body.id !== "string")
+                (body.id !== undefined && typeof body.id !== "string") ||
+                (body.nameConfigured !== undefined && typeof body.nameConfigured !== "boolean")
             ) {
                 sendJson(response, 400, { error: "Workspace settings are invalid." });
                 return;
@@ -2070,6 +2071,11 @@ async function handleRequest(
                     ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
                     ...(body.id === undefined ? {} : { id: body.id }),
                     name: body.name,
+                    // A client that sends a placeholder name leaves this unset, and the first
+                    // chat inside the workspace names it instead.
+                    ...(body.nameConfigured === undefined
+                        ? {}
+                        : { nameConfigured: body.nameConfigured }),
                 });
                 if (workspace === undefined) {
                     sendJson(response, 404, { error: "Project not found" });

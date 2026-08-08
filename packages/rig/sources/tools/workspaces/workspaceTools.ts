@@ -51,7 +51,10 @@ export const createWorkspaceTool = defineTool({
                         "Git ref to fork. Omit this to start from the project's main branch on the remote, which is almost always what you want.",
                 }),
             ),
-            name: Type.String({ description: "Human-readable workspace name." }),
+            name: Type.String({
+                description:
+                    'A short title naming the work, written the way a person would write it, such as "Retry policy rewrite". Rig builds the Git branch and folder from it, so write a title rather than a slug or a path.',
+            }),
         },
         { additionalProperties: false },
     ),

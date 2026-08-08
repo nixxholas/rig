@@ -117,6 +117,9 @@ describe("migrateSessionDatabase", () => {
                 "ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_changed_at_ms INTEGER NOT NULL DEFAULT 0",
             ),
         );
+        opened.database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
+        opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
+        opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
         opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
         migrateSessionDatabase(opened.database);
@@ -242,6 +245,15 @@ describe("migrateSessionDatabase", () => {
             sql.raw(
                 "CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1)",
             ),
+        );
+        opened.database.run(
+            sql.raw(`
+                CREATE TABLE project_workspaces (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    storage_key TEXT NOT NULL,
+                    title TEXT
+                )
+            `),
         );
         opened.database.run(
             sql.raw(`

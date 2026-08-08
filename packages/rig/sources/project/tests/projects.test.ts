@@ -1821,7 +1821,11 @@ describe("projects", () => {
             status: "ready",
             storageKey: "workspace-3",
         });
-        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/workspace-3");
+        // The folder and the branch avoid collisions separately: the occupied folder and the
+        // packed `worktree/workspace-2` ref move the storage key on, while the branch the
+        // workspace name asks for is free.
+        expect(ready.branch).toBe("worktree/workspace");
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/workspace");
         expect(fixture.store.create({ cwd: ready.path }).snapshot()).toMatchObject({
             projectId: project.id,
             workspaceId: ready.id,
@@ -2620,13 +2624,77 @@ describe("projects", () => {
         ).rejects.toThrow(/different base/);
     });
 
-    it("inherits a workspace title once and publishes the updated workspace", async () => {
+    it("takes the name of its first chat and moves its branch to match", async () => {
         const fixture = await createFixture();
-        const repository = await createRepository(fixture.root, "workspace-title");
+        const repository = await createRepository(fixture.root, "workspace-naming");
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
-            name: "Workspace Branch",
+            name: "Workspace 12",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            created.id,
+            (workspace) => workspace.status === "ready",
+        );
+        expect(ready.branch).toBe("worktree/workspace-12");
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/workspace-12");
+
+        const events: string[] = [];
+        const projects = openProjects(fixture, (event) => events.push(event.type));
+        try {
+            const named = projects.repository.inheritWorkspaceName(
+                projectId,
+                ready.id,
+                "Fix Title Inheritance",
+            );
+            expect(named).toMatchObject({
+                branch: "worktree/fix-title-inheritance",
+                name: "Fix Title Inheritance",
+            });
+            // The folder never moves: a chat is already working inside it.
+            expect(named?.path).toBe(ready.path);
+            expect(events).toEqual(["workspace_updated"]);
+            await waitForBranch(ready.path, "worktree/fix-title-inheritance");
+        } finally {
+            projects.close();
+        }
+    });
+
+    it("leaves the branch alone when a new name spells the same branch", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "workspace-same-branch");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const created = await fixture.store.createWorkspace(projectId, {
+            baseRef: "main",
+            name: "Release prep",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            created.id,
+            (workspace) => workspace.status === "ready",
+        );
+        expect(ready.branch).toBe("worktree/release-prep");
+
+        // Only the capitals change, so the branch the workspace is already on still spells it.
+        expect(fixture.store.renameWorkspace(projectId, ready.id, "Release Prep")).toMatchObject({
+            branch: "worktree/release-prep",
+            name: "Release Prep",
+        });
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/release-prep");
+    });
+
+    it("leaves a workspace its owner has named alone, and moves the branch they chose", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "workspace-user-named");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const created = await fixture.store.createWorkspace(projectId, {
+            baseRef: "main",
+            name: "Workspace 13",
         });
         if (created === undefined) throw new Error("Expected a workspace.");
         const ready = await waitForWorkspace(
@@ -2636,25 +2704,87 @@ describe("projects", () => {
             (workspace) => workspace.status === "ready",
         );
 
-        const opened = openSessionDatabase(fixture.databasePath);
-        const events: string[] = [];
-        const projects = new ProjectRepository({
-            database: opened.database,
-            homeDirectory: fixture.home,
-            onEvent: (event) => events.push(event.type),
-            stateDirectory: fixture.state,
+        expect(fixture.store.renameWorkspace(projectId, ready.id, "Release Prep")).toMatchObject({
+            branch: "worktree/release-prep",
+            name: "Release Prep",
         });
+        await waitForBranch(ready.path, "worktree/release-prep");
+
+        const projects = openProjects(fixture);
         try {
             expect(
-                projects.inheritWorkspaceTitle(projectId, ready.id, "First Chat Workspace Title"),
-            ).toMatchObject({ title: "First Chat Workspace Title" });
-            expect(
-                projects.inheritWorkspaceTitle(projectId, ready.id, "Later Chat Title"),
-            ).toMatchObject({ title: "First Chat Workspace Title" });
-            expect(events).toEqual(["workspace_updated"]);
+                projects.repository.inheritWorkspaceName(projectId, ready.id, "First Chat Name"),
+            ).toMatchObject({ branch: "worktree/release-prep", name: "Release Prep" });
         } finally {
             projects.close();
-            opened.client.close();
+        }
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/release-prep");
+    });
+
+    it("keeps the name an agent chose when it asked for the workspace", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "workspace-agent-named");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const created = await fixture.store.createWorkspace(projectId, {
+            baseRef: "main",
+            name: "Investigate Parser",
+            nameConfigured: true,
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            created.id,
+            (workspace) => workspace.status === "ready",
+        );
+        expect(ready.branch).toBe("worktree/investigate-parser");
+
+        const projects = openProjects(fixture);
+        try {
+            expect(
+                projects.repository.inheritWorkspaceName(projectId, ready.id, "First Chat Name"),
+            ).toMatchObject({ branch: "worktree/investigate-parser", name: "Investigate Parser" });
+        } finally {
+            projects.close();
+        }
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe(
+            "worktree/investigate-parser",
+        );
+    });
+
+    it("keeps two workspaces named the same apart, in the name and in the branch", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "workspace-name-clash");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const ready = [];
+        for (const name of ["Workspace 14", "Workspace 15"]) {
+            const created = await fixture.store.createWorkspace(projectId, {
+                baseRef: "main",
+                name,
+            });
+            if (created === undefined) throw new Error("Expected a workspace.");
+            ready.push(
+                await waitForWorkspace(
+                    fixture.store,
+                    projectId,
+                    created.id,
+                    (workspace) => workspace.status === "ready",
+                ),
+            );
+        }
+
+        const projects = openProjects(fixture);
+        try {
+            expect(
+                projects.repository.inheritWorkspaceName(projectId, ready[0]!.id, "Shared Name"),
+            ).toMatchObject({ branch: "worktree/shared-name", name: "Shared Name" });
+            expect(
+                projects.repository.inheritWorkspaceName(projectId, ready[1]!.id, "Shared Name"),
+            ).toMatchObject({ branch: "worktree/shared-name-2", name: "Shared Name (2)" });
+            await waitForBranch(ready[0]!.path, "worktree/shared-name");
+            await waitForBranch(ready[1]!.path, "worktree/shared-name-2");
+        } finally {
+            projects.close();
         }
     });
 
@@ -2969,6 +3099,35 @@ async function createRepository(root: string, name: string): Promise<string> {
     await git(repository, ["add", "README.md"]);
     await git(repository, ["commit", "-m", "Initial"]);
     return repository;
+}
+
+function openProjects(
+    fixture: { databasePath: string; home: string; state: string },
+    onEvent?: (event: { type: string }) => void,
+): { close: () => void; repository: ProjectRepository } {
+    const opened = openSessionDatabase(fixture.databasePath);
+    const repository = new ProjectRepository({
+        database: opened.database,
+        homeDirectory: fixture.home,
+        ...(onEvent === undefined ? {} : { onEvent }),
+        stateDirectory: fixture.state,
+    });
+    return {
+        close: () => {
+            repository.close();
+            opened.client.close();
+        },
+        repository,
+    };
+}
+
+async function waitForBranch(workspacePath: string, branch: string): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+        if ((await git(workspacePath, ["branch", "--show-current"])) === branch) return;
+        if (Date.now() >= deadline) throw new Error(`Timed out waiting for branch ${branch}.`);
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {

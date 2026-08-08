@@ -384,6 +384,7 @@ describe("rig-connect groups against a live daemon", () => {
         const activeProjectId = active[0]!.snapshot().projectId;
         const archivedWorkspace: DaemonProjectWorkspace = {
             archivedAt: 1,
+            branch: "worktree/archived-workspace",
             createdAt: 1,
             gitCommonDir: "/tmp/rig-all-active/.git",
             id: "archived-workspace",

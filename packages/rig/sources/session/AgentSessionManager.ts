@@ -174,7 +174,12 @@ export class AgentSessionManager {
         if (owner.isSubagent()) {
             throw new Error("Only a primary session can create a managed workspace.");
         }
-        const workspace = await create(ownerSessionId, owner.snapshot().projectId, input);
+        // An agent describes the work when it asks for a workspace, so that name stands rather
+        // than being replaced by whatever the first chat inside it ends up called.
+        const workspace = await create(ownerSessionId, owner.snapshot().projectId, {
+            ...input,
+            nameConfigured: true,
+        });
         if (workspace === undefined) throw new Error("The workspace could not be created.");
         return workspace;
     }

@@ -827,7 +827,11 @@ export class GroupStore {
         const cached = this.#workspaceGroups.get(workspace.id);
         const sessions = (sessionsByWorkspace.get(workspace.id) ?? []).sort(byOrderKey);
         const terminals = this.#workspaceTerminals.get(workspace.id) ?? EMPTY_TERMINALS;
-        const branch = this.#workspaceGit.get(workspace.id)?.branch ?? workspace.git?.branch;
+        // What Git reports wins; the managed branch answers before the first probe arrives. An
+        // optimistic local workspace has no branch yet, and an empty one names nothing.
+        const managedBranch = workspace.branch.length === 0 ? undefined : workspace.branch;
+        const branch =
+            this.#workspaceGit.get(workspace.id)?.branch ?? workspace.git?.branch ?? managedBranch;
         if (
             cached !== undefined &&
             this.#workspaceGroupSources.get(workspace.id) === workspace &&
@@ -848,7 +852,6 @@ export class GroupStore {
             sessions,
             terminals,
             status: workspace.status as WorkspaceGroup["status"],
-            ...(workspace.title === undefined ? {} : { title: workspace.title }),
             unread: unreadOf(sessions),
             usage: usageOf(sessions),
             ...(this.#workspaceGit.has(workspace.id)

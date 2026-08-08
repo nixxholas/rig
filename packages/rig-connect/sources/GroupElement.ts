@@ -107,7 +107,6 @@ export interface WorkspaceGroup {
     readonly presence: "present" | "missing";
     readonly projectId: string;
     readonly status: "initializing" | "ready" | "failed";
-    readonly title?: string;
     readonly usage: GroupUsage;
     /** Chats in this worktree that are waiting. */
     readonly unread: GroupUnread;

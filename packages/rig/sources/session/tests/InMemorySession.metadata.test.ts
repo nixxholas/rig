@@ -301,7 +301,7 @@ describe("InMemorySession metadata settlement", () => {
         expect(harness.metadataContexts).toHaveLength(3);
     });
 
-    it("lets a database failure from initial workspace title inheritance escape the settlement", async () => {
+    it("lets a database failure from initial workspace naming escape the settlement", async () => {
         const databaseError = captureDriverError();
         let harness: ReturnType<typeof createHarness> | undefined;
 
@@ -321,9 +321,9 @@ describe("InMemorySession metadata settlement", () => {
         expect(harness?.session.snapshot().titleStatus).not.toBe("error");
     });
 
-    it("keeps ordinary initial workspace title inheritance failures optional", async () => {
+    it("keeps ordinary initial workspace naming failures optional", async () => {
         const inherited = vi.fn(() => {
-            throw new Error("Workspace title inheritance is unavailable.");
+            throw new Error("Workspace naming is unavailable.");
         });
         const harness = createHarness({
             onInitialTitle: inherited,
@@ -363,13 +363,31 @@ describe("InMemorySession metadata settlement", () => {
         expect(harness.session.snapshot().title).not.toBe("Stale generated title");
     });
 
-    it("invalidates stale metadata on rewind and reset", async () => {
-        const harness = createHarness();
+    it("gives back the naming attempt a cleared chat cancelled", async () => {
+        // Naming hangs until it is cancelled, so every attempt here ends the way a cleared chat
+        // ends one. A chat gets an initial attempt and a refining one; if cancelling spent them,
+        // the third request would never be named at all.
+        const harness = createHarness({ afterMetadataAbort: Promise.resolve() });
+
+        for (const text of ["Ask the wrong thing.", "Ask a different wrong thing."]) {
+            harness.session.submit({ text });
+            await vi.waitFor(() => expect(harness.metadataSignals).not.toHaveLength(0));
+            const pending = harness.metadataSignals.length;
+            await harness.session.reset();
+            expect(harness.metadataSignals[pending - 1]?.aborted).toBe(true);
+        }
+
+        harness.session.submit({ text: "Ask the right thing." });
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(3));
+    });
+
+    it("does not count naming cancelled by a rewind as a naming failure", async () => {
+        const harness = createHarness({ afterMetadataAbort: Promise.resolve() });
         const first = harness.session.submit({ text: "Keep this turn." });
         await harness.session.waitForRun(first.runId);
         const second = harness.session.submit({ text: "Remove this turn." });
         await harness.session.waitForRun(second.runId);
-        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
+        await vi.waitFor(() => expect(harness.metadataSignals).not.toHaveLength(0));
 
         const secondMessage = harness.session
             .snapshot()
@@ -381,20 +399,42 @@ describe("InMemorySession metadata settlement", () => {
             );
         if (secondMessage === undefined) throw new Error("Second user message was not persisted.");
         harness.session.rewind(secondMessage.id);
-        await vi.waitFor(() =>
-            expect(harness.session.snapshot()).toMatchObject({
-                metadataRunId: first.runId,
-                titleStatus: "ready",
-            }),
-        );
 
-        await harness.session.reset();
-        expect(harness.session.snapshot()).toMatchObject({ titleStatus: "idle" });
-        expect(harness.session.snapshot()).not.toHaveProperty("metadataRunId");
-        expect(harness.session.snapshot()).not.toHaveProperty("metadataUpdatedAt");
-        expect(harness.session.snapshot()).not.toHaveProperty("recap");
+        // Rewinding closes the runtime the naming request was running through. That is the rewind
+        // cancelling its own work, not the chat failing to earn a name.
+        await vi.waitFor(() => expect(harness.metadataSignals[0]?.aborted).toBe(true));
         await Promise.resolve();
-        expect(harness.metadataContexts).toHaveLength(4);
+        expect(harness.session.snapshot().titleStatus).not.toBe("error");
+    });
+
+    it("keeps the name a chat has been given through rewind and reset", async () => {
+        const inherited = vi.fn();
+        const harness = createHarness({ onInitialTitle: inherited, workspaceId: "workspace-1" });
+        const first = harness.session.submit({ text: "Keep this turn." });
+        await harness.session.waitForRun(first.runId);
+        const second = harness.session.submit({ text: "Remove this turn." });
+        await harness.session.waitForRun(second.runId);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
+        const named = harness.session.snapshot().title;
+
+        const secondMessage = harness.session
+            .snapshot()
+            .snapshot.messages.find(
+                (message) =>
+                    message.role === "user" &&
+                    message.blocks[0]?.type === "text" &&
+                    message.blocks[0].text === "Remove this turn.",
+            );
+        if (secondMessage === undefined) throw new Error("Second user message was not persisted.");
+        harness.session.rewind(secondMessage.id);
+        expect(harness.session.snapshot()).toMatchObject({ title: named, titleStatus: "ready" });
+
+        // Clearing the chat empties the transcript, and the name the chat earned outlives it.
+        await harness.session.reset();
+        expect(harness.session.snapshot()).toMatchObject({ title: named, titleStatus: "ready" });
+        await Promise.resolve();
+        expect(harness.metadataContexts).toHaveLength(2);
+        expect(inherited).toHaveBeenCalledOnce();
     });
 
     it("does not let a provider that ignores abort block task-drain shutdown", async () => {

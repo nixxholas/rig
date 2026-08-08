@@ -1,24 +1,26 @@
-import { and, isNull, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
+
 import { projectWorkspaces } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 import { workspaceScope } from "./workspaceScope.js";
 
-export function workspaceInheritTitle(
+/** Records the branch a workspace is actually on, after Git has moved it or refused to. */
+export function workspaceSetBranch(
     tx: TX,
     projectId: string,
     id: string,
-    title: string,
+    branch: string,
     now: number,
 ): number {
     return Number(
         tx
             .update(projectWorkspaces)
             .set({
-                title,
+                branch,
                 updatedAtMs: now,
                 version: sql`${projectWorkspaces.version} + 1`,
             })
-            .where(and(workspaceScope(projectId, id), isNull(projectWorkspaces.title)))
+            .where(workspaceScope(projectId, id))
             .run().changes,
     );
 }

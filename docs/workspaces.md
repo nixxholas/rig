@@ -53,6 +53,15 @@ workspaces.
 Never guess a workspace path. Use the `path` that `create_workspace`,
 `list_workspaces`, or `delegate_to_workspace` returns.
 
+## Naming
+
+A workspace is created with a placeholder name, and takes the name of its first
+chat once that chat is named. Its branch follows: renaming a workspace, whether
+the first chat does it or a person does, renames the Git branch to match. The
+folder never moves, because a chat is already working inside it.
+
+A workspace a person has named is never renamed again by a chat.
+
 ## How a workspace is created
 
 `create_workspace` takes a human-readable `name` and an optional `base_ref`:
@@ -74,7 +83,7 @@ What happens, in order:
    and the workspace is published as `initializing`. The tool returns at this
    point.
 3. **The worktree is materialized in the background**: `git worktree add -b
-worktree/<storage key> <path> <commit>`, then Git's answer is verified — the
+worktree/<branch key> <path> <commit>`, then Git's answer is verified — the
    worktree must be at exactly the requested path and belong to the expected
    repository.
 4. **Configured sync files are replicated** — every path in `workspace.sync`
@@ -94,8 +103,9 @@ worktree/<storage key> <path> <commit>`, then Git's answer is verified — the
 Two consequences worth remembering:
 
 - A worktree is **always** a branch, created with the worktree, named
-  `worktree/<storage key>`. Other tooling keys off branch names, so do not
-  rename branches casually.
+  `worktree/<branch key>` — the workspace name in kebab-case, with a numeric
+  suffix when Git or another workspace already holds it. Other tooling keys off
+  branch names, so do not rename branches casually.
 - Creation is not instant: the checkout and its setup commands take real time,
   and a fresh workspace has no warm build cache or context.
 
