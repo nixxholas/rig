@@ -157,19 +157,22 @@ export async function replicateProfileToP2pPeer(options: {
 }
 
 export class P2pProfileReplicationError extends Error {
-    constructor(
-        readonly status: number,
-        message: string,
-    ) {
+    readonly status: number;
+
+    constructor(status: number, message: string) {
         super(message);
         this.name = "P2pProfileReplicationError";
+        this.status = status;
     }
 }
 
 class NewerP2pProfileError extends Error {
-    constructor(readonly profile: RigProfile) {
+    readonly profile: RigProfile;
+
+    constructor(profile: RigProfile) {
         super("The remote Rig returned a newer human profile.");
         this.name = "NewerP2pProfileError";
+        this.profile = profile;
     }
 }
 
