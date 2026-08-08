@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChatDelta, MutationRejectedDelta } from "@/ChatElement.js";
-import { connectRig, ProjectRegistrationError, ProjectRegistrationProtocolError } from "@/index.js";
+import {
+    connectRig,
+    MAXIMUM_RIG_PROTOCOL_VERSION,
+    ProjectRegistrationError,
+    ProjectRegistrationProtocolError,
+} from "@/index.js";
 import type { SessionFinished } from "@/connectRig.js";
 import type {
     GlobalStreamHello,
@@ -114,6 +119,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
             models: [],
             providers: [],
         },
+        folders: [],
         presence: {
             presence: {
                 answerWaitMs: null,
@@ -2085,8 +2091,7 @@ describe("connectRig mutations", () => {
 
             expect(error).toEqual(
                 expect.objectContaining({
-                    message:
-                        "The Rig server protocol is version 999, but this rig-connect build supports at most version 10.",
+                    message: `The Rig server protocol is version 999, but this rig-connect build supports at most version ${String(MAXIMUM_RIG_PROTOCOL_VERSION)}.`,
                 }),
             );
         } finally {

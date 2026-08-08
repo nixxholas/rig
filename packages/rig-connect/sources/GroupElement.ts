@@ -42,6 +42,8 @@ export interface GroupSession {
     readonly draft?: string;
     readonly draftUpdatedAt?: number;
     readonly effort?: string;
+    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    readonly folderId?: string;
     readonly id: string;
     readonly lastMessageAt?: number;
     readonly modelId: string;

@@ -1,5 +1,6 @@
 export {
     connectRig,
+    FolderRequestError,
     ProjectRegistrationError,
     ProjectRegistrationProtocolError,
 } from "./connectRig.js";
@@ -27,6 +28,9 @@ export type {
     CreateSessionInput,
     CreateWorkspaceInput,
     DraftUpdate,
+    FolderCreateOptions,
+    FolderOperationOptions,
+    FolderRequestErrorCode,
     GoalStatus,
     GroupTarget,
     HappyCloudCommandInput,
@@ -34,6 +38,9 @@ export type {
     ModelSelection,
     ProjectAddOptions,
     RigConnection,
+    RigFolders,
+    RigFoldersConnection,
+    RigFoldersSubscriptionOptions,
     RigProjects,
     RigGroupsConnection,
     RigGroupsSubscriptionOptions,
@@ -103,6 +110,8 @@ export type {
     PluginManagementErrorCode,
     UninstalledPluginSummary,
 } from "./protocol.js";
+export { FolderStore } from "./FolderStore.js";
+export type { FolderDelta, FolderNode, FoldersState } from "./FolderElement.js";
 export { InboxStore } from "./InboxStore.js";
 export { ProviderUsageStore } from "./ProviderUsageStore.js";
 export type { ProviderUsageDelta, ProviderUsageState } from "./ProviderUsageElement.js";
@@ -187,6 +196,16 @@ export {
     p2pTransportStatusSchema,
     computePreparationNoticeSchema,
     computeServiceErrorSchema,
+    FOLDER_ICON_MAX_LENGTH,
+    FOLDER_NAME_MAX_LENGTH,
+    FOLDER_TEXT_MAX_LENGTH,
+    createFolderRequestSchema,
+    folderErrorResponseSchema,
+    folderResponseSchema,
+    folderSchema,
+    moveFolderRequestSchema,
+    setSessionFolderRequestSchema,
+    updateFolderRequestSchema,
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
     projectWorkspaceSchema,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
@@ -202,6 +221,16 @@ export type {
     ExternalToolCall,
     ExternalToolCallResolution,
     ExternalToolDefinition,
+    CreateFolderRequest,
+    Folder,
+    FolderErrorCode,
+    FolderErrorResponse,
+    FolderEvent,
+    FolderResponse,
+    ListFoldersResponse,
+    MoveFolderRequest,
+    SetSessionFolderRequest,
+    UpdateFolderRequest,
     GitChangeSnapshot,
     ComputePreparationEvent,
     GlobalEvent,

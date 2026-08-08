@@ -9,6 +9,8 @@ import type {
     SessionState,
 } from "./ChatElement.js";
 import { ChatStore } from "./ChatStore.js";
+import type { FolderDelta, FolderNode, FoldersState } from "./FolderElement.js";
+import { FolderStore } from "./FolderStore.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
 import { GroupStore } from "./GroupStore.js";
 import type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
@@ -49,6 +51,11 @@ import type {
     BackgroundProcessSnapshot,
     ComputePreparationEvent,
     ExternalToolCallResolution,
+    CreateFolderRequest,
+    Folder,
+    FolderErrorCode,
+    MoveFolderRequest,
+    UpdateFolderRequest,
     GitChangeSnapshot,
     GitWatchResponse,
     GitHubPluginCatalog,
@@ -98,6 +105,8 @@ import {
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
     p2pPairingStateSchema,
+    folderErrorResponseSchema,
+    folderResponseSchema,
     listPluginsResponseSchema,
     discoverPluginCatalogRequestSchema,
     githubPluginCatalogSchema,
@@ -113,6 +122,7 @@ import { endpointUrl } from "./endpointUrl.js";
 const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
 const PROJECT_REGISTRATION_MAX_ATTEMPTS = 3;
+const FOLDER_REQUEST_MAX_ATTEMPTS = 3;
 const PLUGIN_INSTALLATION_MAX_ATTEMPTS = 3;
 const MAXIMUM_PENDING_PER_ENTITY = 256;
 const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
@@ -311,6 +321,12 @@ export interface RigInboxSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+export interface RigFoldersSubscriptionOptions {
+    onChange: (folders: readonly FolderNode[], state: FoldersState) => void;
+    onDelta?: (delta: FolderDelta) => void;
+    onError?: (error: unknown) => void;
+}
+
 export interface RigProviderUsageSubscriptionOptions {
     onChange: (providers: readonly ProviderUsageEntry[], state: ProviderUsageState) => void;
     onDelta?: (delta: ProviderUsageDelta) => void;
@@ -360,6 +376,13 @@ export interface RigGroupsConnection {
 export interface RigInboxConnection {
     items: () => readonly InboxItem[];
     state: () => InboxState;
+    close: () => void;
+}
+
+export interface RigFoldersConnection {
+    /** The folders at the root of the tree, each carrying its own children. */
+    folders: () => readonly FolderNode[];
+    state: () => FoldersState;
     close: () => void;
 }
 
@@ -503,6 +526,71 @@ export class ProjectRegistrationError extends Error {
     }
 }
 
+export interface FolderOperationOptions {
+    signal?: AbortSignal;
+}
+
+export interface FolderCreateOptions extends FolderOperationOptions {
+    /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
+    folderId?: string;
+}
+
+/**
+ * Everything a view does to the folder tree.
+ *
+ * Each call answers with the folder Rig actually stored, and the same change also arrives on the
+ * live stream, so a subscribed tree updates whether or not this client made it. Nothing here is
+ * predicted locally: the daemon derives a folder's place among its siblings itself, which is why a
+ * move names where the folder landed rather than an order key.
+ */
+export interface RigFolders {
+    /**
+     * Creates one folder.
+     *
+     * The client names what it creates, so an answer lost after Rig committed still converges on
+     * the same folder when the request is retried.
+     */
+    create(request: CreateFolderRequest, options?: FolderCreateOptions): Promise<Folder>;
+    /** Changes a folder's own fields. An explicit `null` clears one. */
+    update(
+        folderId: string,
+        request: UpdateFolderRequest,
+        options?: FolderOperationOptions,
+    ): Promise<Folder>;
+    /**
+     * Applies one drag-and-drop: the folder it was dropped into and the sibling it landed below.
+     *
+     * `parentId` is `null` at the root and `afterId` is `null` when it landed first. Rig derives
+     * the order key from that pair.
+     */
+    move(
+        folderId: string,
+        request: MoveFolderRequest,
+        options?: FolderOperationOptions,
+    ): Promise<Folder>;
+    /** Puts a folder away together with everything nested under it. */
+    archive(folderId: string, options?: FolderOperationOptions): Promise<Folder>;
+    /** Files one chat into a folder, or takes it back out into Unsorted with `null`. */
+    setSessionFolder(
+        sessionId: string,
+        folderId: string | null,
+        options?: FolderOperationOptions,
+    ): Promise<void>;
+}
+
+export type FolderRequestErrorCode = FolderErrorCode | "invalid_response" | "request_failed";
+
+export class FolderRequestError extends Error {
+    constructor(
+        readonly code: FolderRequestErrorCode,
+        readonly status: number,
+        message: string,
+    ) {
+        super(message);
+        this.name = "FolderRequestError";
+    }
+}
+
 export class ProjectRegistrationProtocolError extends Error {
     constructor(
         readonly code: "invalid_response" | "request_failed",
@@ -531,6 +619,13 @@ export interface RigConnection {
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
     connectInbox: (options: RigInboxSubscriptionOptions) => RigInboxConnection;
+    /**
+     * Follows the folder tree, ordered and already nested.
+     *
+     * Folders ride the same stream and the same opening catalog as the groups, so following them
+     * adds no request of its own.
+     */
+    connectFolders: (options: RigFoldersSubscriptionOptions) => RigFoldersConnection;
     /** Follows the authoritative status plus this client's pending Happy Cloud choices. */
     connectHappyCloud: (options: RigHappyCloudSubscriptionOptions) => RigHappyCloudConnection;
     /** Follows authenticated P2P transports and trusted peer reachability. */
@@ -576,6 +671,8 @@ export interface RigConnection {
     ) => Promise<UninstalledPluginSummary>;
     /** Entity-first project catalog actions. */
     projects: RigProjects;
+    /** Entity-first folder tree actions. */
+    folders: RigFolders;
     /** Reads enrollment, profile status, and every independently denied/granted capability. */
     getHappyCloudStatus: (options?: HappyCloudOperationOptions) => Promise<HappyCloudStatus>;
     /**
@@ -676,6 +773,15 @@ interface InboxSubscriber extends RigInboxSubscriptionOptions {
 interface InboxEntry {
     store: InboxStore;
     subscribers: Set<InboxSubscriber>;
+}
+
+interface FolderSubscriber extends RigFoldersSubscriptionOptions {
+    closed: boolean;
+}
+
+interface FolderEntry {
+    store: FolderStore;
+    subscribers: Set<FolderSubscriber>;
 }
 
 interface ProviderUsageSubscriber extends RigProviderUsageSubscriptionOptions {
@@ -874,6 +980,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let happyCloudEntry: HappyCloudEntry | undefined;
     let p2pEntry: P2pEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
+    let folderEntry: FolderEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
     let providerUsageEntry: ProviderUsageEntryState | undefined;
     const timelineEntries = new Map<string, TimelineEntry>();
@@ -925,6 +1032,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         for (const subscriber of [...inboxEntry.subscribers]) {
             if (subscriber.closed) continue;
             subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
+            for (const delta of deltas) subscriber.onDelta?.(delta);
+        }
+    };
+
+    const publishFolders = (deltas: readonly FolderDelta[]): void => {
+        if (closed || deltas.length === 0 || folderEntry === undefined) return;
+        for (const subscriber of [...folderEntry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(folderEntry.store.folders(), folderEntry.store.state());
             for (const delta of deltas) subscriber.onDelta?.(delta);
         }
     };
@@ -1702,6 +1818,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 ...inboxEntry.store.applyHello(hello),
             ]);
         }
+        if (folderEntry !== undefined) {
+            publishFolders([
+                ...folderEntry.store.setConnection("live"),
+                ...folderEntry.store.applyHello(hello),
+            ]);
+        }
         queueGitWatchSync();
     };
 
@@ -1712,6 +1834,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (inboxEntry !== undefined) {
             publishInbox(inboxEntry.store.setConnection("closed"));
             for (const subscriber of [...inboxEntry.subscribers]) {
+                subscriber.onError?.(error);
+            }
+        }
+        if (folderEntry !== undefined) {
+            publishFolders(folderEntry.store.setConnection("closed"));
+            for (const subscriber of [...folderEntry.subscribers]) {
                 subscriber.onError?.(error);
             }
         }
@@ -1893,6 +2021,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (inboxEntry !== undefined) {
                         publishInbox(inboxEntry.store.setConnection("live"));
                     }
+                    if (folderEntry !== undefined) {
+                        publishFolders(folderEntry.store.setConnection("live"));
+                    }
                     if (pluginsEntry !== undefined) {
                         publishPlugins(pluginsEntry.store.setConnection("live"));
                     }
@@ -2014,6 +2145,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     }
                     return;
                 }
+                if (event.type === "folder_created" || event.type === "folder_updated") {
+                    // A folder belongs to the tree rather than to any project, so it carries no
+                    // project or session identity and never joins the per-entity mutation queues.
+                    if (folderEntry !== undefined) publishFolders(folderEntry.store.apply(event));
+                    return;
+                }
                 if (
                     event.type === "project_git_changed" ||
                     event.type === "workspace_git_changed"
@@ -2088,6 +2225,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (inboxEntry !== undefined) {
                     publishInbox(inboxEntry.store.setConnection("reconnecting"));
+                }
+                if (folderEntry !== undefined) {
+                    publishFolders(folderEntry.store.setConnection("reconnecting"));
                 }
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("reconnecting"));
@@ -2359,6 +2499,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             // asking for them keeps it loaded with no view open.
             options.onSessionFinished === undefined &&
             inboxEntry === undefined &&
+            // The folder tree arrives in the same opening catalog, so a folder view keeps it
+            // loaded exactly as an inbox view does.
+            folderEntry === undefined &&
             pendingOverlays.length === 0 &&
             queues.size === 0
         ) {
@@ -2450,6 +2593,34 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 subscriber.closed = true;
                 inboxEntry?.subscribers.delete(subscriber);
                 if (inboxEntry?.subscribers.size === 0) inboxEntry = undefined;
+                releaseUnusedEntries();
+            },
+        };
+    };
+
+    const connectFolders = (subscription: RigFoldersSubscriptionOptions): RigFoldersConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        folderEntry ??= { store: new FolderStore(), subscribers: new Set() };
+        const entry = folderEntry;
+        const subscriber: FolderSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        subscriber.onChange(entry.store.folders(), entry.store.state());
+        const groups = createGroupEntry();
+        const alreadyLoaded = groups.started;
+        startGroupEntry(groups);
+        // The tree rides the opening catalog, so a folder view mounted after that catalog has
+        // already loaded would have nothing to show until it is loaded again.
+        if (alreadyLoaded && liveStreamOpen) {
+            void loadCatalog(groups).catch((error: unknown) => reportCatalogError(groups, error));
+        }
+        return {
+            folders: () => folderEntry?.store.folders() ?? [],
+            state: () => folderEntry?.store.state() ?? { connection: "closed" },
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                if (entry.subscribers.size === 0 && folderEntry === entry) folderEntry = undefined;
                 releaseUnusedEntries();
             },
         };
@@ -2880,6 +3051,135 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
                     }
                 }
+            } finally {
+                operation.detach();
+            }
+        },
+    };
+
+    /**
+     * One folder request, answered with the folder Rig actually stored.
+     *
+     * Every folder change is idempotent — create carries the identity the client chose, and update,
+     * move, and archive all name the state they want rather than a step to take — so an ambiguous
+     * transport failure is retried rather than left unresolved.
+     */
+    const requestFolder = async (
+        path: string,
+        init: { body?: unknown; method: "PATCH" | "POST" },
+        operationOptions: FolderOperationOptions,
+    ): Promise<Folder> => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+        try {
+            for (let attempt = 1; ; attempt += 1) {
+                operation.signal.throwIfAborted();
+                try {
+                    const response = await requestJson(path, {
+                        ...(init.body === undefined
+                            ? {}
+                            : {
+                                  body: JSON.stringify(init.body),
+                                  headers: { "content-type": "application/json" },
+                              }),
+                        method: init.method,
+                        signal: operation.signal,
+                    });
+                    if (response.status >= 400) {
+                        throw folderResponseError(response.status, response.data);
+                    }
+                    try {
+                        return Value.Decode(folderResponseSchema, response.data).folder;
+                    } catch {
+                        throw new FolderRequestError(
+                            "invalid_response",
+                            response.status,
+                            "Rig returned an invalid folder response.",
+                        );
+                    }
+                } catch (error) {
+                    if (error instanceof FolderRequestError) throw error;
+                    if (error instanceof MutationHttpError) {
+                        const refusal = folderCodedError(error.status, error.data);
+                        if (refusal !== undefined) throw refusal;
+                    }
+                    if (!isRetryableMutationError(error)) {
+                        if (error instanceof DOMException && error.name === "AbortError") {
+                            throw error;
+                        }
+                        throw folderRequestFailure(error);
+                    }
+                    if (attempt >= FOLDER_REQUEST_MAX_ATTEMPTS) throw folderRequestFailure(error);
+                    await wait(
+                        error instanceof MutationHttpError
+                            ? (error.retryAfterMs ?? retryDelay)
+                            : retryDelay,
+                        operation.signal,
+                    );
+                    operation.signal.throwIfAborted();
+                    retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
+                }
+            }
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const folders: RigFolders = {
+        create: (folderRequest, createOptions = {}) =>
+            requestFolder(
+                "folders",
+                {
+                    body: {
+                        ...folderRequest,
+                        id: createOptions.folderId ?? folderRequest.id ?? nextEntityId(),
+                    },
+                    method: "POST",
+                },
+                createOptions,
+            ),
+        update: (folderId, folderRequest, updateOptions = {}) =>
+            requestFolder(
+                `folders/${encodeURIComponent(folderId)}`,
+                { body: folderRequest, method: "PATCH" },
+                updateOptions,
+            ),
+        move: (folderId, folderRequest, moveOptions = {}) =>
+            requestFolder(
+                `folders/${encodeURIComponent(folderId)}/move`,
+                { body: folderRequest, method: "POST" },
+                moveOptions,
+            ),
+        archive: (folderId, archiveOptions = {}) =>
+            requestFolder(
+                `folders/${encodeURIComponent(folderId)}/archive`,
+                { method: "POST" },
+                archiveOptions,
+            ),
+        setSessionFolder: async (sessionId, folderId, filingOptions = {}) => {
+            if (closed) throw new Error("This Rig connection is closed.");
+            const operation = combinedSignal(rootController.signal, filingOptions.signal);
+            try {
+                const response = await requestJson(
+                    `sessions/${encodeURIComponent(sessionId)}/folder`,
+                    {
+                        body: JSON.stringify({ folderId }),
+                        headers: { "content-type": "application/json" },
+                        method: "PUT",
+                        signal: operation.signal,
+                    },
+                );
+                if (response.status >= 400) {
+                    throw folderResponseError(response.status, response.data);
+                }
+            } catch (error) {
+                if (error instanceof FolderRequestError) throw error;
+                if (error instanceof MutationHttpError) {
+                    throw folderResponseError(error.status, error.data);
+                }
+                if (error instanceof DOMException && error.name === "AbortError") throw error;
+                throw folderRequestFailure(error);
             } finally {
                 operation.detach();
             }
@@ -4525,6 +4825,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;
+            folderEntry?.subscribers.clear();
+            folderEntry = undefined;
             for (const entry of timelineEntries.values()) {
                 entry.controller.abort();
                 entry.detachRoot();
@@ -4538,6 +4840,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         cancelScheduledMessage,
         clearGoal,
         compactSession,
+        connectFolders,
         connectGroups,
         connectHappyCloud,
         connectP2p,
@@ -4559,6 +4862,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         getHappyCloudStatus,
         getP2pPairing,
         joinP2pInvitation,
+        folders,
         projects,
         readBackgroundProcess,
         readPluginLog,
@@ -4902,6 +5206,48 @@ function projectRegistrationResponseError(
     } catch {
         return undefined;
     }
+}
+
+/**
+ * Turns a refused folder request into the one error a view can display.
+ *
+ * The folder routes answer with a coded envelope, but filing a chat into a folder is a session
+ * route and answers with a plain human-readable message instead. That message is still the best
+ * thing to show, so the code is taken from the status when there is no envelope to read.
+ */
+function folderResponseError(status: number, data: unknown): FolderRequestError {
+    const coded = folderCodedError(status, data);
+    if (coded !== undefined) return coded;
+    const message = humanMutationError(data, status);
+    if (status === 404) return new FolderRequestError("folder_not_found", status, message);
+    if (status === 400) return new FolderRequestError("invalid_request", status, message);
+    if (status >= 500) return new FolderRequestError("storage_unavailable", status, message);
+    return new FolderRequestError("request_failed", status, message);
+}
+
+/** The daemon's own coded refusal, when it sent one. Rig has decided, so it is never retried. */
+function folderCodedError(status: number, data: unknown): FolderRequestError | undefined {
+    try {
+        const response = Value.Decode(folderErrorResponseSchema, data);
+        return new FolderRequestError(response.error.code, status, response.error.message);
+    } catch {
+        return undefined;
+    }
+}
+
+function folderRequestFailure(error: unknown): FolderRequestError {
+    if (error instanceof MutationHttpError) {
+        return new FolderRequestError(
+            "request_failed",
+            error.status,
+            `Rig could not change the folder (${String(error.status)}): ${error.message}`,
+        );
+    }
+    return new FolderRequestError(
+        "request_failed",
+        0,
+        "Rig could not confirm the folder change after repeated transport failures.",
+    );
 }
 
 function projectRegistrationRequestFailure(error: unknown): ProjectRegistrationProtocolError {

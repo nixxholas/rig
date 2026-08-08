@@ -83,6 +83,7 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
             providers: [],
         },
         cursor: "c1",
+        folders: [],
         identity: { version: "test" },
         presence: {
             presence: {

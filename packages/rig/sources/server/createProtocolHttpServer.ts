@@ -2767,7 +2767,7 @@ async function handleRequest(
         return;
     }
 
-    if (request.method === "PUT" && route.name === "folder") {
+    if (request.method === "PUT" && route.name === "session-folder") {
         const body = await readJson<unknown>(request, 8 * 1024);
         if (!Value.Check(setSessionFolderRequestSchema, body)) {
             sendJson(response, 400, {
@@ -4037,7 +4037,6 @@ function matchRoute(pathname: string):
               | "effort"
               | "events"
               | "external-tool-calls"
-              | "folder"
               | "fork"
               | "goal"
               | "messages"
@@ -4051,6 +4050,7 @@ function matchRoute(pathname: string):
               | "secrets"
               | "service-tier"
               | "session"
+              | "session-folder"
               | "stream"
               | "session-state"
               | "steer"
@@ -4360,7 +4360,7 @@ function matchRoute(pathname: string):
         return { name: "reorder", sessionId };
     }
     if (parts.length === 3 && parts[2] === "folder") {
-        return { name: "folder", sessionId };
+        return { name: "session-folder", sessionId };
     }
     if (parts.length === 4 && parts[2] === "terminal-connections" && parts[3] !== undefined) {
         return {
@@ -4722,7 +4722,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
         (method === "POST" && routeName === "user-input") ||
         (method === "DELETE" && routeName === "secret") ||
         (method === "PUT" && routeName === "draft") ||
-        (method === "PUT" && routeName === "folder") ||
+        (method === "PUT" && routeName === "session-folder") ||
         (method === "PATCH" &&
             ["effort", "model", "permissions", "service-tier"].includes(routeName))
     );

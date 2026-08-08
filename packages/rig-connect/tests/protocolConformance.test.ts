@@ -10,6 +10,14 @@ import { happyComputeErrorSchema } from "../../happy-plugins/sources/computeType
 import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
     PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
+    FOLDER_ICON_MAX_LENGTH as DAEMON_FOLDER_ICON_MAX_LENGTH,
+    FOLDER_NAME_MAX_LENGTH as DAEMON_FOLDER_NAME_MAX_LENGTH,
+    FOLDER_TEXT_MAX_LENGTH as DAEMON_FOLDER_TEXT_MAX_LENGTH,
+    createFolderRequestSchema as daemonCreateFolderRequestSchema,
+    folderSchema as daemonFolderSchema,
+    moveFolderRequestSchema as daemonMoveFolderRequestSchema,
+    setSessionFolderRequestSchema as daemonSetSessionFolderRequestSchema,
+    updateFolderRequestSchema as daemonUpdateFolderRequestSchema,
     discoverPluginCatalogRequestSchema as daemonDiscoverPluginCatalogRequestSchema,
     discoverPluginCatalogResponseSchema as daemonDiscoverPluginCatalogResponseSchema,
     installPluginRequestSchema as daemonInstallPluginRequestSchema,
@@ -26,14 +34,22 @@ import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
 import type * as localInstallation from "@/RigInstallationInspection.js";
 import {
+    FOLDER_ICON_MAX_LENGTH,
+    FOLDER_NAME_MAX_LENGTH,
+    FOLDER_TEXT_MAX_LENGTH,
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     computeServiceErrorSchema,
+    createFolderRequestSchema,
     discoverPluginCatalogRequestSchema,
+    folderSchema,
     githubPluginCatalogSchema,
     installPluginRequestSchema,
+    moveFolderRequestSchema,
     projectWorkspaceSchema,
+    setSessionFolderRequestSchema,
     systemNoticePayloadSchema,
+    updateFolderRequestSchema,
 } from "@/protocol.js";
 import {
     rigCliInstallationInspectionSchema,
@@ -135,6 +151,21 @@ type _WorkspaceErrorMaxLength = Assignable<
 >;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
+type _Folder = Assignable<local.Folder, daemon.Folder>;
+type _FolderExact = Assignable<daemon.Folder, local.Folder>;
+type _FolderEvent = Assignable<local.FolderEvent, daemon.FolderEvent>;
+type _FolderErrorCode = Assignable<local.FolderErrorCode, daemon.FolderErrorCode>;
+type _FolderErrorResponse = Assignable<local.FolderErrorResponse, daemon.FolderErrorResponse>;
+type _ListFoldersResponse = Assignable<local.ListFoldersResponse, daemon.ListFoldersResponse>;
+type _FolderResponse = Assignable<local.FolderResponse, daemon.FolderResponse>;
+// The other direction too: a request this library sends must be one the daemon accepts.
+type _CreateFolderRequest = Assignable<daemon.CreateFolderRequest, local.CreateFolderRequest>;
+type _UpdateFolderRequest = Assignable<daemon.UpdateFolderRequest, local.UpdateFolderRequest>;
+type _MoveFolderRequest = Assignable<daemon.MoveFolderRequest, local.MoveFolderRequest>;
+type _SetSessionFolderRequest = Assignable<
+    daemon.SetSessionFolderRequest,
+    local.SetSessionFolderRequest
+>;
 type _HappyCloudStatus = Assignable<local.HappyCloudStatus, daemon.HappyCloudStatus>;
 type _HappyCloudChangedEvent = Assignable<
     local.HappyCloudChangedEvent,
@@ -397,6 +428,60 @@ describe("protocol conformance", () => {
         expect(() =>
             Value.Decode(projectWorkspaceSchema, { ...workspace, unexpected: true }),
         ).toThrow();
+    });
+
+    it("keeps the duplicated folder schemas structurally identical to the daemon", () => {
+        expect(FOLDER_NAME_MAX_LENGTH).toBe(DAEMON_FOLDER_NAME_MAX_LENGTH);
+        expect(FOLDER_TEXT_MAX_LENGTH).toBe(DAEMON_FOLDER_TEXT_MAX_LENGTH);
+        expect(FOLDER_ICON_MAX_LENGTH).toBe(DAEMON_FOLDER_ICON_MAX_LENGTH);
+        expect(folderSchema).toStrictEqual(daemonFolderSchema);
+        expect(createFolderRequestSchema).toStrictEqual(daemonCreateFolderRequestSchema);
+        expect(updateFolderRequestSchema).toStrictEqual(daemonUpdateFolderRequestSchema);
+        expect(moveFolderRequestSchema).toStrictEqual(daemonMoveFolderRequestSchema);
+        expect(setSessionFolderRequestSchema).toStrictEqual(daemonSetSessionFolderRequestSchema);
+    });
+
+    it("accepts and refuses exactly the same folder payloads", () => {
+        const folder = {
+            createdAt: 1,
+            description: "Where the videos live.",
+            icon: "🎬",
+            id: "folder-1",
+            name: "Media",
+            orderKey: "a0",
+            path: "/work/folders/folder-1",
+            rules: "Keep the exports out of the working directory.",
+            updatedAt: 2,
+            version: 3,
+        };
+        const move = { afterId: "folder-2", parentId: null };
+
+        const accepts = (local: TSchema, daemonSchema: TSchema, value: unknown) => {
+            expect(Value.Decode(local, value)).toEqual(value);
+            expect(Value.Decode(daemonSchema, value)).toEqual(value);
+        };
+        const refuses = (local: TSchema, daemonSchema: TSchema, value: unknown) => {
+            expect(Value.Check(local, value)).toBe(false);
+            expect(Value.Check(daemonSchema, value)).toBe(false);
+        };
+        const folders = (value: unknown) => [folderSchema, daemonFolderSchema, value] as const;
+        const moves = (value: unknown) =>
+            [moveFolderRequestSchema, daemonMoveFolderRequestSchema, value] as const;
+        const creates = (value: unknown) =>
+            [createFolderRequestSchema, daemonCreateFolderRequestSchema, value] as const;
+
+        accepts(...folders(folder));
+        accepts(...folders({ ...folder, archivedAt: 4, parentId: "folder-0" }));
+        accepts(...moves(move));
+        accepts(...moves({ afterId: null, parentId: null }));
+        accepts(...creates({ name: "Media" }));
+
+        refuses(...folders({ ...folder, unexpected: true }));
+        refuses(...moves({ parentId: null }));
+        // The order key is the daemon's to derive, so a client can never send one.
+        refuses(...moves({ ...move, orderKey: "a1" }));
+        refuses(...creates({ name: "x".repeat(FOLDER_NAME_MAX_LENGTH + 1) }));
+        refuses(...creates({ name: "Media", orderKey: "a1" }));
     });
 
     it("accepts and refuses exactly the same plugin catalog and installation payloads", () => {

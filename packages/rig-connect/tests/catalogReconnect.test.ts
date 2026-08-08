@@ -67,6 +67,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
             providers: [],
         },
         cursor,
+        folders: [],
         identity: { version: "test" },
         presence: {
             presence: {

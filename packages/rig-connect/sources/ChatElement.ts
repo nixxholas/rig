@@ -263,6 +263,8 @@ export interface SessionState {
     agentId?: string;
     agent?: SessionAgentMetadata;
     lastEventId?: string;
+    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    folderId?: string;
     projectId: string;
     workspaceId?: string;
     /**

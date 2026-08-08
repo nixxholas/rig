@@ -888,6 +888,8 @@ export interface ProtocolSession {
     agent?: SessionAgentMetadata;
     archived: boolean;
     appendSystemPrompt?: string;
+    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    folderId?: string;
     projectId: string;
     workspaceId?: string;
     /** Absent for a session with no place in an ordered list, such as a subagent. */
@@ -1319,6 +1321,8 @@ export interface GitRepositoryFacts {
 export interface SessionSummary {
     id: string;
     archived: boolean;
+    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    folderId?: string;
     projectId: string;
     workspaceId?: string;
     cwd: string;
@@ -1573,6 +1577,156 @@ export const projectRegistrationErrorResponseSchema = Type.Object(
     },
     exact,
 );
+
+/** Longest human-readable folder name Rig stores. */
+export const FOLDER_NAME_MAX_LENGTH = 200;
+/** Longest description or rules text Rig stores for one folder. */
+export const FOLDER_TEXT_MAX_LENGTH = 8_000;
+/**
+ * Longest folder icon Rig stores. Only an emoji is accepted for now, and a single emoji can be a
+ * long grapheme cluster once skin tones, gender signs, and zero-width joiners are counted.
+ */
+export const FOLDER_ICON_MAX_LENGTH = 64;
+
+const folderIdSchema = Type.String({ maxLength: 128, minLength: 1 });
+
+/**
+ * One folder in the virtual tree.
+ *
+ * Folders are nested only virtually: `parentId` places a folder in the tree, while `path` is a flat
+ * storage directory named after the folder's opaque id. Moving a folder rewrites `parentId` and
+ * `orderKey` and never touches the filesystem.
+ */
+export const folderSchema = Type.Object(
+    {
+        archivedAt: Type.Optional(Type.Number()),
+        createdAt: Type.Number(),
+        /** What the folder is for, shown to people and given to agents working inside it. */
+        description: Type.Optional(Type.String()),
+        /** A single emoji. Pictures and built-in icons are not stored yet. */
+        icon: Type.Optional(Type.String()),
+        id: Type.String(),
+        name: Type.String(),
+        /** Fractional index ordering this folder among its siblings. */
+        orderKey: Type.String(),
+        /** Absent for a folder at the root of the tree. */
+        parentId: Type.Optional(Type.String()),
+        /** Flat storage directory holding this folder's files. */
+        path: Type.String(),
+        /** Standing instructions every agent working in this folder must follow. */
+        rules: Type.Optional(Type.String()),
+        updatedAt: Type.Number(),
+        version: Type.Number(),
+    },
+    exact,
+);
+export type Folder = Static<typeof folderSchema>;
+
+export const createFolderRequestSchema = Type.Object(
+    {
+        description: Type.Optional(Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH })),
+        icon: Type.Optional(Type.String({ maxLength: FOLDER_ICON_MAX_LENGTH })),
+        /** Client-chosen cuid2 identity. Repeating it returns the same folder. */
+        id: Type.Optional(folderIdSchema),
+        name: Type.String({ maxLength: FOLDER_NAME_MAX_LENGTH, minLength: 1 }),
+        parentId: Type.Optional(folderIdSchema),
+        rules: Type.Optional(Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH })),
+    },
+    exact,
+);
+export type CreateFolderRequest = Static<typeof createFolderRequestSchema>;
+
+/**
+ * Changing a folder's own fields. An explicit `null` clears an optional field; an absent field is
+ * left as it is.
+ */
+export const updateFolderRequestSchema = Type.Object(
+    {
+        description: Type.Optional(
+            Type.Union([Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH }), Type.Null()]),
+        ),
+        icon: Type.Optional(
+            Type.Union([Type.String({ maxLength: FOLDER_ICON_MAX_LENGTH }), Type.Null()]),
+        ),
+        name: Type.Optional(Type.String({ maxLength: FOLDER_NAME_MAX_LENGTH, minLength: 1 })),
+        rules: Type.Optional(
+            Type.Union([Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH }), Type.Null()]),
+        ),
+    },
+    exact,
+);
+export type UpdateFolderRequest = Static<typeof updateFolderRequestSchema>;
+
+/**
+ * One drag-and-drop. `parentId` is the folder it was dropped into, `null` for the root, and
+ * `afterId` is the sibling it was dropped below, `null` when it landed first. Rig derives the
+ * fractional order key from that pair, so a client never invents one.
+ */
+export const moveFolderRequestSchema = Type.Object(
+    {
+        afterId: Type.Union([folderIdSchema, Type.Null()]),
+        parentId: Type.Union([folderIdSchema, Type.Null()]),
+    },
+    exact,
+);
+export type MoveFolderRequest = Static<typeof moveFolderRequestSchema>;
+
+/** Putting one chat into a folder, or taking it back out into Unsorted with `null`. */
+export const setSessionFolderRequestSchema = Type.Object(
+    { folderId: Type.Union([folderIdSchema, Type.Null()]) },
+    exact,
+);
+export type SetSessionFolderRequest = Static<typeof setSessionFolderRequestSchema>;
+
+export const folderResponseSchema = Type.Object({ folder: folderSchema }, exact);
+
+export const folderErrorCodeSchema = Type.Union([
+    Type.Literal("invalid_request"),
+    Type.Literal("folder_not_found"),
+    Type.Literal("parent_not_found"),
+    Type.Literal("sibling_not_found"),
+    Type.Literal("cycle"),
+    Type.Literal("storage_unavailable"),
+]);
+export type FolderErrorCode = Static<typeof folderErrorCodeSchema>;
+
+export const folderErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            { code: folderErrorCodeSchema, message: Type.String({ minLength: 1 }) },
+            exact,
+        ),
+    },
+    exact,
+);
+export type FolderErrorResponse = Static<typeof folderErrorResponseSchema>;
+
+export interface ListFoldersResponse {
+    folders: readonly Folder[];
+}
+
+export interface FolderResponse {
+    folder: Folder;
+}
+
+/**
+ * A durable folder update.
+ *
+ * Unlike the other global events it is keyed by the folder rather than by a project, because a
+ * folder belongs to the tree rather than to any project.
+ */
+export interface BaseFolderEvent<TType extends string, TData> {
+    createdAt: number;
+    data: TData;
+    folderId: string;
+    id: EventId;
+    type: TType;
+}
+
+export type FolderEvent =
+    | BaseFolderEvent<"folder_created", { folder: Folder; mutationId?: MutationId }>
+    | BaseFolderEvent<"folder_updated", { folder: Folder; mutationId?: MutationId }>;
+
 const pluginResourcePathSchema = Type.String({
     maxLength: 160,
     minLength: 1,
@@ -1933,6 +2087,8 @@ export interface PluginManagementErrorResponse {
 export interface GlobalStreamHello {
     catalog: ModelCatalog;
     cursor: string;
+    /** The whole unarchived folder tree; virtual nesting is carried by each folder's parent. */
+    folders: readonly Folder[];
     identity: DaemonIdentity;
     presence: PresenceSnapshot;
     protocolVersion: number;
@@ -2260,6 +2416,7 @@ export type P2pStatusChangedEvent = Static<typeof p2pStatusChangedEventSchema>;
 
 export type GlobalEvent =
     | ComputePreparationEvent
+    | FolderEvent
     | HappyCloudChangedEvent
     | P2pStatusChangedEvent
     | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>

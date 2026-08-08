@@ -128,6 +128,24 @@ describe("Folders over HTTP", () => {
         expect(missing.body.error.code).toBe("folder_not_found");
     });
 
+    it("files a chat into a folder and back out to Unsorted", async () => {
+        const fixture = await startServer();
+        const folder = await fixture.send("POST", "/folders", { name: "Trip planning" });
+        const chat = fixture.store.create({ cwd: "/tmp/rig-folders" });
+
+        const filed = await fixture.send("PUT", `/sessions/${chat.id}/folder`, {
+            folderId: folder.body.folder.id,
+        });
+        expect(filed.status).toBe(200);
+        expect(filed.body.session.folderId).toBe(folder.body.folder.id);
+
+        const unfiled = await fixture.send("PUT", `/sessions/${chat.id}/folder`, {
+            folderId: null,
+        });
+        expect(unfiled.status).toBe(200);
+        expect(unfiled.body.session.folderId).toBeUndefined();
+    });
+
     it("archives a folder together with everything under it", async () => {
         const fixture = await startServer();
         const parent = await fixture.send("POST", "/folders", { name: "Season one" });

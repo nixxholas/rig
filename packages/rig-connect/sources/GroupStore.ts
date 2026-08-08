@@ -880,6 +880,7 @@ export class GroupStore {
             trackUnread: session.trackUnread === true,
             updatedAt: session.updatedAt,
             ...(session.unread === undefined ? {} : { unread: session.unread }),
+            ...(session.folderId === undefined ? {} : { folderId: session.folderId }),
             ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
             ...(session.draft === undefined ? {} : { draft: session.draft }),
             ...(session.draftUpdatedAt === undefined
