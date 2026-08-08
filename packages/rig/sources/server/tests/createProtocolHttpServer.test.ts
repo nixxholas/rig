@@ -3758,13 +3758,14 @@ function readOnlySubagentState(): PersistedSessionState {
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],
-        scope: { kind: "project", projectId: "project-1" },
+        scope: { kind: "unsorted" },
         nextTaskId: 1,
         status: "completed",
         tasks: [],
         title: "Inspect the protocol",
         titleStatus: "ready",
         tools: [],
+        unsortedSince: Date.now(),
     };
 }
 
@@ -3782,11 +3783,12 @@ function completedPrimaryState(id: string): PersistedSessionState {
         permissionMode: "workspace_write",
         providerId: "codex",
         queuedRuns: [],
-        scope: { kind: "project", projectId: "project-1" },
+        scope: { kind: "unsorted" },
         status: "completed",
         tasks: [],
         titleStatus: "ready",
         tools: [],
+        unsortedSince: Date.now(),
     };
 }
 
@@ -3819,11 +3821,12 @@ function pausedGoalState(): PersistedSessionState {
         permissionMode: "workspace_write",
         providerId: "codex",
         queuedRuns: [],
-        scope: { kind: "project", projectId: "project-1" },
+        scope: { kind: "unsorted" },
         status: "idle",
         tasks: [],
         titleStatus: "idle",
         tools: [],
+        unsortedSince: Date.now(),
     };
 }
 

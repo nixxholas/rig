@@ -853,6 +853,7 @@ function fakeSession(submitted: unknown[]): {
         pendingUserInputs: [],
         permissionMode: "auto",
         providerId: "codex",
+        scope: { kind: "unsorted" },
         skills: [],
         snapshot: { tools: [] },
         status: "idle",

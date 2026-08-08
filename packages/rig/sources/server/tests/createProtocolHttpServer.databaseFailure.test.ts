@@ -47,7 +47,13 @@ describe("createProtocolHttpServer database failures", () => {
 
         try {
             const escaped = await captureUnhandledRejection(async () => {
-                request.end("{}");
+                request.end(
+                    JSON.stringify({
+                        description: "Database failure test",
+                        environment: { TEST_TOKEN: "value" },
+                        id: "database-failure",
+                    }),
+                );
             });
             expect(escaped).toBe(error);
             expect(responseReceived).toBe(false);

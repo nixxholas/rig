@@ -3760,12 +3760,13 @@ function sessionState(overrides: Partial<PersistedSessionState> = {}): Persisted
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],
-        scope: { kind: "project", projectId: "project-1" },
+        scope: { kind: "unsorted" },
         nextTaskId: 1,
         status: "idle",
         tasks: [],
         titleStatus: "idle",
         tools: [],
+        unsortedSince: Date.now(),
         ...overrides,
     };
 }

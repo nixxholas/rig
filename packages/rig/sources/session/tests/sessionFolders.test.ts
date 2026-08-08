@@ -369,7 +369,7 @@ describe("chats and folders", () => {
         expect(store.get("delegated-chat")?.snapshot().archived).toBe(false);
     });
 
-    it("drains more than one bounded Unsorted query batch in one sweep", async () => {
+    it("drains more than one bounded Unsorted query batch across follow-up sweeps", async () => {
         const { databasePath, root } = await createFixture();
         let now = 1_700_000_000_000;
         const store = openStore({ databasePath, now: () => now, root });
@@ -378,7 +378,9 @@ describe("chats and folders", () => {
         );
 
         now += UNSORTED_SESSION_ARCHIVE_AFTER_MS + 1;
-        store.archiveExpiredUnsortedSessions();
+        while (store.archiveExpiredUnsortedSessions()) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        }
 
         expect(stale.every((session) => store.get(session.id)?.snapshot().archived === true)).toBe(
             true,

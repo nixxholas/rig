@@ -256,6 +256,7 @@ function insertSession(
             projectId: overrides.projectId ?? "p1",
             providerId: "codex",
             rootSessionId: overrides.parentSessionId === undefined ? overrides.id : "root",
+            scopeKind: overrides.workspaceId === undefined ? "project" : "workspace",
             secretIdsJson: "[]",
             sessionKind: overrides.sessionKind ?? "primary",
             status: overrides.status ?? "idle",
