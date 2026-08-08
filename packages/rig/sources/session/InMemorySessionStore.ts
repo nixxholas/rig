@@ -30,6 +30,7 @@ import type {
     TransferSessionRequest,
     TransferSessionResponse,
     UpdateFolderRequest,
+    UpdateSecretRequest,
 } from "../protocol/index.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
@@ -871,6 +872,13 @@ export class InMemorySessionStore implements SessionStore {
 
     unregisterSpecialSecret(kind: SpecialSecretKind): boolean {
         return this.#secrets.unregisterSpecial(kind);
+    }
+
+    updateSecret(secretId: string, request: UpdateSecretRequest): SecretSummary | undefined {
+        const updated = this.#secrets.updatedRegistration(secretId, request);
+        if (updated === undefined) return undefined;
+        this.#secrets.register(updated);
+        return this.#secrets.reference(secretId);
     }
 
     getProject(projectId: string): Project | undefined {

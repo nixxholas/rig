@@ -81,7 +81,6 @@ import type {
     RunShellCommandResponse,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
-    RegisterSecretRequest,
     RegisterSecretResponse,
     SearchFilesResponse,
     SecretSessionResponse,
@@ -111,6 +110,7 @@ import type {
     TransferSessionResponse,
     UninstallPluginResponse,
     UnregisterSecretResponse,
+    UpdateSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
     UpdateGlobalInstructionsRequest,
@@ -204,6 +204,7 @@ import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 import {
     environmentSecretRegistrationSchema,
+    environmentSecretUpdateSchema,
     type EnvironmentSecretRegistration,
 } from "../secrets/index.js";
 import type {
@@ -2798,6 +2799,30 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "PATCH" && route.name === "secret-registration") {
+        const body = await readJson<unknown>(request);
+        if (!Value.Check(environmentSecretUpdateSchema, body)) {
+            sendJson(response, 400, {
+                error: "Secret changes must match the environment secret update schema.",
+            });
+            return;
+        }
+        try {
+            const secret = store.updateSecret(route.secretId, body);
+            if (secret === undefined) {
+                sendJson(response, 404, { error: "Secret not found." });
+                return;
+            }
+            sendJson<UpdateSecretResponse>(response, 200, { secret });
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 400, {
+                error: error instanceof Error ? error.message : "The secret could not be updated.",
+            });
+        }
+        return;
+    }
+
     if (request.method === "POST" && route.name === "sessions") {
         const body = await readJson<CreateSessionRequest | null>(request);
         if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -5314,7 +5339,9 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "applet-versions" || route.name === "applet-revert") {
         return request.method === "POST";
     }
-    if (route.name === "secret-registration") return request.method === "DELETE";
+    if (route.name === "secret-registration") {
+        return request.method === "DELETE" || request.method === "PATCH";
+    }
     if (route.name === "messages" && route.sessionId === undefined) {
         return request.method === "POST";
     }

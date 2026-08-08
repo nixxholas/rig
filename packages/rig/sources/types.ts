@@ -27,6 +27,8 @@ export type {
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateGlobalInstructionsRequest,
+    UpdateSecretRequest,
+    UpdateSecretResponse,
 } from "./protocol/SessionProtocol.js";
 export type {
     GetGlobalSecurityPolicyResponse,

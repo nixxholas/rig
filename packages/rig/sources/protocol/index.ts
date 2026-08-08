@@ -382,6 +382,8 @@ export type {
     SteerMessageResponse,
     TasksChangedEvent,
     UnregisterSecretResponse,
+    UpdateSecretRequest,
+    UpdateSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
     UpdateGlobalInstructionsRequest,

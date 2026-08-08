@@ -35,6 +35,9 @@ describe("GitHub secret HTTP status", () => {
                 ],
             });
             expect(JSON.stringify(response)).not.toContain("never-serialize-this");
+            await expect(
+                client.updateSecret("github", { description: "User controlled" }),
+            ).rejects.toMatchObject({ statusCode: 400 });
         } finally {
             await new Promise<void>((resolve) => server.close(() => resolve()));
             await rm(directory, { force: true, recursive: true });

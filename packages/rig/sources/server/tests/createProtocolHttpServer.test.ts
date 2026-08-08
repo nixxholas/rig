@@ -1423,6 +1423,55 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("changes, adds, and removes selected secret fields without replacing the bundle", async () => {
+        const { client, close } = await startServer();
+        try {
+            await client.registerSecret({
+                description: "Service API credentials",
+                environment: {
+                    KEEP: "unchanged",
+                    REMOVE: "remove-me",
+                    ROTATE: "old-value",
+                },
+                id: "service",
+            });
+
+            await expect(
+                client.updateSecret("service", {
+                    description: "Updated API credentials",
+                    environment: {
+                        ADDED: "new-value",
+                        REMOVE: null,
+                        ROTATE: "new-value",
+                    },
+                }),
+            ).resolves.toEqual({
+                secret: {
+                    description: "Updated API credentials",
+                    environmentVariables: ["ADDED", "KEEP", "ROTATE"],
+                    id: "service",
+                },
+            });
+            expect(await client.listSecrets()).toEqual({
+                secrets: [
+                    {
+                        description: "Updated API credentials",
+                        environmentVariables: ["ADDED", "KEEP", "ROTATE"],
+                        id: "service",
+                    },
+                ],
+            });
+            await expect(
+                client.updateSecret("missing", { description: "Missing" }),
+            ).rejects.toMatchObject({ statusCode: 404 });
+            await expect(client.updateSecret("service", {})).rejects.toMatchObject({
+                statusCode: 400,
+            });
+        } finally {
+            await close();
+        }
+    });
+
     it("does not reflect malformed secret registration values in JSON errors", async () => {
         const { close, socketPath } = await startServer();
         const secretValue = "malformed-value-must-not-return";

@@ -22,6 +22,20 @@ export const environmentSecretRegistrationSchema = Type.Object(
     { additionalProperties: false },
 );
 
+export const environmentSecretUpdateSchema = Type.Object(
+    {
+        description: Type.Optional(Type.String({ minLength: 1 })),
+        environment: Type.Optional(
+            Type.Record(
+                Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }),
+                Type.Union([environmentVariableValueSchema, Type.Null()]),
+                { additionalProperties: false, minProperties: 1 },
+            ),
+        ),
+    },
+    { additionalProperties: false, minProperties: 1 },
+);
+
 export const specialSecretKindSchema = Type.Union([Type.Literal("github")]);
 
 export const githubSecretRegistrationSchema = Type.Object(
@@ -42,6 +56,7 @@ export const secretRegistrationSchema = Type.Union([
 ]);
 
 export type EnvironmentSecretRegistration = Static<typeof environmentSecretRegistrationSchema>;
+export type EnvironmentSecretUpdate = Static<typeof environmentSecretUpdateSchema>;
 export type GitHubSecretRegistration = Static<typeof githubSecretRegistrationSchema>;
 export type SpecialSecretKind = Static<typeof specialSecretKindSchema>;
 export type SpecialSecretRegistration = GitHubSecretRegistration;

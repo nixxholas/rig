@@ -28,6 +28,7 @@ import type { SessionExecutionEnvironment } from "../execution/SessionExecutionE
 import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
 import type {
     EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
     SecretAttachmentScope,
     SecretReference,
 } from "../secrets/index.js";
@@ -770,6 +771,7 @@ export interface SecretSessionResponse {
 }
 
 export type RegisterSecretRequest = EnvironmentSecretRegistration;
+export type UpdateSecretRequest = EnvironmentSecretUpdate;
 export type SecretSummary = SecretReference;
 
 export interface ListSecretsResponse {
@@ -777,6 +779,10 @@ export interface ListSecretsResponse {
 }
 
 export interface RegisterSecretResponse {
+    secret: SecretSummary;
+}
+
+export interface UpdateSecretResponse {
     secret: SecretSummary;
 }
 

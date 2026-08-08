@@ -470,6 +470,8 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             tui,
             unregisterSecret: (id) =>
                 localServer.client.unregisterSecret(id).then((response) => response.removed),
+            updateSecret: (id, update) =>
+                localServer.client.updateSecret(id, update).then((response) => response.secret),
             version,
         });
         let terminalThemeRefresh = 0;

@@ -13,12 +13,14 @@ export { createSecretInstructions } from "./createSecretInstructions.js";
 export { resolveSecretEnvironment } from "./resolveSecretEnvironment.js";
 export {
     environmentSecretRegistrationSchema,
+    environmentSecretUpdateSchema,
     githubSecretRegistrationSchema,
     secretRegistrationSchema,
     specialSecretKindSchema,
 } from "./types.js";
 export type {
     EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
     GitHubSecretRegistration,
     RigSecret,
     SecretAttachmentScope,

@@ -55,7 +55,11 @@ import type {
     SubagentSummary,
     WorkflowRun,
 } from "../protocol/index.js";
-import type { EnvironmentSecretRegistration, SecretAttachmentScope } from "../secrets/index.js";
+import type {
+    EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
+    SecretAttachmentScope,
+} from "../secrets/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import { humanizeWorkflowName } from "../workflows/index.js";
 import { createCodeReviewPrompt } from "../review/index.js";
@@ -249,6 +253,10 @@ export interface CodingAssistantAppOptions {
         registration: EnvironmentSecretRegistration,
     ) => SecretSummary | Promise<SecretSummary>;
     unregisterSecret?: (id: string) => boolean | Promise<boolean>;
+    updateSecret?: (
+        id: string,
+        update: EnvironmentSecretUpdate,
+    ) => SecretSummary | Promise<SecretSummary>;
     detachSecret?: (id: string, scope: SecretAttachmentScope) => void | Promise<void>;
     durableGlobalEventQueue?: boolean;
     debugInfo?: AppDebugInfo;
@@ -582,6 +590,7 @@ export class CodingAssistantApp implements Component, Focusable {
             showPanel: (component) => this.#setSelectionPanel(component, true),
             theme: this.#theme,
             unregisterSecret: options.unregisterSecret,
+            updateSecret: options.updateSecret,
         });
         this.#presence = options.presence;
         this.#presenceState = options.presence?.initial;

@@ -42,6 +42,7 @@ import type {
     TransferSessionRequest,
     TransferSessionResponse,
     UpdateFolderRequest,
+    UpdateSecretRequest,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import {
@@ -1458,6 +1459,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     unregisterSpecialSecret(kind: SpecialSecretKind): boolean {
         return this.#secrets.unregisterSpecial(kind);
+    }
+
+    updateSecret(secretId: string, request: UpdateSecretRequest): SecretSummary | undefined {
+        const updated = this.#secrets.updatedRegistration(secretId, request);
+        if (updated === undefined) return undefined;
+        secretRegister(this.#tx(), updated);
+        this.#secrets.register(updated);
+        return this.#secrets.reference(secretId);
     }
 
     #listSubagentSessionsByRoot(rootSessionId: string): readonly InMemorySession[] {

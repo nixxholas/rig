@@ -110,6 +110,8 @@ import type {
     TransferSessionRequest,
     TransferSessionResponse,
     UnregisterSecretResponse,
+    UpdateSecretRequest,
+    UpdateSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
     UpdateGlobalInstructionsRequest,
@@ -399,6 +401,10 @@ export class ProtocolHttpClient {
 
     registerSecret(request: RegisterSecretRequest): Promise<RegisterSecretResponse> {
         return this.#requestJson("POST", "/secrets", request);
+    }
+
+    updateSecret(secretId: string, request: UpdateSecretRequest): Promise<UpdateSecretResponse> {
+        return this.#requestJson("PATCH", `/secrets/${encodeURIComponent(secretId)}`, request);
     }
 
     unregisterSecret(secretId: string): Promise<UnregisterSecretResponse> {

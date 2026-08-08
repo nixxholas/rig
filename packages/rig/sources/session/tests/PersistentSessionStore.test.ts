@@ -1108,6 +1108,61 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("persists targeted secret field updates without replacing omitted values", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            store.registerSecret({
+                description: "Original credentials",
+                environment: { KEEP: "unchanged", REMOVE: "old", ROTATE: "old" },
+                id: "service",
+            });
+            expect(
+                store.updateSecret("service", {
+                    description: "Updated credentials",
+                    environment: { ADDED: "new", REMOVE: null, ROTATE: "rotated" },
+                }),
+            ).toEqual({
+                description: "Updated credentials",
+                environmentVariables: ["ADDED", "KEEP", "ROTATE"],
+                id: "service",
+            });
+            store.close();
+
+            const database = new DatabaseSync(databasePath, { readOnly: true });
+            try {
+                const row = database
+                    .prepare(
+                        "SELECT description, environment_json FROM secret_registrations WHERE id = ?",
+                    )
+                    .get("service") as { description: string; environment_json: string };
+                expect(row.description).toBe("Updated credentials");
+                expect(JSON.parse(row.environment_json)).toEqual({
+                    ADDED: "new",
+                    KEEP: "unchanged",
+                    ROTATE: "rotated",
+                });
+            } finally {
+                database.close();
+            }
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                expect(restoredStore.listSecrets()).toEqual([
+                    {
+                        description: "Updated credentials",
+                        environmentVariables: ["ADDED", "KEEP", "ROTATE"],
+                        id: "service",
+                    },
+                ]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("conservatively restores null, missing, and unknown agent event subtypes", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {

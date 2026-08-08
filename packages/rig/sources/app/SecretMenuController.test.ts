@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Component } from "@earendil-works/pi-tui";
 
 import type { SecretSummary } from "../protocol/index.js";
 import { DEFAULT_TERMINAL_THEME } from "./defaultTerminalTheme.js";
@@ -33,6 +34,7 @@ describe("SecretMenuController", () => {
             },
             theme: DEFAULT_TERMINAL_THEME,
             unregisterSecret: vi.fn(),
+            updateSecret: undefined,
         });
 
         controller.open();
@@ -75,6 +77,7 @@ describe("SecretMenuController", () => {
             },
             theme: DEFAULT_TERMINAL_THEME,
             unregisterSecret: vi.fn(),
+            updateSecret: undefined,
         });
 
         controller.open();
@@ -82,6 +85,64 @@ describe("SecretMenuController", () => {
             expect(stripAnsi(activePanel?.render(100).join("\n") ?? "")).toContain(
                 "Not available to model",
             ),
+        );
+    });
+
+    it("edits one selected field without replacing the secret bundle", async () => {
+        let activePanel: Component | undefined;
+        const updateSecret = vi.fn(
+            async (id: string, update: { description?: string }) =>
+                ({
+                    description: update.description ?? "Service credentials",
+                    environmentVariables: ["API_TOKEN", "REGION"],
+                    id,
+                }) satisfies SecretSummary,
+        );
+        const controller = new SecretMenuController({
+            appendEntry: vi.fn(),
+            attachSecret: vi.fn(),
+            closePanel: () => {
+                activePanel = undefined;
+            },
+            detachSecret: vi.fn(),
+            initialProjectSecretIds: [],
+            initialSessionSecretIds: [],
+            listSecrets: async () => [
+                {
+                    description: "Service credentials",
+                    environmentVariables: ["API_TOKEN", "REGION"],
+                    id: "service",
+                },
+            ],
+            registerSecret: vi.fn(),
+            requestRender: vi.fn(),
+            showPanel: (panel) => {
+                activePanel = panel;
+            },
+            theme: DEFAULT_TERMINAL_THEME,
+            unregisterSecret: vi.fn(),
+            updateSecret,
+        });
+
+        controller.open();
+        await vi.waitFor(() =>
+            expect(stripAnsi(activePanel?.render(100).join("\n") ?? "")).toContain("service"),
+        );
+
+        activePanel?.handleInput?.("\x1b[B");
+        activePanel?.handleInput?.("\r");
+        activePanel?.handleInput?.("\x1b[B");
+        activePanel?.handleInput?.("\x1b[B");
+        activePanel?.handleInput?.("\x1b[B");
+        activePanel?.handleInput?.("\r");
+        activePanel?.handleInput?.("\r");
+        activePanel?.handleInput?.("Updated service credentials");
+        activePanel?.handleInput?.("\r");
+
+        await vi.waitFor(() =>
+            expect(updateSecret).toHaveBeenCalledWith("service", {
+                description: "Updated service credentials",
+            }),
         );
     });
 });

@@ -37,6 +37,54 @@ describe("SecretRegistry", () => {
         });
     });
 
+    it("prepares targeted updates without replacing omitted secret fields", () => {
+        const registry = new SecretRegistry([
+            {
+                description: "Service credentials",
+                environment: { KEEP: "unchanged", REMOVE: "old", ROTATE: "old" },
+                id: "service",
+            },
+        ]);
+
+        const updated = registry.updatedRegistration("service", {
+            description: "Updated service credentials",
+            environment: {
+                ADDED: "new",
+                REMOVE: null,
+                rotate: "rotated",
+            },
+        });
+        expect(updated).toEqual({
+            description: "Updated service credentials",
+            environment: {
+                ADDED: "new",
+                KEEP: "unchanged",
+                rotate: "rotated",
+            },
+            id: "service",
+        });
+        expect(registry.resolve(["service"])).toEqual({
+            KEEP: "unchanged",
+            REMOVE: "old",
+            ROTATE: "old",
+        });
+
+        expect(updated).toBeDefined();
+        if (updated === undefined) throw new Error("Expected a targeted secret update.");
+        registry.register(updated);
+        expect(registry.resolve(["service"])).toEqual({
+            ADDED: "new",
+            KEEP: "unchanged",
+            rotate: "rotated",
+        });
+        expect(() =>
+            registry.updatedRegistration("service", {
+                environment: { ADDED: null, KEEP: null, rotate: null },
+            }),
+        ).toThrow("at least one environment variable");
+        expect(registry.updatedRegistration("missing", { description: "Missing" })).toBeUndefined();
+    });
+
     it("keeps the enumerated GitHub secret away from models while rotating it in place", () => {
         const registry = new SecretRegistry();
         const context = new SessionSecretContext(registry);
@@ -82,6 +130,10 @@ describe("SecretRegistry", () => {
                     },
                 ]),
         ).toThrow("GitHub secret schema");
+        const registry = new SecretRegistry([{ kind: "github", token: "token" }]);
+        expect(() =>
+            registry.updatedRegistration("github", { description: "User-controlled" }),
+        ).toThrow("managed by Rig");
     });
 
     it("rejects invalid registrations and conflicting command selections", () => {

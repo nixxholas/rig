@@ -1,7 +1,11 @@
 import type { Component } from "@earendil-works/pi-tui";
 
 import type { SecretSummary } from "../protocol/index.js";
-import type { EnvironmentSecretRegistration, SecretAttachmentScope } from "../secrets/index.js";
+import type {
+    EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
+    SecretAttachmentScope,
+} from "../secrets/index.js";
 import type { AppTranscriptEntry } from "./AppTranscriptEntry.js";
 import { createSecretInputPanel } from "./createSecretInputPanel.js";
 import { createSelectionPanel } from "./createSelectionPanel.js";
@@ -30,6 +34,9 @@ export interface SecretMenuControllerOptions {
     showPanel: (component: Component) => void;
     theme: TerminalTheme;
     unregisterSecret: ((id: string) => boolean | Promise<boolean>) | undefined;
+    updateSecret:
+        | ((id: string, update: EnvironmentSecretUpdate) => SecretSummary | Promise<SecretSummary>)
+        | undefined;
 }
 
 export class SecretMenuController {
@@ -51,6 +58,9 @@ export class SecretMenuController {
     readonly #showPanelCallback: (component: Component) => void;
     readonly #theme: TerminalTheme;
     readonly #unregisterSecret: ((id: string) => boolean | Promise<boolean>) | undefined;
+    readonly #updateSecret:
+        | ((id: string, update: EnvironmentSecretUpdate) => SecretSummary | Promise<SecretSummary>)
+        | undefined;
 
     #listVisible = false;
     #operationGeneration = 0;
@@ -71,6 +81,7 @@ export class SecretMenuController {
         this.#showPanelCallback = options.showPanel;
         this.#theme = options.theme;
         this.#unregisterSecret = options.unregisterSecret;
+        this.#updateSecret = options.updateSecret;
     }
 
     hide(): void {
@@ -332,6 +343,16 @@ export class SecretMenuController {
                                   label: "Remove registration",
                                   description: "Delete this bundle from Rig.",
                               },
+                              ...(this.#updateSecret === undefined
+                                  ? []
+                                  : [
+                                        {
+                                            value: "edit",
+                                            label: "Edit fields",
+                                            description:
+                                                "Change the description or selected environment variables.",
+                                        },
+                                    ]),
                           ]),
                     { value: "back", label: "Back" },
                 ],
@@ -344,11 +365,185 @@ export class SecretMenuController {
                         this.#confirmRemoval(secret);
                         return;
                     }
+                    if (item.value === "edit") {
+                        this.#openEditMenu(secret);
+                        return;
+                    }
                     this.#showSecretsMenu();
                 },
                 onCancel: () => this.#showSecretsMenu(),
             }),
         );
+    }
+
+    #openEditMenu(secret: SecretSummary, notice?: string): void {
+        this.#showPanel(
+            createSelectionPanel({
+                theme: this.#theme,
+                title: `Edit ${secret.id}`,
+                subtitle: notice ?? "Choose one field to change",
+                items: [
+                    {
+                        value: "description",
+                        label: "Description",
+                        description: secret.description,
+                    },
+                    {
+                        value: "set-variable",
+                        label: "Set variable",
+                        description: "Add a variable or replace one value.",
+                    },
+                    ...(secret.environmentVariables.length <= 1
+                        ? []
+                        : [
+                              {
+                                  value: "remove-variable",
+                                  label: "Remove variable",
+                                  description: "Remove one environment variable.",
+                              },
+                          ]),
+                    { value: "back", label: "Back" },
+                ],
+                onSelect: (item) => {
+                    if (item.value === "description") {
+                        this.#openUpdatedDescriptionInput(secret);
+                        return;
+                    }
+                    if (item.value === "set-variable") {
+                        this.#openUpdatedVariableNameInput(secret);
+                        return;
+                    }
+                    if (item.value === "remove-variable") {
+                        this.#openRemoveVariableMenu(secret);
+                        return;
+                    }
+                    this.#openSecretActions(secret);
+                },
+                onCancel: () => this.#openSecretActions(secret),
+            }),
+        );
+    }
+
+    #openUpdatedDescriptionInput(secret: SecretSummary, error?: string): void {
+        this.#showPanel(
+            createSecretInputPanel({
+                theme: this.#theme,
+                title: `Describe ${secret.id}`,
+                subtitle: error ?? `Current: ${secret.description}`,
+                label: "Description",
+                onSubmit: (value) => {
+                    const description = value.trim();
+                    if (description.length === 0) {
+                        this.#openUpdatedDescriptionInput(secret, "Enter a description.");
+                        return;
+                    }
+                    this.#updateRegistration(secret, { description });
+                },
+                onCancel: () => this.#openEditMenu(secret),
+            }),
+        );
+    }
+
+    #openUpdatedVariableNameInput(secret: SecretSummary, error?: string): void {
+        this.#showPanel(
+            createSecretInputPanel({
+                theme: this.#theme,
+                title: `Set variable in ${secret.id}`,
+                subtitle: error ?? "Enter a new or existing environment variable name",
+                label: "Name",
+                onSubmit: (value) => {
+                    const name = value.trim();
+                    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+                        this.#openUpdatedVariableNameInput(
+                            secret,
+                            "Enter a valid environment variable name.",
+                        );
+                        return;
+                    }
+                    this.#openUpdatedVariableValueInput(secret, name);
+                },
+                onCancel: () => this.#openEditMenu(secret),
+            }),
+        );
+    }
+
+    #openUpdatedVariableValueInput(secret: SecretSummary, name: string, error?: string): void {
+        this.#showPanel(
+            createSecretInputPanel({
+                theme: this.#theme,
+                title: `Set ${name}`,
+                subtitle: error ?? "The new value is masked and never added to the transcript",
+                label: "Value",
+                masked: true,
+                onSubmit: (value) => {
+                    if (value.includes("\0")) {
+                        this.#openUpdatedVariableValueInput(
+                            secret,
+                            name,
+                            "Secret values cannot contain null bytes.",
+                        );
+                        return;
+                    }
+                    this.#updateRegistration(secret, { environment: { [name]: value } });
+                },
+                onCancel: () => this.#openEditMenu(secret),
+            }),
+        );
+    }
+
+    #openRemoveVariableMenu(secret: SecretSummary): void {
+        this.#showPanel(
+            createSelectionPanel({
+                theme: this.#theme,
+                title: `Remove variable from ${secret.id}`,
+                subtitle: "The rest of the secret remains unchanged",
+                items: [
+                    ...secret.environmentVariables.map((name) => ({
+                        value: name,
+                        label: name,
+                    })),
+                    { value: ":back", label: "Back" },
+                ],
+                onSelect: (item) => {
+                    if (item.value === ":back") {
+                        this.#openEditMenu(secret);
+                        return;
+                    }
+                    this.#updateRegistration(secret, {
+                        environment: { [item.value]: null },
+                    });
+                },
+                onCancel: () => this.#openEditMenu(secret),
+            }),
+        );
+    }
+
+    #updateRegistration(secret: SecretSummary, update: EnvironmentSecretUpdate): void {
+        if (this.#updateSecret === undefined) return;
+        this.#closePanel();
+        const generation = this.#beginOperation();
+        void Promise.resolve()
+            .then(() => this.#updateSecret?.(secret.id, update))
+            .then((updated) => {
+                if (updated === undefined) return;
+                this.#registrations = [
+                    ...this.#registrations.filter((candidate) => candidate.id !== updated.id),
+                    updated,
+                ].sort((left, right) => left.id.localeCompare(right.id));
+                this.#appendEntry({
+                    role: "event",
+                    title: "Secrets",
+                    text: `Updated secret '${secret.id}'.`,
+                });
+                if (this.#isCurrentOperation(generation)) this.#showSecretsMenu();
+                this.#requestRender();
+            })
+            .catch(() => {
+                const message = "Could not update the selected secret field.";
+                this.#appendEntry({ role: "error", text: message });
+                if (this.#isCurrentOperation(generation)) this.#openEditMenu(secret, message);
+                this.#requestRender();
+            });
     }
 
     #openScopeMenu(secret: SecretSummary, operation: "attach" | "detach"): void {

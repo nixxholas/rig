@@ -23,6 +23,7 @@ import type {
     TimelineAgent,
     TransferSessionRequest,
     TransferSessionResponse,
+    UpdateSecretRequest,
     UpdateFolderRequest,
 } from "../protocol/index.js";
 import type { AgentTreeUsage } from "../agent/index.js";
@@ -193,4 +194,5 @@ export interface SessionStore {
     ): Promise<TransferSessionResponse | undefined>;
     unregisterSecret(secretId: string): boolean;
     unregisterSpecialSecret(kind: SpecialSecretKind): boolean;
+    updateSecret(secretId: string, request: UpdateSecretRequest): SecretSummary | undefined;
 }

@@ -1,5 +1,6 @@
 import type {
     EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
     SecretReference,
     SecretRegistration,
     SpecialSecretKind,
@@ -50,7 +51,7 @@ export class SecretRegistry {
         }
         const reference: SecretReference = {
             description: secret.description,
-            environmentVariables: Object.keys(secret.environment),
+            environmentVariables: Object.keys(secret.environment).sort(),
             id: secret.id,
         };
         if ("kind" in secret) {
@@ -62,6 +63,40 @@ export class SecretRegistry {
 
     references(): readonly SecretReference[] {
         return [...this.#secrets.keys()].sort().map((secretId) => this.reference(secretId));
+    }
+
+    updatedRegistration(
+        secretId: string,
+        update: EnvironmentSecretUpdate,
+    ): EnvironmentSecretRegistration | undefined {
+        const current = this.#secrets.get(secretId);
+        if (current === undefined) return undefined;
+        if ("kind" in current) {
+            throw new Error(`Secret '${secretId}' is managed by Rig and cannot be edited.`);
+        }
+        const environment = { ...current.environment };
+        const patchedNames = new Set<string>();
+        for (const [name, value] of Object.entries(update.environment ?? {})) {
+            const normalizedName = name.toUpperCase();
+            if (patchedNames.has(normalizedName)) {
+                throw new Error(
+                    `Secret '${secretId}' contains duplicate environment variable updates.`,
+                );
+            }
+            patchedNames.add(normalizedName);
+            const currentName = Object.keys(environment).find(
+                (candidate) => candidate.toUpperCase() === normalizedName,
+            );
+            if (currentName !== undefined) delete environment[currentName];
+            if (value !== null) environment[name] = value;
+        }
+        const updated = {
+            description: update.description?.trim() ?? current.description,
+            environment,
+            id: current.id,
+        };
+        validateSecretRegistration(updated);
+        return updated;
     }
 
     resolve(secretIds: readonly string[]): NodeJS.ProcessEnv {
