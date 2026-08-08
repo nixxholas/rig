@@ -36,6 +36,7 @@ import type { DurableUserInputCall } from "../user-input/index.js";
 import type { PresenceStore } from "../presence/index.js";
 import type { SlotEntryStore } from "../slots/index.js";
 import type { AppletStore } from "../applets/index.js";
+import type { WorkletStore } from "../worklets/index.js";
 
 export interface SessionStore {
     /** Stable identity for this initialized Rig data generation. */
@@ -52,6 +53,8 @@ export interface SessionStore {
     readonly slots: SlotEntryStore;
     /** Imported, versioned applets rig serves as static files. */
     readonly applets: AppletStore;
+    /** Installed, versioned worklets: the background compute rig keeps running. */
+    readonly worklets: WorkletStore;
     attachSecret(
         sessionId: string,
         secretId: string,

@@ -211,6 +211,20 @@ import {
     AppletInvalidError,
     AppletNotFoundError,
 } from "../applets/index.js";
+import {
+    WorkletInvalidError,
+    WorkletNotFoundError,
+    type WorkletManager,
+} from "../worklets/index.js";
+import {
+    installWorkletRequestSchema,
+    revertWorkletRequestSchema,
+    updateWorkletRequestSchema,
+    type ListWorkletsResponse,
+    type WorkletLogResponse,
+    type WorkletManagementErrorCode,
+    type WorkletResponse,
+} from "../protocol/WorkletProtocol.js";
 import { MAX_ATTACHMENT_FILE_BYTES } from "../tools/attachments/prepareAttachment.js";
 import {
     createAppletRequestSchema,
@@ -319,6 +333,8 @@ export interface ProtocolHttpServerOptions {
     >;
     store?: SessionStore;
     taskDrain?: TaskDrain;
+    /** The daemon's running worklets. Absent when this daemon runs without them. */
+    worklets?: WorkletManager;
     secrets?: readonly SecretRegistration[];
     token: string;
 }
@@ -357,6 +373,7 @@ export function createProtocolHttpServer(
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
         plugins: options.plugins,
+        ...(options.worklets === undefined ? {} : { worklets: options.worklets }),
     };
     // The persistent store caches sessions weakly; each open SSE stream needs its own strong lease.
     const sessionEventStreamLeases = new Set<SessionEventStreamLease>();
@@ -470,6 +487,7 @@ interface ProtocolServerRuntimeConfig {
               | "uninstall"
           >
         | undefined;
+    worklets?: WorkletManager;
 }
 
 interface AppliedDaemonSettings {
@@ -1392,6 +1410,20 @@ async function handleRequest(
             "x-content-type-options": "nosniff",
         });
         response.end(file.data);
+        return;
+    }
+    if (route.name === "worklets") {
+        await handleWorkletRequest(request, response, { name: "worklets" }, runtimeConfig);
+        return;
+    }
+    if (
+        route.name === "worklet" ||
+        route.name === "worklet-versions" ||
+        route.name === "worklet-revert" ||
+        route.name === "worklet-log" ||
+        route.name === "worklet-icon"
+    ) {
+        await handleWorkletRequest(request, response, route, runtimeConfig);
         return;
     }
     if (request.method === "POST" && route.name === "debug-inspector") {
@@ -3920,7 +3952,8 @@ function matchRoute(pathname: string):
               | "shutdown"
               | "slots"
               | "timeline"
-              | "applets";
+              | "applets"
+              | "worklets";
           sessionId?: undefined;
       }
     | {
@@ -3946,6 +3979,17 @@ function matchRoute(pathname: string):
           appletName: string;
       }
     | { name: "applet-file"; sessionId?: undefined; appletFilePath: string; appletName: string }
+    | {
+          name: "worklet-log" | "worklet-revert" | "worklet-versions" | "worklet";
+          sessionId?: undefined;
+          workletName: string;
+      }
+    | {
+          name: "worklet-icon";
+          sessionId?: undefined;
+          format: "ico" | "png";
+          workletName: string;
+      }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | {
           name: "plugin-log" | "plugin-uninstall";
@@ -4123,6 +4167,31 @@ function matchRoute(pathname: string):
     if (pathname === "/shutdown") return { name: "shutdown" };
     if (pathname === "/slots") return { name: "slots" };
     if (pathname === "/applets") return { name: "applets" };
+    if (pathname === "/worklets") return { name: "worklets" };
+
+    const workletIcon = /^\/worklets\/([^/]+)\/favicon\.(ico|png)$/u.exec(pathname);
+    if (workletIcon !== null) {
+        const workletName = decodeUrlComponent(workletIcon[1]);
+        if (workletName === undefined) return undefined;
+        return { format: workletIcon[2] as "ico" | "png", name: "worklet-icon", workletName };
+    }
+    const workletOperation = /^\/worklets\/([^/]+)(?:\/(versions|revert|log))?$/u.exec(pathname);
+    if (workletOperation !== null) {
+        const workletName = decodeUrlComponent(workletOperation[1]);
+        if (workletName === undefined) return undefined;
+        const operation = workletOperation[2];
+        return {
+            name:
+                operation === "versions"
+                    ? "worklet-versions"
+                    : operation === "revert"
+                      ? "worklet-revert"
+                      : operation === "log"
+                        ? "worklet-log"
+                        : "worklet",
+            workletName,
+        };
+    }
 
     const appletIcon = /^\/applets\/([^/]+)\/favicon\.(ico|png)$/u.exec(pathname);
     if (appletIcon !== null) {
@@ -4625,6 +4694,217 @@ function sendInvalidSlotBody(response: ServerResponse, error: unknown): void {
     sendSlotManagementError(response, 400, "invalid_request", "A slot entry must be valid JSON.");
 }
 
+async function handleWorkletRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    route:
+        | { name: "worklets" }
+        | Extract<
+              NonNullable<ReturnType<typeof matchRoute>>,
+              {
+                  name:
+                      | "worklet"
+                      | "worklet-icon"
+                      | "worklet-log"
+                      | "worklet-revert"
+                      | "worklet-versions";
+              }
+          >,
+    runtimeConfig: ProtocolServerRuntimeConfig,
+): Promise<void> {
+    const worklets = runtimeConfig.worklets;
+    if (worklets === undefined) {
+        sendWorkletManagementError(
+            response,
+            503,
+            "worklet_not_found",
+            "This Rig daemon is running without worklets.",
+        );
+        return;
+    }
+    if (route.name === "worklets") {
+        if (request.method === "GET") {
+            sendJson<ListWorkletsResponse>(response, 200, worklets.catalog());
+            return;
+        }
+        if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        let body: unknown;
+        try {
+            body = await readJson<unknown>(request, 64 * 1024);
+        } catch (error) {
+            sendInvalidWorkletBody(response, error);
+            return;
+        }
+        if (!Value.Check(installWorkletRequestSchema, body)) {
+            sendWorkletManagementError(
+                response,
+                400,
+                "invalid_request",
+                "A worklet install needs a kebab-case name, description, purpose, author session, source folder path, and 512 by 512 PNG icon path.",
+            );
+            return;
+        }
+        try {
+            sendJson<WorkletResponse>(response, 201, { worklet: await worklets.install(body) });
+        } catch (error) {
+            sendWorkletFailure(response, error);
+        }
+        return;
+    }
+    if (route.name === "worklet-icon") {
+        if (request.method !== "GET") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const icon = await worklets.readIcon(route.workletName, route.format);
+        if (icon.type !== "file") {
+            sendWorkletManagementError(
+                response,
+                404,
+                "worklet_not_found",
+                "Worklet icon not found.",
+            );
+            return;
+        }
+        response.writeHead(200, {
+            "cache-control": "private, max-age=31536000, immutable",
+            "content-length": icon.data.byteLength,
+            "content-type": icon.contentType,
+            "x-content-type-options": "nosniff",
+        });
+        response.end(icon.data);
+        return;
+    }
+    if (route.name === "worklet-log") {
+        if (request.method !== "GET") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        try {
+            const log = await worklets.readLog(route.workletName);
+            sendJson<WorkletLogResponse>(response, 200, log);
+        } catch (error) {
+            sendWorkletFailure(response, error);
+        }
+        return;
+    }
+    if (route.name === "worklet") {
+        if (request.method === "GET") {
+            const worklet = worklets.get(route.workletName);
+            if (worklet === undefined) {
+                sendWorkletManagementError(
+                    response,
+                    404,
+                    "worklet_not_found",
+                    `No worklet named ${JSON.stringify(route.workletName)} exists.`,
+                );
+                return;
+            }
+            sendJson<WorkletResponse>(response, 200, { worklet });
+            return;
+        }
+        if (request.method !== "DELETE") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        try {
+            await worklets.uninstall(route.workletName);
+            sendJson(response, 200, {});
+        } catch (error) {
+            sendWorkletFailure(response, error);
+        }
+        return;
+    }
+    if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+    }
+    let body: unknown;
+    try {
+        body = await readJson<unknown>(request, 64 * 1024);
+    } catch (error) {
+        sendInvalidWorkletBody(response, error);
+        return;
+    }
+    if (route.name === "worklet-versions") {
+        if (!Value.Check(updateWorkletRequestSchema, body)) {
+            sendWorkletManagementError(
+                response,
+                400,
+                "invalid_request",
+                "A worklet update needs the source folder path and a description of what changed.",
+            );
+            return;
+        }
+        try {
+            sendJson<WorkletResponse>(response, 200, {
+                worklet: await worklets.update(route.workletName, body),
+            });
+        } catch (error) {
+            sendWorkletFailure(response, error);
+        }
+        return;
+    }
+    if (!Value.Check(revertWorkletRequestSchema, body)) {
+        sendWorkletManagementError(
+            response,
+            400,
+            "invalid_request",
+            "A worklet revert needs the existing version to make current.",
+        );
+        return;
+    }
+    try {
+        sendJson<WorkletResponse>(response, 200, {
+            worklet: await worklets.revert(route.workletName, body),
+        });
+    } catch (error) {
+        sendWorkletFailure(response, error);
+    }
+}
+
+function sendWorkletFailure(response: ServerResponse, error: unknown): void {
+    if (error instanceof WorkletInvalidError) {
+        sendWorkletManagementError(response, 400, "invalid_worklet", error.message);
+        return;
+    }
+    if (error instanceof WorkletNotFoundError) {
+        sendWorkletManagementError(response, 404, "worklet_not_found", error.message);
+        return;
+    }
+    throw error;
+}
+
+function sendInvalidWorkletBody(response: ServerResponse, error: unknown): void {
+    if (error instanceof RequestBodyTooLargeError) {
+        sendWorkletManagementError(
+            response,
+            413,
+            "invalid_request",
+            "The worklet request is larger than the allowed limit.",
+        );
+        return;
+    }
+    sendWorkletManagementError(
+        response,
+        400,
+        "invalid_request",
+        "A worklet request must be valid JSON.",
+    );
+}
+
+function sendWorkletManagementError(
+    response: ServerResponse,
+    status: number,
+    code: WorkletManagementErrorCode,
+    message: string,
+): void {
+    sendJson(response, status, { error: { code, message } });
+}
+
 function sendInvalidAppletBody(response: ServerResponse, error: unknown): void {
     if (error instanceof RequestBodyTooLargeError) {
         sendAppletManagementError(
@@ -4756,6 +5036,11 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "slots") return request.method === "POST";
     if (route.name === "slot-entry") return request.method !== "GET";
     if (route.name === "applets") return request.method === "POST";
+    if (route.name === "worklets") return request.method === "POST";
+    if (route.name === "worklet") return request.method === "DELETE";
+    if (route.name === "worklet-versions" || route.name === "worklet-revert") {
+        return request.method === "POST";
+    }
     if (route.name === "applet-versions" || route.name === "applet-revert") {
         return request.method === "POST";
     }

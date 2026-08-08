@@ -22,13 +22,22 @@ export async function createLinuxBubblewrapCommand(options: {
      * never build a shell string and never source the user's login profile.
      */
     argv?: readonly string[];
+    additionalWritablePaths?: readonly string[];
+    /**
+     * Writable even when it sits inside a protected path, for a caller whose own folder is nested
+     * under something it must not otherwise touch. Bound after the protections, so it re-opens
+     * exactly these paths and nothing around them.
+     */
+    alwaysWritablePaths?: readonly string[];
     bwrapPath?: string;
     command: string;
     commandCwd: string;
     cwd: string;
     environment?: NodeJS.ProcessEnv;
+    filesystemFullAccess?: boolean;
     mode: Exclude<PermissionMode, "full_access">;
     mountProc?: boolean;
+    networkFullAccess?: boolean;
     networkUnixProxySockets?: {
         authenticationToken: string;
         http: string;
@@ -40,6 +49,7 @@ export async function createLinuxBubblewrapCommand(options: {
     shell: string;
     temporaryDirectory?: string;
     uid?: number;
+    unixSocketPaths?: readonly string[];
 }): Promise<{
     args: readonly string[];
     command: string;
@@ -74,10 +84,19 @@ export async function createLinuxBubblewrapCommand(options: {
     // Read only withholds the workspace but still needs a writable temporary directory, matching
     // the Seatbelt policy and the sandbox-runtime filesystem config. Toolchain shims cache into
     // TMPDIR on every invocation, and denying that write costs hundreds of milliseconds per command.
+    // Space the command's own declared permissions grant it, on top of its workspace. Read only
+    // withholds the workspace, so it is never widened past it either.
+    const filesystemFullAccess =
+        options.mode !== "read_only" && options.filesystemFullAccess === true;
     const writableCandidates =
         options.mode === "read_only"
             ? [temporaryDirectory]
-            : [canonicalCwd, ...gitWritablePaths, temporaryDirectory];
+            : [
+                  canonicalCwd,
+                  ...gitWritablePaths,
+                  ...(options.additionalWritablePaths ?? []),
+                  temporaryDirectory,
+              ];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ].filter((path) => existsSync(path) && path !== privateTemporaryRoot);
@@ -173,6 +192,19 @@ export async function createLinuxBubblewrapCommand(options: {
             (!isAtOrBelow(privateTemporaryRoot, path) ||
                 writableRoots.some((root) => isAtOrBelow(root, path))),
     );
+    const neverGrantedSocketRoots = [environment.RIG_SERVER_DIRECTORY].filter(
+        (path): path is string => typeof path === "string" && path.length > 0,
+    );
+    const neverGrantedSocketPaths = [
+        environment.RIG_SERVER_SOCKET_PATH,
+        environment.RIG_SERVER_TOKEN_PATH,
+    ].filter((path): path is string => typeof path === "string" && path.length > 0);
+    const grantedSocketPaths = [...new Set(options.unixSocketPaths ?? [])].filter(
+        (path) =>
+            existsSync(path) &&
+            !neverGrantedSocketPaths.includes(path) &&
+            !neverGrantedSocketRoots.some((root) => isAtOrBelow(root, path)),
+    );
     const protectedCreatePaths = [...new Set(protectedCreateCandidates)].filter(
         (path) =>
             !existsSync(path) &&
@@ -182,10 +214,12 @@ export async function createLinuxBubblewrapCommand(options: {
                 return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
             }),
     );
+    // Full disk access is the root bind itself rather than a later one, because rebinding `/` on
+    // top of the sandbox would discard the `/dev` and `/tmp` mounts set up right after it.
     const args = [
         "--new-session",
         "--die-with-parent",
-        "--ro-bind",
+        filesystemFullAccess ? "--bind" : "--ro-bind",
         "/",
         "/",
         "--dev",
@@ -203,6 +237,19 @@ export async function createLinuxBubblewrapCommand(options: {
     for (const writableRoot of writableRoots) args.push("--bind", writableRoot, writableRoot);
     for (const protectedPath of protectedPaths)
         args.push("--ro-bind", protectedPath, protectedPath);
+    // The whole filesystem is bound read-only, and connecting to a Unix socket writes to the
+    // socket itself, so an explicitly granted socket is bound writable by its exact path. This is
+    // stated after broad protected roots to reopen the socket and nothing around it.
+    for (const socketPath of grantedSocketPaths) args.push("--bind", socketPath, socketPath);
+    // A caller's own folder, which may sit inside one of those protected paths. It is bound last
+    // because it is the one thing the protection above is not meant to have taken away.
+    if (options.mode !== "read_only") {
+        for (const alwaysWritablePath of [...new Set(options.alwaysWritablePaths ?? [])].filter(
+            (path) => existsSync(path),
+        )) {
+            args.push("--bind", alwaysWritablePath, alwaysWritablePath);
+        }
+    }
     if (projectConfigPlaceholder !== undefined) {
         if (projectConfigPlaceholder.gitExclude !== undefined) {
             args.push(
@@ -214,7 +261,10 @@ export async function createLinuxBubblewrapCommand(options: {
         args.push("--ro-bind", projectConfigPlaceholder.sourcePath, projectConfigPlaceholder.path);
     }
 
-    args.push("--unshare-user", "--unshare-pid", "--unshare-net");
+    // The network namespace is the whole of the egress policy here: keeping it isolated is what
+    // makes the bridge the only way out, and sharing it is what unrestricted egress means.
+    args.push("--unshare-user", "--unshare-pid");
+    if (options.networkFullAccess !== true) args.push("--unshare-net");
     args.push(options.mountProc === false ? "--bind" : "--proc", "/proc");
     if (options.mountProc === false) args.push("/proc");
     args.push("--chdir", commandCwd, "--");

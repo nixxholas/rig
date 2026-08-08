@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createServer } from "node:net";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,6 +64,43 @@ describe("createMacOsSeatbeltCommand", () => {
                 join(cwd, "plans"),
             ]),
         );
+    });
+
+    it("uses a caller-provided private temp folder without reopening the shared host temp", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-seatbelt-private-temp-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "project");
+        const privateTemporaryDirectory = join(root, "runtime", "tmp");
+        await mkdir(cwd);
+        await mkdir(privateTemporaryDirectory, { recursive: true });
+
+        const result = await createMacOsSeatbeltCommand({
+            command: "true",
+            cwd,
+            mode: "workspace_write",
+            shell: "/bin/sh",
+            temporaryDirectory: privateTemporaryDirectory,
+        });
+
+        const writableRoots = definedPaths(result.args, "WRITABLE_ROOT");
+        expect(writableRoots).toContain(await realpath(privateTemporaryDirectory));
+        expect(writableRoots).not.toContain(await realpath(tmpdir()));
+        expect(writableRoots).not.toContain("/private/tmp");
+    });
+
+    it("can refuse subprocess creation for a contained background runtime", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-seatbelt-no-subprocess-"));
+        temporaryDirectories.push(cwd);
+
+        const result = await createMacOsSeatbeltCommand({
+            allowSubprocesses: false,
+            command: "true",
+            cwd,
+            mode: "workspace_write",
+            shell: "/bin/sh",
+        });
+
+        expect(result.args[1]).toContain("(deny process-fork)");
     });
 
     it("allows outbound network only to the managed proxy port", async () => {
@@ -175,6 +213,158 @@ describe("createMacOsSeatbeltCommand", () => {
         },
     );
 
+    it("grants one named socket outside the project without widening anything else", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-seatbelt-socket-grant-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "project");
+        await mkdir(cwd);
+        const granted = join(root, "runtime", "worklet.sock");
+
+        const result = await createMacOsSeatbeltCommand({
+            command: "true",
+            cwd,
+            mode: "workspace_write",
+            shell: "/bin/sh",
+            unixSocketPaths: [granted],
+        });
+
+        const policy = result.args[1] ?? "";
+        expect(definedPaths(result.args, "GRANTED_SOCKET")).toEqual([
+            join(await realpath(root), "runtime", "worklet.sock"),
+        ]);
+        expect(policy).toContain(
+            '(allow network-outbound (remote unix-socket (literal (param "GRANTED_SOCKET_0"))))',
+        );
+        // Connecting is granted; binding there and writing around it are not.
+        expect(policy).not.toContain('(local unix-socket (literal (param "GRANTED_SOCKET_0")))');
+        expect(policy).not.toContain('(subpath (param "GRANTED_SOCKET_0"))');
+        expect(definedPaths(result.args, "WRITABLE_ROOT")).not.toContain(granted);
+    });
+
+    it("never grants Rig's own control socket even when a caller asks for it", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-seatbelt-socket-grant-order-"));
+        temporaryDirectories.push(cwd);
+        const control = join(cwd, "control", "server.sock");
+
+        const result = await createMacOsSeatbeltCommand({
+            command: "true",
+            cwd,
+            environment: { RIG_SERVER_SOCKET_PATH: control },
+            mode: "workspace_write",
+            shell: "/bin/sh",
+            unixSocketPaths: [control],
+        });
+
+        expect(definedPaths(result.args, "GRANTED_SOCKET")).toEqual([]);
+    });
+
+    it("reopens one exact socket inside a broadly protected root", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-seatbelt-protected-socket-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "project");
+        const runtime = join(root, "runtime");
+        const granted = join(runtime, "worklet.sock");
+        await mkdir(cwd);
+        await mkdir(runtime);
+
+        const result = await createMacOsSeatbeltCommand({
+            command: "true",
+            cwd,
+            mode: "workspace_write",
+            protectedPaths: [runtime],
+            shell: "/bin/sh",
+            unixSocketPaths: [granted],
+        });
+
+        const policy = result.args[1] ?? "";
+        expect(policy.indexOf("(deny network-outbound")).toBeLessThan(
+            policy.indexOf('(param "GRANTED_SOCKET_0")'),
+        );
+        expect(definedPaths(result.args, "WRITABLE_ROOT")).not.toContain(await realpath(runtime));
+    });
+
+    it.runIf(process.platform === "darwin")(
+        "connects to a granted socket outside the project and is refused its neighbour",
+        async () => {
+            // A Unix socket address is a small fixed-size kernel field, so this path stays short.
+            const root = await mkdtemp(join(tmpdir(), "rg"));
+            temporaryDirectories.push(root);
+            const cwd = join(root, "project");
+            const runtime = join(root, "runtime");
+            await mkdir(cwd);
+            await mkdir(runtime);
+            const granted = join(runtime, "a.sock");
+            const neighbour = join(runtime, "b.sock");
+            const servers = await Promise.all([listen(granted), listen(neighbour)]);
+            try {
+                const connect = (path: string) =>
+                    `node -e "const net=require('net');const c=net.connect('${path}');c.on('connect',()=>{console.log('CONNECTED');c.end();});c.on('error',(e)=>{console.log('DENIED '+e.code);});"`;
+
+                const allowed = await createMacOsSeatbeltCommand({
+                    command: connect(granted),
+                    cwd,
+                    mode: "workspace_write",
+                    shell: "/bin/sh",
+                    unixSocketPaths: [granted],
+                });
+                const refused = await createMacOsSeatbeltCommand({
+                    command: connect(neighbour),
+                    cwd,
+                    mode: "workspace_write",
+                    shell: "/bin/sh",
+                    unixSocketPaths: [granted],
+                });
+
+                expect(
+                    (await execFileAsync(allowed.command, allowed.args as string[], { cwd }))
+                        .stdout,
+                ).toContain("CONNECTED");
+                expect(
+                    (await execFileAsync(refused.command, refused.args as string[], { cwd }))
+                        .stdout,
+                ).toContain("DENIED");
+            } finally {
+                for (const server of servers) server.close();
+            }
+        },
+    );
+
+    it.runIf(process.platform === "darwin")(
+        "grants full network access IP egress without granting the host's Unix sockets",
+        async () => {
+            // A Unix socket address is a small fixed-size kernel field, so this path stays short.
+            const root = await mkdtemp(join(tmpdir(), "rg"));
+            temporaryDirectories.push(root);
+            const cwd = join(root, "project");
+            const elsewhere = join(root, "elsewhere");
+            await mkdir(cwd);
+            await mkdir(elsewhere);
+            // Stands in for the host's own sockets: the Docker daemon, the ssh agent, gpg.
+            const hostSocket = join(elsewhere, "h.sock");
+            const server = await listen(hostSocket);
+            try {
+                const command = await createMacOsSeatbeltCommand({
+                    command: `node -e "const net=require('net');const c=net.connect('${hostSocket}');c.on('connect',()=>{console.log('CONNECTED');c.end();});c.on('error',(e)=>{console.log('DENIED '+e.code);});"`,
+                    cwd,
+                    mode: "workspace_write",
+                    networkFullAccess: true,
+                    shell: "/bin/sh",
+                });
+
+                // Unrestricted egress is about IP. A socket nothing granted stays out of reach,
+                // so asking for the network never quietly hands over the Docker daemon.
+                expect(
+                    (await execFileAsync(command.command, command.args as string[], { cwd }))
+                        .stdout,
+                ).toContain("DENIED");
+                expect(command.args[1]).toContain('(allow network-outbound (remote ip "*:*"))');
+                expect(command.args[1]).not.toContain("(allow network-outbound)");
+            } finally {
+                server.close();
+            }
+        },
+    );
+
     it("keeps sockets out of Read only commands and out of protected paths", async () => {
         const cwd = await mkdtemp(join(tmpdir(), "rig-seatbelt-socket-limits-"));
         temporaryDirectories.push(cwd);
@@ -250,6 +440,14 @@ describe("createMacOsSeatbeltCommand", () => {
         },
     );
 });
+
+function listen(path: string): Promise<{ close: () => void }> {
+    const server = createServer();
+    return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(path, () => resolve({ close: () => server.close() }));
+    });
+}
 
 function definedPaths(args: readonly string[], prefix: string): string[] {
     return args

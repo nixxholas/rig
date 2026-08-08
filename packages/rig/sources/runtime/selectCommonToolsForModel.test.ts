@@ -32,6 +32,12 @@ describe("selectCommonToolsForModel", () => {
             "applet_update",
             "applet_revert",
             "applet_list",
+            "worklet_install",
+            "worklet_update",
+            "worklet_revert",
+            "worklet_uninstall",
+            "worklet_list",
+            "worklet_logs",
         ]);
     });
 
@@ -61,6 +67,12 @@ describe("selectCommonToolsForModel", () => {
             "applet_update",
             "applet_revert",
             "applet_list",
+            "worklet_install",
+            "worklet_update",
+            "worklet_revert",
+            "worklet_uninstall",
+            "worklet_list",
+            "worklet_logs",
         ]);
     });
 

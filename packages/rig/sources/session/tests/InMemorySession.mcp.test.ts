@@ -2,7 +2,8 @@ import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
-import { defineTool } from "../../agent/types.js";
+import type { WorkletContext } from "../../agent/context/WorkletContext.js";
+import { defineTool, type AnyDefinedTool } from "../../agent/types.js";
 import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
 import type { McpToolProvider } from "../../mcp/index.js";
@@ -152,6 +153,112 @@ describe("InMemorySession MCP permissions", () => {
             "workspace_write",
         ]);
     });
+
+    it("refreshes worklet tools before the next inference in the same run", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/live-worklet-tools",
+            name: "Live worklet tools",
+            thinkingLevels: ["off"],
+        });
+        let revision = 0;
+        const liveTool = defineTool({
+            name: "worklet_clock_now",
+            label: "Clock now",
+            description: "Reads the clock worklet.",
+            arguments: Type.Object({}),
+            returnType: Type.String(),
+            execute: () => "now",
+            shouldReviewInAutoMode: () => false,
+            toLLM: (value) => [{ text: value, type: "text" }],
+            toUI: () => "now",
+            locks: [],
+        });
+        let activeMcpTools: AnyDefinedTool[] = [];
+        const installer = defineTool({
+            name: "install_clock_worklet",
+            label: "Install clock worklet",
+            description: "Installs the test worklet.",
+            arguments: Type.Object({}),
+            returnType: Type.Object({}),
+            execute: () => {
+                activeMcpTools = [liveTool];
+                revision += 1;
+                return {};
+            },
+            shouldReviewInAutoMode: () => false,
+            toLLM: () => [{ text: "installed", type: "text" }],
+            toUI: () => "installed",
+            locks: [],
+        });
+        const toolCatalogs: string[][] = [];
+        let inference = 0;
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream(_model, context, options) {
+                if (options?.sessionId?.endsWith(":title")) return responseStream();
+                toolCatalogs.push(context.tools?.map((tool) => tool.name) ?? []);
+                inference += 1;
+                return inference === 1
+                    ? responseStream(
+                          [
+                              {
+                                  arguments: {},
+                                  id: "install-clock",
+                                  name: installer.name,
+                                  type: "toolCall",
+                              },
+                          ],
+                          "toolUse",
+                      )
+                    : responseStream();
+            },
+        });
+        const catalog: ModelCatalog = {
+            defaultModelId: model.id,
+            defaultProviderId: provider.id,
+            models: [model],
+            providers: [{ providerId: provider.id, models: [model] }],
+        };
+        const load = vi.fn<McpToolProvider["load"]>(async () => ({
+            servers: [
+                {
+                    name: "clock",
+                    status: "connected",
+                    toolCount: activeMcpTools.length,
+                },
+            ],
+            tools: activeMcpTools,
+        }));
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime(options) {
+                const runtime = createRuntime(options, provider);
+                runtime.agent.context.worklets = {
+                    toolRevision: () => revision,
+                } as WorkletContext;
+                runtime.agent.setTools([installer]);
+                return runtime;
+            },
+            mcpToolProvider: { close: async () => undefined, load },
+            modelCatalog: catalog,
+            request: {
+                cwd: "/tmp/rig-live-worklet-tools",
+                modelId: model.id,
+                permissionMode: "full_access",
+                providerId: provider.id,
+            },
+        });
+
+        const run = session.submit({ text: "Install the clock and call it." });
+        await expect(session.waitForRun(run.runId)).resolves.toEqual({ status: "completed" });
+
+        expect(toolCatalogs).toHaveLength(2);
+        expect(toolCatalogs[0]).not.toContain(liveTool.name);
+        expect(toolCatalogs[1]).toContain(liveTool.name);
+        expect(load).toHaveBeenCalledTimes(2);
+    });
 });
 
 function createRuntime(
@@ -179,14 +286,17 @@ function createRuntime(
     };
 }
 
-function responseStream(): InferenceStream {
+function responseStream(
+    content: AssistantMessage["content"] = [{ text: "Done.", type: "text" }],
+    stopReason: "length" | "stop" | "toolUse" = "stop",
+): InferenceStream {
     const message: AssistantMessage = {
         api: "test",
-        content: [{ text: "Done.", type: "text" }],
+        content,
         model: "test/mcp-permissions",
         provider: "test",
         role: "assistant",
-        stopReason: "stop",
+        stopReason,
         timestamp: 1,
         usage: {
             cacheRead: 0,
@@ -200,7 +310,7 @@ function responseStream(): InferenceStream {
     return {
         async *[Symbol.asyncIterator]() {
             yield { partial: message, type: "start" as const };
-            yield { message, reason: "stop" as const, type: "done" as const };
+            yield { message, reason: stopReason, type: "done" as const };
         },
         async result() {
             return message;

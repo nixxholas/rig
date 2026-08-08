@@ -58,6 +58,10 @@ export type {
     RigSessionSubscriptionOptions,
     RigTimelineConnection,
     RigTimelineSubscriptionOptions,
+    RigWorkletsConnection,
+    RigWorkletsSubscriptionOptions,
+    InstallWorkletInput,
+    UpdateWorkletInput,
     SendMessageInput,
     SessionFinished,
     SecretAttachmentScope,
@@ -72,6 +76,16 @@ export {
     PluginManagementRequestError,
     PluginStore,
 } from "./PluginElement.js";
+export { WorkletManagementRequestError, WorkletStore } from "./WorkletElement.js";
+export type {
+    ReadWorkletLogResult,
+    Worklet,
+    WorkletFailure,
+    WorkletManagementRequestErrorCode,
+    WorkletTool,
+    WorkletVersion,
+    WorkletsState,
+} from "./WorkletElement.js";
 export type {
     LocalPlugin,
     PluginApp,
@@ -241,6 +255,10 @@ export type {
     McpServerSummary,
     ModelCatalog,
     ListPluginsResponse,
+    ListWorkletsResponse,
+    WorkletLogResponse,
+    WorkletState,
+    WorkletSummary,
     MutationId,
     PendingSteeringMessage,
     PluginLogResponse,

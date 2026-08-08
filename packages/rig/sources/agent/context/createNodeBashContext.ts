@@ -13,21 +13,19 @@ import { createSandboxedCommand } from "./createSandboxedCommand.js";
 import {
     type ManagedNetworkBlockedRequest,
     type ManagedNetworkInterceptor,
-    type ManagedNetworkProxyHandle,
+    type ManagedNetworkPolicy,
     shouldApplyManagedNetworkPolicy,
-    shouldBypassManagedProxyForLoopback,
-    validateManagedNetworkLoopbackPorts,
 } from "./ManagedNetworkPolicy.js";
-import { startManagedNetworkProxy } from "./startManagedNetworkProxy.js";
 import {
-    startLinuxManagedNetworkBridge,
-    type LinuxManagedNetworkBridge,
-} from "./startLinuxManagedNetworkBridge.js";
+    type SandboxedProcessNetwork,
+    startSandboxedProcessNetwork,
+} from "./startSandboxedProcessNetwork.js";
 import { loadProjectManagedNetworkPolicy } from "./loadProjectManagedNetworkPolicy.js";
 import {
     createProtectedPathMonitor,
     type ProtectedPathMonitor,
 } from "./createProtectedPathMonitor.js";
+import type { ProjectConfigPlaceholder } from "./prepareProjectConfigPlaceholder.js";
 import { createToolEnvironment } from "./createToolEnvironment.js";
 import { waitForBashSessionCompletion } from "./waitForBashSessionCompletion.js";
 import {
@@ -37,7 +35,6 @@ import {
 } from "./bashSessionLimits.js";
 import { createCommandEnvironment, type SessionSecretContext } from "../../secrets/index.js";
 import { errorToMessage } from "../../errorToMessage.js";
-import { runCleanupSteps } from "./runCleanupSteps.js";
 import { formatManagedNetworkDenial } from "./formatManagedNetworkDenial.js";
 
 export interface CreateNodeBashContextOptions {
@@ -47,7 +44,13 @@ export interface CreateNodeBashContextOptions {
     processManager: NativeProcessManager;
     permissions: PermissionContext;
     secrets?: SessionSecretContext;
-    startManagedNetwork?: typeof startCommandManagedNetwork;
+    startManagedNetwork?: (
+        policy: ManagedNetworkPolicy | undefined,
+    ) => Promise<
+        | (Pick<SandboxedProcessNetwork, "close" | "proxy"> &
+              Partial<Pick<SandboxedProcessNetwork, "sandboxOptions" | "withProxyEnvironment">>)
+        | undefined
+    >;
 }
 
 interface NodeBashSession {
@@ -67,7 +70,7 @@ interface NodeBashSession {
     /** A read has already returned this session's final status. */
     exitObserved: boolean;
     process: ManagedProcess;
-    managedNetwork?: CommandManagedNetwork;
+    managedNetwork?: SandboxedProcessNetwork;
     result?: ProcessRunResult;
     sessionId: number;
     stderrOffset: number;
@@ -128,8 +131,27 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
     const loadManagedNetworkPolicy =
         options.loadManagedNetworkPolicy ?? loadProjectManagedNetworkPolicy;
     const startManagedNetwork =
-        options.startManagedNetwork ??
-        ((policy) => startCommandManagedNetwork(policy, options.networkInterceptor));
+        options.startManagedNetwork === undefined
+            ? (policy: ManagedNetworkPolicy | undefined) =>
+                  startSandboxedProcessNetwork(policy, {
+                      ...(options.networkInterceptor === undefined
+                          ? {}
+                          : { networkInterceptor: options.networkInterceptor }),
+                  })
+            : async (policy: ManagedNetworkPolicy | undefined) => {
+                  const managedNetwork = await options.startManagedNetwork?.(policy);
+                  if (managedNetwork === undefined) return undefined;
+                  return {
+                      sandboxOptions: managedNetwork.sandboxOptions ?? {},
+                      ...(managedNetwork.proxy === undefined
+                          ? {}
+                          : { proxy: managedNetwork.proxy }),
+                      close: () => managedNetwork.close(),
+                      withProxyEnvironment(environment: NodeJS.ProcessEnv) {
+                          return managedNetwork.withProxyEnvironment?.(environment) ?? environment;
+                      },
+                  };
+              };
 
     /**
      * Forgets the oldest finished commands once too many have piled up.
@@ -264,7 +286,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     cwd: options.cwd,
                     mode: permissionMode,
                     protectedPaths: options.permissions.protectedPaths,
-                    ...networkSandboxOptions(networkPolicy, managedNetwork),
+                    ...managedNetwork?.sandboxOptions,
                     ...(toolEnvironment.PATH === undefined ? {} : { path: toolEnvironment.PATH }),
                     shell,
                 });
@@ -272,14 +294,15 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 await managedNetwork?.close();
                 throw error;
             }
+            const commandEnvironment = createCommandEnvironment(
+                toolEnvironment,
+                options.secrets,
+                runOptions.secrets,
+            );
             const processRunOptions: Parameters<NativeProcessManager["run"]>[0] = {
                 command: sandboxedCommand.command,
                 cwd,
-                env: withManagedNetworkProxy(
-                    createCommandEnvironment(toolEnvironment, options.secrets, runOptions.secrets),
-                    managedNetwork,
-                    networkPolicy,
-                ),
+                env: managedNetwork?.withProxyEnvironment(commandEnvironment) ?? commandEnvironment,
                 timeoutMs: runOptions.timeoutMs ?? 120_000,
                 maxOutputBytes: runOptions.maxOutputBytes ?? 512_000,
             };
@@ -375,7 +398,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                         cwd: options.cwd,
                         mode: permissionMode,
                         protectedPaths: options.permissions.protectedPaths,
-                        ...networkSandboxOptions(networkPolicy, managedNetwork),
+                        ...managedNetwork?.sandboxOptions,
                         ...(toolEnvironment.PATH === undefined
                             ? {}
                             : { path: toolEnvironment.PATH }),
@@ -385,18 +408,17 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     await managedNetwork?.close();
                     throw error;
                 }
+                const commandEnvironment = createCommandEnvironment(
+                    toolEnvironment,
+                    options.secrets,
+                    runOptions.secrets,
+                );
                 const processStartOptions: Parameters<NativeProcessManager["start"]>[0] = {
                     command: sandboxedCommand.command,
                     cwd,
-                    env: withManagedNetworkProxy(
-                        createCommandEnvironment(
-                            toolEnvironment,
-                            options.secrets,
-                            runOptions.secrets,
-                        ),
-                        managedNetwork,
-                        networkPolicy,
-                    ),
+                    env:
+                        managedNetwork?.withProxyEnvironment(commandEnvironment) ??
+                        commandEnvironment,
                     maxOutputBytes: runOptions.maxOutputBytes ?? 512_000,
                     ...(runOptions.tty === undefined ? {} : { tty: runOptions.tty }),
                 };
@@ -521,57 +543,6 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
     };
 }
 
-interface CommandManagedNetwork {
-    bridge?: LinuxManagedNetworkBridge;
-    close(): Promise<void>;
-    proxy?: ManagedNetworkProxyHandle;
-}
-
-async function startCommandManagedNetwork(
-    policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
-    networkInterceptor?: ManagedNetworkInterceptor,
-): Promise<CommandManagedNetwork | undefined> {
-    if (policy === undefined) return undefined;
-    if (process.platform !== "darwin" && process.platform !== "linux")
-        throw new Error("Managed network access is currently supported only on macOS and Linux.");
-    if (
-        (policy.allowedDomains?.length ?? 0) === 0 &&
-        (policy.allowedLoopbackPorts?.length ?? 0) === 0
-    ) {
-        return undefined;
-    }
-    validateManagedNetworkLoopbackPorts(policy.allowedLoopbackPorts ?? []);
-    if ((policy.allowedDomains?.length ?? 0) === 0 && process.platform !== "linux")
-        return { close: async () => {} };
-    const proxy = await startManagedNetworkProxy(policy, {
-        ...(networkInterceptor === undefined ? {} : { networkInterceptor }),
-    });
-    try {
-        const bridge =
-            process.platform === "linux"
-                ? await startLinuxManagedNetworkBridge(
-                      proxy,
-                      policy.allowedLoopbackPorts === undefined
-                          ? {}
-                          : { loopbackPorts: policy.allowedLoopbackPorts },
-                  )
-                : undefined;
-        return {
-            ...(bridge === undefined ? {} : { bridge }),
-            proxy,
-            async close() {
-                await runCleanupSteps("managed network", [
-                    ...(bridge === undefined ? [] : [() => bridge.close()]),
-                    () => proxy.close(),
-                ]);
-            },
-        };
-    } catch (error) {
-        await proxy.close();
-        throw error;
-    }
-}
-
 interface CommandCleanupResult {
     errorMessage?: string;
     protectedPathViolation: boolean;
@@ -579,10 +550,8 @@ interface CommandCleanupResult {
 
 async function cleanUpCommandResources(
     protectedPathMonitor: ProtectedPathMonitor,
-    managedNetwork: CommandManagedNetwork | undefined,
-    projectConfigPlaceholder:
-        | import("./prepareProjectConfigPlaceholder.js").ProjectConfigPlaceholder
-        | undefined,
+    managedNetwork: SandboxedProcessNetwork | undefined,
+    projectConfigPlaceholder: ProjectConfigPlaceholder | undefined,
 ): Promise<CommandCleanupResult> {
     const [protectedPathResult, managedNetworkResult, projectConfigResult] =
         await Promise.allSettled([
@@ -603,72 +572,5 @@ async function cleanUpCommandResources(
               }),
         protectedPathViolation:
             protectedPathResult.status === "fulfilled" ? protectedPathResult.value : true,
-    };
-}
-
-function networkSandboxOptions(
-    policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
-    managedNetwork: CommandManagedNetwork | undefined,
-): {
-    networkAllowLocalBinding?: boolean;
-    networkAllowedLoopbackPorts?: readonly number[];
-    networkUnixProxySockets?: {
-        authenticationToken: string;
-        http: string;
-        loopback?: readonly { path: string; port: number }[];
-        socks: string;
-    };
-} {
-    const proxy = managedNetwork?.proxy;
-    const ports = [
-        ...(policy?.allowedLoopbackPorts ?? []),
-        ...(proxy === undefined ? [] : [proxy.port, proxy.socksPort]),
-    ];
-    return {
-        ...(process.platform === "darwin" && policy?.allowLocalBinding === true
-            ? { networkAllowLocalBinding: true }
-            : {}),
-        ...(ports.length === 0 ? {} : { networkAllowedLoopbackPorts: [...new Set(ports)] }),
-        ...(managedNetwork?.bridge === undefined
-            ? {}
-            : {
-                  networkUnixProxySockets: {
-                      authenticationToken: managedNetwork.bridge.authenticationToken,
-                      http: managedNetwork.bridge.httpSocketPath,
-                      loopback: managedNetwork.bridge.loopbackSockets,
-                      socks: managedNetwork.bridge.socksSocketPath,
-                  },
-              }),
-    };
-}
-
-function withManagedNetworkProxy(
-    environment: NodeJS.ProcessEnv,
-    managedNetwork: CommandManagedNetwork | undefined,
-    policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
-): NodeJS.ProcessEnv {
-    const proxy = managedNetwork?.proxy;
-    if (proxy === undefined) return environment;
-    const bridge = managedNetwork?.bridge;
-    const url =
-        bridge === undefined ? `http://127.0.0.1:${String(proxy.port)}` : "http://127.0.0.1:3128";
-    const socksUrl =
-        bridge === undefined
-            ? `socks5h://127.0.0.1:${String(proxy.socksPort)}`
-            : "socks5h://127.0.0.1:1080";
-    const noProxy = shouldBypassManagedProxyForLoopback(policy, process.platform === "linux")
-        ? "localhost,127.0.0.1,::1"
-        : "";
-    return {
-        ...environment,
-        ALL_PROXY: socksUrl,
-        HTTP_PROXY: url,
-        HTTPS_PROXY: url,
-        NODE_USE_ENV_PROXY: "1",
-        NO_PROXY: noProxy,
-        all_proxy: socksUrl,
-        http_proxy: url,
-        https_proxy: url,
-        no_proxy: noProxy,
     };
 }

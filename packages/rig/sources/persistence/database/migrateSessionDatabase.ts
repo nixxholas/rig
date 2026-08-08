@@ -35,6 +35,7 @@ import { applets } from "./migrations/30-applets.js";
 import { workspaceBranchNaming } from "./migrations/31-workspace-branch-naming.js";
 import { folders } from "./migrations/32-folders.js";
 import { unsortedChats } from "./migrations/33-unsorted-chats.js";
+import { worklets } from "./migrations/34-worklets.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -76,6 +77,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     workspaceBranchNaming,
     folders,
     unsortedChats,
+    worklets,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

@@ -166,6 +166,7 @@ import { inTx } from "../persistence/inTx.js";
 import { PresenceStore, resolvePresences } from "../presence/index.js";
 import { SlotEntryStore } from "../slots/index.js";
 import { AppletStore } from "../applets/index.js";
+import { WorkletStore } from "../worklets/index.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
@@ -257,6 +258,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     readonly slots: SlotEntryStore;
     readonly applets: AppletStore;
+    readonly worklets: WorkletStore;
 
     constructor(options: PersistentSessionStoreOptions) {
         this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
@@ -311,6 +313,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             publish: (event) => this.#publishGlobalEvent(event),
             tx: () => this.#tx(),
         });
+        this.worklets = new WorkletStore({ tx: () => this.#tx() });
         this.slots = new SlotEntryStore({
             now: this.#now,
             publish: (event) => this.#publishGlobalEvent(event),

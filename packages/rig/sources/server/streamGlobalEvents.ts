@@ -184,7 +184,8 @@ function liveEventKey(event: GlobalLiveEvent): string {
         event.type === "p2p_status_changed" ||
         event.type === "plugins_changed" ||
         event.type === "slots_changed" ||
-        event.type === "applets_changed"
+        event.type === "applets_changed" ||
+        event.type === "worklets_changed"
     ) {
         return event.type;
     }

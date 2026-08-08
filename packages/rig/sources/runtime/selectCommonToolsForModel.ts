@@ -8,6 +8,7 @@ import { slotCreateTool } from "../tools/slots/slot_create.js";
 import { slotListTool } from "../tools/slots/slot_list.js";
 import { slotRemoveTool } from "../tools/slots/slot_remove.js";
 import { slotUpdateTool } from "../tools/slots/slot_update.js";
+import { workletTools } from "../tools/worklets/workletTools.js";
 import { appletCreateTool } from "../tools/applets/applet_create.js";
 import { appletListTool } from "../tools/applets/applet_list.js";
 import { appletRevertTool } from "../tools/applets/applet_revert.js";
@@ -53,5 +54,6 @@ export function selectCommonToolsForModel(options: {
         appletRevertTool,
         appletListTool,
         ...(options.hasFolderContext ? folderTools : []),
+        ...workletTools,
     ] as readonly AnyDefinedTool[];
 }

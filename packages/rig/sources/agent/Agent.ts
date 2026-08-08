@@ -105,6 +105,8 @@ export interface AgentOptions {
 }
 
 export interface AgentRunOptions {
+    /** Refreshes an explicitly supplied tool array before each inference iteration. */
+    beforeInference?: () => Promise<void>;
     clientSubmissionId?: string;
     debug?: DebugLog;
     displayText?: string;
@@ -611,6 +613,14 @@ export class Agent {
                       }),
                 modelId: this.#model.id,
                 tools: this.#tools,
+                ...(options.beforeInference === undefined
+                    ? {}
+                    : {
+                          resolveTools: async () => {
+                              await options.beforeInference?.();
+                              return this.#tools;
+                          },
+                      }),
                 messages: this.#messages,
                 sessionId: runId,
                 startDate: this.#startDate,

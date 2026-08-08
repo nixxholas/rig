@@ -2460,6 +2460,12 @@ export type GlobalEvent =
           id: string;
           type: "applets_changed";
       }
+    | {
+          createdAt: number;
+          data: { version: string; worklets: readonly WorkletSummary[] };
+          id: string;
+          type: "worklets_changed";
+      }
     | SessionEvent;
 
 /** The fixed Happy UI locations an agent can plug content into. */
@@ -2532,6 +2538,109 @@ export interface Applet {
     sourceDescription?: string;
     updatedAt: number;
     versions: readonly AppletVersion[];
+}
+
+/** A worklet always writes only inside its own durable data folder. */
+export const workletDiskPermissionSchema = Type.Literal("none");
+
+/** Where a worklet may reach on the network. */
+export const workletNetworkPermissionSchema = Type.Union([
+    Type.Literal("none"),
+    Type.Object(
+        { hosts: Type.Array(Type.String({ minLength: 1 }), { maxItems: 64, minItems: 1 }) },
+        exact,
+    ),
+]);
+
+/** Everything a worklet may touch beyond its own folder, as its manifest declared it. */
+export const workletPermissionsSchema = Type.Object(
+    {
+        disk: workletDiskPermissionSchema,
+        network: workletNetworkPermissionSchema,
+    },
+    exact,
+);
+
+export type WorkletPermissions = Static<typeof workletPermissionsSchema>;
+
+export const workletVersionSchema = Type.Object(
+    {
+        changeDescription: Type.String(),
+        createdAt: Type.Number(),
+        description: Type.String(),
+        permissions: workletPermissionsSchema,
+        version: Type.Integer({ minimum: 1 }),
+    },
+    exact,
+);
+
+export const workletToolSchema = Type.Object(
+    {
+        description: Type.String(),
+        name: Type.String({ minLength: 1 }),
+    },
+    exact,
+);
+
+export const workletStateSchema = Type.Union([
+    Type.Literal("asleep"),
+    Type.Literal("failed"),
+    Type.Literal("running"),
+    Type.Literal("starting"),
+    Type.Literal("stopped"),
+]);
+
+/** What a worklet is doing right now. */
+export type WorkletState = Static<typeof workletStateSchema>;
+
+/**
+ * Background compute rig keeps running: TypeScript imported as a source folder, versioned like an
+ * applet, writing only into its own data folder, and declaring tools any agent can call.
+ */
+export const workletSummarySchema = Type.Object(
+    {
+        authorSessionId: Type.String(),
+        createdAt: Type.Number(),
+        currentVersion: Type.Integer({ minimum: 1 }),
+        dataDirectory: Type.String({ minLength: 1 }),
+        description: Type.String(),
+        failure: Type.Optional(Type.String()),
+        iconThumbhash: Type.String({ minLength: 1 }),
+        iconUrl: Type.String({ minLength: 1 }),
+        name: Type.String({ minLength: 1 }),
+        permissions: workletPermissionsSchema,
+        sourceDescription: Type.Optional(Type.String()),
+        state: workletStateSchema,
+        status: Type.Optional(Type.String()),
+        tools: Type.Array(workletToolSchema),
+        updatedAt: Type.Number(),
+        versions: Type.Array(workletVersionSchema),
+    },
+    exact,
+);
+
+type ValidatedWorkletSummary = Static<typeof workletSummarySchema>;
+export type WorkletSummary = Omit<ValidatedWorkletSummary, "tools" | "versions"> & {
+    readonly tools: readonly Static<typeof workletToolSchema>[];
+    readonly versions: readonly Static<typeof workletVersionSchema>[];
+};
+
+export const listWorkletsResponseSchema = Type.Object(
+    {
+        version: Type.String({ minLength: 1 }),
+        worklets: Type.Array(workletSummarySchema),
+    },
+    exact,
+);
+
+type ValidatedListWorkletsResponse = Static<typeof listWorkletsResponseSchema>;
+export type ListWorkletsResponse = Omit<ValidatedListWorkletsResponse, "worklets"> & {
+    readonly worklets: readonly WorkletSummary[];
+};
+
+export interface WorkletLogResponse {
+    log: string;
+    truncated: boolean;
 }
 
 export interface ResolveAppletOpenRequest {

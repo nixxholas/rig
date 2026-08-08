@@ -390,6 +390,54 @@ describe("createLinuxBubblewrapCommand", () => {
             }),
         ).rejects.toThrow("resolves outside its trusted metadata directory");
     });
+    it("binds one granted socket writable inside a read-only filesystem", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-socket-grant-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "project");
+        const runtime = join(root, "runtime");
+        await mkdir(cwd);
+        await mkdir(runtime);
+        const granted = join(runtime, "worklet.sock");
+        const neighbour = join(runtime, "other.sock");
+        await writeFile(granted, "");
+        await writeFile(neighbour, "");
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: cwd,
+            cwd,
+            mode: "workspace_write",
+            protectedPaths: [runtime],
+            shell: "/bin/sh",
+            temporaryDirectory: join(root, "tmp"),
+            unixSocketPaths: [granted],
+        });
+
+        // Connecting writes to the socket, so it alone is bound writable; its folder is not.
+        expect(bindMode(result.args, granted)).toBe("--bind");
+        expect(bindMode(result.args, runtime)).toBe("--ro-bind");
+        expect(bindMode(result.args, neighbour)).toBeUndefined();
+        expect(bindMode(result.args, "/")).toBe("--ro-bind");
+    });
+
+    it("ignores a granted socket that does not exist", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-bwrap-socket-missing-"));
+        temporaryDirectories.push(cwd);
+        const missing = join(cwd, "never-created.sock");
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: cwd,
+            cwd,
+            mode: "workspace_write",
+            shell: "/bin/sh",
+            unixSocketPaths: [missing],
+        });
+
+        expect(result.args).not.toContain(missing);
+    });
 });
 
 function bindMode(command: readonly string[], target: string): string | undefined {

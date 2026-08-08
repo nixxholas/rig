@@ -125,6 +125,10 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("DROP INDEX sessions_folder"));
         opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
         opened.database.run(sql.raw("DROP TABLE folders"));
+        // A real database at version 28 predates worklets, so rewinding to it takes their schema
+        // with it rather than letting its later migration replay into tables it already created.
+        opened.database.run(sql.raw("DROP TABLE worklet_versions"));
+        opened.database.run(sql.raw("DROP TABLE worklets"));
         opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
         migrateSessionDatabase(opened.database);

@@ -654,6 +654,7 @@ export class InMemorySession {
     #mcpToolNames = new Set<string>();
     #mcpToolProvider: McpToolProvider | undefined;
     #mcpToolRelease: (() => Promise<void>) | undefined;
+    #workletToolRevision: number | undefined;
     #modelCatalog: ModelCatalog;
     #modelId: string;
     #models: readonly Model[];
@@ -3553,6 +3554,7 @@ export class InMemorySession {
         this.#mcpLoaded = false;
         this.#mcpServers = [];
         this.#mcpToolNames.clear();
+        this.#workletToolRevision = undefined;
         this.#tools = [];
         this.#messages = this.#messages.filter((entry) => entry.position < target.position);
         this.#pendingContextMessages = new Map(
@@ -5673,6 +5675,7 @@ export class InMemorySession {
                 JSON.stringify(this.#mcpServers) !== JSON.stringify(merged.servers);
             this.#mcpServers = merged.servers;
             this.#mcpLoaded = true;
+            this.#workletToolRevision = runtime.agent.context.worklets?.toolRevision?.();
             this.#mcpToolRelease = loaded.release;
             if (serversChanged && merged.servers.length > 0) {
                 this.#append("mcp_servers_changed", { servers: merged.servers });
@@ -5705,6 +5708,7 @@ export class InMemorySession {
         this.#mcpLoaded = false;
         this.#mcpServers = [];
         this.#mcpToolNames.clear();
+        this.#workletToolRevision = undefined;
         this.#releaseMcpToolLease();
         this.#append("mcp_servers_changed", { servers: [] });
     }
@@ -7371,6 +7375,17 @@ export class InMemorySession {
             for (;;) {
                 const result = await runtime.agent.run({
                     ...(debugLog === undefined ? {} : { debug: debugLog }),
+                    beforeInference: async () => {
+                        const revision = runtime!.agent.context.worklets?.toolRevision?.();
+                        if (revision === undefined || revision === this.#workletToolRevision) {
+                            return;
+                        }
+                        await this.#ensureMcpTools(
+                            runtime!,
+                            controller.signal,
+                            queued.interactive !== false,
+                        );
+                    },
                     signal: controller.signal,
                     onEvent: async (event) => {
                         this.#appendAgentEvent(queued.runId, event);

@@ -61,4 +61,21 @@ describe("createSandboxFilesystemConfig", () => {
             "/temporary/rig-sandbox-policy",
         ]);
     });
+
+    it("makes an explicitly granted socket writable without widening the workspace", async () => {
+        const config = await createSandboxFilesystemConfig({
+            cwd: "/home/tester/projects/rig",
+            environment: { RIG_HOME: "/private/rig-home" },
+            homeDirectory: "/home/tester",
+            mode: "read_only",
+            temporaryDirectory: "/temporary",
+            uid: 123,
+            unixSocketPaths: ["/private/rig-home/worklets/github-watch/worklet.sock"],
+        });
+
+        // Connecting to a Unix socket writes to the socket itself, so it alone becomes writable.
+        expect(config.allowWrite).toContain("/private/rig-home/worklets/github-watch/worklet.sock");
+        expect(config.allowWrite).not.toContain("/private/rig-home/worklets/github-watch");
+        expect(config.allowWrite).not.toContain("/home/tester/projects/rig");
+    });
 });

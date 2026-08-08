@@ -57,7 +57,9 @@ import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDi
 import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
+import type { WorkletContext } from "../agent/context/WorkletContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
+import { WorkletManager, WorkletToolRegistry } from "../worklets/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { createEventIdFactory, type GlobalLiveEvent, type P2pStatus } from "../protocol/index.js";
 import {
@@ -135,6 +137,7 @@ async function runOwnedLocalProtocolServer(
 
     let startupState: DaemonStartupState = { status: "starting" };
     let mcpToolProvider: McpToolProvider | undefined;
+    let worklets: WorkletManager | undefined;
     let p2pNetwork: P2pNetwork | undefined;
     let p2pPairingService: P2pPairingService | undefined;
     let happySyncService: HappySyncService | undefined;
@@ -389,7 +392,12 @@ async function runOwnedLocalProtocolServer(
             providers: loadedConfig.config.providers,
         });
         const pluginMcpRegistry = new PluginMcpRegistry();
-        mcpToolProvider = new CompositeMcpToolProvider([new McpClientManager(), pluginMcpRegistry]);
+        const workletToolRegistry = new WorkletToolRegistry();
+        mcpToolProvider = new CompositeMcpToolProvider([
+            new McpClientManager(),
+            pluginMcpRegistry,
+            workletToolRegistry,
+        ]);
         taskDrain = new TrackedTaskDrain();
         gitStateTracker = new GitStateTracker({
             // Snapshots ride the live channel, so they reach subscribers without ever entering the
@@ -479,6 +487,33 @@ async function runOwnedLocalProtocolServer(
             trace: (event) => requirePluginManager(pluginManager).trace(event),
             uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
         };
+        // Worklets are reached the same way, except every session gets its own context with its id
+        // baked in, so a tool can never claim another agent's authorship through its arguments.
+        const workletsFor = (authorSessionId: string): WorkletContext => ({
+            install: (request, sourceFileSystem, expectedPermissions) =>
+                requireWorkletManager(worklets).install(
+                    { ...request, authorSessionId },
+                    sourceFileSystem,
+                    expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
+                ),
+            list: () => requireWorkletManager(worklets).list(),
+            readLog: (name) => requireWorkletManager(worklets).readLog(name),
+            toolRevision: () => workletToolRegistry.revision,
+            revert: (name, request, expectedPermissions) =>
+                requireWorkletManager(worklets).revert(
+                    name,
+                    request,
+                    expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
+                ),
+            uninstall: (name) => requireWorkletManager(worklets).uninstall(name),
+            update: (name, request, sourceFileSystem, expectedPermissions) =>
+                requireWorkletManager(worklets).update(
+                    name,
+                    request,
+                    sourceFileSystem,
+                    expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
+                ),
+        });
         store = new PersistentSessionStore({
             createRuntime: (options) =>
                 createCodingAssistantAgent({
@@ -492,6 +527,7 @@ async function runOwnedLocalProtocolServer(
                         options.onAccountUsage?.(merged);
                     },
                     plugins,
+                    worklets: workletsFor(options.sessionId ?? options.agentId ?? "standalone"),
                     providerUsage: {
                         current: async () => (await providerUsageTracker?.refreshAll()) ?? [],
                     },
@@ -718,7 +754,28 @@ async function runOwnedLocalProtocolServer(
             await startedPluginManager.close();
             await pluginsStarted;
         });
-        await pluginsStarted;
+        const workletManager = new WorkletManager({
+            publish: (event) => {
+                activeStore.globalEventQueue.publishLive(event);
+                activeStore.liveEvents.publish(event);
+            },
+            registry: workletToolRegistry,
+            store: store.worklets,
+        });
+        worklets = workletManager;
+        const workletsStarted = workletManager.start().catch((error: unknown) => {
+            daemonLog.record(
+                "error",
+                "worklets_unavailable",
+                "Rig could not start the worklets folder.",
+                { error: errorToMessage(error), workletsDirectory: workletManager.directory },
+            );
+        });
+        shutdown.register("worklets", async () => {
+            await workletManager.close();
+            await workletsStarted;
+        });
+        await Promise.all([pluginsStarted, workletsStarted]);
         if (stopping) return;
         if (happyModule !== undefined && happyConfiguration !== undefined) {
             try {
@@ -790,6 +847,7 @@ async function runOwnedLocalProtocolServer(
                 p2pStatus: () => p2pNetwork?.status() ?? { transports: [] },
                 canP2pPeerConfigure,
                 plugins,
+                ...(worklets === undefined ? {} : { worklets }),
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 listProviderUsage: () => providerUsageTracker?.all() ?? [],
                 onDaemonConfigChange: async (config) => {
@@ -910,6 +968,12 @@ async function runOwnedLocalProtocolServer(
 function requirePluginManager(manager: PluginManager | undefined): PluginManager {
     if (manager === undefined)
         throw new Error("Rig is still starting, so plugins are unavailable.");
+    return manager;
+}
+
+function requireWorkletManager(manager: WorkletManager | undefined): WorkletManager {
+    if (manager === undefined)
+        throw new Error("Rig is still starting, so worklets are unavailable.");
     return manager;
 }
 

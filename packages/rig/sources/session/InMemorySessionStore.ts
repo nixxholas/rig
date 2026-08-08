@@ -75,6 +75,7 @@ import { timelineAgentSource } from "./impl/timelineAgentSource.js";
 import { queryLiveAgentTreeUsage } from "./queryLiveAgentTreeUsage.js";
 import { SlotEntryStore } from "../slots/index.js";
 import { AppletStore } from "../applets/index.js";
+import { WorkletStore } from "../worklets/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { configureSessionRequest } from "./configureSessionRequest.js";
 import {
@@ -123,6 +124,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     readonly slots: SlotEntryStore;
     readonly applets: AppletStore;
+    readonly worklets: WorkletStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
     readonly #workspaceTransferReservations = new Map<string, string>();
@@ -143,6 +145,7 @@ export class InMemorySessionStore implements SessionStore {
             publish: (event) => this.#publishGlobalEvent(event),
             tx: () => this.#activeTransaction ?? this.#database,
         });
+        this.worklets = new WorkletStore({ tx: () => this.#activeTransaction ?? this.#database });
         this.slots = new SlotEntryStore({
             publish: (event) => this.#publishGlobalEvent(event),
             sessionExists: (sessionId) => this.#sessions.has(sessionId),

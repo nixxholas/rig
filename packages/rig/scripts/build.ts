@@ -50,6 +50,7 @@ const externalPackages = [
     "better-sqlite3",
     "bufferutil",
     "cpu-features",
+    "esbuild",
     "node-liblzma",
     "sharp",
     "ssh2",
@@ -93,6 +94,7 @@ const result = await build({
         main: "sources/main.ts",
         "plugin-docker-bootstrap": "sources/plugins/pluginDockerBootstrap.ts",
         "plugin-sdk-loader": "sources/plugins/happyPluginsLoader.ts",
+        "worklet-bootstrap": "sources/worklets/workletBootstrap.ts",
         readPackageVersion: "sources/readPackageVersion.ts",
     },
     external: externalPackages,
@@ -135,3 +137,4 @@ await cp("sources/config/happy.template.toml", "dist/happy.template.toml");
 await cp("sources/agent/prompt/guardian-policy-template.md", "dist/guardian-policy-template.md");
 await cp("sources/agent/prompt/guardian-policy.md", "dist/guardian-policy.md");
 await cp("../happy-plugins/dist", "dist/plugin-sdk", { recursive: true });
+await cp("../happy-worklets/dist", "dist/worklet-sdk", { recursive: true });

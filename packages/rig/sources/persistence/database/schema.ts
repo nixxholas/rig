@@ -626,6 +626,31 @@ export const appletVersions = sqliteTable(
     (table) => [primaryKey({ columns: [table.appletName, table.version] })],
 );
 
+export const worklets = sqliteTable("worklets", {
+    name: text("name").primaryKey(),
+    authorSessionId: text("author_session_id").notNull(),
+    sourceDescription: text("source_description"),
+    currentVersion: integer("current_version").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+    iconThumbhash: text("icon_thumbhash").notNull(),
+});
+
+export const workletVersions = sqliteTable(
+    "worklet_versions",
+    {
+        workletName: text("worklet_name")
+            .notNull()
+            .references(() => worklets.name, { onDelete: "cascade" }),
+        version: integer("version").notNull(),
+        changeDescription: text("change_description").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        description: text("description").notNull(),
+        permissionsJson: text("permissions_json").notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.workletName, table.version] })],
+);
+
 export const durableGlobalEvents = sqliteTable("durable_global_events", {
     cursor: text("cursor").primaryKey(),
     eventId: text("event_id").notNull().unique(),

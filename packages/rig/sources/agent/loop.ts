@@ -88,6 +88,8 @@ export interface RunAgentLoopOptions {
     effort?: string;
     serviceTier?: ServiceTier;
     tools: readonly AnyDefinedTool[];
+    /** Returns the complete fixed tool array for the next inference iteration. */
+    resolveTools?: () => Promise<readonly AnyDefinedTool[]>;
     durableSkills?: readonly DurableSkillDefinition[];
     instructions?: string;
     messages: readonly Message[];
@@ -302,8 +304,9 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
     } catch {
         // Plugin prompt middleware is optional and must never fail or stall the agent loop.
     }
-    const providerTools = options.tools.map(toExecutorTool);
-    const toolsByName = new Map(
+    let currentTools = options.tools;
+    let providerTools = currentTools.map(toExecutorTool);
+    let toolsByName = new Map(
         options.tools.map((tool) => [toolDispatchKey(tool.name, tool.namespace?.name), tool]),
     );
     const toolContext = options.context;
@@ -347,6 +350,17 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 contextMessages: contextTranscript,
                 stopReason: "aborted",
             };
+        }
+
+        if (options.resolveTools !== undefined) {
+            currentTools = await options.resolveTools();
+            providerTools = currentTools.map(toExecutorTool);
+            toolsByName = new Map(
+                currentTools.map((tool) => [
+                    toolDispatchKey(tool.name, tool.namespace?.name),
+                    tool,
+                ]),
+            );
         }
 
         iteration += 1;

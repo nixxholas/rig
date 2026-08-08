@@ -36,6 +36,8 @@ import {
     PluginManagementRequestError,
     PluginStore,
 } from "./PluginElement.js";
+import type { ReadWorkletLogResult, Worklet, WorkletsState } from "./WorkletElement.js";
+import { projectWorklet, WorkletManagementRequestError, WorkletStore } from "./WorkletElement.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -76,6 +78,7 @@ import type {
     ListProviderUsageResponse,
     InstalledPluginSummary,
     ListPluginsResponse,
+    ListWorkletsResponse,
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
@@ -108,6 +111,8 @@ import {
     folderErrorResponseSchema,
     folderResponseSchema,
     listPluginsResponseSchema,
+    listWorkletsResponseSchema,
+    workletSummarySchema,
     discoverPluginCatalogRequestSchema,
     githubPluginCatalogSchema,
     githubPluginPackageSourceSchema,
@@ -162,6 +167,30 @@ const pluginAppStorageListResponseSchema = Type.Object(
     { additionalProperties: false },
 );
 const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
+const workletResponseSchema = Type.Object(
+    { worklet: workletSummarySchema },
+    { additionalProperties: false },
+);
+const workletLogResponseSchema = Type.Object(
+    { log: Type.String(), truncated: Type.Boolean() },
+    { additionalProperties: false },
+);
+const workletManagementErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            {
+                code: Type.Union([
+                    Type.Literal("invalid_request"),
+                    Type.Literal("invalid_worklet"),
+                    Type.Literal("worklet_not_found"),
+                ]),
+                message: Type.String(),
+            },
+            { additionalProperties: false },
+        ),
+    },
+    { additionalProperties: false },
+);
 const installedPluginSummarySchema = Type.Object(
     {
         classification: pluginInstallClassificationSchema,
@@ -348,6 +377,11 @@ export interface RigPluginsSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+export interface RigWorkletsSubscriptionOptions {
+    onChange: (worklets: readonly Worklet[], state: WorkletsState) => void;
+    onError?: (error: unknown) => void;
+}
+
 export interface RigTimelineSubscriptionOptions {
     /** Leave archived chats out, as the daemon does by default. */
     includeArchived?: boolean;
@@ -427,6 +461,47 @@ export interface RigPluginsConnection {
         value: unknown,
     ): Promise<void>;
     close: () => void;
+}
+
+export interface RigWorkletsConnection {
+    worklets: () => readonly Worklet[];
+    state: () => WorkletsState;
+    /** Reads the worklet's bounded current log. */
+    readLog: (name: string, options?: { signal?: AbortSignal }) => Promise<ReadWorkletLogResult>;
+    /** Imports a source folder as a new worklet and starts it. */
+    install: (request: InstallWorkletInput, options?: { signal?: AbortSignal }) => Promise<Worklet>;
+    /** Imports a new version of an installed worklet and restarts it. */
+    update: (
+        name: string,
+        request: UpdateWorkletInput,
+        options?: { signal?: AbortSignal },
+    ) => Promise<Worklet>;
+    /** Makes an existing version current again and restarts the worklet. */
+    revert: (name: string, version: number, options?: { signal?: AbortSignal }) => Promise<Worklet>;
+    /** Stops a worklet and removes every version of its code, keeping its data folder. */
+    uninstall: (name: string, options?: { signal?: AbortSignal }) => Promise<void>;
+    close: () => void;
+}
+
+/**
+ * A source folder and an icon. The worklet's name, description, purpose, and the disk and network
+ * access it is granted all come from the `worklet.json` at the root of that folder.
+ */
+export interface InstallWorkletInput {
+    /** Session responsible for this installation, retained with the global worklet record. */
+    authorSessionId: string;
+    /** Absolute path of the required 512 by 512 PNG worklet icon. */
+    iconPath: string;
+    /** Absolute path of the source folder to import. */
+    path: string;
+    sourceDescription?: string;
+}
+
+export interface UpdateWorkletInput {
+    /** What changed in this import. */
+    changeDescription: string;
+    /** Absolute path of the source folder to import. */
+    path: string;
 }
 
 export interface RigTimelineConnection {
@@ -646,6 +721,8 @@ export interface RigConnection {
     ) => RigProviderUsageConnection;
     /** Follows the complete local plugin and application catalog. */
     connectPlugins: (options: RigPluginsSubscriptionOptions) => RigPluginsConnection;
+    /** Follows every installed worklet, its version, its state, and its status. */
+    connectWorklets: (options: RigWorkletsSubscriptionOptions) => RigWorkletsConnection;
     connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
     /** Reads the current plugin catalog once. Lifecycle changes are also announced live. */
     listPlugins: (options?: { signal?: AbortSignal }) => Promise<{
@@ -817,6 +894,26 @@ interface PluginsEntry {
     subscribers: Set<PluginsSubscriber>;
 }
 
+interface WorkletsSubscriber extends RigWorkletsSubscriptionOptions {
+    closed: boolean;
+}
+
+interface BufferedWorkletsEvent {
+    cursor: string;
+    data: Extract<GlobalEvent, { type: "worklets_changed" }>["data"];
+}
+
+interface WorkletsEntry {
+    bootstrapVersion: number;
+    bootstrapping: boolean;
+    controller: AbortController;
+    detachRoot: () => void;
+    pending?: BufferedWorkletsEvent;
+    started: boolean;
+    store: WorkletStore;
+    subscribers: Set<WorkletsSubscriber>;
+}
+
 interface TimelineSubscriber extends RigTimelineSubscriptionOptions {
     closed: boolean;
 }
@@ -982,6 +1079,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let inboxEntry: InboxEntry | undefined;
     let folderEntry: FolderEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
+    let workletsEntry: WorkletsEntry | undefined;
     let providerUsageEntry: ProviderUsageEntryState | undefined;
     const timelineEntries = new Map<string, TimelineEntry>();
     let liveStreamStarted = false;
@@ -1054,6 +1152,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 pluginsEntry.store.plugins(),
                 pluginsEntry.store.state(),
             );
+        }
+    };
+
+    const publishWorklets = (changed: boolean): void => {
+        if (closed || !changed || workletsEntry === undefined) return;
+        for (const subscriber of [...workletsEntry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(workletsEntry.store.worklets(), workletsEntry.store.state());
         }
     };
 
@@ -1919,6 +2025,63 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
+    const createWorkletsEntry = (): WorkletsEntry => {
+        if (workletsEntry !== undefined) return workletsEntry;
+        const linked = linkedController(rootController.signal);
+        const entry: WorkletsEntry = {
+            bootstrapVersion: 0,
+            bootstrapping: false,
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            started: false,
+            store: new WorkletStore(),
+            subscribers: new Set(),
+        };
+        workletsEntry = entry;
+        return entry;
+    };
+
+    const loadWorklets = async (entry: WorkletsEntry): Promise<void> => {
+        const version = ++entry.bootstrapVersion;
+        entry.bootstrapping = true;
+        let snapshot: ListWorkletsResponse;
+        try {
+            snapshot = await fetchWorkletCatalog(
+                options.endpoint,
+                options.token,
+                request,
+                entry.controller.signal,
+            );
+        } catch (error) {
+            if (version !== entry.bootstrapVersion) return;
+            entry.bootstrapping = false;
+            delete entry.pending;
+            throw error;
+        }
+        if (version !== entry.bootstrapVersion) return;
+        const pending = entry.pending;
+        delete entry.pending;
+        entry.bootstrapping = false;
+        // Both readings say which change they reflect, so the newer one wins outright.
+        const catalog =
+            pending !== undefined && pending.data.version > snapshot.version
+                ? pending.data
+                : snapshot;
+        publishWorklets(entry.store.replace(catalog.worklets, "live"));
+    };
+
+    const startWorkletsEntry = (entry: WorkletsEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (!liveStreamOpen) return;
+        void loadWorklets(entry).catch((error: unknown) => {
+            if (closed || entry.controller.signal.aborted) return;
+            publishWorklets(entry.store.setConnection("closed"));
+            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        });
+    };
+
     const createTimelineEntry = (subscription: RigTimelineSubscriptionOptions): TimelineEntry => {
         const key = timelineKey(subscription);
         const existing = timelineEntries.get(key);
@@ -2027,6 +2190,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (pluginsEntry !== undefined) {
                         publishPlugins(pluginsEntry.store.setConnection("live"));
                     }
+                    if (workletsEntry !== undefined) {
+                        publishWorklets(workletsEntry.store.setConnection("live"));
+                    }
                     setTimelineConnection("live");
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
@@ -2054,6 +2220,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         if (closed || plugins.controller.signal.aborted) return;
                         publishPlugins(plugins.store.setConnection("closed"));
                         for (const subscriber of [...plugins.subscribers]) {
+                            subscriber.onError?.(error);
+                        }
+                    });
+                }
+                const worklets = workletsEntry;
+                if (worklets !== undefined && worklets.started) {
+                    void loadWorklets(worklets).catch((error: unknown) => {
+                        if (closed || worklets.controller.signal.aborted) return;
+                        publishWorklets(worklets.store.setConnection("closed"));
+                        for (const subscriber of [...worklets.subscribers]) {
                             subscriber.onError?.(error);
                         }
                     });
@@ -2151,6 +2327,22 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (folderEntry !== undefined) publishFolders(folderEntry.store.apply(event));
                     return;
                 }
+                if (event.type === "worklets_changed") {
+                    const entry = workletsEntry;
+                    if (entry === undefined || !entry.started) return;
+                    const update = {
+                        cursor,
+                        data: (event as Extract<GlobalEvent, { type: "worklets_changed" }>).data,
+                    };
+                    if (entry.bootstrapping) {
+                        if (entry.pending === undefined || cursor > entry.pending.cursor) {
+                            entry.pending = update;
+                        }
+                    } else {
+                        publishWorklets(entry.store.replace(update.data.worklets, "live"));
+                    }
+                    return;
+                }
                 if (
                     event.type === "project_git_changed" ||
                     event.type === "workspace_git_changed"
@@ -2232,6 +2424,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("reconnecting"));
                 }
+                if (workletsEntry !== undefined) {
+                    publishWorklets(workletsEntry.store.setConnection("reconnecting"));
+                }
                 setTimelineConnection("reconnecting");
                 for (const entry of [...sessionEntries.values()]) {
                     if (entry.started) {
@@ -2260,6 +2455,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         subscriber.onError?.(error);
                     }
                 }
+                if (workletsEntry !== undefined) {
+                    publishWorklets(workletsEntry.store.setConnection("closed"));
+                    for (const subscriber of [...workletsEntry.subscribers]) {
+                        subscriber.onError?.(error);
+                    }
+                }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
@@ -2279,6 +2480,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("closed"));
+                }
+                if (workletsEntry !== undefined) {
+                    publishWorklets(workletsEntry.store.setConnection("closed"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
@@ -2901,6 +3105,124 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     emptyResponseSchema,
                 );
             },
+        };
+    };
+
+    const connectWorklets = (
+        subscription: RigWorkletsSubscriptionOptions,
+    ): RigWorkletsConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createWorkletsEntry();
+        const subscriber: WorkletsSubscriber = { ...subscription, closed: false };
+        const calls = linkedController(entry.controller.signal);
+        entry.subscribers.add(subscriber);
+        subscriber.onChange(entry.store.worklets(), entry.store.state());
+        startWorkletsEntry(entry);
+
+        const call = async <TSchema_ extends ReturnType<typeof Type.Object>>(
+            path: string,
+            method: "DELETE" | "GET" | "POST",
+            body: unknown,
+            schema: TSchema_,
+            signal?: AbortSignal,
+        ): Promise<Static<TSchema_>> => {
+            if (subscriber.closed) throw new Error("This worklet connection is closed.");
+            const requestSignal = combinedSignal(calls.controller.signal, signal);
+            try {
+                const response = await request(endpointUrl(options.endpoint, path), {
+                    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+                    headers: {
+                        accept: "application/json",
+                        authorization: `Bearer ${options.token}`,
+                        ...(body === undefined ? {} : { "content-type": "application/json" }),
+                    },
+                    method,
+                    signal: requestSignal.signal,
+                });
+                const payload: unknown = await response.json().catch(() => undefined);
+                if (!response.ok) throw workletManagementError(response.status, payload);
+                try {
+                    return Value.Decode(schema, payload);
+                } catch {
+                    throw new WorkletManagementRequestError(
+                        "invalid_response",
+                        response.status,
+                        "Rig answered a worklet request with something this client could not read.",
+                    );
+                }
+            } finally {
+                requestSignal.detach();
+            }
+        };
+
+        return {
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                calls.controller.abort();
+                calls.detach();
+                if (entry.subscribers.size === 0 && workletsEntry === entry) {
+                    entry.controller.abort();
+                    entry.detachRoot();
+                    workletsEntry = undefined;
+                }
+            },
+            install: async (input, callOptions = {}) =>
+                projectWorklet(
+                    (
+                        await call(
+                            "worklets",
+                            "POST",
+                            input,
+                            workletResponseSchema,
+                            callOptions.signal,
+                        )
+                    ).worklet,
+                ),
+            readLog: async (name, callOptions = {}) =>
+                call(
+                    `worklets/${encodeURIComponent(name)}/log`,
+                    "GET",
+                    undefined,
+                    workletLogResponseSchema,
+                    callOptions.signal,
+                ),
+            revert: async (name, version, callOptions = {}) =>
+                projectWorklet(
+                    (
+                        await call(
+                            `worklets/${encodeURIComponent(name)}/revert`,
+                            "POST",
+                            { version },
+                            workletResponseSchema,
+                            callOptions.signal,
+                        )
+                    ).worklet,
+                ),
+            state: () => entry.store.state(),
+            uninstall: async (name, callOptions = {}) => {
+                await call(
+                    `worklets/${encodeURIComponent(name)}`,
+                    "DELETE",
+                    undefined,
+                    emptyResponseSchema,
+                    callOptions.signal,
+                );
+            },
+            update: async (name, input, callOptions = {}) =>
+                projectWorklet(
+                    (
+                        await call(
+                            `worklets/${encodeURIComponent(name)}/versions`,
+                            "POST",
+                            input,
+                            workletResponseSchema,
+                            callOptions.signal,
+                        )
+                    ).worklet,
+                ),
+            worklets: () => entry.store.worklets(),
         };
     };
 
@@ -4823,6 +5145,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 pluginsEntry.subscribers.clear();
                 pluginsEntry = undefined;
             }
+            if (workletsEntry !== undefined) {
+                workletsEntry.controller.abort();
+                workletsEntry.detachRoot();
+                workletsEntry.subscribers.clear();
+                workletsEntry = undefined;
+            }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;
             folderEntry?.subscribers.clear();
@@ -4846,6 +5174,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectP2p,
         connectInbox,
         connectPlugins,
+        connectWorklets,
         connectProviderUsage,
         connectSession,
         connectTerminalPresence,
@@ -5427,6 +5756,34 @@ async function fetchPluginCatalog(
         throw new Error(`Rig could not load the plugin catalog (${String(response.status)}).`);
     }
     return Value.Decode(listPluginsResponseSchema, await response.json());
+}
+
+async function fetchWorkletCatalog(
+    endpoint: string,
+    token: string,
+    request: typeof globalThis.fetch,
+    signal: AbortSignal,
+): Promise<ListWorkletsResponse> {
+    const response = await request(endpointUrl(endpoint, "worklets"), {
+        headers: { accept: "application/json", authorization: `Bearer ${token}` },
+        signal,
+    });
+    if (!response.ok) {
+        throw new Error(`Rig could not load the worklet catalog (${String(response.status)}).`);
+    }
+    return Value.Decode(listWorkletsResponseSchema, await response.json());
+}
+
+/** Turns rig's worklet failure reply into an error a view can act on. */
+function workletManagementError(status: number, payload: unknown): WorkletManagementRequestError {
+    if (Value.Check(workletManagementErrorResponseSchema, payload)) {
+        return new WorkletManagementRequestError(payload.error.code, status, payload.error.message);
+    }
+    return new WorkletManagementRequestError(
+        "request_failed",
+        status,
+        `Rig could not complete the worklet request (${String(status)}).`,
+    );
 }
 
 async function fetchGitWatch(

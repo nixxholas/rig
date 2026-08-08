@@ -50,6 +50,7 @@ import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import type { SlotContext } from "../agent/context/SlotContext.js";
 import type { FolderContext } from "../agent/context/FolderContext.js";
+import type { WorkletContext } from "../agent/context/WorkletContext.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
 import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
 import type { SchedulingContext } from "../scheduling/index.js";
@@ -104,6 +105,7 @@ export interface CreateCodingAssistantAgentOptions {
     secrets?: SessionSecretContext;
     scheduling?: SchedulingContext;
     slots?: SlotContext;
+    worklets?: WorkletContext;
     subagents?: SubagentContext;
     systemPrompt?: string;
     plugins?: PluginContext;
@@ -193,6 +195,9 @@ export function createCodingAssistantAgent(
     }
     if (options.slots !== undefined) {
         context.slots = options.slots;
+    }
+    if (options.worklets !== undefined) {
+        context.worklets = options.worklets;
     }
     if (options.providerUsage !== undefined) {
         context.providerUsage = options.providerUsage;
