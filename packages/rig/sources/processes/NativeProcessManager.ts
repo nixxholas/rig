@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { killProcessTree } from "./killProcessTree.js";
 import { isProcessGroupAlive, killProcessGroup, ProcessGroupReaper } from "./ProcessGroupReaper.js";
 import { startProcessTransport, type ProcessTransport } from "./startProcessTransport.js";
+import { BoundedOutputBuffer } from "./BoundedOutputBuffer.js";
 import type {
     ManagedProcessStatus,
     ProcessKillOptions,
@@ -167,8 +168,10 @@ export class ManagedProcess {
     readonly #hooks: ManagedProcessHooks;
     readonly #waitPromise: Promise<ProcessRunResult>;
     #resolveWait!: (result: ProcessRunResult) => void;
-    #stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-    #stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    readonly #stdout: BoundedOutputBuffer;
+    readonly #stderr: BoundedOutputBuffer;
+    #stdoutUnread: BoundedOutputBuffer;
+    #stderrUnread: BoundedOutputBuffer;
     #stdoutBytes = 0;
     #stderrBytes = 0;
     #status: ManagedProcessStatus = "running";
@@ -184,6 +187,10 @@ export class ManagedProcess {
         this.command = options.command;
         this.cwd = options.cwd;
         this.#maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+        this.#stdout = new BoundedOutputBuffer(this.#maxOutputBytes);
+        this.#stderr = new BoundedOutputBuffer(this.#maxOutputBytes);
+        this.#stdoutUnread = new BoundedOutputBuffer(this.#maxOutputBytes);
+        this.#stderrUnread = new BoundedOutputBuffer(this.#maxOutputBytes);
         this.#hooks = hooks;
         this.#waitPromise = new Promise((resolve) => {
             this.#resolveWait = resolve;
@@ -208,36 +215,49 @@ export class ManagedProcess {
             command: this.command,
             cwd: this.cwd,
             status: this.#status,
-            stdout: this.#stdout.toString("utf8"),
-            stderr: this.#stderr.toString("utf8"),
+            stdout: this.#stdout.snapshot().toString("utf8"),
+            stderr: this.#stderr.snapshot().toString("utf8"),
+            stdoutBytes: this.#stdout.totalBytes,
+            stderrBytes: this.#stderr.totalBytes,
+            stdoutOmittedBytes: this.#stdout.omittedBytes,
+            stderrOmittedBytes: this.#stderr.omittedBytes,
         };
     }
 
     readOutput(
         stdoutOffset: number,
         stderrOffset: number,
+        consume = false,
     ): ProcessSnapshot & {
         stderrDelta: string;
+        stderrDeltaBytes: number;
+        stderrDeltaOmittedBytes: number;
         stderrOffset: number;
         stdoutDelta: string;
+        stdoutDeltaBytes: number;
+        stdoutDeltaOmittedBytes: number;
         stdoutOffset: number;
     } {
-        const stdoutStartOffset = this.#stdoutBytes - this.#stdout.length;
-        const stderrStartOffset = this.#stderrBytes - this.#stderr.length;
-        const stdoutDeltaOffset = Math.max(
-            0,
-            Math.min(this.#stdout.length, stdoutOffset - stdoutStartOffset),
-        );
-        const stderrDeltaOffset = Math.max(
-            0,
-            Math.min(this.#stderr.length, stderrOffset - stderrStartOffset),
-        );
+        const stdoutDelta = consume
+            ? drainedSnapshot(this.#stdoutUnread)
+            : this.#stdout.snapshotFromOffset(stdoutOffset);
+        const stderrDelta = consume
+            ? drainedSnapshot(this.#stderrUnread)
+            : this.#stderr.snapshotFromOffset(stderrOffset);
         return {
             ...this.snapshot(),
-            stderrDelta: this.#stderr.subarray(stderrDeltaOffset).toString("utf8"),
-            stderrOffset: this.#stderrBytes,
-            stdoutDelta: this.#stdout.subarray(stdoutDeltaOffset).toString("utf8"),
-            stdoutOffset: this.#stdoutBytes,
+            stderrDelta: stderrDelta.buffer.toString("utf8"),
+            stderrDeltaBytes: stderrDelta.totalBytes,
+            stderrDeltaOmittedBytes: stderrDelta.omittedBytes,
+            stderrOffset: consume
+                ? this.#stderrBytes - this.#stderrUnread.totalBytes
+                : this.#stderrBytes,
+            stdoutDelta: stdoutDelta.buffer.toString("utf8"),
+            stdoutDeltaBytes: stdoutDelta.totalBytes,
+            stdoutDeltaOmittedBytes: stdoutDelta.omittedBytes,
+            stdoutOffset: consume
+                ? this.#stdoutBytes - this.#stdoutUnread.totalBytes
+                : this.#stdoutBytes,
         };
     }
 
@@ -330,7 +350,8 @@ export class ManagedProcess {
 
     #onStdoutData = (chunk: Buffer): void => {
         this.#stdoutBytes += chunk.length;
-        this.#stdout = appendCapped(this.#stdout, chunk, this.#maxOutputBytes);
+        this.#stdout.append(chunk);
+        this.#stdoutUnread.append(chunk);
         if (this.#exitCode !== null || this.#exitSignal !== null) {
             this.#armPostExitTimer();
         }
@@ -338,7 +359,8 @@ export class ManagedProcess {
 
     #onStderrData = (chunk: Buffer): void => {
         this.#stderrBytes += chunk.length;
-        this.#stderr = appendCapped(this.#stderr, chunk, this.#maxOutputBytes);
+        this.#stderr.append(chunk);
+        this.#stderrUnread.append(chunk);
         if (this.#exitCode !== null || this.#exitSignal !== null) {
             this.#armPostExitTimer();
         }
@@ -353,7 +375,8 @@ export class ManagedProcess {
     #onError = (error: Error): void => {
         const chunk = Buffer.from(error.message);
         this.#stderrBytes += chunk.length;
-        this.#stderr = appendCapped(this.#stderr, chunk, this.#maxOutputBytes);
+        this.#stderr.append(chunk);
+        this.#stderrUnread.append(chunk);
         this.#finalize(null, null);
     };
 
@@ -417,13 +440,17 @@ export class ManagedProcess {
     }
 }
 
-function appendCapped(
-    buffer: Buffer<ArrayBufferLike>,
-    chunk: Buffer,
-    maxBytes: number,
-): Buffer<ArrayBufferLike> {
-    const combined = Buffer.concat([buffer, chunk]);
-    return combined.length <= maxBytes ? combined : combined.subarray(combined.length - maxBytes);
+function drainedSnapshot(buffer: BoundedOutputBuffer): {
+    buffer: Buffer;
+    omittedBytes: number;
+    totalBytes: number;
+} {
+    const drained = buffer.drain();
+    return {
+        buffer: drained.snapshot(),
+        omittedBytes: drained.omittedBytes,
+        totalBytes: drained.totalBytes,
+    };
 }
 
 function abortedResult(options: ProcessRunOptions): ProcessRunResult {

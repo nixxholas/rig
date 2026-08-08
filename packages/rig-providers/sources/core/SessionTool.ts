@@ -21,6 +21,8 @@ export interface SessionTool {
     readonly server?: { readonly type: string; readonly [key: string]: unknown };
     readonly description?: string;
     readonly parameters?: TSchema;
+    /** Provider-neutral request to expose this tool through native tool discovery. */
+    readonly deferLoading?: boolean;
     /** Opaque provider metadata persisted with this tool definition. */
     readonly vendor?: any;
     /** Ignored by providers that do not support grammar-based tools. */

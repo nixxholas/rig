@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../types.js";
 import { quoteVisibleExact } from "../../../permissions/quoteVisibleExact.js";
 import {
+    CODEX_EXEC_CAPTURE_MAX_BYTES,
     createUnifiedExecOutput,
     formatUnifiedExecOutput,
     unifiedExecOutputSchema,
@@ -88,6 +89,7 @@ export const codexWriteStdinTool = defineTool({
             ...(execution.onProgress === undefined ? {} : { onProgress: execution.onProgress }),
             sessionId: session_id,
             ...(execution.signal === undefined ? {} : { signal: execution.signal }),
+            maxOutputBytes: CODEX_EXEC_CAPTURE_MAX_BYTES,
             waitMs: Math.max(0, Math.min(maximumWaitMs, yield_time_ms ?? defaultWaitMs)),
         });
         if (snapshot === undefined) throw new Error("The shell session was not found.");

@@ -179,7 +179,11 @@ describe("createDockerBashContext", () => {
         stream?.write("abcde");
 
         await vi.waitFor(async () =>
-            expect(await context.readSession(1)).toMatchObject({ stdoutDelta: "abcde" }),
+            expect(await context.readSession(1)).toMatchObject({
+                stdoutDelta: "ri\n... 10 bytes omitted ...\ncde",
+                stdoutDeltaBytes: 15,
+                stdoutDeltaOmittedBytes: 10,
+            }),
         );
         stream?.write("fg");
         await vi.waitFor(async () =>

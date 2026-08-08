@@ -1,18 +1,14 @@
 import { deunicode } from "deunicode";
 import stem from "wink-porter2-stemmer";
 
-import type { AnyDefinedTool } from "../../types.js";
-import { toolSearchStopWords } from "./impl/toolSearchStopWords.js";
+import type { SessionTool } from "@/core/SessionTool.js";
+import { toolSearchStopWords } from "@/vendors/codex/impl/toolSearchStopWords.js";
 
 const segmenter = new Intl.Segmenter("en", { granularity: "word" });
 
-/**
- * Ranks tool definitions with the same English BM25 shape used by Codex tool search.
- *
- * The returned definitions are the original objects, ordered by descending relevance.
- */
-export function searchToolDefinitions<T extends AnyDefinedTool>(
-    toolDefinitions: readonly T[],
+/** Ranks deferred Codex tools with the same English BM25 shape as the native client. */
+export function searchCodexTools<T extends SessionTool>(
+    tools: readonly T[],
     query: string,
     limit = 8,
 ): readonly T[] {
@@ -21,7 +17,7 @@ export function searchToolDefinitions<T extends AnyDefinedTool>(
     if (limit === 0) throw new Error("limit must be greater than zero");
     if (!Number.isSafeInteger(limit) || limit < 0)
         throw new Error("limit must be a positive integer");
-    if (toolDefinitions.length === 0) return [];
+    if (tools.length === 0) return [];
 
     const tokenize = (text: string): string[] =>
         Array.from(
@@ -36,20 +32,18 @@ export function searchToolDefinitions<T extends AnyDefinedTool>(
             .map((segment) => segment.segment)
             .filter((token) => !toolSearchStopWords.has(token))
             .map(stem);
-    const documents = toolDefinitions.map((tool) => {
-        if (tool.searchText !== undefined) return tokenize(tool.searchText);
-
+    const documents = tools.map((tool) => {
         const parts: string[] = [];
         const add = (value: unknown): void => {
             if (typeof value === "string" && value.trim().length > 0) parts.push(value.trim());
         };
-        add(tool.namespace?.name);
-        add(tool.namespace?.description);
+        add(tool.namespace);
+        add(tool.namespaceDescription);
         add(tool.name);
         add(tool.name.replaceAll("_", " "));
         add(tool.description);
 
-        const pending: unknown[] = [tool.arguments];
+        const pending: unknown[] = [tool.parameters];
         const seen = new Set<object>();
         while (pending.length > 0) {
             const schema = pending.pop();
@@ -98,9 +92,7 @@ export function searchToolDefinitions<T extends AnyDefinedTool>(
             if (frequency === undefined) continue;
             const containingDocuments = documentFrequency.get(token) ?? 0;
             const inverseDocumentFrequency = Math.log(
-                1 +
-                    (toolDefinitions.length - containingDocuments + 0.5) /
-                        (containingDocuments + 0.5),
+                1 + (tools.length - containingDocuments + 0.5) / (containingDocuments + 0.5),
             );
             const normalizedFrequency =
                 (frequency * 2.2) /
@@ -116,5 +108,5 @@ export function searchToolDefinitions<T extends AnyDefinedTool>(
         return score === 0 ? [] : [{ index, score }];
     });
     scored.sort((left, right) => right.score - left.score || left.index - right.index);
-    return scored.slice(0, limit).map(({ index }) => toolDefinitions[index]!);
+    return scored.slice(0, limit).map(({ index }) => tools[index]!);
 }

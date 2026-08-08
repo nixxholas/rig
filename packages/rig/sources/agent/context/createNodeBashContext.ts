@@ -192,6 +192,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         const processSnapshot = session.process.readOutput(
             session.stdoutOffset,
             session.stderrOffset,
+            !peeking,
         );
         const completionStderrDelta = session.completionStderrDelta ?? "";
         if (!peeking) {
@@ -200,6 +201,14 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             session.stderrOffset = processSnapshot.stderrOffset;
             if (session.result !== undefined) session.exitObserved = true;
         }
+        const stderrDelta = `${processSnapshot.stderrDelta}${completionStderrDelta}`;
+        const stderrDeltaBytes =
+            (processSnapshot.stderrDeltaBytes ??
+                Buffer.byteLength(processSnapshot.stderrDelta, "utf8")) +
+            Buffer.byteLength(completionStderrDelta, "utf8");
+        const stdoutDeltaBytes =
+            processSnapshot.stdoutDeltaBytes ??
+            Buffer.byteLength(processSnapshot.stdoutDelta, "utf8");
         return {
             command: session.command,
             cwd: session.cwd,
@@ -212,9 +221,25 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                       ? "killed"
                       : "completed",
             stderr: session.result?.stderr ?? processSnapshot.stderr,
-            stderrDelta: `${processSnapshot.stderrDelta}${completionStderrDelta}`,
+            stderrDelta,
+            ...(processSnapshot.stderrBytes === undefined
+                ? {}
+                : { stderrBytes: processSnapshot.stderrBytes }),
+            ...(processSnapshot.stderrOmittedBytes === undefined
+                ? {}
+                : { stderrOmittedBytes: processSnapshot.stderrOmittedBytes }),
+            stderrDeltaBytes,
+            stderrDeltaOmittedBytes: processSnapshot.stderrDeltaOmittedBytes ?? 0,
             stdout: session.result?.stdout ?? processSnapshot.stdout,
             stdoutDelta: processSnapshot.stdoutDelta,
+            ...(processSnapshot.stdoutBytes === undefined
+                ? {}
+                : { stdoutBytes: processSnapshot.stdoutBytes }),
+            ...(processSnapshot.stdoutOmittedBytes === undefined
+                ? {}
+                : { stdoutOmittedBytes: processSnapshot.stdoutOmittedBytes }),
+            stdoutDeltaBytes,
+            stdoutDeltaOmittedBytes: processSnapshot.stdoutDeltaOmittedBytes ?? 0,
             timedOut: session.timedOut,
         };
     };

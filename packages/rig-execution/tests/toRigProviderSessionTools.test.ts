@@ -31,6 +31,22 @@ describe("toRigProviderSessionTools", () => {
         expect(tools[0]?.parameters).toBe(parameters);
     });
 
+    it("preserves provider-neutral deferred loading metadata", () => {
+        const [tool] = toRigProviderSessionTools([
+            {
+                name: "rare_tool",
+                description: "Perform a rare operation.",
+                parameters: Type.Object({}),
+                deferLoading: true,
+            },
+        ]);
+
+        expect(tool).toMatchObject({
+            name: "rare_tool",
+            deferLoading: true,
+        });
+    });
+
     it("replaces native Codex collaboration schemas with locked definitions", () => {
         const tools = toRigProviderSessionTools(
             [

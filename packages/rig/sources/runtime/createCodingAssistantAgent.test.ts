@@ -589,6 +589,31 @@ describe("createCodingAssistantAgent", () => {
         ).toEqual(["spawn_agent", "followup_task"]);
     });
 
+    it("defers long-tail tools while keeping the coding core eager", () => {
+        const codex = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            modelId: modelOpenaiGpt56Sol.id,
+        });
+        const claude = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            modelId: modelAnthropicFable5.id,
+        });
+        const byName = (runtime: typeof codex, name: string) =>
+            runtime.agent.tools.find((tool) => tool.name === name);
+
+        expect(byName(codex, "exec_command")?.deferLoading).toBeUndefined();
+        expect(byName(codex, "apply_patch")?.deferLoading).toBeUndefined();
+        expect(byName(codex, "attach")?.deferLoading).toBe(true);
+        expect(byName(codex, "plugin_discover")?.deferLoading).toBe(true);
+        expect(byName(codex, "agent_me")?.deferLoading).toBe(true);
+        expect(byName(codex, "codex_imagegen")?.deferLoading).toBe(true);
+
+        expect(byName(claude, "Bash")?.deferLoading).toBeUndefined();
+        expect(byName(claude, "Read")?.deferLoading).toBeUndefined();
+        expect(byName(claude, "TaskList")?.deferLoading).toBe(true);
+        expect(byName(claude, "attach")?.deferLoading).toBe(true);
+    });
+
     it("exposes the Agent tool only while another nested level is available", () => {
         const spawn = async () => ({
             agentId: "test-agent",
@@ -694,7 +719,7 @@ describe("createCodingAssistantAgent", () => {
         expect(grokDeepest.agent.tools.map((tool) => tool.name)).not.toContain("spawn_subagent");
     });
 
-    it("explicitly permits parent delegation for every provider", async () => {
+    it("does not add a separate parent delegation prompt for any provider", async () => {
         const controls = {
             canSpawn: true,
             depth: 0,
@@ -739,8 +764,8 @@ describe("createCodingAssistantAgent", () => {
                 tools: runtime.agent.tools,
             });
 
-            expect(prompt).toContain("You are the parent agent");
-            expect(prompt).toContain("explicitly allowed to spawn subagents");
+            expect(prompt).not.toContain("# Delegation role");
+            expect(prompt).not.toContain("You are the parent agent");
             if (runtime.executor.type === "codex") {
                 expect(prompt).toContain(
                     "`collaboration.wait_agent` is also steerable, even though the canonical tool description does not say so",

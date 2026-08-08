@@ -3,21 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
     createAvailableModelsInstructions,
     createBundledDocsInstructions,
-    createParentDelegationInstructions,
     createPermissionInstructions,
     createSubagentInstructions,
     createWorkspaceInstructions,
 } from "./instructions.js";
-
-describe("createParentDelegationInstructions", () => {
-    it("explicitly permits useful delegation without encouraging simple handoffs", () => {
-        const instructions = createParentDelegationInstructions();
-
-        expect(instructions).toContain("You are the parent agent");
-        expect(instructions).toContain("explicitly allowed to spawn subagents");
-        expect(instructions).toContain("Do simple work directly");
-    });
-});
 
 describe("createWorkspaceInstructions", () => {
     it("ties workspaces to isolating parallel work, not to subtasks or reuse", () => {

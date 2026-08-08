@@ -642,27 +642,27 @@ export class AgentSessionManager {
     }
 
     sendMessage(
-        parentSessionId: string,
+        senderSessionId: string,
         target: string,
         message: string,
         encryptedMessage?: string,
     ): ManagedSubagent {
-        const child = this.#resolveTarget(parentSessionId, target);
-        const parent = this.#current(parentSessionId);
+        const sender = this.#current(senderSessionId);
+        const recipient = this.#resolveMessageTarget(sender, target);
         if (encryptedMessage !== undefined) {
-            const parentTransportScope = parent?.encryptedAgentTransportScope();
+            const senderTransportScope = sender.encryptedAgentTransportScope();
             if (
-                parentTransportScope === undefined ||
-                parentTransportScope !== child.encryptedAgentTransportScope()
+                senderTransportScope === undefined ||
+                senderTransportScope !== recipient.encryptedAgentTransportScope()
             ) {
                 throw new Error(
                     "Native encrypted collaboration only works within the same compatible provider and region.",
                 );
             }
         }
-        const childPath = this.#pathFor(child);
-        const parentPath = this.#pathFor(parent);
-        child.deliverAgentMessage({
+        const senderPath = this.#pathFor(sender);
+        const recipientPath = this.#pathFor(recipient);
+        recipient.deliverAgentMessage({
             blocks: message.length === 0 ? [] : [{ type: "text", text: message }],
             id: crypto.randomUUID(),
             provenance: "agent",
@@ -671,21 +671,21 @@ export class AgentSessionManager {
                 ? {}
                 : {
                       encryptedAgentMessage: {
-                          author: parentPath,
-                          recipient: childPath,
+                          author: senderPath,
+                          recipient: recipientPath,
                           header: agentMessageHeader(
-                              parent,
-                              parentPath,
-                              child,
-                              childPath,
+                              sender,
+                              senderPath,
+                              recipient,
+                              recipientPath,
                               "MESSAGE",
                           ),
                           encryptedContent: encryptedMessage,
                       },
                   }),
         });
-        this.recordChanged(child);
-        return this.#managedSubagent(child);
+        this.recordChanged(recipient);
+        return this.#managedMessageTarget(recipient);
     }
 
     async setSubagentReadOnly(
@@ -1400,6 +1400,17 @@ export class AgentSessionManager {
         };
     }
 
+    #managedMessageTarget(target: InMemorySession): ManagedSubagent {
+        if (target.isSubagent()) return this.#managedSubagent(target);
+        const identity = target.agentIdentity();
+        return {
+            agentId: identity.agentId,
+            description: identity.title ?? "Parent agent",
+            path: this.#pathFor(target),
+            status: "running",
+        };
+    }
+
     async #monitorBackground(
         parent: InMemorySession | undefined,
         child: InMemorySession,
@@ -1562,6 +1573,18 @@ export class AgentSessionManager {
             throw new Error(`Subagent path '${target}' is ambiguous. Use its Agent ID.`);
         }
         return matches[0] as InMemorySession;
+    }
+
+    #resolveMessageTarget(sender: InMemorySession, target: string): InMemorySession {
+        const directParent = this.#parentFor(sender);
+        if (
+            directParent !== undefined &&
+            (directParent.agentIdentity().agentId === target ||
+                this.#pathFor(directParent) === target)
+        ) {
+            return directParent;
+        }
+        return this.#resolveTarget(sender.id, target);
     }
 
     #rootFor(sessionId: string): InMemorySession {

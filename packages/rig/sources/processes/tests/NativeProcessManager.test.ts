@@ -75,7 +75,7 @@ describe("NativeProcessManager", () => {
         expect(manager.activeCount()).toBe(0);
     });
 
-    it("retains the newest output when a command exceeds its byte cap", async () => {
+    it("retains the head and tail and reports omitted bytes when output exceeds its cap", async () => {
         const cwd = await makeTempDir();
         const manager = new NativeProcessManager();
 
@@ -86,7 +86,28 @@ describe("NativeProcessManager", () => {
             timeoutMs: 2_000,
         });
 
-        expect(result.stdout).toBe("newest");
+        expect(result.stdout).toBe("old\n... 7 bytes omitted ...\nest");
+        expect(result.stdoutBytes).toBe(13);
+        expect(result.stdoutOmittedBytes).toBe(7);
+    });
+
+    it("honors direct read cursors without consuming their output", async () => {
+        const cwd = await makeTempDir();
+        const manager = new NativeProcessManager();
+        const process = manager.start({
+            command: "printf 'abcdef'",
+            cwd,
+            maxOutputBytes: 4_096,
+        });
+        await process.wait();
+
+        expect(process.readOutput(2, 0)).toMatchObject({
+            stdoutDelta: "cdef",
+            stdoutDeltaBytes: 4,
+            stdoutDeltaOmittedBytes: 0,
+            stdoutOffset: 6,
+        });
+        expect(process.readOutput(2, 0).stdoutDelta).toBe("cdef");
     });
 
     it("kills timed out commands and removes them from tracking", async () => {

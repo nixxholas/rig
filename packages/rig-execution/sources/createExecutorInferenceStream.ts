@@ -405,19 +405,11 @@ export function toRigProviderSessionTools(
                 name: tool.name,
                 description: tool.description,
                 parameters: tool.parameters,
+                ...(tool.deferLoading === undefined ? {} : { deferLoading: tool.deferLoading }),
                 ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
                 ...(tool.namespaceDescription === undefined
                     ? {}
                     : { namespaceDescription: tool.namespaceDescription }),
-                ...(tool.deferLoading === undefined
-                    ? {}
-                    : {
-                          vendor: {
-                              provider: "codex",
-                              type: "function",
-                              deferLoading: tool.deferLoading,
-                          },
-                      }),
             },
         ];
     });

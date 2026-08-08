@@ -35,6 +35,25 @@ describe("readSessionWithProgress", () => {
         expect(displays[1]).toMatch(/^TELEPROMPTER_HEAD_/u);
         expect(displays[1]).not.toContain("LATER_TAIL_");
     });
+
+    it("bounds accumulated output and preserves omitted-byte accounting", async () => {
+        const snapshots = [
+            snapshot({ status: "running", stdout: "0123456789", stdoutDelta: "0123456789" }),
+            snapshot({ status: "completed", stdout: "abcdefghij", stdoutDelta: "abcdefghij" }),
+        ];
+
+        const result = await readSessionWithProgress({
+            bash: {
+                readSession: vi.fn(async () => snapshots.shift()),
+            } as unknown as BashContext,
+            maxOutputBytes: 10,
+            sessionId: 1,
+        });
+
+        expect(result?.stdoutDelta).toBe("01234\n... 10 bytes omitted ...\nfghij");
+        expect(result?.stdoutDeltaBytes).toBe(20);
+        expect(result?.stdoutDeltaOmittedBytes).toBe(10);
+    });
 });
 
 function snapshot(

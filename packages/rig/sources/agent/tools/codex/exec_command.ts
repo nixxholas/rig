@@ -4,6 +4,7 @@ import { defineTool } from "../../types.js";
 import { summarizeEscalatedShellAction } from "../../../permissions/summarizeEscalatedShellAction.js";
 import { summarizeTextOutput } from "../../../tools/utils/index.js";
 import {
+    CODEX_EXEC_CAPTURE_MAX_BYTES,
     createUnifiedExecOutput,
     formatUnifiedExecOutput,
     unifiedExecOutputSchema,
@@ -139,7 +140,8 @@ export const codexExecCommandTool = defineTool({
         const startedAt = Date.now();
         const startOptions: Parameters<typeof context.bash.startSession>[0] = {
             command: cmd,
-            maxOutputBytes: Math.max(4_000, (max_output_tokens ?? 10_000) * 4),
+            maxOutputBytes:
+                tty === true ? CODEX_EXEC_CAPTURE_MAX_BYTES : CODEX_EXEC_CAPTURE_MAX_BYTES / 2,
         };
         if (workdir !== undefined) startOptions.cwd = workdir;
         if (secrets !== undefined) startOptions.secrets = secrets;
@@ -156,6 +158,7 @@ export const codexExecCommandTool = defineTool({
                 ...(execution.onProgress === undefined ? {} : { onProgress: execution.onProgress }),
                 sessionId,
                 ...(execution.signal === undefined ? {} : { signal: execution.signal }),
+                maxOutputBytes: CODEX_EXEC_CAPTURE_MAX_BYTES,
                 waitMs: Math.max(250, Math.min(30_000, yield_time_ms ?? 10_000)),
             });
         } finally {

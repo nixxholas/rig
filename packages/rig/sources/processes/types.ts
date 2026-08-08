@@ -31,6 +31,10 @@ export interface ProcessSnapshot {
     status: ManagedProcessStatus;
     stdout: string;
     stderr: string;
+    stdoutBytes?: number;
+    stderrBytes?: number;
+    stdoutOmittedBytes?: number;
+    stderrOmittedBytes?: number;
 }
 
 export interface ProcessRunResult extends ProcessSnapshot {

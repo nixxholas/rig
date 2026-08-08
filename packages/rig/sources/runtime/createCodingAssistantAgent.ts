@@ -19,7 +19,7 @@ import {
     type TaskContext,
     type UserInputContext,
 } from "../agent/index.js";
-import type { Message } from "../agent/types.js";
+import { deferToolLoading, type AnyDefinedTool, type Message } from "../agent/types.js";
 import { DEFAULT_RIG_CONFIG } from "../config/defaultConfig.js";
 import { findConfiguredProvider } from "../config/findConfiguredProvider.js";
 import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
@@ -311,7 +311,11 @@ export function createCodingAssistantAgent(
         ...surface.baseTools,
         ...(imageGeneration.length === 0
             ? []
-            : [createImageGenerationTool(imageGeneration, surface.imageGenerationSurface)]),
+            : [
+                  deferToolLoading(
+                      createImageGenerationTool(imageGeneration, surface.imageGenerationSurface),
+                  ),
+              ]),
     ];
     const currentRoute =
         nativeProvider instanceof Executor
@@ -332,24 +336,30 @@ export function createCodingAssistantAgent(
               : surface.limitedCollaborationTools;
     const toolsWithoutGoals = [
         ...baseTools,
-        ...selectCommonToolsForModel({
-            ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
-            hasFolderContext: options.folders !== undefined,
-            hasWorkspaceContext: options.workspaces !== undefined,
-            isSubagent: options.isSubagent === true,
-            searchTools,
-        }),
-        ...(options.workspaces === undefined
-            ? []
-            : options.workspaces.crossWorkspace
-              ? [...workspaceTools, ...crossWorkspaceTools]
-              : workspaceTools),
-        ...agentCommunicationTools,
-        ...(options.chatHistory === undefined ? [] : [readAgentHistoryTool]),
+        ...deferToolArray(
+            selectCommonToolsForModel({
+                ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
+                hasFolderContext: options.folders !== undefined,
+                hasWorkspaceContext: options.workspaces !== undefined,
+                isSubagent: options.isSubagent === true,
+                searchTools,
+            }),
+        ),
+        ...deferToolArray(
+            options.workspaces === undefined
+                ? []
+                : options.workspaces.crossWorkspace
+                  ? [...workspaceTools, ...crossWorkspaceTools]
+                  : workspaceTools,
+        ),
+        ...deferToolArray(agentCommunicationTools),
+        ...deferToolArray(options.chatHistory === undefined ? [] : [readAgentHistoryTool]),
         ...availableCollaborationTools,
     ];
     const selectedTools =
-        options.goals === undefined ? toolsWithoutGoals : [...toolsWithoutGoals, ...goalTools];
+        options.goals === undefined
+            ? toolsWithoutGoals
+            : [...toolsWithoutGoals, ...deferToolArray(goalTools)];
     const usesOfficialCodexBedrockPrompt =
         provider.type === "bedrock" && model.id.startsWith("openai/");
     const tools = selectedTools;
@@ -416,6 +426,10 @@ export function createCodingAssistantAgent(
         processManager,
         executor: provider,
     };
+}
+
+function deferToolArray(tools: readonly AnyDefinedTool[]): readonly AnyDefinedTool[] {
+    return tools.map(deferToolLoading);
 }
 
 function imageGenerationProviders(executor: Executor): readonly ImageGenerationProvider[] {

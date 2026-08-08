@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
 import { ClaudeSession, type ClaudeSdkQuery } from "@/vendors/claude/ClaudeSession.js";
-import { toClaudeSdkOptions } from "@/vendors/claude/impl/toClaudeSdkOptions.js";
+import {
+    toClaudeMcpToolDefinition,
+    toClaudeSdkOptions,
+} from "@/vendors/claude/impl/toClaudeSdkOptions.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import { collectSessionEvents, textFromSessionEvents } from "../helpers/collectSessionEvents.js";
 
@@ -39,6 +42,27 @@ describe("Claude server tools", () => {
         });
 
         expect(options.tools).toEqual([]);
+    });
+
+    it("enables native ToolSearch when a client tool is deferred", () => {
+        const deferred = { name: "RareTool", deferLoading: true };
+        const options = toClaudeSdkOptions({
+            context: { instructions: "", messages: [] },
+            credential: { name: "claude-code", credential: undefined },
+            env: {},
+            model: "claude-sonnet-5",
+            sessionId: "session",
+            systemPrompt: "",
+            tools: [read, deferred],
+        });
+
+        expect(options.tools).toEqual(["ToolSearch"]);
+        expect(options.allowedTools).toContain("ToolSearch");
+        expect(options.env?.ENABLE_TOOL_SEARCH).toBe("true");
+        expect(toClaudeMcpToolDefinition(read)._meta).toEqual({
+            "anthropic/alwaysLoad": true,
+        });
+        expect(toClaudeMcpToolDefinition(deferred)).not.toHaveProperty("_meta");
     });
 
     it("reports a built-in Claude Code answers itself without ending the turn for the executor", async () => {
@@ -91,6 +115,32 @@ describe("Claude server tools", () => {
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events)).toBe("Rig is a coding agent.");
     });
+
+    it("keeps ToolSearch inside the Claude SDK instead of handing it to Rig", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const query = vi.fn<ClaudeSdkQuery>(() => serverToolQuery("ToolSearch"));
+        const session = new ClaudeSession("tool-search-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query,
+            tools: [read, { name: "RareTool", deferLoading: true }],
+        });
+
+        const events = await collectSessionEvents(
+            session.run({ context: { messages: [{ role: "user", content: "Find a tool." }] } }),
+        );
+
+        expect(events).toContainEqual({
+            type: "toolcall_start",
+            callId: "srvtoolu_1",
+            name: "ToolSearch",
+            server: true,
+            vendor: { type: "claude_tool_use" },
+        });
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+    });
 });
 
 /** Call ids of every `toolcall_start` the provider marked `server: true`. */
@@ -106,12 +156,12 @@ function serverToolCallIds(events: readonly SessionEvent[]): Set<string> {
  * The SDK stream a host sees when Claude Code runs a built-in itself: the `tool_use` block
  * arrives like any other, the CLI answers it out of band, and the same query keeps generating.
  */
-function serverToolQuery(): ReturnType<ClaudeSdkQuery> {
+function serverToolQuery(name = "WebSearch"): ReturnType<ClaudeSdkQuery> {
     async function* messages() {
         yield streamEvent({
             type: "content_block_start",
             index: 0,
-            content_block: { type: "tool_use", id: "srvtoolu_1", name: "WebSearch", input: {} },
+            content_block: { type: "tool_use", id: "srvtoolu_1", name, input: {} },
         });
         yield streamEvent({
             type: "content_block_delta",

@@ -273,10 +273,10 @@ export interface DefinedTool<
     name: string;
     label: string;
     description: string;
-    /** Optional complete search text used instead of metadata-derived tool search text. */
-    searchText?: string;
     /** Exact provider-facing definition when JSON-schema function calling cannot represent it. */
     executorTool?: ExecutorTool;
+    /** Keep this tool out of the initial prompt when the provider supports native tool search. */
+    deferLoading?: boolean;
     /** Converts provider-facing custom-tool arguments into this tool's typed arguments. */
     parseExecutorToolArguments?: (argumentsValue: unknown) => Record<string, unknown>;
     /** Provider-facing namespace containing this tool. */
@@ -334,9 +334,8 @@ export interface AnyDefinedTool {
     name: string;
     label: string;
     description: string;
-    /** Optional complete search text used instead of metadata-derived tool search text. */
-    searchText?: string;
     executorTool?: ExecutorTool;
+    deferLoading?: boolean;
     parseExecutorToolArguments?: (argumentsValue: unknown) => Record<string, unknown>;
     namespace?: ToolNamespace;
     arguments: TSchema;
@@ -375,6 +374,11 @@ export type InferToolReturn<T extends AnyDefinedTool> =
         ? Static<TReturnSchema>
         : never;
 
+/** Marks one member of a fixed tool array for provider-native deferred loading. */
+export function deferToolLoading<T extends AnyDefinedTool>(tool: T): T & { deferLoading: true } {
+    return { ...tool, deferLoading: true };
+}
+
 /** Define a tool with TypeBox-inferred argument and return types. */
 export function defineTool<
     const TArgsSchema extends TSchema,
@@ -383,9 +387,8 @@ export function defineTool<
     name: string;
     label: string;
     description: string;
-    /** Optional complete search text used instead of metadata-derived tool search text. */
-    searchText?: string;
     executorTool?: ExecutorTool;
+    deferLoading?: boolean;
     parseExecutorToolArguments?: (argumentsValue: unknown) => Record<string, unknown>;
     namespace?: ToolNamespace;
     arguments: TArgsSchema;

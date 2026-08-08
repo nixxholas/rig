@@ -13,6 +13,10 @@ export interface BashRunOptions {
 export interface BashRunResult {
     stdout: string;
     stderr: string;
+    stdoutBytes?: number;
+    stderrBytes?: number;
+    stdoutOmittedBytes?: number;
+    stderrOmittedBytes?: number;
     exitCode: number | null;
     timedOut: boolean;
 }
@@ -27,8 +31,16 @@ export interface BashSessionSnapshot {
     status: BashSessionStatus;
     stderr: string;
     stderrDelta: string;
+    stderrDeltaBytes?: number;
+    stderrDeltaOmittedBytes?: number;
+    stderrBytes?: number;
+    stderrOmittedBytes?: number;
     stdout: string;
     stdoutDelta: string;
+    stdoutDeltaBytes?: number;
+    stdoutDeltaOmittedBytes?: number;
+    stdoutBytes?: number;
+    stdoutOmittedBytes?: number;
     timedOut: boolean;
 }
 

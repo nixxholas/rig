@@ -1,4 +1,4 @@
-import type { AnyDefinedTool } from "../../types.js";
+import { deferToolLoading, type AnyDefinedTool } from "../../types.js";
 import { claudeWaitForWorkflowTool, claudeWorkflowTool } from "../../../tools/workflows/index.js";
 import { claudeAgentTool } from "./Agent.js";
 import { claudeAskUserQuestionTool } from "./AskUserQuestion.js";
@@ -18,19 +18,19 @@ import { claudeTaskUpdateTool } from "./TaskUpdate.js";
 import { claudeWriteTool } from "./Write.js";
 
 export const claudeTools = [
-    claudeTaskOutputTool,
+    deferToolLoading(claudeTaskOutputTool),
     claudeBashTool,
     claudeReadTool,
     claudeEditTool,
     claudeWriteTool,
     claudeGlobTool,
     claudeGrepTool,
-    claudeTaskCreateTool,
-    claudeTaskGetTool,
-    claudeTaskUpdateTool,
-    claudeTaskListTool,
-    claudeTaskStopTool,
-    claudeTaskInputTool,
+    deferToolLoading(claudeTaskCreateTool),
+    deferToolLoading(claudeTaskGetTool),
+    deferToolLoading(claudeTaskUpdateTool),
+    deferToolLoading(claudeTaskListTool),
+    deferToolLoading(claudeTaskStopTool),
+    deferToolLoading(claudeTaskInputTool),
     claudeAskUserQuestionTool,
 ] as const;
 
@@ -45,8 +45,8 @@ export const claudeCollaborationToolsWithoutWorkflows = [
 
 export const claudeCollaborationTools = [
     claudeAgentTool,
-    claudeWorkflowTool,
-    claudeWaitForWorkflowTool,
+    deferToolLoading(claudeWorkflowTool),
+    deferToolLoading(claudeWaitForWorkflowTool),
     claudeSendMessageTool,
 ] as const;
 

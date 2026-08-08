@@ -22,6 +22,7 @@ import { codexSpawnAgentTool } from "./v2/spawn_agent.js";
 import { codexExtendedFollowupTaskTool } from "./v2/collaboration_ext/followup_task.js";
 import { codexExtendedSpawnAgentTool } from "./v2/collaboration_ext/spawn_agent.js";
 import { codexWaitAgentTool } from "./v2/wait_agent.js";
+import { deferToolLoading } from "../../types.js";
 
 export const codexTools = [
     codexExecCommandTool,
@@ -34,16 +35,16 @@ export const codexTools = [
 ] as const;
 
 export const codexWorkflowTools = [
-    codexWorkflowTool,
-    codexWaitForWorkflowTool,
-    codexWorkflowStatusTool,
-    codexStopWorkflowTool,
+    deferToolLoading(codexWorkflowTool),
+    deferToolLoading(codexWaitForWorkflowTool),
+    deferToolLoading(codexWorkflowStatusTool),
+    deferToolLoading(codexStopWorkflowTool),
 ] as const;
 
 export const codexV2CollaborationTools = [
     codexSpawnAgentTool,
-    codexExtendedSpawnAgentTool,
-    codexExtendedFollowupTaskTool,
+    deferToolLoading(codexExtendedSpawnAgentTool),
+    deferToolLoading(codexExtendedFollowupTaskTool),
     codexFollowupTaskTool,
     codexSendMessageTool,
     codexWaitAgentTool,
@@ -70,7 +71,7 @@ export const codexV1FullCollaborationTools = [
 ] as const;
 
 export const codexV2LimitedCollaborationTools = [
-    codexExtendedFollowupTaskTool,
+    deferToolLoading(codexExtendedFollowupTaskTool),
     codexFollowupTaskTool,
     codexSendMessageTool,
     codexWaitAgentTool,

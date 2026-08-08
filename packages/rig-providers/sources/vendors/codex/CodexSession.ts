@@ -53,6 +53,7 @@ import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.
 import { recoverCodexUnauthorizedCredential } from "@/vendors/codex/impl/recoverCodexUnauthorizedCredential.js";
 import { resolveCodexReasoningEffort } from "@/vendors/codex/impl/resolveCodexReasoningEffort.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
+import { settleCodexToolSearch } from "@/vendors/codex/impl/settleCodexToolSearch.js";
 import {
     resolveCodexStreamIdleTimeout,
     waitForCodexCompactionRetry,
@@ -66,6 +67,7 @@ import {
 import type { CodexTransport } from "@/vendors/codex/impl/codexConstants.js";
 
 const CODEX_COMPACTION_MAX_RETRIES = 2;
+const CODEX_TOOL_SEARCH_MAX_ROUNDS = 4;
 
 export interface CodexSessionOptions extends InferenceRetryOptions {
     instructions: string;
@@ -229,7 +231,9 @@ export class CodexSession extends BaseSession {
         // read back as provider-run appear in a request whose replies are only ever a summary.
         const compactionConfiguration: SessionModelConfiguration = {
             ...configuration,
-            tools: (configuration.tools ?? []).filter((tool) => tool.server === undefined),
+            tools: (configuration.tools ?? []).filter(
+                (tool) => tool.server === undefined && tool.deferLoading !== true,
+            ),
         };
         if (this.credential.name === "bedrock-bearer-token") {
             return this.compactBedrockContext(
@@ -498,6 +502,10 @@ export class CodexSession extends BaseSession {
             instructions: configuration.instructions,
             messages,
         };
+        const turnContextPrefixLength = this.context.messages.length;
+        const carriedResponseItems: string[] = [];
+        let carriedAssistantText = "";
+        let toolSearchRounds = 0;
         this.activeConfiguration = configuration;
         this.activeEffort = effort;
         this.activeModel = model;
@@ -522,6 +530,7 @@ export class CodexSession extends BaseSession {
                 turnTools.filter((tool) => tool.server !== undefined).map((tool) => tool.name),
             );
             const attemptUsage: Extract<SessionEvent, { type: "token_usage" }>[] = [];
+            const internalToolSearchCallIds = new Set<string>();
             yield { type: "block_start" };
             try {
                 const responseStream = useSse
@@ -560,6 +569,16 @@ export class CodexSession extends BaseSession {
                         attemptUsage.push(event);
                         continue;
                     }
+                    if (event.type === "toolcall_start" && event.name === "tool_search") {
+                        internalToolSearchCallIds.add(event.callId);
+                        continue;
+                    }
+                    if (
+                        (event.type === "toolcall_delta" || event.type === "toolcall_end") &&
+                        internalToolSearchCallIds.has(event.callId)
+                    ) {
+                        continue;
+                    }
                     yield event;
                 }
 
@@ -583,14 +602,28 @@ export class CodexSession extends BaseSession {
                 ) {
                     throw new EmptyResponseError("Codex");
                 }
+                const settled =
+                    result !== undefined && "assistantText" in result
+                        ? settleCodexToolSearch(result, turnTools)
+                        : undefined;
+                if (settled !== undefined) result = settled.result;
                 for (const event of attemptUsage) yield event;
                 if (result !== undefined && "assistantText" in result) {
-                    if (
-                        result.assistantText.length > 0 ||
-                        result.encryptedReasoning !== undefined ||
-                        result.toolCalls.length > 0 ||
-                        result.responseItems.length > 0
-                    ) {
+                    if (settled?.settled === true && result.toolCalls.length === 0) {
+                        toolSearchRounds += 1;
+                        if (toolSearchRounds > CODEX_TOOL_SEARCH_MAX_ROUNDS) {
+                            yield { type: "block_stop" };
+                            yield {
+                                type: "done",
+                                state: "error",
+                                kind: "internal_error",
+                                message:
+                                    "Codex exceeded the provider-internal tool discovery limit.",
+                            };
+                            return;
+                        }
+                        carriedAssistantText += result.assistantText;
+                        carriedResponseItems.push(...result.responseItems);
                         this.context = {
                             instructions: this.context.instructions,
                             messages: [
@@ -598,21 +631,43 @@ export class CodexSession extends BaseSession {
                                 {
                                     role: "assistant",
                                     content: result.assistantText,
-                                    ...(result.encryptedReasoning === undefined
-                                        ? {}
-                                        : { encryptedReasoning: result.encryptedReasoning }),
-                                    ...(result.toolCalls.length === 0
-                                        ? {}
-                                        : { toolCalls: result.toolCalls }),
                                     ...(result.responseItems.length === 0
                                         ? {}
                                         : { responseItems: result.responseItems }),
                                 },
                             ],
                         };
+                        yield { type: "block_stop" };
+                        continue;
                     }
-                    if (result.responseItems.length > 0) {
-                        yield { type: "response_items", items: result.responseItems };
+                    const responseItems = [...carriedResponseItems, ...result.responseItems];
+                    const assistantText = carriedAssistantText + result.assistantText;
+                    if (
+                        assistantText.length > 0 ||
+                        result.encryptedReasoning !== undefined ||
+                        result.toolCalls.length > 0 ||
+                        responseItems.length > 0
+                    ) {
+                        this.context = {
+                            instructions: this.context.instructions,
+                            messages: [
+                                ...this.context.messages.slice(0, turnContextPrefixLength),
+                                {
+                                    role: "assistant",
+                                    content: assistantText,
+                                    ...(result.encryptedReasoning === undefined
+                                        ? {}
+                                        : { encryptedReasoning: result.encryptedReasoning }),
+                                    ...(result.toolCalls.length === 0
+                                        ? {}
+                                        : { toolCalls: result.toolCalls }),
+                                    ...(responseItems.length === 0 ? {} : { responseItems }),
+                                },
+                            ],
+                        };
+                    }
+                    if (responseItems.length > 0) {
+                        yield { type: "response_items", items: responseItems };
                     }
                 }
                 yield { type: "block_stop" };

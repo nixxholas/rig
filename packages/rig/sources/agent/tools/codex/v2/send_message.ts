@@ -13,11 +13,12 @@ export const codexSendMessageTool = defineTool({
         description: "Tools for spawning and managing sub-agents.",
     },
     description:
-        "Send a message to an existing subagent without starting another turn. Target it by stable Agent ID (preferred) or canonical task path.",
+        "Send a message to an existing agent without waiting for it to finish. A child may message its direct parent, including `/root`; other targets must be subagents in the same retained tree. Target by stable Agent ID (preferred) or canonical task path.",
     arguments: Type.Object(
         {
             target: Type.String({
-                description: "Stable Agent ID (preferred) or canonical task path.",
+                description:
+                    "Stable Agent ID (preferred) or canonical task path. `/root` is valid for a direct child of the root agent.",
             }),
             message: Type.String({
                 description: "Message text to queue on the target agent.",

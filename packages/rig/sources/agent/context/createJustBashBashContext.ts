@@ -7,7 +7,7 @@ import type {
     BashSessionExit,
     BashSessionSnapshot,
 } from "./BashContext.js";
-import { capOutput } from "./capOutput.js";
+import { capOutputWithMetadata } from "./capOutput.js";
 import { MAX_ACTIVE_BASH_SESSIONS, MAX_RETAINED_BASH_SESSIONS } from "./bashSessionLimits.js";
 
 interface JustBashSession {
@@ -110,6 +110,8 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
         const result = session.result;
         const stdout = result?.stdout ?? "";
         const stderr = result?.stderr ?? "";
+        const stdoutAlreadyRead = session.stdoutOffset > 0;
+        const stderrAlreadyRead = session.stderrOffset > 0;
         const stdoutDelta = stdout.slice(session.stdoutOffset);
         const stderrDelta = stderr.slice(session.stderrOffset);
         if (!peeking) {
@@ -125,8 +127,28 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
             status: result === undefined ? "running" : session.killed ? "killed" : "completed",
             stderr,
             stderrDelta,
+            ...(result?.stderrBytes === undefined ? {} : { stderrBytes: result.stderrBytes }),
+            ...(result?.stderrOmittedBytes === undefined
+                ? {}
+                : { stderrOmittedBytes: result.stderrOmittedBytes }),
+            stderrDeltaBytes:
+                result === undefined || stderrAlreadyRead
+                    ? Buffer.byteLength(stderrDelta, "utf8")
+                    : (result.stderrBytes ?? Buffer.byteLength(stderrDelta, "utf8")),
+            stderrDeltaOmittedBytes:
+                result === undefined || stderrAlreadyRead ? 0 : (result.stderrOmittedBytes ?? 0),
             stdout,
             stdoutDelta,
+            ...(result?.stdoutBytes === undefined ? {} : { stdoutBytes: result.stdoutBytes }),
+            ...(result?.stdoutOmittedBytes === undefined
+                ? {}
+                : { stdoutOmittedBytes: result.stdoutOmittedBytes }),
+            stdoutDeltaBytes:
+                result === undefined || stdoutAlreadyRead
+                    ? Buffer.byteLength(stdoutDelta, "utf8")
+                    : (result.stdoutBytes ?? Buffer.byteLength(stdoutDelta, "utf8")),
+            stdoutDeltaOmittedBytes:
+                result === undefined || stdoutAlreadyRead ? 0 : (result.stdoutOmittedBytes ?? 0),
             timedOut: session.timedOut,
         };
     };
@@ -170,12 +192,7 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
                     cwd: runOptions.cwd ?? cwd,
                     signal: controller.signal,
                 });
-                return {
-                    stdout: capOutput(result.stdout, runOptions.maxOutputBytes),
-                    stderr: capOutput(result.stderr, runOptions.maxOutputBytes),
-                    exitCode: result.exitCode,
-                    timedOut: controller.signal.aborted,
-                };
+                return capBashResult(result, runOptions.maxOutputBytes, controller.signal.aborted);
             } finally {
                 if (timeout !== undefined) clearTimeout(timeout);
                 runOptions.signal?.removeEventListener("abort", abort);
@@ -213,12 +230,7 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
                     cwd: session.cwd,
                     signal: controller.signal,
                 })
-                .then((result) => ({
-                    stdout: capOutput(result.stdout, session.maxOutputBytes),
-                    stderr: capOutput(result.stderr, session.maxOutputBytes),
-                    exitCode: result.exitCode,
-                    timedOut: session.timedOut,
-                }))
+                .then((result) => capBashResult(result, session.maxOutputBytes, session.timedOut))
                 .catch((error: unknown) => ({
                     stdout: "",
                     stderr: errorToMessage(error),
@@ -263,6 +275,25 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
         async writeSession() {
             return false;
         },
+    };
+}
+
+function capBashResult(
+    result: Pick<BashRunResult, "exitCode" | "stderr" | "stdout">,
+    maxOutputBytes: number | undefined,
+    timedOut: boolean,
+): BashRunResult {
+    const stdout = capOutputWithMetadata(result.stdout, maxOutputBytes);
+    const stderr = capOutputWithMetadata(result.stderr, maxOutputBytes);
+    return {
+        stderr: stderr.text,
+        stderrBytes: stderr.totalBytes,
+        stderrOmittedBytes: stderr.omittedBytes,
+        exitCode: result.exitCode,
+        stdout: stdout.text,
+        stdoutBytes: stdout.totalBytes,
+        stdoutOmittedBytes: stdout.omittedBytes,
+        timedOut,
     };
 }
 

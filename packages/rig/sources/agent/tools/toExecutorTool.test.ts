@@ -10,6 +10,7 @@ describe("toExecutorTool", () => {
             name: "read_file",
             label: "Read file",
             description: "Read one file.",
+            deferLoading: true,
             arguments: Type.Object(
                 { path: Type.String({ description: "Path to read." }) },
                 { additionalProperties: false },
@@ -26,6 +27,7 @@ describe("toExecutorTool", () => {
             name: "read_file",
             description: "Read one file.",
             parameters: tool.arguments,
+            deferLoading: true,
         });
         expect(tool.execute).toBeTypeOf("function");
         expect(tool.shouldReviewInAutoMode).toBeTypeOf("function");

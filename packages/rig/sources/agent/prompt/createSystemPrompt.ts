@@ -3,7 +3,6 @@ import { createCodexCollaborationInstructions } from "./codexInstructions.js";
 import {
     createAvailableModelsInstructions,
     createBundledDocsInstructions,
-    createParentDelegationInstructions,
     createPermissionInstructions,
     createWorkspaceInstructions,
     RIG_AGENT_TOOL_INSTRUCTIONS,
@@ -90,10 +89,6 @@ export async function createSystemPrompt(
                 maxActive: options.context.subagents.maxActive ?? 4,
             }),
         );
-    }
-
-    if (options.context.subagents?.canSpawn === true && options.context.subagents.depth === 0) {
-        parts.push(createParentDelegationInstructions());
     }
 
     if (options.context.workspaces !== undefined) {

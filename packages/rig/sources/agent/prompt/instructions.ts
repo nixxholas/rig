@@ -134,14 +134,6 @@ Rig ships documentation about Rig and Happy as a read-only folder at \`${docsPat
 \`${docsPath}/DESIGN.md\` is the design specification for Happy plugin apps and applets. Read it before designing or building a Happy applet or plugin UI, and follow its host style variables, surfaces, layout grid, typography, control, and state rules so the result looks like part of Happy rather than a generic page.`;
 }
 
-export function createParentDelegationInstructions(): string {
-    return `# Delegation role
-
-You are the parent agent. You are explicitly allowed to spawn subagents for concrete, bounded work that is genuinely independent and benefits from parallel execution or separate context.
-
-Do simple work directly. When you delegate, give each child one clear task, keep doing useful work yourself, and combine the results into the response to the user. A child may delegate further only when you explicitly allow nested delegation in its assigned task.`;
-}
-
 export function createWorkspaceInstructions(): string {
     return `# Workspaces
 

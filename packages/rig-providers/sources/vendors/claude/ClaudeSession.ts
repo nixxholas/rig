@@ -42,7 +42,10 @@ import {
     createClaudeSessionReplay,
     type ClaudeSessionReplay,
 } from "@/vendors/claude/impl/createClaudeSessionReplay.js";
-import { toClaudeSdkOptions } from "@/vendors/claude/impl/toClaudeSdkOptions.js";
+import {
+    claudeSdkBuiltInToolNames,
+    toClaudeSdkOptions,
+} from "@/vendors/claude/impl/toClaudeSdkOptions.js";
 import { toClaudeRetryEvent } from "@/vendors/claude/impl/toClaudeRetryEvent.js";
 
 export type ClaudeSdkQuery = typeof defaultClaudeSdkQuery;
@@ -448,9 +451,7 @@ export class ClaudeSession extends BaseSession {
         const activeTools = new Map<number, SessionToolCall>();
         // Claude Code runs a server tool inside its own process and answers it there, so Rig
         // reports these calls without ever collecting them as work for the executor.
-        const serverToolNames = new Set(
-            tools.filter((tool) => tool.server !== undefined).map((tool) => tool.name),
-        );
+        const serverToolNames = new Set(claudeSdkBuiltInToolNames(tools));
         this.lastQueryToolCalls = [];
         let sawToolCall = false;
         let sawText = false;

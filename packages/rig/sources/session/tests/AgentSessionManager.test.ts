@@ -285,6 +285,7 @@ describe("AgentSessionManager", () => {
     it("forwards opaque Codex collaboration only within one compatible provider and region", () => {
         const submit = vi.fn(() => ({ runId: "child-run" }));
         const deliverAgentMessage = vi.fn();
+        const deliverParentMessage = vi.fn();
         const encryptedAgentTransportScope = vi.fn(() => '["codex",null]');
         const child = {
             agentIdentity: () => ({ agentId: "child-agent", folder: "workspace" }),
@@ -314,13 +315,40 @@ describe("AgentSessionManager", () => {
             id: "root-1",
             encryptedAgentTransportScope: () => '["codex",null]',
             isSubagent: () => false,
+            deliverAgentMessage: deliverParentMessage,
             recordSubagentChanged: vi.fn(),
+        } as unknown as InMemorySession;
+        const nested = {
+            agentIdentity: () => ({ agentId: "nested-agent", folder: "workspace" }),
+            agentMetadata: () => ({
+                depth: 2,
+                parentSessionId: child.id,
+                rootSessionId: parent.id,
+                taskName: "nested",
+                type: "subagent" as const,
+            }),
+            id: "nested-1",
+            isSubagent: () => true,
+            encryptedAgentTransportScope: () => '["codex",null]',
+            subagentSummary: () => ({
+                agentId: "nested-agent",
+                description: "Nested",
+                status: "running" as const,
+                taskName: "nested",
+            }),
         } as unknown as InMemorySession;
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent: vi.fn(),
-                get: (id) => (id === parent.id ? parent : id === child.id ? child : undefined),
-                listByRoot: () => [child],
+                get: (id) =>
+                    id === parent.id
+                        ? parent
+                        : id === child.id
+                          ? child
+                          : id === nested.id
+                            ? nested
+                            : undefined,
+                listByRoot: () => [child, nested],
             },
         });
 
@@ -356,6 +384,41 @@ describe("AgentSessionManager", () => {
             id: expect.any(String),
             provenance: "agent",
             role: "user",
+        });
+
+        expect(manager.sendMessage(child.id, "/root", "", "opaque-finding")).toMatchObject({
+            agentId: "parent-agent",
+            path: "/root",
+            status: "running",
+        });
+        expect(deliverParentMessage).toHaveBeenCalledWith({
+            blocks: [],
+            encryptedAgentMessage: {
+                author: "/root/audit",
+                recipient: "/root",
+                header: "Message Type: MESSAGE\nRecipient Agent ID: parent-agent\nRecipient path: /root\nSender Agent ID: child-agent\nSender path: /root/audit\nPayload:\n",
+                encryptedContent: "opaque-finding",
+            },
+            id: expect.any(String),
+            provenance: "agent",
+            role: "user",
+        });
+        expect(manager.sendMessage(child.id, "parent-agent", "Plain finding.")).toMatchObject({
+            agentId: "parent-agent",
+            path: "/root",
+        });
+        expect(deliverParentMessage).toHaveBeenLastCalledWith({
+            blocks: [{ type: "text", text: "Plain finding." }],
+            id: expect.any(String),
+            provenance: "agent",
+            role: "user",
+        });
+        expect(() => manager.sendMessage(nested.id, "/root", "Skip the parent.")).toThrow(
+            "Subagent '/root' was not found.",
+        );
+        expect(manager.sendMessage(nested.id, "/root/audit", "Nested finding.")).toMatchObject({
+            agentId: "child-agent",
+            path: "/root/audit",
         });
 
         encryptedAgentTransportScope.mockReturnValue('["bedrock","us-east-1"]');

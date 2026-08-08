@@ -568,7 +568,7 @@ describe("createNodeBashContext", () => {
             processManager,
         });
         const script = [
-            'process.stdout.write("A".repeat(32) + "FIRST_MARKER\\n");',
+            'process.stdout.write("A".repeat(64) + "FIRST_MARKER\\n");',
             'process.stdin.once("data", () => {',
             '    process.stdout.write("SECOND_MARKER\\n");',
             "    process.exit(0);",
@@ -576,18 +576,24 @@ describe("createNodeBashContext", () => {
         ].join(" ");
         const sessionId = await context.startSession({
             command: `${nodeBinary()} -e ${shellQuote(script)}`,
-            maxOutputBytes: 16,
+            maxOutputBytes: 32,
         });
 
         try {
             const first = await waitForSessionOutput(context, sessionId, "FIRST_MARKER");
-            expect(first.stdout).toBe("AAAFIRST_MARKER\n");
-            expect(first.stdoutDelta).toBe("AAAFIRST_MARKER\n");
+            expect(first.stdout).toBe(
+                "AAAAAAAAAAAAAAAA\n... 45 bytes omitted ...\nAAAFIRST_MARKER\n",
+            );
+            expect(first.stdoutDelta).toBe(
+                "AAAAAAAAAAAAAAAA\n... 45 bytes omitted ...\nAAAFIRST_MARKER\n",
+            );
 
             expect(context.supportsSessionInput).toBe(true);
             expect(await context.writeSession(sessionId, "continue\n")).toBe(true);
             const second = await waitForSessionOutput(context, sessionId, "SECOND_MARKER");
-            expect(second.stdout).toBe("R\nSECOND_MARKER\n");
+            expect(second.stdout).toBe(
+                "AAAAAAAAAAAAAAAA\n... 59 bytes omitted ...\nR\nSECOND_MARKER\n",
+            );
             expect(second.stdoutDelta).toBe("SECOND_MARKER\n");
         } finally {
             await context.killAllSessions?.();

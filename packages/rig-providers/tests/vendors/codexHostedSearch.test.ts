@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
 import { CodexSession } from "@/vendors/codex/CodexSession.js";
@@ -134,6 +135,27 @@ describe("Codex server tools", () => {
         expect(declared.some((tool) => tool.type === "web_search")).toBe(false);
     });
 
+    it("declares no deferred tool search while compacting", async () => {
+        const declared = await declaredTools(
+            [
+                {
+                    name: "weather_forecast",
+                    description: "Read a weather forecast.",
+                    parameters: Type.Object({ city: Type.String() }),
+                    deferLoading: true,
+                },
+            ],
+            async (session) => {
+                await session.compact().catch(() => {
+                    // The stub server does not return a real compaction item.
+                });
+            },
+        );
+
+        expect(declared.some((tool) => tool.type === "tool_search")).toBe(false);
+        expect(declared.some((tool) => tool.name === "weather_forecast")).toBe(false);
+    });
+
     // A request that did not declare server search cannot receive one. Compaction sends none, so
     // this is also what keeps a compaction sample that calls a tool counting as a tool call.
     it("treats the same item as client work when no server tool was declared", async () => {
@@ -160,6 +182,197 @@ describe("Codex server tools", () => {
         expect(
             events.some((event) => event.type === "toolcall_start" && event.server === true),
         ).toBe(false);
+    });
+
+    it("settles deferred tool discovery inside the Codex session and continues inference", async () => {
+        const bodies: Record<string, any>[] = [];
+        const server = createServer(async (request, response) => {
+            bodies.push(JSON.parse(await readBody(request)));
+            if (bodies.length === 1) {
+                completeSseWith(response, [
+                    {
+                        type: "response.completed",
+                        response: {
+                            output: [
+                                {
+                                    type: "tool_search_call",
+                                    call_id: "search-1",
+                                    execution: "client",
+                                    arguments: { query: "weather forecast" },
+                                },
+                            ],
+                            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+                        },
+                    },
+                ]);
+                return;
+            }
+            completeSseWith(response, [
+                {
+                    type: "response.completed",
+                    response: {
+                        output: [
+                            {
+                                type: "message",
+                                id: "message-1",
+                                role: "assistant",
+                                content: [
+                                    {
+                                        type: "output_text",
+                                        text: "Forecast tool loaded.",
+                                        annotations: [],
+                                    },
+                                ],
+                            },
+                        ],
+                        usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 },
+                    },
+                },
+            ]);
+        });
+        server.listen(0, "127.0.0.1");
+        await new Promise<void>((resolve, reject) => {
+            server.once("listening", resolve);
+            server.once("error", reject);
+        });
+        const address = server.address();
+        if (typeof address !== "object" || address === null) throw new Error("Missing port.");
+
+        try {
+            const session = new CodexSession("tool-search-session", {
+                credential: { name: "codex-api-key", credential: { apiKey: "test" } } as never,
+                endpoint: `http://127.0.0.1:${address.port}/v1`,
+                installationId: "00000000-0000-4000-8000-000000000001",
+                instructions: "Be brief.",
+                tools: [
+                    {
+                        name: "weather_forecast",
+                        description: "Read a weather forecast.",
+                        parameters: Type.Object({ city: Type.String() }),
+                        deferLoading: true,
+                    },
+                ],
+                transport: "sse",
+                userAgent: "rig-test",
+            });
+            const events: SessionEvent[] = [];
+            for await (const event of session.run({
+                context: { messages: [{ role: "user", content: "Check the weather." }] },
+                effort: "low",
+                model: "gpt-5.6-sol",
+            })) {
+                events.push(event);
+            }
+
+            expect(
+                events.some(
+                    (event) => event.type === "toolcall_start" && event.name === "tool_search",
+                ),
+            ).toBe(false);
+            expect(events).toContainEqual({
+                type: "text_delta",
+                delta: "Forecast tool loaded.",
+            });
+            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(bodies).toHaveLength(2);
+            const firstRequestTools = requestTools(bodies[0] ?? {});
+            const secondRequestTools = requestTools(bodies[1] ?? {});
+            expect(firstRequestTools).not.toContainEqual(
+                expect.objectContaining({ name: "weather_forecast" }),
+            );
+            expect(firstRequestTools).toContainEqual(
+                expect.objectContaining({ type: "tool_search", execution: "client" }),
+            );
+            expect(JSON.stringify(firstRequestTools)).not.toContain("AllTrails");
+            expect(secondRequestTools).not.toContainEqual(
+                expect.objectContaining({ name: "weather_forecast" }),
+            );
+            expect(
+                bodies[1]?.input.find((item: any) => item.type === "tool_search_output"),
+            ).toMatchObject({
+                type: "tool_search_output",
+                call_id: "search-1",
+                execution: "client",
+                status: "completed",
+                tools: [
+                    {
+                        type: "function",
+                        name: "weather_forecast",
+                        defer_loading: true,
+                    },
+                ],
+            });
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
+    it("stops a Codex turn that keeps searching without making progress", async () => {
+        const bodies: Record<string, any>[] = [];
+        const server = createServer(async (request, response) => {
+            bodies.push(JSON.parse(await readBody(request)));
+            const callId = `search-${bodies.length}`;
+            completeSseWith(response, [
+                {
+                    type: "response.completed",
+                    response: {
+                        output: [
+                            {
+                                type: "tool_search_call",
+                                call_id: callId,
+                                execution: "client",
+                                arguments: { query: "missing capability" },
+                            },
+                        ],
+                        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+                    },
+                },
+            ]);
+        });
+        server.listen(0, "127.0.0.1");
+        await new Promise<void>((resolve, reject) => {
+            server.once("listening", resolve);
+            server.once("error", reject);
+        });
+        const address = server.address();
+        if (typeof address !== "object" || address === null) throw new Error("Missing port.");
+
+        try {
+            const session = new CodexSession("tool-search-limit-session", {
+                credential: { name: "codex-api-key", credential: { apiKey: "test" } } as never,
+                endpoint: `http://127.0.0.1:${address.port}/v1`,
+                installationId: "00000000-0000-4000-8000-000000000001",
+                instructions: "Be brief.",
+                tools: [
+                    {
+                        name: "weather_forecast",
+                        description: "Read a weather forecast.",
+                        parameters: Type.Object({ city: Type.String() }),
+                        deferLoading: true,
+                    },
+                ],
+                transport: "sse",
+                userAgent: "rig-test",
+            });
+            const events: SessionEvent[] = [];
+            for await (const event of session.run({
+                context: { messages: [{ role: "user", content: "Find a missing capability." }] },
+                effort: "low",
+                model: "gpt-5.6-sol",
+            })) {
+                events.push(event);
+            }
+
+            expect(bodies).toHaveLength(5);
+            expect(events.at(-1)).toEqual({
+                type: "done",
+                state: "error",
+                kind: "internal_error",
+                message: "Codex exceeded the provider-internal tool discovery limit.",
+            });
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
     });
 });
 
@@ -199,7 +412,7 @@ async function* stream(events: readonly unknown[]) {
 async function declaredTools(
     tools: readonly SessionTool[],
     exercise?: (session: CodexSession) => Promise<void>,
-): Promise<readonly { type?: string }[]> {
+): Promise<readonly Record<string, any>[]> {
     const bodies: Record<string, any>[] = [];
     const server = createServer(async (request, response) => {
         bodies.push(JSON.parse(await readBody(request)));
@@ -249,6 +462,16 @@ async function declaredTools(
     ]);
 }
 
+function requestTools(body: Record<string, any>): readonly Record<string, any>[] {
+    return [
+        ...((body.tools as readonly Record<string, any>[] | undefined) ?? []),
+        ...((body.input as readonly Record<string, any>[] | undefined) ?? []).flatMap(
+            (item): readonly Record<string, any>[] =>
+                item.type === "additional_tools" ? (item.tools ?? []) : [],
+        ),
+    ];
+}
+
 function readBody(request: IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
         let body = "";
@@ -264,16 +487,23 @@ function readBody(request: IncomingMessage): Promise<string> {
 }
 
 function completeSse(response: ServerResponse): void {
+    completeSseWith(response, [
+        {
+            type: "response.completed",
+            response: { output: [], usage: { total_tokens: 1 } },
+        },
+    ]);
+}
+
+function completeSseWith(
+    response: ServerResponse,
+    events: readonly Record<string, unknown>[],
+): void {
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(
-        [
-            `event: response.completed`,
-            `data: ${JSON.stringify({
-                type: "response.completed",
-                response: { output: [], usage: { total_tokens: 1 } },
-            })}`,
-            "",
-            "",
-        ].join("\n"),
+        events
+            .flatMap((event) => [`event: ${event.type}`, `data: ${JSON.stringify(event)}`, ""])
+            .concat("")
+            .join("\n"),
     );
 }

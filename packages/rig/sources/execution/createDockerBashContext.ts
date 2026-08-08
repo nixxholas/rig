@@ -31,6 +31,7 @@ import {
 } from "../agent/context/startLinuxManagedNetworkBridge.js";
 import { startManagedNetworkProxy } from "../agent/context/startManagedNetworkProxy.js";
 import { assertPermissionRevision, type PermissionContext } from "../permissions/index.js";
+import { BoundedOutputBuffer } from "../processes/BoundedOutputBuffer.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
 import { runDockerExec } from "./runDockerExec.js";
 import { readDockerEnvironmentVariableNames } from "./readDockerEnvironmentVariableNames.js";
@@ -70,9 +71,11 @@ interface DockerBashSession {
     pidFile: string;
     projectConfigPlaceholderCleanup?: () => Promise<void>;
     sessionId: number;
-    stderr: Buffer;
+    stderr: BoundedOutputBuffer;
+    stderrUnread: BoundedOutputBuffer;
     stderrOffset: number;
-    stdout: Buffer;
+    stdout: BoundedOutputBuffer;
+    stdoutUnread: BoundedOutputBuffer;
     stdoutOffset: number;
     stream: Duplex;
     stopNetworkDenialListener?: () => void;
@@ -371,24 +374,25 @@ export function createDockerBashContext(
                 : { projectConfigPlaceholderCleanup }),
             pidFile,
             sessionId,
-            stderr: Buffer.alloc(0),
+            stderr: new BoundedOutputBuffer(maximum),
+            stderrUnread: new BoundedOutputBuffer(maximum),
             stderrOffset: 0,
-            stdout: Buffer.alloc(0),
+            stdout: new BoundedOutputBuffer(maximum),
+            stdoutUnread: new BoundedOutputBuffer(maximum),
             stdoutOffset: 0,
             stream,
             timedOut: false,
         };
+        const appendStderr = (chunk: Buffer): void => {
+            session.stderr.append(chunk);
+            session.stderrUnread.append(chunk);
+        };
         stdoutStream.on("data", (chunk: Buffer) => {
-            const previousLength = session.stdout.length;
-            session.stdout = appendCapped(session.stdout, chunk, maximum);
-            const evictedBytes = previousLength + chunk.length - session.stdout.length;
-            session.stdoutOffset = Math.max(0, session.stdoutOffset - evictedBytes);
+            session.stdout.append(chunk);
+            session.stdoutUnread.append(chunk);
         });
         stderrStream.on("data", (chunk: Buffer) => {
-            const previousLength = session.stderr.length;
-            session.stderr = appendCapped(session.stderr, chunk, maximum);
-            const evictedBytes = previousLength + chunk.length - session.stderr.length;
-            session.stderrOffset = Math.max(0, session.stderrOffset - evictedBytes);
+            appendStderr(chunk);
         });
         container.modem.demuxStream(stream, stdoutStream, stderrStream);
         session.completion = new Promise<void>((resolve) => {
@@ -399,21 +403,15 @@ export function createDockerBashContext(
                 session.stopNetworkDenialListener?.();
                 delete session.stopNetworkDenialListener;
                 if (error !== undefined) {
-                    session.stderr = appendCapped(
-                        session.stderr,
-                        Buffer.from(error.message),
-                        maximum,
-                    );
+                    appendStderr(Buffer.from(error.message));
                 }
                 try {
                     session.exitCode = (await inspectDockerExec(exec)).ExitCode;
                 } catch (inspectError) {
-                    session.stderr = appendCapped(
-                        session.stderr,
+                    appendStderr(
                         Buffer.from(
                             `Could not inspect the Docker command after it exited: ${errorToMessage(inspectError)}\n`,
                         ),
-                        maximum,
                     );
                     session.exitCode = null;
                 }
@@ -427,19 +425,13 @@ export function createDockerBashContext(
                             : [session.projectConfigPlaceholderCleanup]),
                     ]);
                 } catch (cleanupError) {
-                    session.stderr = appendCapped(
-                        session.stderr,
+                    appendStderr(
                         Buffer.from(`Command cleanup failed: ${errorToMessage(cleanupError)}\n`),
-                        maximum,
                     );
                     session.exitCode = 1;
                 }
                 if (session.networkDenial !== undefined) {
-                    session.stderr = appendCapped(
-                        session.stderr,
-                        Buffer.from(formatManagedNetworkDenial(session.networkDenial)),
-                        maximum,
-                    );
+                    appendStderr(Buffer.from(formatManagedNetworkDenial(session.networkDenial)));
                     session.exitCode = 1;
                     session.killed = false;
                 }
@@ -617,11 +609,17 @@ export function createDockerBashContext(
     };
 
     const snapshot = (session: DockerBashSession, peek = false): BashSessionSnapshot => {
-        const stdoutDelta = session.stdout.subarray(session.stdoutOffset).toString("utf8");
-        const stderrDelta = session.stderr.subarray(session.stderrOffset).toString("utf8");
+        const stdoutDeltaBuffer = peek
+            ? session.stdoutUnread.clone()
+            : session.stdoutUnread.drain();
+        const stderrDeltaBuffer = peek
+            ? session.stderrUnread.clone()
+            : session.stderrUnread.drain();
+        const stdoutDelta = stdoutDeltaBuffer.snapshot().toString("utf8");
+        const stderrDelta = stderrDeltaBuffer.snapshot().toString("utf8");
         if (!peek) {
-            session.stdoutOffset = session.stdout.length;
-            session.stderrOffset = session.stderr.length;
+            session.stdoutOffset = session.stdout.totalBytes - session.stdoutUnread.totalBytes;
+            session.stderrOffset = session.stderr.totalBytes - session.stderrUnread.totalBytes;
             if (session.finished) session.exitObserved = true;
         }
         return {
@@ -634,10 +632,18 @@ export function createDockerBashContext(
                     ? "killed"
                     : "completed"
                 : "running",
-            stderr: session.stderr.toString("utf8"),
+            stderr: session.stderr.snapshot().toString("utf8"),
             stderrDelta,
-            stdout: session.stdout.toString("utf8"),
+            stderrBytes: session.stderr.totalBytes,
+            stderrDeltaBytes: stderrDeltaBuffer.totalBytes,
+            stderrDeltaOmittedBytes: stderrDeltaBuffer.omittedBytes,
+            stderrOmittedBytes: session.stderr.omittedBytes,
+            stdout: session.stdout.snapshot().toString("utf8"),
             stdoutDelta,
+            stdoutBytes: session.stdout.totalBytes,
+            stdoutDeltaBytes: stdoutDeltaBuffer.totalBytes,
+            stdoutDeltaOmittedBytes: stdoutDeltaBuffer.omittedBytes,
+            stdoutOmittedBytes: session.stdout.omittedBytes,
             timedOut: session.timedOut,
         };
     };
@@ -718,7 +724,19 @@ export function createDockerBashContext(
                 return {
                     exitCode: result.exitCode,
                     stderr: result.stderr,
+                    ...(result.stderrBytes === undefined
+                        ? {}
+                        : { stderrBytes: result.stderrBytes }),
+                    ...(result.stderrOmittedBytes === undefined
+                        ? {}
+                        : { stderrOmittedBytes: result.stderrOmittedBytes }),
                     stdout: result.stdout,
+                    ...(result.stdoutBytes === undefined
+                        ? {}
+                        : { stdoutBytes: result.stdoutBytes }),
+                    ...(result.stdoutOmittedBytes === undefined
+                        ? {}
+                        : { stdoutOmittedBytes: result.stdoutOmittedBytes }),
                     timedOut: result.timedOut,
                 };
             } finally {
@@ -881,9 +899,4 @@ function withDockerManagedNetworkEnvironment(
         https_proxy: "http://127.0.0.1:3128",
         no_proxy: noProxy,
     };
-}
-
-function appendCapped(current: Buffer, chunk: Buffer, maximum: number): Buffer {
-    const combined = Buffer.concat([current, chunk]);
-    return combined.length <= maximum ? combined : combined.subarray(combined.length - maximum);
 }

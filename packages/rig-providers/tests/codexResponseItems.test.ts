@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Type } from "@sinclair/typebox";
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
@@ -357,6 +358,28 @@ describe("Codex response items", () => {
                 output: "[]",
             },
         ]);
+    });
+
+    it("hides deferred functions behind a concise native tool search", () => {
+        const definitions = toCodexToolDefinitions([
+            {
+                name: "rare_tool",
+                description: "Perform a rare operation.",
+                parameters: Type.Object({}),
+                deferLoading: true,
+            },
+        ]);
+
+        expect(definitions).toEqual([
+            expect.objectContaining({
+                type: "tool_search",
+                execution: "client",
+            }),
+        ]);
+        expect(definitions).not.toContainEqual(
+            expect.objectContaining({ type: "function", name: "rare_tool" }),
+        );
+        expect(JSON.stringify(definitions)).not.toContain("AllTrails");
     });
 
     it("preserves ordered reasoning, commentary, normal tool search, and final text", async () => {

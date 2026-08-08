@@ -12,6 +12,7 @@ export function toExecutorTool(tool: AnyDefinedTool): ExecutorTool {
             name: tool.name,
             description: tool.description,
             parameters: tool.arguments,
+            ...(tool.deferLoading === undefined ? {} : { deferLoading: tool.deferLoading }),
         } satisfies ExecutorTool);
     const describedDefinition =
         tool.steerable === true

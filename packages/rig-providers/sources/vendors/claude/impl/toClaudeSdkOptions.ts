@@ -35,14 +35,13 @@ export function toClaudeSdkOptions(options: {
     registerAbortCleanup?: (cleanup: () => void) => void;
 }): ClaudeSdkOptions {
     const clientTools = options.tools.filter((tool) => tool.server === undefined);
-    const serverToolNames = options.tools.flatMap((tool) =>
-        tool.server === undefined ? [] : [tool.server.type],
-    );
     const mcpToolNames = clientTools.map((tool) => `mcp__${RIG_MCP_SERVER_NAME}__${tool.name}`);
+    const toolSearchEnabled = hasDeferredClaudeTools(options.tools);
+    const builtInToolNames = claudeSdkBuiltInToolNames(options.tools);
     const { abortController, cleanup } = toAbortController(options.abort);
     options.registerAbortCleanup?.(cleanup);
     return {
-        allowedTools: [...mcpToolNames, ...serverToolNames],
+        allowedTools: [...mcpToolNames, ...builtInToolNames],
         mcpServers: {
             [RIG_MCP_SERVER_NAME]: createClaudeMcpServer(clientTools, options.callTool),
         },
@@ -62,6 +61,7 @@ export function toClaudeSdkOptions(options: {
             CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
             CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
             CLAUDE_CODE_MAX_RETRIES: String(options.maxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES),
+            ...(toolSearchEnabled ? { ENABLE_TOOL_SEARCH: "true" } : {}),
         },
         extraArgs: options.compaction ? {} : { "disable-slash-commands": null },
         includePartialMessages: true,
@@ -83,7 +83,7 @@ export function toClaudeSdkOptions(options: {
         systemPrompt: createSystemPrompt(options.systemPrompt, options.context),
         // An empty list disables every built-in. A server tool is named here instead of being
         // bridged over MCP, which is what hands the call to Claude Code's own implementation.
-        tools: serverToolNames,
+        tools: builtInToolNames,
         ...(abortController === undefined ? {} : { abortController }),
         ...thinkingOptions(options.effort),
     };
@@ -138,14 +138,7 @@ function createClaudeMcpServer(
         },
     );
     instance.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: tools.map((tool) => ({
-            name: tool.name,
-            description:
-                tool.description === undefined || tool.description.trim().length === 0
-                    ? `Run ${tool.name} through Rig.`
-                    : tool.description,
-            inputSchema: tool.parameters ?? Type.Object({}, { additionalProperties: false }),
-        })),
+        tools: tools.map(toClaudeMcpToolDefinition),
     }));
     instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
         callTool === undefined
@@ -159,6 +152,29 @@ function createClaudeMcpServer(
         type: "sdk" as const,
         name: RIG_MCP_SERVER_NAME,
         instance,
+    };
+}
+
+export function claudeSdkBuiltInToolNames(tools: readonly SessionTool[]): string[] {
+    return [
+        ...tools.flatMap((tool) => (tool.server === undefined ? [] : [tool.server.type])),
+        ...(hasDeferredClaudeTools(tools) ? ["ToolSearch"] : []),
+    ];
+}
+
+function hasDeferredClaudeTools(tools: readonly SessionTool[]): boolean {
+    return tools.some((tool) => tool.server === undefined && tool.deferLoading === true);
+}
+
+export function toClaudeMcpToolDefinition(tool: SessionTool) {
+    return {
+        name: tool.name,
+        description:
+            tool.description === undefined || tool.description.trim().length === 0
+                ? `Run ${tool.name} through Rig.`
+                : tool.description,
+        inputSchema: tool.parameters ?? Type.Object({}, { additionalProperties: false }),
+        ...(tool.deferLoading === true ? {} : { _meta: { "anthropic/alwaysLoad": true } }),
     };
 }
 
