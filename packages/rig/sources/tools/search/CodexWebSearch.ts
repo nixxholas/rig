@@ -4,8 +4,9 @@ import type { SessionTool } from "@slopus/rig-providers";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
 import { networkToolPermission } from "../../runtime/networkToolPermission.js";
-import type { OneOffInferenceRoute, SearchProviderRoutes } from "./OneOffInferenceRoute.js";
+import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
+import { searchProviderSelection } from "./searchProviderSelection.js";
 
 const codexSearchQueryArguments = Type.Object(
     {
@@ -38,43 +39,36 @@ const codexNativeWebSearch = {
 } as const satisfies SessionTool;
 
 export function createCodexWebSearchTool(options: SearchProviderRoutes) {
-    const providerIds = codexProviderIds(options);
-    const providerId = Type.String({
-        description: `Codex provider to use. Available provider IDs: ${providerIds.join(", ")}`,
-        enum: providerIds,
-    });
-    const currentProviderIsAvailable =
-        options.currentProviderId !== undefined && providerIds.includes(options.currentProviderId);
-    const argumentsSchema =
-        providerIds.length > 1 && !currentProviderIsAvailable
-            ? Type.Object(
-                  {
-                      ...codexSearchQueryArguments.properties,
-                      provider_id: providerId,
-                  },
-                  { additionalProperties: false },
-              )
-            : Type.Object(
-                  {
-                      ...codexSearchQueryArguments.properties,
-                      provider_id: Type.Optional(providerId),
-                  },
-                  { additionalProperties: false },
-              );
+    const selection = searchProviderSelection("Codex", options);
+    const argumentsSchema = selection.providerIdIsOptional
+        ? Type.Object(
+              {
+                  ...codexSearchQueryArguments.properties,
+                  provider_id: Type.Optional(selection.providerIdSchema),
+              },
+              { additionalProperties: false },
+          )
+        : Type.Object(
+              {
+                  ...codexSearchQueryArguments.properties,
+                  provider_id: selection.providerIdSchema,
+              },
+              { additionalProperties: false },
+          );
     return defineTool({
         name: "codex_web_search",
         label: "Codex web search",
         description: `Research the live web through Codex.
 
 Use it when current documentation, releases, or external facts need direct source attribution.
-Available Codex provider IDs: ${providerIds.join(", ")}.`,
+${selection.availability}`,
         arguments: argumentsSchema,
         returnType: codexSearchResult,
         ...networkToolPermission,
         describeAutoPermissionAction: ({ query }) =>
             `searching the web through Codex for ${quoteVisibleExact(query)}. Access: network access outside Rig’s shell sandbox`,
         execute: async (input, _context, execution): Promise<CodexSearchResult> => {
-            const route = selectCodexRoute(options, input.provider_id);
+            const route = selection.selectRoute(input.provider_id);
             let usedSearch = false;
             const resultPayloads: string[] = [];
             const result = await runOneOffInference({
@@ -120,40 +114,6 @@ Available Codex provider IDs: ${providerIds.join(", ")}.`,
             `Codex returned ${result.citations.length} citation${result.citations.length === 1 ? "" : "s"}`,
         locks: [],
     });
-}
-
-function codexProviderIds(options: SearchProviderRoutes): string[] {
-    const providerIds = [...new Set(options.routes.map((route) => route.provider.id))];
-    if (providerIds.length === 0) {
-        throw new Error("Codex search requires at least one configured provider.");
-    }
-    return providerIds;
-}
-
-function selectCodexRoute(
-    options: SearchProviderRoutes,
-    requestedProviderId: string | undefined,
-): OneOffInferenceRoute {
-    const providerIds = codexProviderIds(options);
-    const selectedProviderId =
-        requestedProviderId ??
-        (options.currentProviderId !== undefined && providerIds.includes(options.currentProviderId)
-            ? options.currentProviderId
-            : options.routes.length === 1
-              ? options.routes[0]?.provider.id
-              : undefined);
-    if (selectedProviderId === undefined) {
-        throw new Error(
-            `Codex search requires provider_id. Available provider IDs: ${providerIds.join(", ")}.`,
-        );
-    }
-    const route = options.routes.find((candidate) => candidate.provider.id === selectedProviderId);
-    if (route === undefined) {
-        throw new Error(
-            `Unknown Codex provider '${selectedProviderId}'. Available provider IDs: ${providerIds.join(", ")}.`,
-        );
-    }
-    return route;
 }
 
 function codexPrompt(input: Static<typeof codexSearchQueryArguments>): string {

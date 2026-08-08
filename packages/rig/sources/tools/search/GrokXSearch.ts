@@ -4,14 +4,9 @@ import type { SessionTool } from "@slopus/rig-providers";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
 import { networkToolPermission } from "../../runtime/networkToolPermission.js";
-import {
-    grokProviderIdIsOptional,
-    grokProviderIdSchema,
-    grokProviderIds,
-    selectGrokRoute,
-} from "./GrokProviderRoutes.js";
 import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
+import { searchProviderSelection } from "./searchProviderSelection.js";
 
 const grokXSearchQueryArguments = Type.Object(
     {
@@ -43,20 +38,19 @@ const grokNativeXSearch = {
 } as const satisfies SessionTool;
 
 export function createGrokXSearchTool(options: SearchProviderRoutes) {
-    const providerIds = grokProviderIds(options);
-    const providerId = grokProviderIdSchema(options);
-    const argumentsSchema = grokProviderIdIsOptional(options)
+    const selection = searchProviderSelection("Grok", options);
+    const argumentsSchema = selection.providerIdIsOptional
         ? Type.Object(
               {
                   ...grokXSearchQueryArguments.properties,
-                  provider_id: Type.Optional(providerId),
+                  provider_id: Type.Optional(selection.providerIdSchema),
               },
               { additionalProperties: false },
           )
         : Type.Object(
               {
                   ...grokXSearchQueryArguments.properties,
-                  provider_id: providerId,
+                  provider_id: selection.providerIdSchema,
               },
               { additionalProperties: false },
           );
@@ -65,14 +59,14 @@ export function createGrokXSearchTool(options: SearchProviderRoutes) {
         label: "Grok X search",
         description: `Search posts and discussion on X through Grok. Use this for reactions, opinion, and breaking conversation.
 
-Available Grok provider IDs: ${providerIds.join(", ")}.`,
+${selection.availability}`,
         arguments: argumentsSchema,
         returnType: grokXSearchResult,
         ...networkToolPermission,
         describeAutoPermissionAction: ({ query }) =>
             `searching X through Grok for ${quoteVisibleExact(query)}. Access: network access outside Rig’s shell sandbox`,
         execute: async (input, _context, execution): Promise<GrokXSearchResult> => {
-            const route = selectGrokRoute(options, input.provider_id);
+            const route = selection.selectRoute(input.provider_id);
             let searchedX = false;
             const providerResults: string[] = [];
             const response = await runOneOffInference({

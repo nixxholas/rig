@@ -5,8 +5,9 @@ import type { SessionTool } from "@slopus/rig-providers";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
 import { networkToolPermission } from "../../runtime/networkToolPermission.js";
-import type { OneOffInferenceRoute, SearchProviderRoutes } from "./OneOffInferenceRoute.js";
+import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
+import { searchProviderSelection } from "./searchProviderSelection.js";
 
 const bedrockSearchQueryArguments = Type.Object(
     {
@@ -42,40 +43,36 @@ const bedrockNativeWebSearch = {
 } as const satisfies SessionTool;
 
 export function createBedrockWebSearchTool(options: SearchProviderRoutes) {
-    const providerIds = bedrockProviderIds(options);
-    const providerId = Type.String({
-        description: `Bedrock provider to use. Available provider IDs: ${providerIds.join(", ")}`,
-        enum: providerIds,
-    });
-    const currentProviderIsAvailable =
-        options.currentProviderId !== undefined && providerIds.includes(options.currentProviderId);
-    const argumentsSchema =
-        providerIds.length > 1 && !currentProviderIsAvailable
-            ? Type.Object(
-                  { ...bedrockSearchQueryArguments.properties, provider_id: providerId },
-                  { additionalProperties: false },
-              )
-            : Type.Object(
-                  {
-                      ...bedrockSearchQueryArguments.properties,
-                      provider_id: Type.Optional(providerId),
-                  },
-                  { additionalProperties: false },
-              );
+    const selection = searchProviderSelection("Bedrock", options);
+    const argumentsSchema = selection.providerIdIsOptional
+        ? Type.Object(
+              {
+                  ...bedrockSearchQueryArguments.properties,
+                  provider_id: Type.Optional(selection.providerIdSchema),
+              },
+              { additionalProperties: false },
+          )
+        : Type.Object(
+              {
+                  ...bedrockSearchQueryArguments.properties,
+                  provider_id: selection.providerIdSchema,
+              },
+              { additionalProperties: false },
+          );
     return defineTool({
         name: "bedrock_web_search",
         label: "Bedrock web search",
         description: `Search the web through Amazon Bedrock's hosted index.
 
 Answers are grounded in Amazon's own web index and page cache and come back with source citations. Retrieval stays inside AWS, so this reads a recent snapshot of the web rather than fetching pages live.
-Available Bedrock provider IDs: ${providerIds.join(", ")}.`,
+${selection.availability}`,
         arguments: argumentsSchema,
         returnType: bedrockSearchResult,
         ...networkToolPermission,
         describeAutoPermissionAction: ({ query }) =>
             `searching the web through Amazon Bedrock for ${quoteVisibleExact(query)}. Access: network access outside Rig’s shell sandbox`,
         execute: async (input, _context, execution): Promise<BedrockSearchResult> => {
-            const route = selectBedrockRoute(options, input.provider_id);
+            const route = selection.selectRoute(input.provider_id);
             let usedSearch = false;
             const responseItems: string[] = [];
             const result = await runOneOffInference({
@@ -120,40 +117,6 @@ Available Bedrock provider IDs: ${providerIds.join(", ")}.`,
             `Bedrock returned ${result.citations.length} citation${result.citations.length === 1 ? "" : "s"}`,
         locks: [],
     });
-}
-
-function bedrockProviderIds(options: SearchProviderRoutes): string[] {
-    const providerIds = [...new Set(options.routes.map((route) => route.provider.id))];
-    if (providerIds.length === 0) {
-        throw new Error("Bedrock search requires at least one configured provider.");
-    }
-    return providerIds;
-}
-
-function selectBedrockRoute(
-    options: SearchProviderRoutes,
-    requestedProviderId: string | undefined,
-): OneOffInferenceRoute {
-    const providerIds = bedrockProviderIds(options);
-    const selectedProviderId =
-        requestedProviderId ??
-        (options.currentProviderId !== undefined && providerIds.includes(options.currentProviderId)
-            ? options.currentProviderId
-            : options.routes.length === 1
-              ? options.routes[0]?.provider.id
-              : undefined);
-    if (selectedProviderId === undefined) {
-        throw new Error(
-            `Bedrock search requires provider_id. Available provider IDs: ${providerIds.join(", ")}.`,
-        );
-    }
-    const route = options.routes.find((candidate) => candidate.provider.id === selectedProviderId);
-    if (route === undefined) {
-        throw new Error(
-            `Unknown Bedrock provider '${selectedProviderId}'. Available provider IDs: ${providerIds.join(", ")}.`,
-        );
-    }
-    return route;
 }
 
 function bedrockPrompt(input: Static<typeof bedrockSearchQueryArguments>): string {

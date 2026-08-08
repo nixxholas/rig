@@ -43,6 +43,18 @@ describe("search tools", () => {
         }
     });
 
+    it("names the account an omitted provider_id falls back to", () => {
+        for (const factory of searchFactories) {
+            const tool = factory({
+                currentProviderId: "vendor-secondary",
+                routes: [route("vendor-primary"), route("vendor-secondary")],
+            });
+
+            expect(tool.description).toMatch(/leave provider_id out .*vendor-secondary/iu);
+            expect(providerIdSchema(tool).description).toContain("vendor-secondary");
+        }
+    });
+
     it("makes provider_id optional when exactly one route exists", () => {
         for (const factory of searchFactories) {
             const tool = factory({ routes: [route("only-provider")] });
@@ -84,9 +96,12 @@ function route(providerId: string): OneOffInferenceRoute {
     return { profile, provider };
 }
 
-function providerIdSchema(tool: AnyDefinedTool): { enum?: readonly string[] } {
+function providerIdSchema(tool: AnyDefinedTool): {
+    description?: string;
+    enum?: readonly string[];
+} {
     const properties = (tool.arguments as { properties?: Record<string, unknown> }).properties;
-    return (properties?.provider_id ?? {}) as { enum?: readonly string[] };
+    return (properties?.provider_id ?? {}) as { description?: string; enum?: readonly string[] };
 }
 
 function requiredArguments(tool: AnyDefinedTool): readonly string[] {

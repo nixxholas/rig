@@ -4,8 +4,9 @@ import type { SessionTool } from "@slopus/rig-providers";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
 import { networkToolPermission } from "../../runtime/networkToolPermission.js";
-import type { OneOffInferenceRoute, SearchProviderRoutes } from "./OneOffInferenceRoute.js";
+import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
+import { searchProviderSelection } from "./searchProviderSelection.js";
 
 const claudeSearchQueryArguments = Type.Object(
     {
@@ -39,36 +40,29 @@ const claudeNativeWebSearch = {
 } as const satisfies SessionTool;
 
 export function createClaudeWebSearchTool(options: SearchProviderRoutes) {
-    const providerIds = claudeProviderIds(options);
-    const providerId = Type.String({
-        description: `Claude provider to use. Available provider IDs: ${providerIds.join(", ")}`,
-        enum: providerIds,
-    });
-    const currentProviderIsAvailable =
-        options.currentProviderId !== undefined && providerIds.includes(options.currentProviderId);
-    const argumentsSchema =
-        providerIds.length > 1 && !currentProviderIsAvailable
-            ? Type.Object(
-                  {
-                      ...claudeSearchQueryArguments.properties,
-                      provider_id: providerId,
-                  },
-                  { additionalProperties: false },
-              )
-            : Type.Object(
-                  {
-                      ...claudeSearchQueryArguments.properties,
-                      provider_id: Type.Optional(providerId),
-                  },
-                  { additionalProperties: false },
-              );
+    const selection = searchProviderSelection("Claude", options);
+    const argumentsSchema = selection.providerIdIsOptional
+        ? Type.Object(
+              {
+                  ...claudeSearchQueryArguments.properties,
+                  provider_id: Type.Optional(selection.providerIdSchema),
+              },
+              { additionalProperties: false },
+          )
+        : Type.Object(
+              {
+                  ...claudeSearchQueryArguments.properties,
+                  provider_id: selection.providerIdSchema,
+              },
+              { additionalProperties: false },
+          );
     return defineTool({
         name: "claude_web_search",
         label: "Claude web search",
         description: `Search the current web through Claude.
 
 Use this for recent facts and documentation. Cite the returned sources as markdown links.
-Available Claude provider IDs: ${providerIds.join(", ")}.`,
+${selection.availability}`,
         arguments: argumentsSchema,
         returnType: claudeSearchResult,
         ...networkToolPermission,
@@ -78,7 +72,7 @@ Available Claude provider IDs: ${providerIds.join(", ")}.`,
             if (input.allowed_domains?.length && input.blocked_domains?.length) {
                 throw new Error("Claude search cannot allow and block domains in one request.");
             }
-            const route = selectClaudeRoute(options, input.provider_id);
+            const route = selection.selectRoute(input.provider_id);
             let searched = false;
             const providerSources = new Map<string, { title: string; url: string }>();
             const result = await runOneOffInference({
@@ -132,40 +126,6 @@ Available Claude provider IDs: ${providerIds.join(", ")}.`,
             `Claude searched the web and returned ${result.sources.length} source${result.sources.length === 1 ? "" : "s"}`,
         locks: [],
     });
-}
-
-function claudeProviderIds(options: SearchProviderRoutes): string[] {
-    const providerIds = [...new Set(options.routes.map((route) => route.provider.id))];
-    if (providerIds.length === 0) {
-        throw new Error("Claude search requires at least one configured provider.");
-    }
-    return providerIds;
-}
-
-function selectClaudeRoute(
-    options: SearchProviderRoutes,
-    requestedProviderId: string | undefined,
-): OneOffInferenceRoute {
-    const providerIds = claudeProviderIds(options);
-    const selectedProviderId =
-        requestedProviderId ??
-        (options.currentProviderId !== undefined && providerIds.includes(options.currentProviderId)
-            ? options.currentProviderId
-            : options.routes.length === 1
-              ? options.routes[0]?.provider.id
-              : undefined);
-    if (selectedProviderId === undefined) {
-        throw new Error(
-            `Claude search requires provider_id. Available provider IDs: ${providerIds.join(", ")}.`,
-        );
-    }
-    const route = options.routes.find((candidate) => candidate.provider.id === selectedProviderId);
-    if (route === undefined) {
-        throw new Error(
-            `Unknown Claude provider '${selectedProviderId}'. Available provider IDs: ${providerIds.join(", ")}.`,
-        );
-    }
-    return route;
 }
 
 function claudePrompt(input: Static<typeof claudeSearchQueryArguments>): string {
