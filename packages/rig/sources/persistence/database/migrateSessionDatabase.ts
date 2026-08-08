@@ -37,6 +37,8 @@ import { folders } from "./migrations/32-folders.js";
 import { unsortedChats } from "./migrations/33-unsorted-chats.js";
 import { worklets } from "./migrations/34-worklets.js";
 import { rigProfiles } from "./migrations/35-rig-profiles.js";
+import { sessionScopes } from "./migrations/36-session-scopes.js";
+import { sessionMutations } from "./migrations/37-session-mutations.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -80,6 +82,8 @@ const migrations: readonly SessionDatabaseMigration[] = [
     unsortedChats,
     worklets,
     rigProfiles,
+    sessionScopes,
+    sessionMutations,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

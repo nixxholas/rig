@@ -57,7 +57,7 @@ describe("InboxStore", () => {
                             status: "pending",
                         },
                     ],
-                    projectId: "project-1",
+                    scope: { kind: "project", projectId: "project-1" },
                     title: "Choose storage",
                 },
             },
@@ -68,7 +68,7 @@ describe("InboxStore", () => {
 
         expect(deltas.map((delta) => delta.type)).toContain("item_changed");
         expect(store.items()[0]).toMatchObject({
-            projectId: "project-1",
+            scope: { kind: "project", projectId: "project-1" },
             title: "Choose storage",
         });
     });

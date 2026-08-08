@@ -170,7 +170,6 @@ export {
     folderErrorCodeSchema,
     folderErrorResponseSchema,
     moveFolderRequestSchema,
-    setSessionFolderRequestSchema,
     updateFolderRequestSchema,
     FOLDER_ICON_MAX_LENGTH,
     FOLDER_NAME_MAX_LENGTH,
@@ -184,7 +183,6 @@ export {
     type FolderResponse,
     type ListFoldersResponse,
     type MoveFolderRequest,
-    type SetSessionFolderRequest,
     type UpdateFolderRequest,
 } from "./FolderProtocol.js";
 export type { McpServerSummary } from "../mcp/index.js";
@@ -293,6 +291,7 @@ export type {
     PermissionModeChangedEvent,
     ProviderModelCatalog,
     ProtocolSession,
+    MoveSessionRequest,
     ProviderQuotaObservedEvent,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
@@ -349,6 +348,7 @@ export type {
     SessionStatusChangedEvent,
     SessionRewoundEvent,
     SessionStatus,
+    SessionScope,
     SessionSummaryStatus,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
@@ -486,7 +486,9 @@ export {
     SESSION_DRAFT_MAX_LENGTH,
     SESSION_TRANSCRIPT_NOTICE_LIMIT,
     SESSION_STREAM_TURN_LIMIT,
+    moveSessionRequestSchema,
     submitContextMessageRequestSchema,
+    sessionScopeSchema,
     transferSessionRequestSchema,
     updateDaemonConfigRequestSchema,
 } from "./SessionProtocol.js";

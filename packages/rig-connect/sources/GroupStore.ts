@@ -37,6 +37,10 @@ export class GroupStore {
     #sessions = new Map<string, SessionSummary>();
     /** Newest event applied per session, so an out-of-order copy is ignored. */
     #sessionEventIds = new Map<string, string>();
+    /** Newest global-stream cursor observed for each session. */
+    #sessionStreamCursors = new Map<string, string>();
+    /** Request-response sessions awaiting their first catalog acknowledgement. */
+    #sessionsAwaitingCatalog = new Set<string>();
     /**
      * Recent events per session, kept so a snapshot can be rebased onto them.
      *
@@ -46,7 +50,7 @@ export class GroupStore {
      * now introducing. Holding them means the snapshot becomes the base and
      * everything after it is replayed, instead of either side simply winning.
      */
-    #recentSessionEvents = new Map<string, GlobalEvent[]>();
+    #recentSessionEvents = new Map<string, { cursor: string; event: GlobalEvent }[]>();
     #projectGit = new Map<string, GitChangeSnapshot>();
     #workspaceGit = new Map<string, GitChangeSnapshot>();
     #projectTerminals = new Map<string, GlobalStreamHello["terminalGroups"][number]["terminals"]>();
@@ -102,6 +106,11 @@ export class GroupStore {
         return this.#sessions.get(sessionId);
     }
 
+    /** Canonical summaries after snapshot/event rebasing, including non-code scopes. */
+    sessionSummaries(): readonly SessionSummary[] {
+        return [...this.#sessions.values()];
+    }
+
     groupVersion(
         target:
             | { kind: "project"; projectId: string }
@@ -123,7 +132,7 @@ export class GroupStore {
         }
         const previousTree = this.projects();
         this.#sessions.set(sessionId, { ...known, archived });
-        this.#markDirty(known.projectId);
+        this.#markSessionDirty(known);
         const projects = this.projects();
         return {
             deltas: [
@@ -137,7 +146,7 @@ export class GroupStore {
             ],
             undo: () => {
                 this.#sessions.set(sessionId, known);
-                this.#markDirty(known.projectId);
+                this.#markSessionDirty(known);
             },
         };
     }
@@ -154,13 +163,13 @@ export class GroupStore {
         const previousTree = this.projects();
         const { unread: _, ...read } = known;
         this.#sessions.set(sessionId, read);
-        this.#markDirty(known.projectId);
+        this.#markSessionDirty(known);
         const projects = this.projects();
         return {
             deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
             undo: () => {
                 this.#sessions.set(sessionId, known);
-                this.#markDirty(known.projectId);
+                this.#markSessionDirty(known);
             },
         };
     }
@@ -178,13 +187,13 @@ export class GroupStore {
         }
         const previousTree = this.projects();
         this.#sessions.set(sessionId, updated);
-        this.#markDirty(known.projectId);
+        this.#markSessionDirty(known);
         const projects = this.projects();
         return {
             deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
             undo: () => {
                 this.#sessions.set(sessionId, known);
-                this.#markDirty(known.projectId);
+                this.#markSessionDirty(known);
             },
         };
     }
@@ -346,6 +355,17 @@ export class GroupStore {
             // Same rule as the stream: no position, no place in the list.
             if (session.orderKey === undefined) continue;
             const known = this.#sessions.get(session.id);
+            const knownEventId = this.#sessionEventIds.get(session.id);
+            if (
+                known !== undefined &&
+                this.#sessionsAwaitingCatalog.has(session.id) &&
+                (session.lastEventId === undefined ||
+                    (knownEventId !== undefined && knownEventId > session.lastEventId))
+            ) {
+                nextSessions.set(session.id, known);
+                continue;
+            }
+            this.#sessionsAwaitingCatalog.delete(session.id);
             // The snapshot is the base, and anything that outran it is replayed on
             // top. A catalog arrives asynchronously, so by now the client may hold
             // events the snapshot predates — including events for a session this
@@ -355,14 +375,27 @@ export class GroupStore {
                 nextSessions.set(session.id, known);
             } else {
                 nextSessions.set(session.id, rebased);
-                changedProjectIds.add(rebased.projectId);
-                if (known !== undefined) changedProjectIds.add(known.projectId);
+                const projectId = sessionProjectId(rebased);
+                if (projectId !== undefined) changedProjectIds.add(projectId);
+                const knownProjectId = known === undefined ? undefined : sessionProjectId(known);
+                if (knownProjectId !== undefined) changedProjectIds.add(knownProjectId);
             }
         }
         for (const session of this.#sessions.values()) {
             if (nextSessions.has(session.id)) continue;
-            changedProjectIds.add(session.projectId);
+            if (this.#sessionsAwaitingCatalog.has(session.id)) {
+                nextSessions.set(session.id, session);
+                continue;
+            }
+            const latestCursor = this.#sessionStreamCursors.get(session.id);
+            if (latestCursor !== undefined && latestCursor > hello.cursor) {
+                nextSessions.set(session.id, session);
+                continue;
+            }
+            const projectId = sessionProjectId(session);
+            if (projectId !== undefined) changedProjectIds.add(projectId);
             this.#sessionEventIds.delete(session.id);
+            this.#sessionStreamCursors.delete(session.id);
             this.#groupSessions.delete(session.id);
         }
 
@@ -444,7 +477,7 @@ export class GroupStore {
         return deltas;
     }
 
-    apply(event: GlobalEvent): readonly GroupDelta[] {
+    apply(event: GlobalEvent, cursor?: string): readonly GroupDelta[] {
         const deltas: GroupDelta[] = [];
         switch (event.type) {
             case "presence_changed": {
@@ -552,7 +585,7 @@ export class GroupStore {
                 break;
             }
             default: {
-                const applied = this.#applySessionEvent(event, deltas);
+                const applied = this.#applySessionEvent(event, cursor, deltas);
                 if (!applied) return [];
                 break;
             }
@@ -570,17 +603,34 @@ export class GroupStore {
      * so each update is merged onto what is already known rather than replacing
      * it, and a field only the summary carries survives a live update.
      */
-    #applySessionEvent(event: GlobalEvent, deltas: GroupDelta[]): boolean {
+    #applySessionEvent(
+        event: GlobalEvent,
+        cursor: string | undefined,
+        deltas: GroupDelta[],
+    ): boolean {
         const sessionId = (event as { sessionId?: string }).sessionId;
         if (sessionId === undefined) return false;
         // Events are ordered UUIDv7, so this is what decides which of two views
         // of the same session is newer. Sessions carry no version of their own.
         const seen = this.#sessionEventIds.get(sessionId);
-        if (seen !== undefined && seen >= event.id) return false;
+        if (seen !== undefined && seen >= event.id) {
+            if (cursor !== undefined && seen === event.id) {
+                this.#rememberSessionEvent(sessionId, cursor, event);
+                this.#sessionStreamCursors.set(sessionId, cursor);
+                this.#sessionsAwaitingCatalog.delete(sessionId);
+            }
+            return false;
+        }
         // Held before it is applied, so an event for a session the client has not
         // loaded yet survives to be replayed once a snapshot introduces it. Such
         // an event used to be dropped, which lost the change outright.
-        this.#rememberSessionEvent(sessionId, event);
+        if (cursor === undefined) {
+            this.#sessionsAwaitingCatalog.add(sessionId);
+        } else {
+            this.#rememberSessionEvent(sessionId, cursor, event);
+            this.#sessionStreamCursors.set(sessionId, cursor);
+            this.#sessionsAwaitingCatalog.delete(sessionId);
+        }
 
         if (event.type === "session_current") {
             const incoming = (event.data as { session: SessionSummary }).session;
@@ -594,10 +644,8 @@ export class GroupStore {
                     ? incoming
                     : withAuthoritativeUnread({ ...known, ...incoming }, incoming),
             );
-            this.#markDirty(incoming.projectId);
-            if (known !== undefined && known.projectId !== incoming.projectId) {
-                this.#markDirty(known.projectId);
-            }
+            this.#markSessionDirty(incoming);
+            if (known !== undefined) this.#markSessionDirty(known);
             return true;
         }
 
@@ -607,7 +655,7 @@ export class GroupStore {
             const known = this.#sessions.get(sessionId);
             if (known === undefined) return false;
             this.#sessions.set(sessionId, { ...known, archived, lastEventId: event.id });
-            this.#markDirty(known.projectId);
+            this.#markSessionDirty(known);
             deltas.push({
                 sessionId,
                 type: archived ? "session_removed" : "session_added",
@@ -624,7 +672,7 @@ export class GroupStore {
             if (unread !== undefined && unread !== waiting.unread) {
                 this.#sessionEventIds.set(sessionId, event.id);
                 this.#sessions.set(sessionId, { ...waiting, lastEventId: event.id, unread });
-                this.#markDirty(waiting.projectId);
+                this.#markSessionDirty(waiting);
                 return true;
             }
         }
@@ -641,7 +689,7 @@ export class GroupStore {
             const updated = { ...known, ...patch.set, lastEventId: event.id };
             for (const key of patch.clear ?? []) delete updated[key];
             this.#sessions.set(sessionId, updated);
-            this.#markDirty(known.projectId);
+            this.#markSessionDirty(known);
             return true;
         }
 
@@ -658,12 +706,10 @@ export class GroupStore {
         // A session with no position is not in this list. A subagent is the case
         // that matters: it syncs and can be opened by id, but it belongs to the
         // session that started it, so the stream must not put it in the sidebar.
-        if (merged.projectId === undefined || merged.orderKey === undefined) return false;
+        if (merged.scope === undefined || merged.orderKey === undefined) return false;
         this.#sessions.set(merged.id, merged);
-        this.#markDirty(merged.projectId);
-        if (known !== undefined && known.projectId !== merged.projectId) {
-            this.#markDirty(known.projectId);
-        }
+        this.#markSessionDirty(merged);
+        if (known !== undefined) this.#markSessionDirty(known);
         if (known === undefined) deltas.push({ sessionId: merged.id, type: "session_added" });
         return true;
     }
@@ -676,17 +722,17 @@ export class GroupStore {
      * Dropping the oldest is safe because a snapshot older than everything still
      * held is a snapshot the client has already moved far past.
      */
-    #rememberSessionEvent(sessionId: string, event: GlobalEvent): void {
+    #rememberSessionEvent(sessionId: string, cursor: string, event: GlobalEvent): void {
         const held = this.#recentSessionEvents.get(sessionId);
         if (held === undefined) {
             if (this.#recentSessionEvents.size >= PENDING_SESSION_LIMIT) {
                 const oldest = this.#recentSessionEvents.keys().next();
                 if (!oldest.done) this.#recentSessionEvents.delete(oldest.value);
             }
-            this.#recentSessionEvents.set(sessionId, [event]);
+            this.#recentSessionEvents.set(sessionId, [{ cursor, event }]);
             return;
         }
-        held.push(event);
+        held.push({ cursor, event });
         while (held.length > PENDING_EVENTS_PER_SESSION) held.shift();
     }
 
@@ -705,22 +751,24 @@ export class GroupStore {
      */
     #rebaseSession(snapshot: SessionSummary, observedAt: string): SessionSummary {
         const held = this.#recentSessionEvents.get(snapshot.id);
-        const later = (held ?? []).filter((event) => event.id > observedAt);
+        const later = (held ?? []).filter((item) => item.cursor > observedAt);
         if (later.length === 0) {
             this.#recentSessionEvents.delete(snapshot.id);
             // Nothing outran the snapshot, so its position is what the client has
             // seen of this session.
             this.#sessionEventIds.set(snapshot.id, snapshot.lastEventId ?? observedAt);
+            this.#sessionStreamCursors.set(snapshot.id, observedAt);
             return snapshot;
         }
         this.#recentSessionEvents.set(snapshot.id, later);
 
         let rebased = snapshot;
-        for (const event of later) {
+        for (const { event } of later) {
             const updated = sessionSummaryAfterEvent(rebased, event);
             if (updated !== undefined) rebased = updated;
         }
-        this.#sessionEventIds.set(snapshot.id, later[later.length - 1]!.id);
+        this.#sessionEventIds.set(snapshot.id, later[later.length - 1]!.event.id);
+        this.#sessionStreamCursors.set(snapshot.id, later[later.length - 1]!.cursor);
         return rebased;
     }
 
@@ -749,17 +797,23 @@ export class GroupStore {
         this.#treeStale = true;
     }
 
+    #markSessionDirty(session: SessionSummary): void {
+        const projectId = sessionProjectId(session);
+        if (projectId !== undefined) this.#markDirty(projectId);
+    }
+
     #rebuild(): void {
         this.#treeStale = false;
         const sessionsByProject = new Map<string, GroupSession[]>();
         const sessionsByWorkspace = new Map<string, GroupSession[]>();
         for (const session of this.#sessions.values()) {
             if (session.archived) continue;
+            if (session.scope.kind !== "project" && session.scope.kind !== "workspace") continue;
             const projected = this.#groupSession(session);
             const into =
-                session.workspaceId === undefined
-                    ? mapList(sessionsByProject, session.projectId)
-                    : mapList(sessionsByWorkspace, session.workspaceId);
+                session.scope.kind === "project"
+                    ? mapList(sessionsByProject, session.scope.projectId)
+                    : mapList(sessionsByWorkspace, session.scope.workspaceId);
             into.push(projected);
         }
         const workspacesByProject = new Map<string, ProjectWorkspace[]>();
@@ -874,14 +928,15 @@ export class GroupStore {
             modelId: session.modelId,
             orderKey: session.orderKey ?? "",
             permissionMode: session.permissionMode,
-            projectId: session.projectId,
+            scope: session.scope as Extract<
+                SessionSummary["scope"],
+                { kind: "project" | "workspace" }
+            >,
             providerId: session.providerId,
             status: session.status,
             trackUnread: session.trackUnread === true,
             updatedAt: session.updatedAt,
             ...(session.unread === undefined ? {} : { unread: session.unread }),
-            ...(session.folderId === undefined ? {} : { folderId: session.folderId }),
-            ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
             ...(session.draft === undefined ? {} : { draft: session.draft }),
             ...(session.draftUpdatedAt === undefined
                 ? {}
@@ -911,6 +966,12 @@ function mapList<T>(into: Map<string, T[]>, key: string): T[] {
     const created: T[] = [];
     into.set(key, created);
     return created;
+}
+
+function sessionProjectId(session: SessionSummary): string | undefined {
+    return session.scope.kind === "project" || session.scope.kind === "workspace"
+        ? session.scope.projectId
+        : undefined;
 }
 
 /**

@@ -22,8 +22,9 @@ export function queryWorkspaceSessions(
             AND parent_session_id IS NULL
             ${
                 target.workspaceId === undefined
-                    ? sql``
-                    : sql`AND workspace_id = ${target.workspaceId}`
+                    ? sql`AND scope_kind = 'project'`
+                    : sql`AND scope_kind = 'workspace'
+                          AND workspace_id = ${target.workspaceId}`
             }
         ORDER BY last_message_at_ms DESC, updated_at_ms DESC, id ASC
         LIMIT ${target.limit ?? 100}

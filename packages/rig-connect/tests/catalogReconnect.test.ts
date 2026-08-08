@@ -51,7 +51,7 @@ function session(lastEventId: string, title: string): SessionSummary {
         orderKey: "a",
         pendingUserInputs: [],
         permissionMode: "auto",
-        projectId: "project-1",
+        scope: { kind: "project", projectId: "project-1" },
         status: "idle",
         title,
         updatedAt: 1,

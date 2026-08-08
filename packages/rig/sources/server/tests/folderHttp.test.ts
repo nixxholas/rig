@@ -73,10 +73,15 @@ describe("Folders over HTTP", () => {
             parentId: home.body.folder.id,
         });
 
-        const moved = await fixture.send(`POST`, `/folders/${moving.body.folder.id}/move`, {
-            afterId: null,
-            parentId: away.body.folder.id,
-        });
+        const moved = await fixture.send(
+            `POST`,
+            `/folders/${moving.body.folder.id}/move`,
+            {
+                afterId: null,
+                parentId: away.body.folder.id,
+            },
+            { "if-match": String(moving.body.folder.version) },
+        );
 
         expect(moved.status).toBe(200);
         expect(moved.body.folder.parentId).toBe(away.body.folder.id);
@@ -91,10 +96,15 @@ describe("Folders over HTTP", () => {
             parentId: parent.body.folder.id,
         });
 
-        const refused = await fixture.send("POST", `/folders/${parent.body.folder.id}/move`, {
-            afterId: null,
-            parentId: child.body.folder.id,
-        });
+        const refused = await fixture.send(
+            "POST",
+            `/folders/${parent.body.folder.id}/move`,
+            {
+                afterId: null,
+                parentId: child.body.folder.id,
+            },
+            { "if-match": String(parent.body.folder.version) },
+        );
 
         expect(refused.status).toBe(400);
         expect(refused.body.error.code).toBe("cycle");
@@ -108,10 +118,15 @@ describe("Folders over HTTP", () => {
             rules: "Ship nothing from here.",
         });
 
-        const updated = await fixture.send("PATCH", `/folders/${created.body.folder.id}`, {
-            icon: null,
-            name: "Final cuts",
-        });
+        const updated = await fixture.send(
+            "PATCH",
+            `/folders/${created.body.folder.id}`,
+            {
+                icon: null,
+                name: "Final cuts",
+            },
+            { "if-match": String(created.body.folder.version) },
+        );
 
         expect(updated.status).toBe(200);
         expect(updated.body.folder.name).toBe("Final cuts");
@@ -128,22 +143,144 @@ describe("Folders over HTTP", () => {
         expect(missing.body.error.code).toBe("folder_not_found");
     });
 
+    it("accepts quoted entity versions and deduplicates a lost response after later edits", async () => {
+        const fixture = await startServer();
+        const created = await fixture.send("POST", "/folders", { name: "Draft" });
+        const folderId = created.body.folder.id as string;
+
+        const first = await fixture.send(
+            "PATCH",
+            `/folders/${folderId}`,
+            { mutationId: "rename-first", name: "First" },
+            { "if-match": `"${created.body.folder.version}"`, "x-rig-mutation-id": "rename-first" },
+        );
+        expect(first.status).toBe(200);
+
+        const second = await fixture.send(
+            "PATCH",
+            `/folders/${folderId}`,
+            { mutationId: "rename-second", name: "Second" },
+            { "if-match": `"${first.body.folder.version}"`, "x-rig-mutation-id": "rename-second" },
+        );
+        expect(second.status).toBe(200);
+
+        const retried = await fixture.send(
+            "PATCH",
+            `/folders/${folderId}`,
+            { mutationId: "rename-first", name: "First" },
+            { "if-match": `"${created.body.folder.version}"`, "x-rig-mutation-id": "rename-first" },
+        );
+        expect(retried.status).toBe(200);
+        expect(retried.body.folder.name).toBe("Second");
+        expect(retried.body.folder.version).toBe(second.body.folder.version);
+    });
+
     it("files a chat into a folder and back out to Unsorted", async () => {
         const fixture = await startServer();
         const folder = await fixture.send("POST", "/folders", { name: "Trip planning" });
         const chat = fixture.store.create({ cwd: "/tmp/rig-folders" });
 
-        const filed = await fixture.send("PUT", `/sessions/${chat.id}/folder`, {
-            folderId: folder.body.folder.id,
+        const filed = await fixture.send("PUT", `/sessions/${chat.id}/scope`, {
+            afterId: null,
+            mutationId: "file-chat",
+            scope: { folderId: folder.body.folder.id, kind: "folder" },
         });
         expect(filed.status).toBe(200);
         expect(filed.body.session.folderId).toBe(folder.body.folder.id);
 
-        const unfiled = await fixture.send("PUT", `/sessions/${chat.id}/folder`, {
-            folderId: null,
+        const unfiled = await fixture.send("PUT", `/sessions/${chat.id}/scope`, {
+            afterId: null,
+            mutationId: "unfile-chat",
+            scope: { kind: "unsorted" },
         });
         expect(unfiled.status).toBe(200);
         expect(unfiled.body.session.folderId).toBeUndefined();
+    });
+
+    it("moves a chat through the canonical scope route with scoped ordering and retry identity", async () => {
+        const fixture = await startServer();
+        const folder = await fixture.send("POST", "/folders", { name: "Ordered" });
+        const first = fixture.store.create({ cwd: "/tmp/rig-folders" });
+        const second = fixture.store.create({ cwd: "/tmp/rig-folders" });
+        const mutationId = "move-first";
+        const staleVersion = first.events.lastEventId();
+
+        const moved = await fixture.send(
+            "PUT",
+            `/sessions/${first.id}/scope`,
+            {
+                afterId: null,
+                mutationId,
+                scope: { folderId: folder.body.folder.id, kind: "folder" },
+            },
+            {
+                ...(staleVersion === undefined ? {} : { "if-match": `"${staleVersion}"` }),
+                "x-rig-mutation-id": mutationId,
+            },
+        );
+        expect(moved.status).toBe(200);
+        expect(moved.body.session.scope).toEqual({
+            folderId: folder.body.folder.id,
+            kind: "folder",
+        });
+
+        const retried = await fixture.send(
+            "PUT",
+            `/sessions/${first.id}/scope`,
+            {
+                afterId: null,
+                mutationId,
+                scope: { folderId: folder.body.folder.id, kind: "folder" },
+            },
+            {
+                ...(staleVersion === undefined ? {} : { "if-match": `"${staleVersion}"` }),
+                "x-rig-mutation-id": mutationId,
+            },
+        );
+        expect(retried.status).toBe(200);
+
+        const movedSecond = await fixture.send("PUT", `/sessions/${second.id}/scope`, {
+            afterId: first.id,
+            mutationId: "move-second",
+            scope: { folderId: folder.body.folder.id, kind: "folder" },
+        });
+        expect(movedSecond.status, JSON.stringify(movedSecond.body)).toBe(200);
+        const laterMove = await fixture.send(
+            "PUT",
+            `/sessions/${first.id}/scope`,
+            {
+                afterId: null,
+                mutationId: "move-later",
+                scope: { kind: "unsorted" },
+            },
+            {
+                "if-match": `"${retried.body.session.lastEventId}"`,
+                "x-rig-mutation-id": "move-later",
+            },
+        );
+        expect(laterMove.status).toBe(200);
+        const lostResponseRetry = await fixture.send(
+            "PUT",
+            `/sessions/${first.id}/scope`,
+            {
+                afterId: null,
+                mutationId,
+                scope: { folderId: folder.body.folder.id, kind: "folder" },
+            },
+            {
+                ...(staleVersion === undefined ? {} : { "if-match": `"${staleVersion}"` }),
+                "x-rig-mutation-id": mutationId,
+            },
+        );
+        expect(lostResponseRetry.status).toBe(200);
+        expect(lostResponseRetry.body.session.scope).toEqual({ kind: "unsorted" });
+
+        const crossScope = await fixture.send("PUT", `/sessions/${first.id}/scope`, {
+            afterId: second.id,
+            scope: { kind: "unsorted" },
+        });
+        expect(crossScope.status).toBe(400);
+        expect(first.snapshot().scope.kind).toBe("unsorted");
     });
 
     it("archives a folder together with everything under it", async () => {
@@ -154,7 +291,12 @@ describe("Folders over HTTP", () => {
             parentId: parent.body.folder.id,
         });
 
-        const archived = await fixture.send("POST", `/folders/${parent.body.folder.id}/archive`);
+        const archived = await fixture.send(
+            "POST",
+            `/folders/${parent.body.folder.id}/archive`,
+            undefined,
+            { "if-match": String(parent.body.folder.version) },
+        );
 
         expect(archived.status).toBe(200);
         expect(archived.body.folder.archivedAt).toEqual(expect.any(Number));
@@ -165,10 +307,37 @@ describe("Folders over HTTP", () => {
             ),
         ).toEqual([]);
     });
+
+    it("prevents work and individual restoration after a chat's folder is archived", async () => {
+        const fixture = await startServer();
+        const folder = await fixture.send("POST", "/folders", { name: "Finished" });
+        const chat = fixture.store.create({
+            cwd: "/ignored",
+            scope: { folderId: folder.body.folder.id, kind: "folder" },
+        });
+
+        const archived = await fixture.send(
+            "POST",
+            `/folders/${folder.body.folder.id}/archive`,
+            undefined,
+            { "if-match": String(folder.body.folder.version) },
+        );
+        expect(archived.status).toBe(200);
+        expect(() => chat.submit({ text: "Continue after archival." })).toThrow("archived");
+
+        const restored = await fixture.send("POST", `/sessions/${chat.id}/unarchive`);
+        expect(restored.status).toBe(409);
+        expect(chat.snapshot()).toMatchObject({ archived: true, status: "archived" });
+    });
 });
 
 async function startServer(): Promise<{
-    send: (method: string, path: string, body?: unknown) => Promise<{ body: any; status: number }>;
+    send: (
+        method: string,
+        path: string,
+        body?: unknown,
+        headers?: Record<string, string>,
+    ) => Promise<{ body: any; status: number }>;
     store: InMemorySessionStore;
 }> {
     const root = await createTestFixtureDirectory();
@@ -194,13 +363,19 @@ async function startServer(): Promise<{
         ]);
     });
 
-    const send = async (method: string, path: string, body?: unknown) =>
+    const send = async (
+        method: string,
+        path: string,
+        body?: unknown,
+        headers: Record<string, string> = {},
+    ) =>
         await new Promise<{ body: any; status: number }>((resolve, reject) => {
             const payload = body === undefined ? undefined : JSON.stringify(body);
             const call = httpRequest(
                 {
                     headers: {
                         authorization: "Bearer t",
+                        ...headers,
                         ...(payload === undefined
                             ? {}
                             : {

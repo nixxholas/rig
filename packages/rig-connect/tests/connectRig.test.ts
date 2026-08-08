@@ -58,7 +58,7 @@ function sessionState(modelId = "old-model"): SessionStateResponse {
             orderKey: "a",
             pendingUserInputs: [],
             permissionMode: "auto",
-            projectId: "project-1",
+            scope: { kind: "project", projectId: "project-1" },
             providerId: "codex",
             snapshot: { messages: [] },
             status: "idle",
@@ -2656,7 +2656,7 @@ describe("connectRig and chats that finish", () => {
                     modelId: "sonnet-5",
                     orderKey: "a",
                     permissionMode: "auto",
-                    projectId: "project-1",
+                    scope: { kind: "project", projectId: "project-1" },
                     providerId: "claude",
                     status: "idle",
                     titleStatus: "idle",
@@ -2711,8 +2711,8 @@ describe("connectRig and chats that finish", () => {
 
             expect(finished).toEqual([
                 {
-                    projectId: "project-1",
                     reason: "turn_finished",
+                    scope: { kind: "project", projectId: "project-1" },
                     sessionId: "session-1",
                     since: 2,
                 },
@@ -2750,8 +2750,8 @@ describe("connectRig and chats that finish", () => {
             // answer it, so it is not a second thing to be told about.
             expect(finished).toEqual([
                 {
-                    projectId: "project-1",
                     reason: "attention_needed",
+                    scope: { kind: "project", projectId: "project-1" },
                     sessionId: "session-1",
                     since: 2,
                 },

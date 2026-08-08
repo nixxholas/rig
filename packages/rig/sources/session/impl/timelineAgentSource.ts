@@ -11,7 +11,7 @@ export function timelineAgentSource(session: InMemorySession): TimelineAgentSour
         createdAt: summary.createdAt,
         depth: agent.depth,
         modelId: summary.modelId,
-        projectId: summary.projectId,
+        scope: summary.scope,
         providerId: summary.providerId,
         sessionId: session.id,
         type: agent.type,
@@ -23,6 +23,5 @@ export function timelineAgentSource(session: InMemorySession): TimelineAgentSour
         ...(agent.description === undefined ? {} : { description: agent.description }),
         ...(agent.taskName === undefined ? {} : { taskName: agent.taskName }),
         ...(summary.title === undefined ? {} : { title: summary.title }),
-        ...(summary.workspaceId === undefined ? {} : { workspaceId: summary.workspaceId }),
     };
 }

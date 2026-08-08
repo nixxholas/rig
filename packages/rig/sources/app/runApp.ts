@@ -417,18 +417,23 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                 localServer.client
                     .answerUserInput(session.session.id, requestId, response)
                     .then(() => undefined),
-            searchFiles: (query) =>
-                localServer.client
+            searchFiles: (query) => {
+                const scope = session.session.scope;
+                if (scope.kind !== "project" && scope.kind !== "workspace") {
+                    throw new Error("File search is available only in project or workspace chats.");
+                }
+                return localServer.client
                     .searchFiles(
                         {
-                            projectId: session.session.projectId,
-                            ...(session.session.workspaceId === undefined
-                                ? {}
-                                : { workspaceId: session.session.workspaceId }),
+                            projectId: scope.projectId,
+                            ...(scope.kind === "workspace"
+                                ? { workspaceId: scope.workspaceId }
+                                : {}),
                         },
                         query,
                     )
-                    .then((response) => response.files),
+                    .then((response) => response.files);
+            },
             sessionBacked: true,
             inferenceMaxRetries,
             compactCompletedTurns,

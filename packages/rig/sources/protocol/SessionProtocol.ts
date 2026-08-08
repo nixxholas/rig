@@ -54,6 +54,53 @@ export type SessionStatus =
 export type SessionSummaryStatus = SessionStatus;
 
 /**
+ * The one collection a visible primary chat belongs to.
+ *
+ * Replacing this tagged value moves a chat atomically, so a delayed partial update cannot leave it
+ * visible in two different trees.
+ */
+export const sessionScopeSchema = Type.Union([
+    Type.Object(
+        { kind: Type.Literal("project"), projectId: Type.String({ minLength: 1 }) },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            kind: Type.Literal("workspace"),
+            projectId: Type.String({ minLength: 1 }),
+            workspaceId: Type.String({ minLength: 1 }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        { folderId: Type.String({ minLength: 1 }), kind: Type.Literal("folder") },
+        { additionalProperties: false },
+    ),
+    Type.Object({ kind: Type.Literal("unsorted") }, { additionalProperties: false }),
+]);
+export type SessionScope = Static<typeof sessionScopeSchema>;
+
+/** Moves a visible chat within the folder tree, or back into Unsorted. */
+export const moveSessionRequestSchema = Type.Object(
+    {
+        afterId: Type.Union([Type.String({ maxLength: 128, minLength: 1 }), Type.Null()]),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        scope: Type.Union([
+            Type.Object(
+                {
+                    folderId: Type.String({ maxLength: 128, minLength: 1 }),
+                    kind: Type.Literal("folder"),
+                },
+                { additionalProperties: false },
+            ),
+            Type.Object({ kind: Type.Literal("unsorted") }, { additionalProperties: false }),
+        ]),
+    },
+    { additionalProperties: false },
+);
+export type MoveSessionRequest = Static<typeof moveSessionRequestSchema>;
+
+/**
  * What a session is doing at this moment.
  *
  * `SessionStatus` answers whether a session is busy; this answers what the busy
@@ -319,10 +366,14 @@ export interface ProtocolSession {
     /** Git state of the session's directory, when it is inside a repository. */
     git?: GitChangeSnapshot;
     archived: boolean;
-    /** Folder this chat was filed into. Absent while it is still Unsorted. */
-    folderId?: string;
-    projectId: string;
+    /** The only project, workspace, folder, or Unsorted collection containing this chat. */
+    scope: SessionScope;
+    /** Present exactly when `scope` names a project or workspace. */
+    projectId?: string;
+    /** Present exactly when `scope` names a workspace. */
     workspaceId?: string;
+    /** Present exactly when `scope` names a folder. */
+    folderId?: string;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     appendSystemPrompt?: string;
@@ -572,10 +623,14 @@ export interface SubagentSummary {
 export interface SessionSummary {
     id: string;
     archived: boolean;
-    /** Folder this chat was filed into. Absent while it is still Unsorted. */
-    folderId?: string;
-    projectId: string;
+    /** The only project, workspace, folder, or Unsorted collection containing this chat. */
+    scope: SessionScope;
+    /** Present exactly when `scope` names a project or workspace. */
+    projectId?: string;
+    /** Present exactly when `scope` names a workspace. */
     workspaceId?: string;
+    /** Present exactly when `scope` names a folder. */
+    folderId?: string;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     cwd: string;
@@ -642,6 +697,11 @@ export interface CreateSessionRequest {
     workflowsEnabled?: boolean;
     docker?: DockerExecutionConfig;
     local?: boolean;
+    /**
+     * Explicit non-code destination. When absent, `cwd` resolves to a project or workspace scope.
+     * Folder and Unsorted creation derive their own safe working directory.
+     */
+    scope?: Extract<SessionScope, { kind: "folder" | "unsorted" }>;
     workspaceId?: string;
     /** Client-chosen cuid2 identity for the session. Repeating it returns the same session. */
     id?: string;
@@ -660,7 +720,7 @@ export type TransferSessionRequest = Static<typeof transferSessionRequestSchema>
 
 export interface TransferSessionResponse {
     commit: string;
-    session: ProtocolSession & { workspaceId: string };
+    session: ProtocolSession;
     state: "succeeded";
 }
 

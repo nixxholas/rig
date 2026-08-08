@@ -831,13 +831,14 @@ async function runOwnedLocalProtocolServer(
                     databasePath: paths.databasePath,
                     getSubagents: (sessionId) => store?.listSubagents(sessionId) ?? [],
                     getProjectContext: (session) => {
-                        const snapshot = session.snapshot();
-                        const project = store?.getProject(snapshot.projectId);
+                        const identity = session.projectIdentity();
+                        if (identity === undefined) return undefined;
+                        const project = store?.getProject(identity.projectId);
                         if (project === undefined) return undefined;
                         const workspace =
-                            snapshot.workspaceId === undefined
+                            identity.workspaceId === undefined
                                 ? undefined
-                                : store?.getWorkspace(project.id, snapshot.workspaceId);
+                                : store?.getWorkspace(project.id, identity.workspaceId);
                         return {
                             project,
                             ...(workspace === undefined ? {} : { workspace }),
@@ -955,15 +956,16 @@ async function runOwnedLocalProtocolServer(
                                           getSubagents: (sessionId) =>
                                               store?.listSubagents(sessionId) ?? [],
                                           getProjectContext: (session) => {
-                                              const snapshot = session.snapshot();
-                                              const project = store?.getProject(snapshot.projectId);
+                                              const identity = session.projectIdentity();
+                                              if (identity === undefined) return undefined;
+                                              const project = store?.getProject(identity.projectId);
                                               if (project === undefined) return undefined;
                                               const workspace =
-                                                  snapshot.workspaceId === undefined
+                                                  identity.workspaceId === undefined
                                                       ? undefined
                                                       : store?.getWorkspace(
                                                             project.id,
-                                                            snapshot.workspaceId,
+                                                            identity.workspaceId,
                                                         );
                                               return {
                                                   project,

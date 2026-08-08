@@ -15,6 +15,17 @@ export function retriedSession(
     request: CreateSessionRequest,
 ): InMemorySession {
     const snapshot = existing.snapshot();
+    if (request.scope !== undefined) {
+        const sameScope =
+            request.scope.kind === "unsorted"
+                ? snapshot.scope.kind === "unsorted"
+                : snapshot.scope.kind === "folder" &&
+                  snapshot.scope.folderId === request.scope.folderId;
+        if (!sameScope) {
+            throw new Error("That session ID already names a session in another location.");
+        }
+        return existing;
+    }
     if (normalizeProjectCwd(snapshot.cwd) !== normalizeProjectCwd(request.cwd)) {
         throw new Error("That session ID already names a session in another directory.");
     }

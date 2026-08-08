@@ -246,35 +246,35 @@ describe("projects", () => {
         const second = fixture.store.create({ cwd: alias });
         const nested = fixture.store.create({ cwd: nestedDirectory });
 
-        expect(first.snapshot().projectId).toBe(second.snapshot().projectId);
-        expect(nested.snapshot().projectId).not.toBe(first.snapshot().projectId);
+        expect(first.snapshot().projectId!).toBe(second.snapshot().projectId!);
+        expect(nested.snapshot().projectId!).not.toBe(first.snapshot().projectId!);
         expect(fixture.store.listProjects().map((project) => project.id)).toEqual([
-            nested.snapshot().projectId,
-            first.snapshot().projectId,
+            nested.snapshot().projectId!,
+            first.snapshot().projectId!,
         ]);
         expect(
             fixture.store
                 .list()
-                .filter((session) => session.projectId === first.snapshot().projectId)
+                .filter((session) => session.projectId === first.snapshot().projectId!)
                 .map((session) => session.id),
         ).toEqual([first.id, second.id]);
 
         const movedProject = fixture.store.reorderProject(
-            nested.snapshot().projectId,
-            { afterId: first.snapshot().projectId },
-            fixture.store.getProject(nested.snapshot().projectId)!.version,
+            nested.snapshot().projectId!,
+            { afterId: first.snapshot().projectId! },
+            fixture.store.getProject(nested.snapshot().projectId!)!.version,
         );
         expect(movedProject).toBeDefined();
         expect(fixture.store.listProjects().map((project) => project.id)).toEqual([
-            first.snapshot().projectId,
-            nested.snapshot().projectId,
+            first.snapshot().projectId!,
+            nested.snapshot().projectId!,
         ]);
 
         fixture.store.reorderSession(second.id, { afterId: null });
         expect(
             fixture.store
                 .list()
-                .filter((session) => session.projectId === first.snapshot().projectId)
+                .filter((session) => session.projectId === first.snapshot().projectId!)
                 .map((session) => session.id),
         ).toEqual([second.id, first.id]);
         expect(fixture.store.globalEventQueue.list()?.map((entry) => entry.event.type)).toEqual([
@@ -291,7 +291,7 @@ describe("projects", () => {
     it("creates a ready Home project with its built-in visual", async () => {
         const fixture = await createFixture();
         const session = fixture.store.create({ cwd: fixture.home });
-        expect(fixture.store.getProject(session.snapshot().projectId)).toMatchObject({
+        expect(fixture.store.getProject(session.snapshot().projectId!)).toMatchObject({
             avatarBuiltin: "home",
             initializationStatus: "ready",
             kind: "home",
@@ -302,7 +302,7 @@ describe("projects", () => {
     it("keeps stale settings saves as conflicts after user project mutations", async () => {
         const fixture = await createFixture();
         const session = fixture.store.create({ cwd: fixture.home });
-        const project = fixture.store.getProject(session.snapshot().projectId)!;
+        const project = fixture.store.getProject(session.snapshot().projectId!)!;
         const renamed = fixture.store.renameProject(
             project.id,
             "Renamed project",
@@ -344,7 +344,7 @@ describe("projects", () => {
         const fixture = await createFixture();
         const directory = join(fixture.root, "future-version");
         await mkdir(directory);
-        const projectId = fixture.store.create({ cwd: directory }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: directory }).snapshot().projectId!;
         const project = fixture.store.getProject(projectId)!;
         const futureVersion = project.version + 1_000_000;
 
@@ -363,7 +363,7 @@ describe("projects", () => {
     it("renames after enrichment but rejects a concurrent user mutation", async () => {
         const fixture = await createFixture();
         const session = fixture.store.create({ cwd: fixture.home });
-        const project = fixture.store.getProject(session.snapshot().projectId)!;
+        const project = fixture.store.getProject(session.snapshot().projectId!)!;
 
         fixture.store.applyGitFacts(
             { projectId: project.id },
@@ -424,7 +424,7 @@ describe("projects", () => {
         const session = fixture.store.create({ cwd: repository });
         const project = await waitForProject(
             fixture.store,
-            session.snapshot().projectId,
+            session.snapshot().projectId!,
             (value) => value.initializationStatus === "ready",
         );
         expect(project).toMatchObject({
@@ -456,7 +456,7 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Initial"]);
 
         const sourceSession = fixture.store.create({ cwd: repository });
-        const workspace = await fixture.store.createWorkspace(sourceSession.snapshot().projectId, {
+        const workspace = await fixture.store.createWorkspace(sourceSession.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Feature Work",
         });
@@ -480,7 +480,7 @@ describe("projects", () => {
         const workspaceFork = fixture.store.fork(workspaceSession.id);
         if (workspaceFork === undefined) throw new Error("Expected a workspace session fork.");
         expect(workspaceSession.snapshot()).toMatchObject({
-            projectId: sourceSession.snapshot().projectId,
+            projectId: sourceSession.snapshot().projectId!,
             workspaceId: ready.id,
         });
 
@@ -938,7 +938,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "observed-source");
         const source = fixture.store.create({ cwd: repository });
-        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Observed Work",
         });
@@ -984,7 +984,7 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Configure workspace setup"]);
         const source = fixture.store.create({ cwd: repository });
 
-        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Configured Setup",
         });
@@ -1033,7 +1033,7 @@ describe("projects", () => {
         await writeFile(join(repository, ".env.production"), "SECRET=1\n");
         const source = fixture.store.create({ cwd: repository });
 
-        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Synced Files",
         });
@@ -1114,7 +1114,7 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Configure failing workspace setup"]);
         const source = fixture.store.create({ cwd: repository });
 
-        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Failed Setup",
         });
@@ -1158,13 +1158,13 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Configure parallel workspace setup"]);
         const source = fixture.store.create({ cwd: repository });
 
-        const first = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const first = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "First Setup",
         });
         if (first === undefined) throw new Error("Expected the first workspace.");
         await waitForPath(join(first.path, "setup-started.txt"));
-        const second = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const second = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Second Setup",
         });
@@ -1197,7 +1197,7 @@ describe("projects", () => {
         const source = fixture.store.create({ cwd: repository });
         const reserved = await Promise.all(
             Array.from({ length: 5 }, (_, index) =>
-                fixture.store.createWorkspace(source.snapshot().projectId, {
+                fixture.store.createWorkspace(source.snapshot().projectId!, {
                     baseRef: "HEAD",
                     name: `Recovery ${index + 1}`,
                 }),
@@ -1239,7 +1239,7 @@ describe("projects", () => {
         opened.database
             .update(projectWorkspaces)
             .set({ status: "initializing" })
-            .where(eq(projectWorkspaces.projectId, source.snapshot().projectId))
+            .where(eq(projectWorkspaces.projectId, source.snapshot().projectId!))
             .run();
         opened.client.close();
 
@@ -1322,7 +1322,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "reserved-before-base");
         const source = fixture.store.create({ cwd: repository });
-        const projectId = source.snapshot().projectId;
+        const projectId = source.snapshot().projectId!;
         const workspaceId = createId();
         blockBaseResolution = true;
 
@@ -1391,7 +1391,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "reserved-base-failure");
         const source = fixture.store.create({ cwd: repository });
-        const projectId = source.snapshot().projectId;
+        const projectId = source.snapshot().projectId!;
         const workspaceId = createId();
         blockBaseResolution = true;
 
@@ -1444,7 +1444,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "versioned-initialization");
         const source = fixture.store.create({ cwd: repository });
-        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Versioned Initialization",
         });
@@ -1522,13 +1522,13 @@ describe("projects", () => {
         const repository = await createRepository(fixture.root, "serialized-initialization");
         serializedRepositoryName = basename(repository);
         const source = fixture.store.create({ cwd: repository });
-        const first = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const first = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "First",
         });
         if (first === undefined) throw new Error("Expected the first workspace.");
         await firstBaseResolutionStarted.promise;
-        const second = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const second = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Second",
         });
@@ -1538,7 +1538,7 @@ describe("projects", () => {
 
         const otherRepository = await createRepository(fixture.root, "parallel-initialization");
         const otherSource = fixture.store.create({ cwd: otherRepository });
-        const other = await fixture.store.createWorkspace(otherSource.snapshot().projectId, {
+        const other = await fixture.store.createWorkspace(otherSource.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Other Project",
         });
@@ -1616,7 +1616,7 @@ describe("projects", () => {
             },
         });
         const repository = await createRepository(fixture.root, "waiting-sessions");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const workspace = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
             name: "Waiting Sessions",
@@ -1686,7 +1686,7 @@ describe("projects", () => {
             },
         });
         const repository = await createRepository(fixture.root, "waiting-failure");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const workspace = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
             name: "Waiting Failure",
@@ -1764,7 +1764,7 @@ describe("projects", () => {
             },
         });
         const repository = await createRepository(fixture.root, "waiting-restart");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const workspace = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
             name: "Waiting Restart",
@@ -1797,7 +1797,7 @@ describe("projects", () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "collision-source");
         const source = fixture.store.create({ cwd: repository });
-        const project = fixture.store.getProject(source.snapshot().projectId);
+        const project = fixture.store.getProject(source.snapshot().projectId!);
         if (project === undefined) throw new Error("Expected a project.");
         await mkdir(join(fixture.state, "workspaces", project.storageKey, "workspace"), {
             recursive: true,
@@ -1848,7 +1848,7 @@ describe("projects", () => {
         await git(repository, ["pack-refs", "--all", "--prune"]);
 
         const source = fixture.store.create({ cwd: linkedWorktree });
-        const project = fixture.store.getProject(source.snapshot().projectId);
+        const project = fixture.store.getProject(source.snapshot().projectId!);
         if (project === undefined) throw new Error("Expected a project.");
         const created = await fixture.store.createWorkspace(project.id, {
             baseRef: "HEAD",
@@ -1873,7 +1873,7 @@ describe("projects", () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "large-packed-refs-source");
         const source = fixture.store.create({ cwd: repository });
-        const project = fixture.store.getProject(source.snapshot().projectId);
+        const project = fixture.store.getProject(source.snapshot().projectId!);
         if (project === undefined) throw new Error("Expected a project.");
         const commit = await git(repository, ["rev-parse", "HEAD"]);
         const packedRefs = [
@@ -1912,7 +1912,7 @@ describe("projects", () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "unreadable-git-metadata");
         const source = fixture.store.create({ cwd: repository });
-        const projectId = source.snapshot().projectId;
+        const projectId = source.snapshot().projectId!;
         const realGitDirectory = join(repository, ".git-real");
         await rename(join(repository, ".git"), realGitDirectory);
         await writeFile(join(repository, ".git"), "not-a-gitdir\n");
@@ -1954,7 +1954,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "cleanup-source");
         const source = fixture.store.create({ cwd: repository });
-        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Cleanup Failure",
         });
@@ -1995,7 +1995,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "symlink-cleanup-source");
         const source = fixture.store.create({ cwd: repository });
-        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Protected Cleanup",
         });
@@ -2053,7 +2053,7 @@ describe("projects", () => {
         });
         const repository = await createRepository(fixture.root, "database-failure-source");
         const source = fixture.store.create({ cwd: repository });
-        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Database Failure",
         });
@@ -2092,11 +2092,11 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Initial"]);
 
         const source = fixture.store.create({ cwd: repository });
-        const first = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const first = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Recovered Create",
         });
-        const second = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const second = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Recovered Archive",
         });
@@ -2119,18 +2119,18 @@ describe("projects", () => {
         ]);
         expect(
             fixture.store
-                .listWorkspaces(source.snapshot().projectId)
+                .listWorkspaces(source.snapshot().projectId!)
                 .map((workspace) => workspace.id),
         ).toEqual([readySecond.id, readyFirst.id]);
         fixture.store.reorderWorkspace(
-            source.snapshot().projectId,
+            source.snapshot().projectId!,
             readyFirst.id,
             { afterId: null },
             readyFirst.version,
         );
         expect(
             fixture.store
-                .listWorkspaces(source.snapshot().projectId)
+                .listWorkspaces(source.snapshot().projectId!)
                 .map((workspace) => workspace.id),
         ).toEqual([readyFirst.id, readySecond.id]);
         const attached = fixture.store.create({
@@ -2211,7 +2211,7 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Initial"]);
 
         const source = fixture.store.create({ cwd: repository });
-        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Archive During Create",
         });
@@ -2271,7 +2271,7 @@ describe("projects", () => {
         await git(repository, ["add", "rig.toml"]);
         await git(repository, ["commit", "-m", "Configure long workspace setup"]);
         const source = fixture.store.create({ cwd: repository });
-        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
+        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId!, {
             baseRef: "HEAD",
             name: "Archive During Setup",
         });
@@ -2319,7 +2319,7 @@ describe("projects", () => {
         await git(repository, ["commit", "-m", "Initial"]);
 
         const root = fixture.store.create({ cwd: repository });
-        const projectId = root.snapshot().projectId;
+        const projectId = root.snapshot().projectId!;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
             name: "Feature",
@@ -2345,7 +2345,7 @@ describe("projects", () => {
         await expect(access(workspace.path)).rejects.toThrow();
 
         const resumed = fixture.store.create({ cwd: repository });
-        expect(resumed.snapshot().projectId).toBe(projectId);
+        expect(resumed.snapshot().projectId!).toBe(projectId);
         expect(fixture.store.getProject(projectId)?.archivedAt).toBeUndefined();
     });
 
@@ -2354,7 +2354,7 @@ describe("projects", () => {
         const directory = join(fixture.root, "archive-race");
         await mkdir(directory);
         const session = fixture.store.create({ cwd: directory });
-        const projectId = session.snapshot().projectId;
+        const projectId = session.snapshot().projectId!;
         let release!: () => void;
         const held = new Promise<void>((resolve) => {
             release = resolve;
@@ -2380,7 +2380,7 @@ describe("projects", () => {
         const directory = join(fixture.root, "folder");
         await mkdir(directory);
         const session = fixture.store.create({ cwd: directory });
-        const projectId = session.snapshot().projectId;
+        const projectId = session.snapshot().projectId!;
         const staleVersion = fixture.store.getProject(projectId)!.version;
         fixture.store.renameProject(projectId, "Renamed folder", staleVersion);
 
@@ -2402,8 +2402,8 @@ describe("projects", () => {
         const plain = join(fixture.root, "plain");
         await mkdir(plain);
 
-        const repositoryProject = fixture.store.create({ cwd: repository }).snapshot().projectId;
-        const plainProject = fixture.store.create({ cwd: plain }).snapshot().projectId;
+        const repositoryProject = fixture.store.create({ cwd: repository }).snapshot().projectId!;
+        const plainProject = fixture.store.create({ cwd: plain }).snapshot().projectId!;
 
         const tracked = await waitForProject(
             fixture.store,
@@ -2429,7 +2429,7 @@ describe("projects", () => {
         const fixture = await createFixture();
         const directory = join(fixture.root, "vanishing");
         await mkdir(directory);
-        const projectId = fixture.store.create({ cwd: directory }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: directory }).snapshot().projectId!;
         await waitForProject(fixture.store, projectId, (p) => p.worktreeSupport !== "unknown");
         fixture.store.close();
         await rm(directory, { force: true, recursive: true });
@@ -2447,7 +2447,7 @@ describe("projects", () => {
     it("refuses immediate checkout operations when a ready workspace directory is missing", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "missing-workspace-source");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const sourceReservation = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
             name: "Missing Source",
@@ -2500,7 +2500,7 @@ describe("projects", () => {
     it("persists the resolved base commit so a moving base ref cannot rewrite history", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "based");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const expected = await git(repository, ["rev-parse", "HEAD"]);
 
         const created = await fixture.store.createWorkspace(projectId, {
@@ -2549,7 +2549,7 @@ describe("projects", () => {
         await writeFile(join(repository, "LOCAL.md"), "local only\n");
         await git(repository, ["add", "LOCAL.md"]);
         await git(repository, ["commit", "-m", "Local only"]);
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         const workspace = await fixture.store.createWorkspace(projectId, { name: "Fresh Origin" });
         if (workspace === undefined) throw new Error("Expected a workspace.");
@@ -2584,7 +2584,7 @@ describe("projects", () => {
             "refs/remotes/origin/HEAD",
             "refs/remotes/origin/release",
         ]);
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         await waitForProject(fixture.store, projectId, (p) => p.defaultBranch !== undefined);
         expect(fixture.store.getProject(projectId)?.defaultBranch).toBe("release");
 
@@ -2609,7 +2609,7 @@ describe("projects", () => {
     it("keeps a client-chosen workspace identity honest about the base it was built on", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "retry-base");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const id = createId();
 
         const first = await fixture.store.createWorkspace(projectId, { id, name: "Retried" });
@@ -2627,7 +2627,7 @@ describe("projects", () => {
     it("takes the name of its first chat and moves its branch to match", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "workspace-naming");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
             name: "Workspace 12",
@@ -2666,7 +2666,7 @@ describe("projects", () => {
     it("leaves the branch alone when a new name spells the same branch", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "workspace-same-branch");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
             name: "Release prep",
@@ -2691,7 +2691,7 @@ describe("projects", () => {
     it("leaves a workspace its owner has named alone, and moves the branch they chose", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "workspace-user-named");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
             name: "Workspace 13",
@@ -2724,7 +2724,7 @@ describe("projects", () => {
     it("keeps the name an agent chose when it asked for the workspace", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "workspace-agent-named");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
             name: "Investigate Parser",
@@ -2755,7 +2755,7 @@ describe("projects", () => {
     it("keeps two workspaces named the same apart, in the name and in the branch", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "workspace-name-clash");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const ready = [];
         for (const name of ["Workspace 14", "Workspace 15"]) {
             const created = await fixture.store.createWorkspace(projectId, {
@@ -2796,7 +2796,7 @@ describe("projects", () => {
         const workspaceId = createId();
 
         const session = fixture.store.createWithId(createId(), { cwd: repository, projectId });
-        expect(session.snapshot().projectId).toBe(projectId);
+        expect(session.snapshot().projectId!).toBe(projectId);
 
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
@@ -2815,7 +2815,7 @@ describe("projects", () => {
         expect(repeated?.id).toBe(workspaceId);
         expect(fixture.store.listWorkspaces(projectId)).toHaveLength(1);
 
-        const otherProjectId = fixture.store.create({ cwd: other }).snapshot().projectId;
+        const otherProjectId = fixture.store.create({ cwd: other }).snapshot().projectId!;
         await expect(
             fixture.store.createWorkspace(otherProjectId, {
                 baseRef: "HEAD",
@@ -2845,7 +2845,7 @@ describe("projects", () => {
             cwd: repository,
             projectId: createId(),
         });
-        expect(reimported.snapshot().projectId).toBe(projectId);
+        expect(reimported.snapshot().projectId!).toBe(projectId);
         expect(() => fixture.store.createWithId(createId(), { cwd: other, projectId })).toThrow(
             "another folder",
         );
@@ -2959,7 +2959,7 @@ async function createTransferFixture(
     await git(repository, ["add", ".gitignore"]);
     await git(repository, ["commit", "-m", "Ignore fixture"]);
     const rootSession = fixture.store.create({ cwd: repository });
-    const projectId = rootSession.snapshot().projectId;
+    const projectId = rootSession.snapshot().projectId!;
     await waitForProject(
         fixture.store,
         projectId,

@@ -74,7 +74,7 @@ function sessionStateBody(paged: boolean): SessionStateResponse {
             orderKey: "a0",
             pendingUserInputs: [],
             permissionMode: "auto",
-            projectId: "project-1",
+            scope: { kind: "project", projectId: "project-1" },
             providerId: "claude",
             snapshot: { messages: transcript?.messages ?? [] },
             status: "idle",

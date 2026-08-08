@@ -1,4 +1,4 @@
-import { desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 
 import { folders } from "../database/schema.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
@@ -18,16 +18,33 @@ export interface FolderCreateInput {
     rules?: string;
 }
 
+export type FolderCreateResult =
+    | { outcome: "created" }
+    | { outcome: "parent_archived" }
+    | { outcome: "parent_not_found" };
+
 /** Adds one folder, last among the siblings it is created in. */
-export function folderCreate(tx: TX, input: FolderCreateInput): void {
-    inTx(tx, (tx) => {
+export function folderCreate(tx: TX, input: FolderCreateInput): FolderCreateResult {
+    return inTx(tx, (tx) => {
+        if (input.parentId !== undefined) {
+            const parent = tx
+                .select({ archivedAtMs: folders.archivedAtMs })
+                .from(folders)
+                .where(eq(folders.id, input.parentId))
+                .get();
+            if (parent === undefined) return { outcome: "parent_not_found" };
+            if (parent.archivedAtMs !== null) return { outcome: "parent_archived" };
+        }
         const last = tx
             .select({ orderKey: folders.orderKey })
             .from(folders)
             .where(
-                input.parentId === undefined
-                    ? isNull(folders.parentId)
-                    : eq(folders.parentId, input.parentId),
+                and(
+                    input.parentId === undefined
+                        ? isNull(folders.parentId)
+                        : eq(folders.parentId, input.parentId),
+                    isNull(folders.archivedAtMs),
+                ),
             )
             .orderBy(desc(folders.orderKey))
             .limit(1)
@@ -47,5 +64,6 @@ export function folderCreate(tx: TX, input: FolderCreateInput): void {
                 version: 1,
             })
             .run();
+        return { outcome: "created" };
     });
 }

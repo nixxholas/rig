@@ -182,9 +182,17 @@ export class TimelineStore {
 
     #inScope(session: ProtocolSession): boolean {
         if (this.#scope.kind === "global") return true;
-        if (this.#scope.kind === "project") return session.projectId === this.#scope.projectId;
+        if (this.#scope.kind === "project") {
+            return (
+                session.scope.kind === "project" &&
+                session.scope.projectId === this.#scope.projectId
+            );
+        }
         if (this.#scope.kind === "workspace") {
-            return session.workspaceId === this.#scope.workspaceId;
+            return (
+                session.scope.kind === "workspace" &&
+                session.scope.workspaceId === this.#scope.workspaceId
+            );
         }
         if (session.id === this.#scope.sessionId) return true;
         // A subagent belongs to the chart whenever one of its ancestors does.
@@ -270,7 +278,7 @@ function agentFromSession(session: ProtocolSession, createdAt: number): Timeline
                   ? "Delegated task"
                   : "Untitled chat",
         modelId: session.modelId,
-        projectId: session.projectId,
+        scope: session.scope,
         providerId: session.providerId,
         sessionId: session.id,
         spans: [],
@@ -279,7 +287,6 @@ function agentFromSession(session: ProtocolSession, createdAt: number): Timeline
         ...(agent?.parentToolCallId === undefined
             ? {}
             : { parentToolCallId: agent.parentToolCallId }),
-        ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
     };
 }
 
@@ -299,7 +306,7 @@ function nodeFor(record: AgentRecord, children: readonly TimelineAgentNode[]): T
         depth: record.agent.depth,
         label: record.agent.label,
         modelId: record.agent.modelId,
-        projectId: record.agent.projectId,
+        scope: record.agent.scope,
         providerId: record.agent.providerId,
         sessionId: record.agent.sessionId,
         spans,
@@ -312,9 +319,6 @@ function nodeFor(record: AgentRecord, children: readonly TimelineAgentNode[]): T
         ...(record.agent.parentToolCallId === undefined
             ? {}
             : { parentToolCallId: record.agent.parentToolCallId }),
-        ...(record.agent.workspaceId === undefined
-            ? {}
-            : { workspaceId: record.agent.workspaceId }),
     };
 }
 

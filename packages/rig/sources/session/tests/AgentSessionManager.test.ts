@@ -585,6 +585,7 @@ describe("AgentSessionManager", () => {
                 permissionMode: "auto",
                 providerId: "codex",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(
             (_request: CreateSessionRequest, _metadata: SessionAgentMetadata) => child,
@@ -678,6 +679,7 @@ describe("AgentSessionManager", () => {
                 permissionMode: "auto",
                 providerId: "codex",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(() => child);
         const manager = new AgentSessionManager({
@@ -858,6 +860,7 @@ describe("AgentSessionManager", () => {
                 permissionMode: "auto",
                 providerId: "codex",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(() => child);
         const manager = new AgentSessionManager({
@@ -954,6 +957,7 @@ describe("AgentSessionManager", () => {
             }),
             snapshot: () => ({
                 projectSecretIds: [],
+                scope: { kind: "project", projectId: "project-1" },
                 secretIds: ["service"],
                 sessionSecretIds: ["service"],
             }),
@@ -1233,6 +1237,7 @@ describe("AgentSessionManager", () => {
                 cwd: "/tmp/rig-manager-test",
                 modelId: "openai/gpt-5.5",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         let created = false;
         const sessions = new Map([
@@ -1342,6 +1347,7 @@ describe("AgentSessionManager", () => {
                 cwd: "/tmp/rig-manager-test",
                 modelId: "openai/gpt-5.5",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const child = {
             agentIdentity: () => ({ agentId: "agent-2", folder: "workspace" }),
@@ -1472,6 +1478,7 @@ describe("AgentSessionManager", () => {
                 cwd: "/tmp/rig-manager-test",
                 modelId: "openai/gpt-5.5",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const sessions = new Map<string, InMemorySession>([["root-1", parent]]);
         let nextChild = 0;
@@ -1571,6 +1578,7 @@ describe("AgentSessionManager", () => {
                 cwd: "/tmp/rig-manager-test",
                 modelId: "openai/gpt-5.5",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const manager = new AgentSessionManager({
             repository: {
@@ -1675,6 +1683,79 @@ describe("AgentSessionManager", () => {
             provenance: "agent",
             text: "Inspect one more file.",
         });
+    });
+
+    it("retires every descendant, including completed and workflow children, before a root context changes", async () => {
+        const root = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" as const }),
+            id: "root-1",
+            isSubagent: () => false,
+            recordSubagentChanged: vi.fn(),
+        } as unknown as InMemorySession;
+        const retireWorkflowChild = vi.fn(async () => undefined);
+        const workflowChild = {
+            agentMetadata: () => ({
+                depth: 1,
+                parentSessionId: root.id,
+                rootSessionId: root.id,
+                type: "subagent" as const,
+            }),
+            id: "workflow-child",
+            isSubagent: () => true,
+            retireForContextChange: retireWorkflowChild,
+            subagentSummary: () => ({
+                agentId: "workflow-child-agent",
+                description: "Workflow child",
+                id: "workflow-child",
+                parentSessionId: root.id,
+                status: "running" as const,
+                workflowRunId: "workflow-1",
+            }),
+        } as unknown as InMemorySession;
+        let completedStatus: "archived" | "completed" = "completed";
+        const retireCompletedChild = vi.fn(async () => {
+            completedStatus = "archived";
+        });
+        const completedChild = {
+            agentIdentity: () => ({ agentId: "completed-child-agent", folder: "completed" }),
+            agentMetadata: () => ({
+                depth: 1,
+                parentSessionId: root.id,
+                rootSessionId: root.id,
+                taskName: "completed_child",
+                type: "subagent" as const,
+            }),
+            id: "completed-child",
+            isSubagent: () => true,
+            retireForContextChange: retireCompletedChild,
+            subagentSummary: () => ({
+                agentId: "completed-child-agent",
+                description: "Completed child",
+                id: "completed-child",
+                parentSessionId: root.id,
+                status: completedStatus,
+            }),
+        } as unknown as InMemorySession;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (id) =>
+                    id === root.id
+                        ? root
+                        : id === workflowChild.id
+                          ? workflowChild
+                          : completedChild,
+                listByRoot: () => [workflowChild, completedChild],
+            },
+        });
+
+        await expect(manager.stopDescendantsForContextChange(root.id)).resolves.toBe(2);
+
+        expect(retireWorkflowChild).toHaveBeenCalledOnce();
+        expect(retireCompletedChild).toHaveBeenCalledOnce();
+        expect(() =>
+            manager.followUp(root.id, "completed-child-agent", "Resume old work."),
+        ).toThrow("retired");
     });
 
     it("suspends active descendants until each retained session receives follow-up work", async () => {
@@ -2014,6 +2095,7 @@ describe("AgentSessionManager", () => {
                 cwd: "/tmp/rig-manager-test",
                 modelId: "openai/gpt-5.5",
             }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const active = {
             agentMetadata: () => ({
@@ -2166,7 +2248,7 @@ describe("AgentSessionManager", () => {
                 permissionMode: "auto",
                 providerId: "codex",
             }),
-            snapshot: () => ({ projectId: "project-1" }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(() => child);
         const configureWorkspaceRequest = vi.fn((request: CreateSessionRequest) => ({
@@ -2531,7 +2613,7 @@ describe("AgentSessionManager", () => {
                 permissionMode: "auto",
                 providerId: "codex",
             }),
-            snapshot: () => ({ projectId: "project-1" }),
+            snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(() => child);
         let workspacePresence: ProjectWorkspace["presence"];
@@ -2606,9 +2688,16 @@ function delegatorSession(overrides: Partial<InMemorySession> = {}): InMemorySes
             providerId: "codex",
             trackUnread: false,
         }),
-        snapshot: () => ({ projectId: "project-1" }),
+        snapshot: projectSessionSnapshot,
         ...overrides,
     } as unknown as InMemorySession;
+}
+
+function projectSessionSnapshot() {
+    return {
+        projectId: "project-1",
+        scope: { kind: "project" as const, projectId: "project-1" },
+    };
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {

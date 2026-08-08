@@ -1,4 +1,4 @@
-import type { SessionAgentType } from "./SessionProtocol.js";
+import type { SessionAgentType, SessionScope } from "./SessionProtocol.js";
 
 /**
  * How much of Rig one timeline covers.
@@ -66,12 +66,11 @@ export interface TimelineAgent {
     modelId: string;
     parentSessionId?: string;
     parentToolCallId?: string;
-    projectId: string;
+    scope: SessionScope;
     providerId: string;
     sessionId: string;
     spans: readonly TimelineSpan[];
     type: SessionAgentType;
-    workspaceId?: string;
 }
 
 export interface GetTimelineRequest {

@@ -563,18 +563,23 @@ The tree is referentially stable in the same way the project tree is, so a React
 re-renders only the branch that actually moved. An archived folder leaves the tree together with
 everything nested under it.
 
-A chat belongs to at most one folder, carried as `folderId` on the chat's session state and on each
-`GroupSession` in the catalog. A chat with no folder is Unsorted.
+A chat has one canonical scope. Project and workspace chats appear only in the project tree;
+folder chats appear only in their folder; and Unsorted chats appear only in the global Unsorted
+list.
 
 Changing the tree is entity-first, because the daemon has to derive a folder's place among its
 siblings itself:
 
 ```ts
-const media = await rig.folders.create({ icon: "🎬", name: "Media" });
-await rig.folders.update(media.id, { description: "Where the videos live." });
-await rig.folders.move(travel.id, { afterId: media.id, parentId: null });
-await rig.folders.archive(media.id);
-await rig.folders.setSessionFolder(sessionId, media.id); // or null, back to Unsorted
+const mediaId = rig.folders.create({ icon: "🎬", name: "Media" });
+rig.folders.update(mediaId, { description: "Where the videos live." });
+rig.folders.move(travelId, { afterId: mediaId, parentId: null });
+rig.folders.archive(mediaId);
+rig.folders.moveSession(sessionId, {
+    afterId: null,
+    scope: { folderId: mediaId, kind: "folder" },
+});
+rig.folders.setSessionFolder(sessionId, null); // Convenience: back to Unsorted.
 ```
 
 A move says where the folder landed — the folder it was dropped into and the sibling it was dropped
@@ -582,14 +587,11 @@ below, each `null` at the root and at the top of a list. Rig derives the fractio
 that pair, so a client never sends or invents one. `update` clears an optional field with an
 explicit `null` and leaves an absent one alone.
 
-Every call answers with the folder Rig actually stored, and the same change also arrives on the
-stream, so a subscribed tree updates whether or not this client made it. Rig Connect names the
-folder it creates and reuses that identity across transport retries, so an answer lost after the
-daemon committed converges on the same folder. Refusals reject with `FolderRequestError`, whose
-`code`, `status`, and human-readable message are safe to display; `code` is one of the daemon's own
-`invalid_request`, `folder_not_found`, `parent_not_found`, `sibling_not_found`, `cycle`, and
-`storage_unavailable`, plus `invalid_response` and `request_failed`. An optional `{ signal }`
-cancels the operation, and `{ folderId }` on `create` supplies a caller-owned identity.
+Every call returns a mutation ID immediately and applies its prediction synchronously. The
+authoritative result also arrives through the live stream, and conflicts are rebased and retried in
+order. Rig Connect names the folder it creates and reuses that identity across transport retries,
+so an answer lost after the daemon committed converges on the same folder. `{ folderId }` on
+`create` supplies a caller-owned identity.
 
 ## The timeline
 

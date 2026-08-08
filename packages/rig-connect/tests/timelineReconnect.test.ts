@@ -263,7 +263,7 @@ function timeline(spans?: GetTimelineResponse["agents"][number]["spans"]): GetTi
                 depth: 0,
                 label: "Untitled chat",
                 modelId: "model",
-                projectId: "p1",
+                scope: { kind: "project", projectId: "p1" },
                 providerId: "codex",
                 sessionId: "s",
                 spans: spans ?? [{ kind: "waiting", startedAt: 0 }],

@@ -406,6 +406,7 @@ describe("InMemorySession queued configuration", () => {
                 permissionMode: "auto",
                 providerId: "codex",
                 queuedRuns: [],
+                scope: { kind: "project", projectId: "project-1" },
                 status: "idle",
                 tasks: [],
                 titleStatus: "idle",

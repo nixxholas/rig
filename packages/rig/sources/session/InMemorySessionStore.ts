@@ -1,3 +1,5 @@
+import { createId } from "@paralleldrive/cuid2";
+
 import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import type {
@@ -21,6 +23,7 @@ import type {
     SecretSummary,
     SessionAgentMetadata,
     SessionSummary,
+    SessionScope,
     SubagentSummary,
     TimelineAgent,
     TimelineScope,
@@ -39,6 +42,7 @@ import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import {
     CURRENT_SESSION_DATABASE_VERSION,
@@ -178,6 +182,25 @@ export class InMemorySessionStore implements SessionStore {
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#publishGlobalEvent(event),
+            onFolderContextChanged: (folderIds) => {
+                this.#afterTransactionCommit(() => {
+                    const affected = new Set(folderIds);
+                    for (const session of this.#sessions.values()) {
+                        if (session.belongsToFolderContext(affected))
+                            session.folderContextChanged();
+                    }
+                });
+            },
+            onSessionsArchived: (sessionIds) => {
+                this.#afterTransactionCommit(() => {
+                    for (const sessionId of sessionIds) {
+                        void this.#sessions
+                            .get(sessionId)
+                            ?.recordFolderArchived()
+                            .catch(rethrowDatabaseFailure);
+                    }
+                });
+            },
             transaction: (body) => this.#transaction(body),
         });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
@@ -263,7 +286,8 @@ export class InMemorySessionStore implements SessionStore {
                                 const snapshot = candidate.snapshot();
                                 return (
                                     snapshot.archived !== true &&
-                                    snapshot.workspaceId === workspaceId
+                                    snapshot.scope.kind === "workspace" &&
+                                    snapshot.scope.workspaceId === workspaceId
                                 );
                             }),
                         projects: this.#projects,
@@ -306,12 +330,12 @@ export class InMemorySessionStore implements SessionStore {
         if (session === undefined) return undefined;
         this.#secrets.reference(secretId);
         if (scope === "project") {
-            const projectId = session.snapshot().projectId;
+            const projectId = codeScope(session.snapshot().scope).projectId;
             const ids = this.#projectSecretIds.get(projectId) ?? new Set<string>();
             ids.add(secretId);
             this.#projectSecretIds.set(projectId, ids);
             for (const candidate of this.#sessions.values()) {
-                if (candidate.snapshot().projectId === projectId) {
+                if (codeScopeOrUndefined(candidate.snapshot().scope)?.projectId === projectId) {
                     candidate.attachSecret(secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
@@ -358,10 +382,10 @@ export class InMemorySessionStore implements SessionStore {
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
-            const projectId = session.snapshot().projectId;
+            const projectId = codeScope(session.snapshot().scope).projectId;
             this.#projectSecretIds.get(projectId)?.delete(secretId);
             for (const candidate of this.#sessions.values()) {
-                if (candidate.snapshot().projectId === projectId) {
+                if (codeScopeOrUndefined(candidate.snapshot().scope)?.projectId === projectId) {
                     candidate.detachSecret(secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
@@ -386,22 +410,41 @@ export class InMemorySessionStore implements SessionStore {
         }
         const source = this.get(sessionId);
         if (source === undefined) return undefined;
-        const state = source.createForkState();
         const sourceSnapshot = source.snapshot();
-        if (sourceSnapshot.workspaceId !== undefined) {
-            this.#assertWorkspaceAcceptingSessions(sourceSnapshot.workspaceId);
+        const folderPath =
+            sourceSnapshot.scope.kind === "folder"
+                ? this.#folders.activeFolderStoragePath(sourceSnapshot.scope.folderId)
+                : undefined;
+        const state = source.createForkState();
+        const forkState =
+            folderPath === undefined
+                ? state
+                : (() => {
+                      const { docker: _docker, ...rest } = state;
+                      return { ...rest, cwd: folderPath };
+                  })();
+        const sourceRequest = source.requestForSubagent();
+        const forkRequest =
+            folderPath === undefined
+                ? sourceRequest
+                : (() => {
+                      const { docker: _docker, ...rest } = sourceRequest;
+                      return { ...rest, cwd: folderPath };
+                  })();
+        if (sourceSnapshot.scope.kind === "workspace") {
+            this.#assertWorkspaceAcceptingSessions(sourceSnapshot.scope.workspaceId);
         }
-        if (sourceSnapshot.workspaceId !== undefined) {
+        if (sourceSnapshot.scope.kind === "workspace") {
             const workspace = this.#projects.getWorkspace(
-                sourceSnapshot.projectId,
-                sourceSnapshot.workspaceId,
+                sourceSnapshot.scope.projectId,
+                sourceSnapshot.scope.workspaceId,
             );
             if (
                 workspace === undefined ||
                 workspaceRunReadiness(this.#projects, {
                     cwd: sourceSnapshot.cwd,
-                    projectId: sourceSnapshot.projectId,
-                    workspaceId: sourceSnapshot.workspaceId,
+                    projectId: sourceSnapshot.scope.projectId,
+                    workspaceId: sourceSnapshot.scope.workspaceId,
                 }).state !== "ready"
             ) {
                 throw new Error("A session in an unavailable workspace cannot be forked.");
@@ -419,29 +462,25 @@ export class InMemorySessionStore implements SessionStore {
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),
-            request: source.requestForSubagent(),
+            request: forkRequest,
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
             folders: this.#folders,
             slotStores: { entries: this.slots, applets: this.applets },
-            projectId: sourceSnapshot.projectId,
-            projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
+            ...(sourceSnapshot.scope.kind === "project" || sourceSnapshot.scope.kind === "workspace"
+                ? { projectSecretIds: this.#projectSecrets(sourceSnapshot.scope.projectId) }
+                : {}),
             secretRegistry: this.#secrets,
             restore: {
-                ...state,
+                ...forkState,
                 ...(targetSessionId === undefined
                     ? {}
                     : {
-                          agent: { ...state.agent, rootSessionId: targetSessionId },
+                          agent: { ...forkState.agent, rootSessionId: targetSessionId },
                           id: targetSessionId,
                       }),
-                orderKey: this.#newLastSessionOrderKey(
-                    sourceSnapshot.projectId,
-                    sourceSnapshot.workspaceId,
-                ),
+                orderKey: this.#newLastSessionOrderKey(sourceSnapshot.scope),
             },
-            ...(sourceSnapshot.workspaceId === undefined
-                ? {}
-                : { workspaceId: sourceSnapshot.workspaceId }),
+            scope: sourceSnapshot.scope,
         });
         this.#sessions.set(session.id, session);
         session.emitCreatedEvent();
@@ -454,6 +493,8 @@ export class InMemorySessionStore implements SessionStore {
         contextMessages?: readonly Message[],
         id?: string,
     ): InMemorySession {
+        const sessionId = id ?? createId();
+        let newUnsortedStorage: { created: boolean; path: string } | undefined;
         const inherited =
             metadata?.parentSessionId === undefined
                 ? undefined
@@ -465,81 +506,157 @@ export class InMemorySessionStore implements SessionStore {
             throw new Error("An archived session cannot create a subagent.");
         }
         const inheritedWorkspace =
-            inherited?.workspaceId === undefined
-                ? undefined
-                : this.#projects.getWorkspace(inherited.projectId, inherited.workspaceId);
+            inherited?.scope.kind === "workspace"
+                ? this.#projects.getWorkspace(
+                      inherited.scope.projectId,
+                      inherited.scope.workspaceId,
+                  )
+                : undefined;
         if (
-            inherited?.workspaceId !== undefined &&
+            inherited?.scope.kind === "workspace" &&
             (inheritedWorkspace === undefined ||
                 workspaceRunReadiness(this.#projects, {
                     cwd: inherited.cwd,
-                    projectId: inherited.projectId,
-                    workspaceId: inherited.workspaceId,
+                    projectId: inherited.scope.projectId,
+                    workspaceId: inherited.scope.workspaceId,
                 }).state !== "ready")
         ) {
             throw new Error("The parent session workspace is not ready and available.");
         }
-        const ownership = (() => {
+        const resolved = (() => {
             if (inherited === undefined) {
+                if (request.scope?.kind === "folder") {
+                    return {
+                        request: {
+                            ...request,
+                            cwd: this.#folders.activeFolderStoragePath(request.scope.folderId),
+                        },
+                        scope: request.scope,
+                    };
+                }
+                if (request.scope?.kind === "unsorted") {
+                    newUnsortedStorage = this.#folders.createUnsortedSessionDirectory(sessionId);
+                    return {
+                        request: {
+                            ...request,
+                            cwd: newUnsortedStorage.path,
+                        },
+                        scope: request.scope,
+                    };
+                }
                 if (request.workspaceId !== undefined) {
-                    return this.#projects.resolveSessionOwnership(
+                    const ownership = this.#projects.resolveSessionOwnership(
                         request.cwd,
                         request.workspaceId,
                         request.projectId,
                     );
+                    return {
+                        ownership,
+                        request,
+                        scope: {
+                            kind: "workspace" as const,
+                            projectId: ownership.project.id,
+                            workspaceId: ownership.workspace?.id ?? request.workspaceId,
+                        },
+                    };
                 }
-                return this.#projects.resolve(request.cwd, undefined, request.projectId);
+                const ownership = this.#projects.resolve(request.cwd, undefined, request.projectId);
+                return {
+                    ownership,
+                    request,
+                    scope:
+                        ownership.workspace === undefined
+                            ? { kind: "project" as const, projectId: ownership.project.id }
+                            : {
+                                  kind: "workspace" as const,
+                                  projectId: ownership.project.id,
+                                  workspaceId: ownership.workspace.id,
+                              },
+                };
             }
             if (
                 request.workspaceId !== undefined &&
-                request.workspaceId !== inherited.workspaceId
+                (inherited.scope.kind !== "workspace" ||
+                    request.workspaceId !== inherited.scope.workspaceId)
             ) {
-                return this.#projects.resolve(
+                const project = codeScope(inherited.scope);
+                const ownership = this.#projects.resolve(
                     request.cwd,
                     request.workspaceId,
-                    inherited.projectId,
+                    project.projectId,
                 );
+                return {
+                    ownership,
+                    request,
+                    scope: {
+                        kind: "workspace" as const,
+                        projectId: ownership.project.id,
+                        workspaceId: ownership.workspace?.id ?? request.workspaceId,
+                    },
+                };
             }
-            const project = this.#projects.getProject(inherited.projectId);
-            if (project === undefined) {
-                throw new Error("The parent session project was not found.");
+            if (inherited.scope.kind === "folder") {
+                const { docker: _docker, local: _local, ...inheritedRequest } = request;
+                return {
+                    request: {
+                        ...inheritedRequest,
+                        cwd: this.#folders.activeFolderStoragePath(inherited.scope.folderId),
+                    },
+                    scope: inherited.scope,
+                };
             }
             return {
-                project,
-                ...(inheritedWorkspace === undefined ? {} : { workspace: inheritedWorkspace }),
+                request: { ...request, cwd: inherited.cwd },
+                scope: inherited.scope,
             };
         })();
-        if (ownership.workspace !== undefined) {
-            this.#assertWorkspaceAcceptingSessions(ownership.workspace.id);
+        try {
+            if (resolved.scope.kind === "workspace") {
+                this.#assertWorkspaceAcceptingSessions(resolved.scope.workspaceId);
+            }
+            const projectId =
+                resolved.scope.kind === "project" || resolved.scope.kind === "workspace"
+                    ? resolved.scope.projectId
+                    : undefined;
+            const session = new InMemorySession({
+                presence: this.presence,
+                agentManager: this.#agentManager,
+                workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
+                createEventId: createEventIdFactory(),
+                ...(this.#createRuntime === undefined
+                    ? {}
+                    : { createRuntime: this.#createRuntime }),
+                modelCatalog: this.#modelCatalog,
+                onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
+                ...(this.#mcpToolProvider !== undefined
+                    ? { mcpToolProvider: this.#mcpToolProvider }
+                    : {}),
+                ...(metadata !== undefined ? { metadata } : {}),
+                ...(contextMessages !== undefined
+                    ? { initialContextMessages: contextMessages }
+                    : {}),
+                id: sessionId,
+                onAppendEvent: (event) => this.#publishGlobalEvent(event),
+                orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
+                    this.#newLastSessionOrderKey(resolved.scope),
+                ),
+                ...(projectId === undefined
+                    ? {}
+                    : { projectSecretIds: this.#projectSecrets(projectId) }),
+                request: resolved.request,
+                scope: resolved.scope,
+                secretRegistry: this.#secrets,
+                folders: this.#folders,
+                slotStores: { entries: this.slots, applets: this.applets },
+            });
+            this.#sessions.set(session.id, session);
+            return session;
+        } catch (error) {
+            if (newUnsortedStorage?.created === true) {
+                this.#folders.removeNewUnsortedSessionDirectory(sessionId, newUnsortedStorage.path);
+            }
+            throw error;
         }
-        const session = new InMemorySession({
-            presence: this.presence,
-            agentManager: this.#agentManager,
-            workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
-            createEventId: createEventIdFactory(),
-            ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
-            modelCatalog: this.#modelCatalog,
-            onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
-            ...(this.#mcpToolProvider !== undefined
-                ? { mcpToolProvider: this.#mcpToolProvider }
-                : {}),
-            ...(metadata !== undefined ? { metadata } : {}),
-            ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
-            ...(id === undefined ? {} : { id }),
-            onAppendEvent: (event) => this.#publishGlobalEvent(event),
-            orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
-                this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
-            ),
-            projectId: ownership.project.id,
-            projectSecretIds: this.#projectSecrets(ownership.project.id),
-            request,
-            secretRegistry: this.#secrets,
-            folders: this.#folders,
-            slotStores: { entries: this.slots, applets: this.applets },
-            ...(ownership.workspace === undefined ? {} : { workspaceId: ownership.workspace.id }),
-        });
-        this.#sessions.set(session.id, session);
-        return session;
     }
 
     #inheritWorkspaceName(
@@ -550,6 +667,7 @@ export class InMemorySessionStore implements SessionStore {
                 const identity = session.projectIdentity();
                 return (
                     !session.isSubagent() &&
+                    identity !== undefined &&
                     identity.projectId === metadata.projectId &&
                     identity.workspaceId === metadata.workspaceId
                 );
@@ -683,7 +801,11 @@ export class InMemorySessionStore implements SessionStore {
             hasAttachedSessions: (workspaceId) =>
                 [...this.#sessions.values()].some((candidate) => {
                     const snapshot = candidate.snapshot();
-                    return snapshot.archived !== true && snapshot.workspaceId === workspaceId;
+                    return (
+                        snapshot.archived !== true &&
+                        snapshot.scope.kind === "workspace" &&
+                        snapshot.scope.workspaceId === workspaceId
+                    );
                 }),
             projects: this.#projects,
             releaseTarget: (workspaceId, ownerSessionId) =>
@@ -699,8 +821,18 @@ export class InMemorySessionStore implements SessionStore {
     #inTimelineScope(session: InMemorySession, scope: TimelineScope): boolean {
         if (scope.kind === "global") return true;
         const summary = session.summary();
-        if (scope.kind === "project") return summary.projectId === scope.projectId;
-        if (scope.kind === "workspace") return summary.workspaceId === scope.workspaceId;
+        if (scope.kind === "project") {
+            return (
+                (summary.scope.kind === "project" || summary.scope.kind === "workspace") &&
+                summary.scope.projectId === scope.projectId
+            );
+        }
+        if (scope.kind === "workspace") {
+            return (
+                summary.scope.kind === "workspace" &&
+                summary.scope.workspaceId === scope.workspaceId
+            );
+        }
         let candidateId: string | undefined = session.id;
         while (candidateId !== undefined) {
             if (candidateId === scope.sessionId) return true;
@@ -740,6 +872,10 @@ export class InMemorySessionStore implements SessionStore {
         return this.#folders.listFolders();
     }
 
+    folderCatalog() {
+        return this.#folders.folderCatalog();
+    }
+
     getFolder(folderId: string): Folder | undefined {
         return this.#folders.getFolder(folderId);
     }
@@ -764,15 +900,106 @@ export class InMemorySessionStore implements SessionStore {
         return this.#folders.moveFolder(folderId, request, expectedVersion);
     }
 
-    archiveFolder(folderId: string): Folder | undefined {
-        return this.#folders.archiveFolder(folderId);
+    archiveFolder(
+        folderId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Folder | undefined {
+        const archived = this.#folders.archiveFolder(folderId, expectedVersion, mutationId);
+        if (archived === undefined) return undefined;
+        const archivedFolderIds = new Set(
+            this.#folders
+                .listFolders()
+                .filter((folder) => folder.archivedAt !== undefined)
+                .map((folder) => folder.id),
+        );
+        for (const session of this.#sessions.values()) {
+            const scope = session.snapshot().scope;
+            if (scope.kind !== "folder" || !archivedFolderIds.has(scope.folderId)) continue;
+            void session.recordFolderArchived().catch(rethrowDatabaseFailure);
+        }
+        return archived;
     }
 
-    setSessionFolder(sessionId: string, folderId: string | null): InMemorySession | undefined {
+    setSessionFolder(
+        sessionId: string,
+        folderId: string | null,
+        afterId?: string | null,
+        mutationId?: string,
+    ): InMemorySession | undefined {
         const session = this.#sessions.get(sessionId);
         if (session === undefined) return undefined;
-        session.fileIntoFolder(folderId);
+        if (session.isSubagent()) throw new Error("Subagent histories cannot be moved.");
+        const current = session.state();
+        const scope: SessionScope =
+            folderId === null ? { kind: "unsorted" } : { folderId, kind: "folder" };
+        if (afterId === undefined && sameScope(current.scope, scope)) return session;
+        const folder = folderId === null ? undefined : this.#folders.getFolder(folderId);
+        if (folderId !== null && (folder === undefined || folder.archivedAt !== undefined)) {
+            throw new Error("That folder was not found.");
+        }
+        const storage =
+            folderId === null
+                ? this.#folders.createUnsortedSessionDirectory(sessionId)
+                : { created: false, path: this.#folders.activeFolderStoragePath(folderId) };
+        try {
+            const targetItems = [...this.#sessions.values()]
+                .filter((candidate) => !candidate.isSubagent())
+                .map((candidate) => candidate.state())
+                .filter((candidate) => sameScope(candidate.scope, scope))
+                .map((candidate) => ({ id: candidate.id, orderKey: candidate.orderKey }));
+            const existing = targetItems.some((candidate) => candidate.id === sessionId);
+            const orderKey =
+                afterId === undefined
+                    ? generateKeyBetween(
+                          targetItems
+                              .filter((candidate) => candidate.id !== sessionId)
+                              .sort((left, right) => left.orderKey.localeCompare(right.orderKey))
+                              .at(-1)?.orderKey ?? null,
+                          null,
+                      )
+                    : orderKeyAfter(
+                          existing
+                              ? targetItems
+                              : [
+                                    ...targetItems,
+                                    {
+                                        id: sessionId,
+                                        orderKey: generateKeyBetween(
+                                            targetItems
+                                                .sort((left, right) =>
+                                                    left.orderKey.localeCompare(right.orderKey),
+                                                )
+                                                .at(-1)?.orderKey ?? null,
+                                            null,
+                                        ),
+                                    },
+                                ],
+                          sessionId,
+                          afterId,
+                      );
+            session.applyScopeMove({
+                cwd: storage.path,
+                orderKey,
+                scope,
+                ...(scope.kind === "unsorted"
+                    ? { unsortedSince: current.unsortedSince ?? Date.now() }
+                    : {}),
+            });
+            if (mutationId !== undefined) {
+                this.#folders.rememberSessionScopeMutation(sessionId, mutationId);
+            }
+        } catch (error) {
+            if (storage.created) {
+                this.#folders.removeNewUnsortedSessionDirectory(sessionId, storage.path);
+            }
+            throw error;
+        }
         return session;
+    }
+
+    sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean {
+        return this.#folders.sessionScopeMutationApplied(sessionId, mutationId);
     }
 
     listProjects(): readonly Project[] {
@@ -836,10 +1063,7 @@ export class InMemorySessionStore implements SessionStore {
             .filter((candidate) => {
                 if (candidate.isSubagent()) return false;
                 const candidateSnapshot = candidate.snapshot();
-                return (
-                    candidateSnapshot.projectId === snapshot.projectId &&
-                    candidateSnapshot.workspaceId === snapshot.workspaceId
-                );
+                return sameScope(candidateSnapshot.scope, snapshot.scope);
             })
             .map((candidate) => candidate.summary());
         session.setOrderKey(orderKeyAfter(positioned(siblings), sessionId, request.afterId));
@@ -894,7 +1118,7 @@ export class InMemorySessionStore implements SessionStore {
             for (const session of this.#sessions.values()) {
                 if (session.isSubagent()) continue;
                 const snapshot = session.snapshot();
-                if (snapshot.projectId !== projectId || snapshot.workspaceId !== undefined) {
+                if (snapshot.scope.kind !== "project" || snapshot.scope.projectId !== projectId) {
                     continue;
                 }
                 session.setArchived(true);
@@ -906,7 +1130,7 @@ export class InMemorySessionStore implements SessionStore {
                 return [
                     {
                         cleanup: [...this.#sessions.values()]
-                            .filter((session) => session.snapshot().workspaceId === workspace.id)
+                            .filter((session) => isSessionInWorkspace(session, workspace.id))
                             .map((session) => session.archiveForWorkspace(workspace.id)()),
                         workspaceId: workspace.id,
                     },
@@ -946,7 +1170,7 @@ export class InMemorySessionStore implements SessionStore {
             return Promise.resolve(workspace);
         }
         const cleanup = [...this.#sessions.values()]
-            .filter((session) => session.snapshot().workspaceId === workspaceId)
+            .filter((session) => isSessionInWorkspace(session, workspaceId))
             .map((session) => session.archiveForWorkspace(workspaceId)());
         cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
         void this.#completeWorkspaceArchive(projectId, workspaceId, cleanup).catch(
@@ -1038,12 +1262,12 @@ export class InMemorySessionStore implements SessionStore {
         };
     }
 
-    #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {
+    #newLastSessionOrderKey(scope: SessionScope): string {
         const candidates = [...this.#sessions.values()]
             .filter((session) => {
                 if (session.isSubagent()) return false;
                 const snapshot = session.snapshot();
-                return snapshot.projectId === projectId && snapshot.workspaceId === workspaceId;
+                return sameScope(snapshot.scope, scope);
             })
             .map((session) => session.summary());
         const last = positioned(candidates)
@@ -1083,7 +1307,8 @@ export class InMemorySessionStore implements SessionStore {
             for (const session of this.#sessions.values()) {
                 const state = session.state();
                 if (
-                    state.workspaceId === event.workspaceId &&
+                    state.scope.kind === "workspace" &&
+                    state.scope.workspaceId === event.workspaceId &&
                     state.workspaceQueueWaiting === true
                 ) {
                     session.workspaceReadinessChanged();
@@ -1177,17 +1402,51 @@ function sortSummariesByOrder(
     projectOrder: ReadonlyMap<string, string>,
     workspaceOrder: ReadonlyMap<string, string>,
 ): number {
+    const leftCode = codeScopeOrUndefined(left.scope);
+    const rightCode = codeScopeOrUndefined(right.scope);
     return (
         compareOrderKeys(
-            projectOrder.get(left.projectId) ?? "",
-            projectOrder.get(right.projectId) ?? "",
+            leftCode === undefined ? "" : (projectOrder.get(leftCode.projectId) ?? ""),
+            rightCode === undefined ? "" : (projectOrder.get(rightCode.projectId) ?? ""),
         ) ||
-        Number(left.workspaceId !== undefined) - Number(right.workspaceId !== undefined) ||
+        Number(leftCode?.kind === "workspace") - Number(rightCode?.kind === "workspace") ||
         compareOrderKeys(
-            left.workspaceId === undefined ? "" : (workspaceOrder.get(left.workspaceId) ?? ""),
-            right.workspaceId === undefined ? "" : (workspaceOrder.get(right.workspaceId) ?? ""),
+            leftCode?.kind !== "workspace" ? "" : (workspaceOrder.get(leftCode.workspaceId) ?? ""),
+            rightCode?.kind !== "workspace"
+                ? ""
+                : (workspaceOrder.get(rightCode.workspaceId) ?? ""),
         ) ||
         compareOrderKeys(left.orderKey, right.orderKey) ||
         compareOrderKeys(left.id, right.id)
     );
+}
+
+function codeScope(scope: SessionScope): Extract<SessionScope, { kind: "project" | "workspace" }> {
+    const code = codeScopeOrUndefined(scope);
+    if (code === undefined) {
+        throw new Error("This operation is available only for project or workspace chats.");
+    }
+    return code;
+}
+
+function codeScopeOrUndefined(
+    scope: SessionScope,
+): Extract<SessionScope, { kind: "project" | "workspace" }> | undefined {
+    return scope.kind === "project" || scope.kind === "workspace" ? scope : undefined;
+}
+
+function sameScope(left: SessionScope, right: SessionScope): boolean {
+    if (left.kind !== right.kind) return false;
+    if (left.kind === "project" && right.kind === "project") {
+        return left.projectId === right.projectId;
+    }
+    if (left.kind === "workspace" && right.kind === "workspace") {
+        return left.workspaceId === right.workspaceId;
+    }
+    return left.kind !== "folder" || right.kind !== "folder" || left.folderId === right.folderId;
+}
+
+function isSessionInWorkspace(session: InMemorySession, workspaceId: string): boolean {
+    const scope = session.snapshot().scope;
+    return scope.kind === "workspace" && scope.workspaceId === workspaceId;
 }

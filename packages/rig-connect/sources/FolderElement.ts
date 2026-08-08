@@ -1,5 +1,12 @@
-import type { ConnectionState } from "./ChatElement.js";
-import type { Folder } from "./protocol.js";
+import type { ConnectionState, MutationRejectedDelta } from "./ChatElement.js";
+import type {
+    Folder,
+    SessionScope,
+    SessionStatus,
+    SessionSummary,
+    SessionTokenCount,
+    SessionUnreadState,
+} from "./protocol.js";
 
 export type { Folder };
 
@@ -26,9 +33,42 @@ export interface FolderNode {
     readonly parentId?: string;
     /** Flat storage directory holding this folder's files. */
     readonly path: string;
+    /** Chats directly contained by this folder, ordered independently of every other folder. */
+    readonly sessions: readonly FolderSession[];
     /** Standing instructions every agent working in this folder must follow. */
     readonly rules?: string;
     readonly updatedAt: number;
+}
+
+export interface FolderSession {
+    readonly archived: boolean;
+    readonly createdAt: number;
+    readonly cwd: string;
+    readonly draft?: string;
+    readonly draftUpdatedAt?: number;
+    readonly effort?: string;
+    readonly id: string;
+    readonly lastMessageAt?: number;
+    readonly modelId: string;
+    readonly orderKey: string;
+    readonly permissionMode: string;
+    readonly providerId: string;
+    readonly recap?: string;
+    readonly scope: Extract<SessionScope, { kind: "folder" | "unsorted" }>;
+    readonly serviceTier?: string;
+    readonly sessionTokenCount?: SessionTokenCount;
+    readonly status: SessionStatus;
+    readonly title?: string;
+    readonly trackUnread: boolean;
+    readonly unread?: SessionUnreadState;
+    readonly updatedAt: number;
+    readonly wait?: { readonly dueAt: number; readonly startedAt: number };
+}
+
+/** Everything the folder area renders in one atomic application value. */
+export interface FolderView {
+    readonly folders: readonly FolderNode[];
+    readonly unsorted: readonly FolderSession[];
 }
 
 /** Live facts about the folder tree as a whole. */
@@ -38,7 +78,12 @@ export interface FoldersState {
 
 /** What changed, for a consumer that reacts rather than re-rendering. */
 export type FolderDelta =
-    | { readonly folders: readonly FolderNode[]; readonly type: "folders_changed" }
+    | { readonly type: "folders_changed"; readonly view: FolderView }
     | { readonly folderId: string; readonly type: "folder_added" }
     | { readonly folderId: string; readonly type: "folder_removed" }
-    | { readonly state: FoldersState; readonly type: "folders_state_changed" };
+    | { readonly sessionId: string; readonly type: "session_added" | "session_removed" }
+    | { readonly state: FoldersState; readonly type: "folders_state_changed" }
+    | MutationRejectedDelta;
+
+/** Internal input shared by authoritative and optimistic projections. */
+export type FolderSessionSource = SessionSummary;

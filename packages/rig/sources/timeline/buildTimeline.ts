@@ -41,7 +41,7 @@ export function buildTimeline(
             depth: agent.depth,
             label: timelineAgentLabel(agent),
             modelId: agent.modelId,
-            projectId: agent.projectId,
+            scope: agent.scope,
             providerId: agent.providerId,
             sessionId: agent.sessionId,
             spans: kept,
@@ -52,7 +52,6 @@ export function buildTimeline(
             ...(agent.parentToolCallId === undefined
                 ? {}
                 : { parentToolCallId: agent.parentToolCallId }),
-            ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
         });
     }
     return built.sort((left, right) => left.createdAt - right.createdAt);

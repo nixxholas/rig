@@ -831,6 +831,7 @@ function protocolSession(model: ReturnType<typeof defineModel>): ProtocolSession
         cwd: "/workspace",
         id: "session-1",
         projectId: "project-1",
+        scope: { kind: "project", projectId: "project-1" },
         orderKey: "a0",
         modelId: model.id,
         modelLocked: false,

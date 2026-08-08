@@ -3,14 +3,14 @@ import { describe, expect, it } from "vitest";
 
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
-import { projects, sessions } from "../../database/schema.js";
+import { projects, projectWorkspaces, sessions } from "../../database/schema.js";
 import { folderArchive } from "../folderArchive.js";
 import { folderCreate } from "../folderCreate.js";
 import { folderMove } from "../folderMove.js";
 import { folderUpdate } from "../folderUpdate.js";
 import { queryFolder } from "../queryFolder.js";
 import { queryFolders } from "../queryFolders.js";
-import { sessionSetFolder } from "../sessionSetFolder.js";
+import { sessionMoveScope } from "../../session/sessionMoveScope.js";
 
 describe("folder persistence", () => {
     it("creates folders at the root and inside a parent", () => {
@@ -128,13 +128,64 @@ describe("folder persistence", () => {
             path: "/folders/videos",
         });
 
-        expect(folderMove(opened.database, "videos", "notes", "a5", 3)).toBe(1);
+        expect(folderMove(opened.database, "videos", "notes", "a5", 3)).toEqual({
+            outcome: "moved",
+        });
 
         expect(queryFolder(opened.database, "videos")).toMatchObject({
             orderKey: "a5",
             parentId: "notes",
             path: "/folders/videos",
             version: 2,
+        });
+        opened.client.close();
+    });
+
+    it("refuses a move directly through persistence that would create a cycle", () => {
+        const opened = openFolderDatabase();
+        folderCreate(opened.database, {
+            id: "media",
+            name: "Media",
+            now: 1,
+            path: "/folders/media",
+        });
+        folderCreate(opened.database, {
+            id: "videos",
+            name: "Videos",
+            now: 1,
+            parentId: "media",
+            path: "/folders/videos",
+        });
+
+        expect(folderMove(opened.database, "media", "videos", "a0", 2)).toEqual({
+            outcome: "cycle",
+        });
+        expect(queryFolder(opened.database, "media")?.parentId).toBeUndefined();
+        expect(queryFolder(opened.database, "videos")?.parentId).toBe("media");
+        opened.client.close();
+    });
+
+    it("refuses archived or missing parents through persistence", () => {
+        const opened = openFolderDatabase();
+        folderCreate(opened.database, {
+            id: "archive",
+            name: "Archive",
+            now: 1,
+            path: "/folders/archive",
+        });
+        folderArchive(opened.database, "archive", 2);
+
+        expect(
+            folderCreate(opened.database, {
+                id: "child",
+                name: "Child",
+                now: 3,
+                parentId: "archive",
+                path: "/folders/child",
+            }),
+        ).toEqual({ outcome: "parent_archived" });
+        expect(folderMove(opened.database, "archive", "missing", "a0", 3)).toEqual({
+            outcome: "parent_not_found",
         });
         opened.client.close();
     });
@@ -168,7 +219,10 @@ describe("folder persistence", () => {
             path: "/folders/notes",
         });
 
-        expect(folderArchive(opened.database, "media", 9)).toBe(3);
+        expect(folderArchive(opened.database, "media", 9)).toEqual({
+            folders: 3,
+            sessionIds: [],
+        });
 
         expect(
             queryFolders(opened.database).map((folder) => [folder.id, folder.archivedAt]),
@@ -178,6 +232,59 @@ describe("folder persistence", () => {
             ["cuts", 9],
             ["notes", undefined],
         ]);
+        opened.client.close();
+    });
+
+    it("archives folder chats without turning them into workspace-archived sessions", () => {
+        const opened = openFolderDatabase();
+        folderCreate(opened.database, {
+            id: "media",
+            name: "Media",
+            now: 1,
+            path: "/folders/media",
+        });
+        insertSession(opened.database, "session-1");
+        sessionMoveScope(opened.database, {
+            cwd: "/folders/media",
+            now: 2,
+            scope: { folderId: "media", kind: "folder" },
+            sessionId: "session-1",
+        });
+
+        folderArchive(opened.database, "media", 3);
+
+        expect(
+            opened.database
+                .select({ archived: sessions.archived, status: sessions.status })
+                .from(sessions)
+                .where(eq(sessions.id, "session-1"))
+                .get(),
+        ).toEqual({ archived: true, status: "idle" });
+        opened.client.close();
+    });
+
+    it("reports already hidden folder chats so their retained runtimes are still retired", () => {
+        const opened = openFolderDatabase();
+        folderCreate(opened.database, {
+            id: "media",
+            name: "Media",
+            now: 1,
+            path: "/folders/media",
+        });
+        insertSession(opened.database, "session-1");
+        sessionMoveScope(opened.database, {
+            cwd: "/folders/media",
+            now: 2,
+            scope: { folderId: "media", kind: "folder" },
+            sessionId: "session-1",
+        });
+        opened.database
+            .update(sessions)
+            .set({ archived: true })
+            .where(eq(sessions.id, "session-1"))
+            .run();
+
+        expect(folderArchive(opened.database, "media", 3).sessionIds).toEqual(["session-1"]);
         opened.client.close();
     });
 
@@ -197,8 +304,14 @@ describe("folder persistence", () => {
             path: "/folders/videos",
         });
 
-        expect(folderArchive(opened.database, "videos", 4)).toBe(1);
-        expect(folderArchive(opened.database, "media", 9)).toBe(1);
+        expect(folderArchive(opened.database, "videos", 4)).toEqual({
+            folders: 1,
+            sessionIds: [],
+        });
+        expect(folderArchive(opened.database, "media", 9)).toEqual({
+            folders: 1,
+            sessionIds: [],
+        });
 
         expect(queryFolder(opened.database, "videos")?.archivedAt).toBe(4);
         expect(queryFolder(opened.database, "media")?.archivedAt).toBe(9);
@@ -215,11 +328,106 @@ describe("folder persistence", () => {
         });
         insertSession(opened.database, "session-1");
 
-        expect(sessionSetFolder(opened.database, "session-1", "media", 5)).toBe(1);
+        expect(
+            sessionMoveScope(opened.database, {
+                cwd: "/folders/media",
+                now: 5,
+                scope: { folderId: "media", kind: "folder" },
+                sessionId: "session-1",
+            }).scope,
+        ).toEqual({ folderId: "media", kind: "folder" });
         expect(sessionFolderId(opened.database, "session-1")).toBe("media");
 
-        expect(sessionSetFolder(opened.database, "session-1", null, 6)).toBe(1);
+        expect(
+            sessionMoveScope(opened.database, {
+                cwd: "/folders/unsorted/session-1",
+                now: 6,
+                scope: { kind: "unsorted" },
+                sessionId: "session-1",
+            }).scope,
+        ).toEqual({ kind: "unsorted" });
         expect(sessionFolderId(opened.database, "session-1")).toBeNull();
+        opened.client.close();
+    });
+
+    it("refuses inactive folders and mismatched workspace ownership at the persistence boundary", () => {
+        const opened = openFolderDatabase();
+        folderCreate(opened.database, {
+            id: "archive",
+            name: "Archive",
+            now: 1,
+            path: "/folders/archive",
+        });
+        folderArchive(opened.database, "archive", 2);
+        opened.database
+            .insert(projects)
+            .values({
+                createdAtMs: 1,
+                gitAhead: 0,
+                gitBehind: 0,
+                gitDetached: false,
+                id: "project-2",
+                initializationAttempt: 0,
+                initializationStatus: "ready",
+                kind: "regular",
+                name: "Other project",
+                nameKey: "other-project",
+                nameSource: "folder",
+                orderKey: "a1",
+                path: "/other-workspace",
+                presence: "present",
+                storageKey: "other-project",
+                updatedAtMs: 1,
+                version: 1,
+                worktreeSupport: "unknown",
+            })
+            .run();
+        opened.database
+            .insert(projectWorkspaces)
+            .values({
+                branch: "feature",
+                createdAtMs: 1,
+                gitAhead: 0,
+                gitBehind: 0,
+                gitCommonDir: "/workspace/.git",
+                gitDetached: false,
+                id: "workspace-1",
+                kind: "managed",
+                name: "Feature",
+                nameConfigured: true,
+                nameKey: "feature",
+                orderKey: "a0",
+                path: "/workspace/feature",
+                presence: "present",
+                projectId: "project-1",
+                status: "ready",
+                storageKey: "feature",
+                updatedAtMs: 1,
+                version: 1,
+            })
+            .run();
+        insertSession(opened.database, "session-1");
+
+        expect(() =>
+            sessionMoveScope(opened.database, {
+                cwd: "/folders/archive",
+                now: 3,
+                scope: { folderId: "archive", kind: "folder" },
+                sessionId: "session-1",
+            }),
+        ).toThrow("active folder");
+        expect(() =>
+            sessionMoveScope(opened.database, {
+                cwd: "/workspace/feature",
+                now: 3,
+                scope: {
+                    kind: "workspace",
+                    projectId: "project-2",
+                    workspaceId: "workspace-1",
+                },
+                sessionId: "session-1",
+            }),
+        ).toThrow("does not belong");
         opened.client.close();
     });
 });

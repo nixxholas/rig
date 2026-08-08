@@ -5,6 +5,7 @@ import { sessionContextMessages, sessions } from "../database/schema.js";
 import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import { sessionScopeValues } from "./impl/sessionScope.js";
 
 export function sessionSave(
     tx: TX,
@@ -12,11 +13,11 @@ export function sessionSave(
     input: {
         contextMessages: readonly Message[];
         now: number;
-        projectId: string;
     },
 ): void {
     inTx(tx, (tx) => {
         const values = {
+            ...sessionScopeValues(state.scope),
             activeRunId: state.activeRunId ?? null,
             activeSinceMs: state.activeSince ?? null,
             agentId: state.agentId,
@@ -50,7 +51,6 @@ export function sessionSave(
             delegatedBySessionId: state.agent.delegatedBySessionId ?? null,
             parentToolCallId: state.agent.parentToolCallId ?? null,
             permissionMode: state.permissionMode,
-            projectId: input.projectId,
             providerId: state.providerId,
             recap: state.recap ?? null,
             rootSessionId: state.agent.rootSessionId,
@@ -70,6 +70,7 @@ export function sessionSave(
             titleStatus: state.titleStatus,
             toolsJson: JSON.stringify(state.tools),
             totalTokens: state.totalTokens ?? 0,
+            unsortedSinceMs: state.unsortedSince ?? null,
             lifetimeTotalTokens: state.lifetimeTotalTokens ?? state.usage?.totalTokens ?? 0,
             trackUnread: state.trackUnread === true,
             unreadReason: state.unread?.reason ?? null,
@@ -90,7 +91,6 @@ export function sessionSave(
                       }),
             workflowsEnabled: state.workflowsEnabled !== false,
             workflowsJson: JSON.stringify(state.workflows ?? []),
-            workspaceId: state.workspaceId ?? null,
             workspaceQueueWaiting: state.workspaceQueueWaiting === true,
             workspaceTransferJson: JSON.stringify(state.workspaceTransfer ?? { status: "idle" }),
         };

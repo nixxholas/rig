@@ -9,6 +9,7 @@ import type {
     SessionTokenCount,
     SessionUnreadReason,
     SessionUnreadState,
+    SessionScope,
 } from "./protocol.js";
 
 export interface GroupUsage {
@@ -42,14 +43,12 @@ export interface GroupSession {
     readonly draft?: string;
     readonly draftUpdatedAt?: number;
     readonly effort?: string;
-    /** Folder this chat was filed into. Absent while it is still Unsorted. */
-    readonly folderId?: string;
     readonly id: string;
     readonly lastMessageAt?: number;
     readonly modelId: string;
     readonly orderKey: string;
     readonly permissionMode: string;
-    readonly projectId: string;
+    readonly scope: Extract<SessionScope, { kind: "project" | "workspace" }>;
     readonly providerId: string;
     readonly recap?: string;
     readonly serviceTier?: string;
@@ -63,7 +62,6 @@ export interface GroupSession {
     readonly updatedAt: number;
     /** Present while the agent is inside a scheduled `wait` or `wait_until`. */
     readonly wait?: { readonly startedAt: number; readonly dueAt: number };
-    readonly workspaceId?: string;
 }
 
 /**

@@ -6,6 +6,7 @@ import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import { replaceContextMessages } from "./sessionSave.js";
 import type { SessionWorkspaceTransferState } from "../../session/sessionWorkspaceTransferState.js";
+import { sessionScopeValues } from "./impl/sessionScope.js";
 
 export function sessionTransferWorkspace(
     tx: TX,
@@ -13,6 +14,8 @@ export function sessionTransferWorkspace(
         contextMessages: readonly Message[];
         cwd: string;
         now: number;
+        orderKey: string;
+        projectId: string;
         sessionId: string;
         state: SessionWorkspaceTransferState;
         workspaceId: string;
@@ -22,7 +25,14 @@ export function sessionTransferWorkspace(
         const changed = tx
             .update(sessions)
             .set({
+                ...sessionScopeValues({
+                    kind: "workspace",
+                    projectId: input.projectId,
+                    workspaceId: input.workspaceId,
+                }),
                 cwd: input.cwd,
+                orderKey: input.orderKey,
+                unsortedSinceMs: null,
                 updatedAtMs: input.now,
                 workspaceId: input.workspaceId,
                 workspaceTransferJson: JSON.stringify(input.state),

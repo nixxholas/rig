@@ -364,7 +364,7 @@ describe("createProtocolHttpServer", () => {
                 projectId,
             });
             expect(created.session.id).toBe(sessionId);
-            expect(created.session.projectId).toBe(projectId);
+            expect(created.session.projectId!).toBe(projectId);
 
             const workspace = await client.createProjectWorkspace(projectId, {
                 baseRef: "HEAD",
@@ -423,12 +423,12 @@ describe("createProtocolHttpServer", () => {
         const { client, close, socketPath } = await startServer();
         try {
             const created = await client.createSession({ cwd: projectDirectory });
-            const response = await client.createProjectWorkspace(created.session.projectId, {
+            const response = await client.createProjectWorkspace(created.session.projectId!, {
                 baseRef: "HEAD",
                 name: "Versioned workspace",
             });
             const workspacePath = `/projects/${encodeURIComponent(
-                created.session.projectId,
+                created.session.projectId!,
             )}/workspaces/${encodeURIComponent(response.workspace.id)}`;
 
             await expect(
@@ -454,7 +454,7 @@ describe("createProtocolHttpServer", () => {
             await vi.waitFor(
                 async () => {
                     const candidate = (
-                        await client.listProjectWorkspaces(created.session.projectId)
+                        await client.listProjectWorkspaces(created.session.projectId!)
                     ).workspaces.find((item) => item.id === response.workspace.id);
                     if (candidate === undefined) throw new Error("Expected the workspace.");
                     workspace = candidate;
@@ -468,7 +468,7 @@ describe("createProtocolHttpServer", () => {
             });
             await expect(
                 client.reorderProjectWorkspace(
-                    created.session.projectId,
+                    created.session.projectId!,
                     workspace.id,
                     { afterId: null },
                     workspace.version,
@@ -477,7 +477,7 @@ describe("createProtocolHttpServer", () => {
                 workspace: { id: workspace.id, orderKey: expect.any(String) },
             });
             await client.archiveProjectWorkspace(
-                created.session.projectId,
+                created.session.projectId!,
                 workspace.id,
                 workspace.version,
             );
@@ -538,8 +538,9 @@ describe("createProtocolHttpServer", () => {
         });
         try {
             const source = await client.createSession({ cwd: projectDirectory });
+            const sourceProjectId = source.session.projectId!;
             const workspace = (
-                await client.createProjectWorkspace(source.session.projectId, {
+                await client.createProjectWorkspace(sourceProjectId, {
                     baseRef: "HEAD",
                     id: createId(),
                     name: "Queued session",
@@ -552,7 +553,7 @@ describe("createProtocolHttpServer", () => {
             const request = {
                 cwd: workspace.path,
                 id: sessionId,
-                projectId: source.session.projectId,
+                projectId: sourceProjectId,
                 workspaceId: workspace.id,
             };
             const created = await client.createSession(request);
@@ -576,7 +577,7 @@ describe("createProtocolHttpServer", () => {
 
             await expect(
                 client.searchFiles(
-                    { projectId: source.session.projectId, workspaceId: workspace.id },
+                    { projectId: sourceProjectId, workspaceId: workspace.id },
                     "README",
                 ),
             ).rejects.toThrow();
@@ -618,9 +619,10 @@ describe("createProtocolHttpServer", () => {
         const { client, close, socketPath, store } = await startServer();
         try {
             const source = await client.createSession({ cwd: projectDirectory });
+            const sourceProjectId = source.session.projectId!;
             const created = await requestRawJson(
                 socketPath,
-                `/projects/${source.session.projectId}/workspaces`,
+                `/projects/${sourceProjectId}/workspaces`,
                 {
                     body: JSON.stringify({ baseRef: "HEAD", name: "Without client ID" }),
                     method: "POST",
@@ -634,7 +636,7 @@ describe("createProtocolHttpServer", () => {
             await vi.waitFor(
                 async () => {
                     const candidate = (
-                        await client.listProjectWorkspaces(source.session.projectId)
+                        await client.listProjectWorkspaces(sourceProjectId)
                     ).workspaces.find((item) => item.id === workspace.id);
                     if (candidate === undefined) throw new Error("Expected the workspace.");
                     workspace = candidate;
@@ -643,7 +645,7 @@ describe("createProtocolHttpServer", () => {
                 { interval: 20, timeout: 5_000 },
             );
 
-            const project = (await client.getProject(source.session.projectId)).project;
+            const project = (await client.getProject(sourceProjectId)).project;
             await client.updateProjectSettings(
                 project.id,
                 {
@@ -658,7 +660,7 @@ describe("createProtocolHttpServer", () => {
             const attached = await client.createSession({ cwd: workspace.path });
 
             expect(attached.session).toMatchObject({
-                projectId: source.session.projectId,
+                projectId: sourceProjectId,
                 workspaceId: workspace.id,
             });
             expect(store.get(attached.session.id)?.requestForSubagent().docker?.name).toBe(
@@ -704,8 +706,9 @@ describe("createProtocolHttpServer", () => {
         const { client, close } = await startServer({ store });
         try {
             const session = await client.createSession({ cwd: projectDirectory });
+            const projectId = session.session.projectId!;
             await firstProbeStarted.promise;
-            const project = (await client.getProject(session.session.projectId)).project;
+            const project = (await client.getProject(projectId)).project;
 
             releaseFirstProbe.resolve();
             await initializationContinued.promise;
@@ -752,7 +755,7 @@ describe("createProtocolHttpServer", () => {
         try {
             const first = await client.createSession({ cwd: "/tmp/rig-archive-api/project" });
             const second = await client.createSession({ cwd: "/tmp/rig-archive-api/project" });
-            const project = (await client.getProject(first.session.projectId)).project;
+            const project = (await client.getProject(first.session.projectId!)).project;
 
             await expect(client.archiveProject(project.id, project.version + 1)).rejects.toThrow(
                 "changed before it could be archived",
@@ -864,24 +867,26 @@ describe("createProtocolHttpServer", () => {
         try {
             const first = await client.createSession({ cwd: "/tmp/rig-project-api/one/project" });
             const second = await client.createSession({ cwd: "/tmp/rig-project-api/two/project" });
+            const firstProjectId = first.session.projectId!;
+            const secondProjectId = second.session.projectId!;
             const firstProject = await client.renameProject(
-                first.session.projectId,
+                firstProjectId,
                 { name: "Shared" },
-                store.getProject(first.session.projectId)?.version ?? 1,
+                store.getProject(firstProjectId)?.version ?? 1,
             );
             const secondProject = await client.renameProject(
-                second.session.projectId,
+                secondProjectId,
                 { name: "Shared" },
-                store.getProject(second.session.projectId)?.version ?? 1,
+                store.getProject(secondProjectId)?.version ?? 1,
             );
             expect(firstProject.project.name).toBe("Shared");
             expect(secondProject.project.name).toBe("Shared (2)");
             expect((await client.listProjects()).projects.map((project) => project.id)).toEqual([
-                second.session.projectId,
-                first.session.projectId,
+                secondProjectId,
+                firstProjectId,
             ]);
             const configuredProject = await client.updateProjectSettings(
-                first.session.projectId,
+                firstProjectId,
                 {
                     defaultWorkspaceCompute: {
                         image: "rig-dev:latest",
@@ -900,7 +905,7 @@ describe("createProtocolHttpServer", () => {
             });
             await expect(
                 client.updateProjectSettings(
-                    first.session.projectId,
+                    firstProjectId,
                     {
                         defaultWorkspaceCompute: {
                             image: "rig-dev:latest",
@@ -912,13 +917,13 @@ describe("createProtocolHttpServer", () => {
                 ),
             ).resolves.toEqual(configuredProject);
             const reorderedProject = await client.reorderProject(
-                first.session.projectId,
+                firstProjectId,
                 { afterId: null },
                 configuredProject.project.version,
             );
             expect((await client.listProjects()).projects.map((project) => project.id)).toEqual([
-                first.session.projectId,
-                second.session.projectId,
+                firstProjectId,
+                secondProjectId,
             ]);
 
             const laterChat = await client.createSession({
@@ -971,7 +976,7 @@ describe("createProtocolHttpServer", () => {
                 .png()
                 .toBuffer();
             const withAvatar = await client.uploadProjectAvatar(
-                first.session.projectId,
+                firstProjectId,
                 png,
                 "image/png",
                 reorderedProject.project.version,
@@ -983,14 +988,14 @@ describe("createProtocolHttpServer", () => {
             });
             await expect(
                 client.uploadProjectAvatar(
-                    first.session.projectId,
+                    firstProjectId,
                     png,
                     "image/png",
                     reorderedProject.project.version,
                 ),
             ).rejects.toThrow("changed");
             expect(
-                (await client.clearProjectAvatar(first.session.projectId)).project.avatar,
+                (await client.clearProjectAvatar(firstProjectId)).project.avatar,
             ).toBeUndefined();
         } finally {
             await close();
@@ -1003,7 +1008,7 @@ describe("createProtocolHttpServer", () => {
         const cwd = "/tmp/rig-project-compute/project";
         try {
             const seed = await client.createSession({ cwd });
-            const project = store.getProject(seed.session.projectId)!;
+            const project = store.getProject(seed.session.projectId!)!;
             const dockerProject = await client.updateProjectSettings(
                 project.id,
                 {
@@ -1767,7 +1772,7 @@ describe("createProtocolHttpServer", () => {
                     expect.arrayContaining([
                         expect.objectContaining({
                             event: expect.objectContaining({
-                                projectId: created.session.projectId,
+                                projectId: created.session.projectId!,
                                 type: "project_created",
                             }),
                         }),
@@ -1942,7 +1947,7 @@ describe("createProtocolHttpServer", () => {
                 cwd: directory,
                 permissionMode: "read_only",
             });
-            const scope = { projectId: created.session.projectId };
+            const scope = { projectId: created.session.projectId! };
             const first = await client.writeFile(scope, {
                 content: Buffer.from("first").toString("base64"),
                 expectedHash: null,
@@ -1994,7 +1999,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close } = await startServer();
         try {
             const created = await client.createSession({ cwd: directory });
-            const scope = { projectId: created.session.projectId };
+            const scope = { projectId: created.session.projectId! };
 
             await expect(client.readFile(scope, outsidePath)).rejects.toThrow(
                 "outside the selected folder",
@@ -2042,7 +2047,8 @@ describe("createProtocolHttpServer", () => {
         });
         try {
             const rootSession = await client.createSession({ cwd: projectDirectory });
-            const created = await client.createProjectWorkspace(rootSession.session.projectId, {
+            const rootProjectId = rootSession.session.projectId!;
+            const created = await client.createProjectWorkspace(rootProjectId, {
                 baseRef: "HEAD",
                 name: "No chat yet",
             });
@@ -2050,7 +2056,7 @@ describe("createProtocolHttpServer", () => {
             await vi.waitFor(
                 async () => {
                     const current = (
-                        await client.listProjectWorkspaces(rootSession.session.projectId)
+                        await client.listProjectWorkspaces(rootProjectId)
                     ).workspaces.find((candidate) => candidate.id === created.workspace.id);
                     if (current === undefined) throw new Error("Expected the workspace.");
                     workspace = current;
@@ -2063,7 +2069,7 @@ describe("createProtocolHttpServer", () => {
             );
 
             const scope = {
-                projectId: rootSession.session.projectId,
+                projectId: rootProjectId,
                 workspaceId: workspace.id,
             };
             const written = await client.writeFile(scope, {
@@ -3293,7 +3299,7 @@ describe("createProtocolHttpServer", () => {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
 
             const response = await client.searchFiles(
-                { projectId: created.session.projectId },
+                { projectId: created.session.projectId! },
                 "coding app",
                 7,
             );
@@ -3703,6 +3709,7 @@ function readOnlySubagentState(): PersistedSessionState {
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],
+        scope: { kind: "project", projectId: "project-1" },
         nextTaskId: 1,
         status: "completed",
         tasks: [],
@@ -3726,6 +3733,7 @@ function completedPrimaryState(id: string): PersistedSessionState {
         permissionMode: "workspace_write",
         providerId: "codex",
         queuedRuns: [],
+        scope: { kind: "project", projectId: "project-1" },
         status: "completed",
         tasks: [],
         titleStatus: "ready",
@@ -3762,6 +3770,7 @@ function pausedGoalState(): PersistedSessionState {
         permissionMode: "workspace_write",
         providerId: "codex",
         queuedRuns: [],
+        scope: { kind: "project", projectId: "project-1" },
         status: "idle",
         tasks: [],
         titleStatus: "idle",

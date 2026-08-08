@@ -4,9 +4,10 @@ import type { SessionAgentType, TimelineScope } from "../../protocol/index.js";
 import type { TimelineAgentSource } from "../../timeline/index.js";
 import type { TX } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
+import { sessionScopeFromRow } from "../session/impl/sessionScope.js";
 
 const COLUMNS = sql`
-    id, agent_id, project_id, workspace_id, session_kind, parent_session_id,
+    id, agent_id, scope_kind, project_id, workspace_id, folder_id, session_kind, parent_session_id,
     parent_tool_call_id, depth, task_name, description, title, archived,
     provider_id, model_id, status, created_at_ms
 `;
@@ -69,7 +70,6 @@ function readTimelineAgentRow(row: Record<string, unknown>): TimelineAgentSource
     const status = readString(row, "status");
     const parentSessionId = readOptionalString(row, "parent_session_id");
     const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
-    const workspaceId = readOptionalString(row, "workspace_id");
     const taskName = readOptionalString(row, "task_name");
     const description = readOptionalString(row, "description");
     const title = readOptionalString(row, "title");
@@ -79,7 +79,7 @@ function readTimelineAgentRow(row: Record<string, unknown>): TimelineAgentSource
         createdAt: readNumber(row, "created_at_ms"),
         depth: readNumber(row, "depth"),
         modelId: readString(row, "model_id"),
-        projectId: readString(row, "project_id"),
+        scope: sessionScopeFromRow(row),
         providerId: readString(row, "provider_id"),
         sessionId: readString(row, "id"),
         type: readString(row, "session_kind") as SessionAgentType,
@@ -89,6 +89,5 @@ function readTimelineAgentRow(row: Record<string, unknown>): TimelineAgentSource
         ...(description === undefined ? {} : { description }),
         ...(taskName === undefined ? {} : { taskName }),
         ...(title === undefined ? {} : { title }),
-        ...(workspaceId === undefined ? {} : { workspaceId }),
     };
 }

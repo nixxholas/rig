@@ -189,7 +189,7 @@ function agent(): TimelineAgentSource {
         createdAt: 0,
         depth: 0,
         modelId: "model",
-        projectId: "project-1",
+        scope: { kind: "project", projectId: "project-1" },
         providerId: "codex",
         sessionId: "session-1",
         type: "primary",

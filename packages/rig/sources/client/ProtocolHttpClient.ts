@@ -52,7 +52,7 @@ import type {
     FolderResponse,
     GoalSessionResponse,
     MoveFolderRequest,
-    SetSessionFolderRequest,
+    MoveSessionRequest,
     UpdateFolderRequest,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
@@ -647,13 +647,13 @@ export class ProtocolHttpClient {
         return this.#requestJson("POST", `/folders/${encodeURIComponent(folderId)}/archive`);
     }
 
-    setSessionFolder(
+    moveSessionScope(
         sessionId: string,
-        request: SetSessionFolderRequest,
+        request: MoveSessionRequest,
     ): Promise<{ session: ProtocolSession }> {
         return this.#requestJson(
             "PUT",
-            `/sessions/${encodeURIComponent(sessionId)}/folder`,
+            `/sessions/${encodeURIComponent(sessionId)}/scope`,
             request,
         );
     }

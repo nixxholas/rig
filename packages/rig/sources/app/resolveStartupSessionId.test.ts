@@ -189,6 +189,7 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
         permissionMode: "workspace_write",
         projectId: "project-1",
         providerId: "codex",
+        scope: { kind: "project", projectId: "project-1" },
         status: "idle",
         titleStatus: "idle",
         updatedAt: NOW - 10 * 60 * 1_000,

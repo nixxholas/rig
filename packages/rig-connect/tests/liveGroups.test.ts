@@ -34,6 +34,16 @@ import type { GlobalStreamHello } from "@/protocol.js";
 const started: { close: () => Promise<void> }[] = [];
 const execFile = promisify(execFileCallback);
 
+function projectIdOf(session: { scope: { kind: string; projectId?: string } }): string {
+    if (
+        (session.scope.kind !== "project" && session.scope.kind !== "workspace") ||
+        session.scope.projectId === undefined
+    ) {
+        throw new Error("Expected a project-backed test session.");
+    }
+    return session.scope.projectId;
+}
+
 afterEach(async () => {
     for (const server of started.splice(0)) await server.close();
 });
@@ -160,7 +170,7 @@ describe("rig-connect groups against a live daemon", () => {
                 () =>
                     connection
                         .projects()
-                        .find((project) => project.id === session.snapshot().projectId)?.git
+                        .find((project) => project.id === projectIdOf(session.snapshot()))?.git
                         ?.changedFiles === 0,
                 "the initial Git state",
                 15_000,
@@ -172,14 +182,15 @@ describe("rig-connect groups against a live daemon", () => {
                 () =>
                     connection
                         .projects()
-                        .find((project) => project.id === session.snapshot().projectId)
+                        .find((project) => project.id === projectIdOf(session.snapshot()))
                         ?.git?.files?.some((file) => file.path === "changed.txt") === true,
                 "the changed file to arrive",
                 15_000,
             );
             expect(
-                connection.projects().find((project) => project.id === session.snapshot().projectId)
-                    ?.git,
+                connection
+                    .projects()
+                    .find((project) => project.id === projectIdOf(session.snapshot()))?.git,
             ).toMatchObject({
                 branch: "main",
                 changedFiles: 1,
@@ -198,7 +209,7 @@ describe("rig-connect groups against a live daemon", () => {
                 () => {
                     const snapshot = connection
                         .projects()
-                        .find((project) => project.id === session.snapshot().projectId)?.git;
+                        .find((project) => project.id === projectIdOf(session.snapshot()))?.git;
                     return (
                         snapshot?.changedFiles === 1 &&
                         snapshot.files?.some(
@@ -215,7 +226,7 @@ describe("rig-connect groups against a live daemon", () => {
     it("keeps open terminal tabs in the live group stream", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-terminal-groups" });
-        const { projectId } = session.projectIdentity();
+        const projectId = projectIdOf(session.snapshot());
 
         await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
             await waitFor(() => connection.state().connection === "live", "the stream to open");
@@ -356,7 +367,7 @@ describe("rig-connect groups against a live daemon", () => {
                 () =>
                     connection
                         .projects()
-                        .find((project) => project.id === session.snapshot().projectId)?.usage
+                        .find((project) => project.id === projectIdOf(session.snapshot()))?.usage
                         .totalTokens === 40,
                 "the usage to update",
             );
@@ -376,12 +387,12 @@ describe("rig-connect groups against a live daemon", () => {
         const archivedProjectSession = store.createWithId("archived-project-session", {
             cwd: "/tmp/rig-archived-project",
         });
-        const archivedProjectId = archivedProjectSession.snapshot().projectId;
+        const archivedProjectId = projectIdOf(archivedProjectSession.snapshot());
         await store.archiveProject(archivedProjectId);
 
         // An archived workspace remains durable after its worktree is removed.
         // Injecting the summary avoids making this sync test build a Git worktree.
-        const activeProjectId = active[0]!.snapshot().projectId;
+        const activeProjectId = projectIdOf(active[0]!.snapshot());
         const archivedWorkspace: DaemonProjectWorkspace = {
             archivedAt: 1,
             branch: "worktree/archived-workspace",

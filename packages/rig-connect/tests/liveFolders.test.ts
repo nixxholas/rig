@@ -7,13 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
-import { connectRig, FolderRequestError, type RigConnection } from "@/connectRig.js";
-import type { FolderNode } from "@/FolderElement.js";
-
-/**
- * These run against the real daemon rather than scripted frames, because the point of the library
- * is that the stream and the opening catalog alone are enough to hold the tree.
- */
+import { connectRig, type RigConnection } from "@/connectRig.js";
 
 const started: { close: () => Promise<void> }[] = [];
 
@@ -22,7 +16,6 @@ afterEach(async () => {
 });
 
 async function startDaemon(): Promise<{ endpoint: string; store: InMemorySessionStore }> {
-    // Folders own real directories, so the daemon is pointed at a temporary home for the test.
     const home = await mkdtemp(join(tmpdir(), "rig-connect-folders-"));
     const store = new InMemorySessionStore({ homeDirectory: home });
     const server = createProtocolHttpServer({ store, token: "secret" });
@@ -58,229 +51,234 @@ async function withRig(
     }
 }
 
-/** The names in the tree, depth first, each nested level indented by a slash. */
-function outline(folders: readonly FolderNode[], depth = 0): string[] {
-    return folders.flatMap((node) => [
-        `${"/".repeat(depth)}${node.name}`,
-        ...outline(node.children, depth + 1),
-    ]);
-}
+describe("rig-connect folder and Unsorted projections against a live daemon", () => {
+    it("applies folder changes immediately", async () => {
+        const { endpoint } = await startDaemon();
+        await withRig(endpoint, async (rig) => {
+            const connection = rig.connectFolders({ onChange: () => undefined });
+            await waitFor(() => connection.state().connection === "live", "the catalog to load");
 
-describe("rig-connect folders against a live daemon", () => {
-    it("hands a subscribing view the whole tree the daemon already holds", async () => {
+            const mediaId = rig.folders.create({ name: "Media" });
+            expect(connection.view().folders.map((folder) => folder.id)).toEqual([mediaId]);
+
+            rig.folders.update(mediaId, { name: "Production" });
+            expect(connection.view().folders[0]?.name).toBe("Production");
+            connection.close();
+        });
+    });
+
+    it("never duplicates folder or Unsorted chats in project/workspace groups", async () => {
         const { endpoint, store } = await startDaemon();
-        const media = store.createFolder({ name: "Media" });
-        store.createFolder({ name: "Videos", parentId: media.id });
-        store.createFolder({ name: "Writing" });
-
-        await withRig(endpoint, async (rig) => {
-            const folders = rig.connectFolders({ onChange: () => undefined });
-            await waitFor(() => folders.state().connection === "live", "the stream to open");
-
-            expect(outline(folders.folders())).toEqual(["Media", "/Videos", "Writing"]);
-            expect(folders.folders()[0]?.path).toBe(store.getFolder(media.id)?.path);
-            folders.close();
+        const folder = store.createFolder({ name: "Trips" });
+        const projectChat = store.create({ cwd: "/tmp/rig-connect-folder-project" });
+        const folderChat = store.create({
+            cwd: folder.path,
+            scope: { folderId: folder.id, kind: "folder" },
         });
-    });
-
-    it("adds a folder this client creates and applies the rename that follows", async () => {
-        const { endpoint } = await startDaemon();
-
-        await withRig(endpoint, async (rig) => {
-            const folders = rig.connectFolders({ onChange: () => undefined });
-            await waitFor(() => folders.state().connection === "live", "the stream to open");
-
-            const created = await rig.folders.create({ icon: "🎬", name: "Media" });
-            await waitFor(() => folders.folders().length === 1, "the created folder to arrive");
-            expect(folders.folders()[0]).toMatchObject({
-                icon: "🎬",
-                id: created.id,
-                name: "Media",
-            });
-
-            const renamed = await rig.folders.update(created.id, {
-                description: "Where the videos live.",
-                name: "Media production",
-            });
-            expect(renamed.version).toBeGreaterThan(created.version);
-            await waitFor(
-                () => folders.folders()[0]?.name === "Media production",
-                "the rename to arrive",
-            );
-            expect(folders.folders()[0]?.description).toBe("Where the videos live.");
-            folders.close();
+        const unsortedChat = store.create({
+            cwd: "/tmp",
+            scope: { kind: "unsorted" },
         });
-    });
-
-    it("reorders siblings from a drop the daemon turns into an order key", async () => {
-        const { endpoint } = await startDaemon();
-
-        await withRig(endpoint, async (rig) => {
-            const folders = rig.connectFolders({ onChange: () => undefined });
-            await waitFor(() => folders.state().connection === "live", "the stream to open");
-
-            const media = await rig.folders.create({ name: "Media" });
-            await rig.folders.create({ name: "Writing" });
-            const travel = await rig.folders.create({ name: "Travel" });
-            await waitFor(() => folders.folders().length === 3, "all three folders to arrive");
-            expect(outline(folders.folders())).toEqual(["Media", "Writing", "Travel"]);
-
-            // Dropped into the root, directly below Media. Rig derives the key from that pair.
-            const moved = await rig.folders.move(travel.id, {
-                afterId: media.id,
-                parentId: null,
-            });
-            expect(moved.orderKey).not.toBe(travel.orderKey);
-            await waitFor(
-                () => outline(folders.folders()).join() === ["Media", "Travel", "Writing"].join(),
-                "the move to reorder the siblings",
-            );
-
-            // And dropped inside Media, where it becomes the only child.
-            await rig.folders.move(travel.id, { afterId: null, parentId: media.id });
-            await waitFor(
-                () => outline(folders.folders()).join() === ["Media", "/Travel", "Writing"].join(),
-                "the move to renest the folder",
-            );
-            expect(folders.folders()[0]?.children[0]?.parentId).toBe(media.id);
-            folders.close();
-        });
-    });
-
-    it("takes an archived folder and its children out of the tree", async () => {
-        const { endpoint } = await startDaemon();
-
-        await withRig(endpoint, async (rig) => {
-            const removed: string[] = [];
-            const folders = rig.connectFolders({
-                onChange: () => undefined,
-                onDelta: (delta) => {
-                    if (delta.type === "folder_removed") removed.push(delta.folderId);
-                },
-            });
-            await waitFor(() => folders.state().connection === "live", "the stream to open");
-
-            const media = await rig.folders.create({ name: "Media" });
-            const videos = await rig.folders.create({ name: "Videos", parentId: media.id });
-            await rig.folders.create({ name: "Writing" });
-            await waitFor(() => outline(folders.folders()).length === 3, "the folders to arrive");
-
-            const archived = await rig.folders.archive(media.id);
-            expect(archived.archivedAt).toBeGreaterThan(0);
-            await waitFor(
-                () => outline(folders.folders()).join() === "Writing",
-                "the archived subtree to leave the tree",
-            );
-            expect(removed.sort()).toEqual([media.id, videos.id].sort());
-            folders.close();
-        });
-    });
-
-    it("carries a filed chat's folder to the catalog and to the chat's own state", async () => {
-        const { endpoint, store } = await startDaemon();
-        const session = store.create({ cwd: "/tmp/rig-connect-folders" });
-        const folder = store.createFolder({ name: "Trip planning" });
 
         await withRig(endpoint, async (rig) => {
             const groups = rig.connectGroups({ onChange: () => undefined });
-            const chat = rig.connectSession({
-                onChange: () => undefined,
-                sessionId: session.id,
-            });
+            const folders = rig.connectFolders({ onChange: () => undefined });
             await waitFor(() => groups.state().connection === "live", "the catalog to load");
-            await waitFor(() => chat.session().sessionId === session.id, "the chat to load");
 
-            store.setSessionFolder(session.id, folder.id);
+            expect(
+                groups
+                    .projects()
+                    .flatMap((project) => [
+                        ...project.sessions,
+                        ...project.workspaces.flatMap((workspace) => workspace.sessions),
+                    ])
+                    .map((session) => session.id),
+            ).toContain(projectChat.id);
+            expect(
+                groups
+                    .projects()
+                    .flatMap((project) => [
+                        ...project.sessions,
+                        ...project.workspaces.flatMap((workspace) => workspace.sessions),
+                    ])
+                    .map((session) => session.id),
+            ).not.toEqual(expect.arrayContaining([folderChat.id, unsortedChat.id]));
+            expect(folders.view().folders[0]?.sessions.map((session) => session.id)).toEqual([
+                folderChat.id,
+            ]);
+            expect(folders.view().unsorted.map((session) => session.id)).toEqual([unsortedChat.id]);
+
+            folders.close();
+            groups.close();
+        });
+    });
+
+    it("moves a chat between Unsorted and a folder in one optimistic frame", async () => {
+        const { endpoint, store } = await startDaemon();
+        const folder = store.createFolder({ name: "Trips" });
+        const chat = store.create({ cwd: "/tmp", scope: { kind: "unsorted" } });
+
+        await withRig(endpoint, async (rig) => {
+            const folders = rig.connectFolders({ onChange: () => undefined });
+            await waitFor(() => folders.state().connection === "live", "the catalog to load");
+
+            rig.folders.setSessionFolder(chat.id, folder.id);
+
+            expect(folders.view().unsorted).toEqual([]);
+            expect(folders.view().folders[0]?.sessions.map((session) => session.id)).toEqual([
+                chat.id,
+            ]);
             await waitFor(
                 () =>
-                    groups
-                        .projects()
-                        .flatMap((project) => project.sessions)
-                        .some((candidate) => candidate.folderId === folder.id),
-                "the chat's folder to reach the catalog",
+                    store.list().find((session) => session.id === chat.id)?.scope.kind === "folder",
+                "the authoritative session scope",
             );
-            await waitFor(
-                () => chat.session().folderId === folder.id,
-                "the chat's folder to reach its own state",
-            );
-
-            store.setSessionFolder(session.id, null);
-            await waitFor(
-                () => chat.session().folderId === undefined,
-                "the chat to return to Unsorted",
-            );
-
-            chat.close();
-            groups.close();
+            folders.close();
         });
     });
 
-    it("files a chat into a folder through the connection", async () => {
+    it("publishes cross-tree moves only after both projections agree", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = store.create({ cwd: "/tmp/rig-connect-folders" });
+        const folder = store.createFolder({ name: "Trips" });
+        const chat = store.create({ cwd: "/tmp/rig-connect-folder-project" });
 
         await withRig(endpoint, async (rig) => {
-            const folder = await rig.folders.create({ name: "Trip planning" });
-            await rig.folders.setSessionFolder(session.id, folder.id);
-            expect(store.list().find((summary) => summary.id === session.id)?.folderId).toBe(
-                folder.id,
-            );
-        });
-    });
-
-    it("refuses a folder change with the daemon's own code and message", async () => {
-        const { endpoint } = await startDaemon();
-
-        await withRig(endpoint, async (rig) => {
-            const media = await rig.folders.create({ name: "Media" });
-            const videos = await rig.folders.create({ name: "Videos", parentId: media.id });
-
-            await expect(
-                rig.folders.move(media.id, { afterId: null, parentId: videos.id }),
-            ).rejects.toMatchObject({ code: "cycle", name: "FolderRequestError", status: 400 });
-            await expect(rig.folders.archive("not-a-folder")).rejects.toMatchObject({
-                code: "folder_not_found",
-                name: "FolderRequestError",
-                status: 404,
+            let monitoring = false;
+            const observedMembershipCounts: number[] = [];
+            const folders = rig.connectFolders({
+                onChange: () => {
+                    if (!monitoring) return;
+                    const folderCount = folders
+                        .view()
+                        .folders.flatMap((item) => item.sessions)
+                        .filter((session) => session.id === chat.id).length;
+                    observedMembershipCounts.push(folderCount + groupMembershipCount());
+                },
             });
-            await expect(rig.folders.create({ name: "  " })).rejects.toBeInstanceOf(
-                FolderRequestError,
-            );
-        });
-    });
-
-    it("loads the tree for a folder view that opens after the catalog already did", async () => {
-        const { endpoint, store } = await startDaemon();
-        store.createFolder({ name: "Media" });
-
-        await withRig(endpoint, async (rig) => {
-            const groups = rig.connectGroups({ onChange: () => undefined });
-            await waitFor(() => groups.state().connection === "live", "the catalog to load");
-
-            const folders = rig.connectFolders({ onChange: () => undefined });
+            let groups = rig.connectGroups({
+                onChange: () => {
+                    if (!monitoring) return;
+                    const folderCount = folders
+                        .view()
+                        .folders.flatMap((item) => item.sessions)
+                        .filter((session) => session.id === chat.id).length;
+                    observedMembershipCounts.push(folderCount + groupMembershipCount());
+                },
+            });
+            const groupMembershipCount = (): number =>
+                groups
+                    .projects()
+                    .flatMap((project) => [
+                        ...project.sessions,
+                        ...project.workspaces.flatMap((workspace) => workspace.sessions),
+                    ])
+                    .filter((session) => session.id === chat.id).length;
             await waitFor(
-                () => outline(folders.folders()).join() === "Media",
-                "the tree to reach a view that subscribed late",
+                () => groups.state().connection === "live" && folders.state().connection === "live",
+                "both catalogs to load",
             );
 
+            monitoring = true;
+            rig.folders.setSessionFolder(chat.id, folder.id);
+
+            expect(observedMembershipCounts.length).toBeGreaterThan(0);
+            expect(observedMembershipCounts).toEqual(observedMembershipCounts.map(() => 1));
             folders.close();
             groups.close();
         });
     });
 
-    it("keeps the catalog loaded for a folder view with nothing else subscribed", async () => {
+    it("reorders chats only within their current folder", async () => {
         const { endpoint, store } = await startDaemon();
+        const folder = store.createFolder({ name: "Trips" });
+        const first = store.create({
+            cwd: "/tmp/first",
+            scope: { folderId: folder.id, kind: "folder" },
+        });
+        const second = store.create({
+            cwd: "/tmp/second",
+            scope: { folderId: folder.id, kind: "folder" },
+        });
 
         await withRig(endpoint, async (rig) => {
             const folders = rig.connectFolders({ onChange: () => undefined });
-            await waitFor(() => folders.state().connection === "live", "the stream to open");
+            await waitFor(() => folders.state().connection === "live", "the catalog to load");
+            expect(folders.view().folders[0]?.sessions.map((session) => session.id)).toEqual([
+                first.id,
+                second.id,
+            ]);
 
-            store.createFolder({ name: "Media" });
-            await waitFor(
-                () => folders.folders().length === 1,
-                "a folder created outside this client to arrive",
-            );
+            rig.folders.moveSession(second.id, {
+                afterId: null,
+                scope: { folderId: folder.id, kind: "folder" },
+            });
+
+            expect(folders.view().folders[0]?.sessions.map((session) => session.id)).toEqual([
+                second.id,
+                first.id,
+            ]);
+            await waitFor(() => {
+                const ordered = store
+                    .list()
+                    .filter(
+                        (session) =>
+                            session.scope.kind === "folder" && session.scope.folderId === folder.id,
+                    )
+                    .sort((left, right) =>
+                        (left.orderKey ?? "") < (right.orderKey ?? "") ? -1 : 1,
+                    );
+                return ordered[0]?.id === second.id;
+            }, "the authoritative folder order");
             folders.close();
+        });
+    });
+
+    it("marks an open chat archived in the same optimistic folder-archive frame", async () => {
+        const { endpoint, store } = await startDaemon();
+        const folder = store.createFolder({ name: "Trips" });
+        const chat = store.create({
+            cwd: folder.path,
+            scope: { folderId: folder.id, kind: "folder" },
+        });
+
+        await withRig(endpoint, async (rig) => {
+            const folders = rig.connectFolders({ onChange: () => undefined });
+            const session = rig.connectSession({ onChange: () => undefined, sessionId: chat.id });
+            await waitFor(
+                () =>
+                    folders.state().connection === "live" &&
+                    session.session().connection === "live",
+                "the folder and chat catalogs to load",
+            );
+
+            rig.folders.archive(folder.id);
+
+            expect(folders.view().folders).toEqual([]);
+            expect(session.session().archived).toBe(true);
+            session.close();
+            folders.close();
+        });
+    });
+
+    it("optimistically archives an open chat without a mounted folder view", async () => {
+        const { endpoint, store } = await startDaemon();
+        const folder = store.createFolder({ name: "Trips" });
+        const chat = store.create({
+            cwd: folder.path,
+            scope: { folderId: folder.id, kind: "folder" },
+        });
+
+        await withRig(endpoint, async (rig) => {
+            const session = rig.connectSession({ onChange: () => undefined, sessionId: chat.id });
+            await waitFor(
+                () => session.session().connection === "live",
+                "the chat catalog to load",
+            );
+
+            rig.folders.archive(folder.id);
+
+            expect(session.session().archived).toBe(true);
+            session.close();
         });
     });
 });

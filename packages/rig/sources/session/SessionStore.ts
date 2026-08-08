@@ -7,6 +7,7 @@ import type {
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
     Folder,
+    ListFoldersResponse,
     GetTimelineRequest,
     GitRepositoryFacts,
     MoveFolderRequest,
@@ -105,6 +106,7 @@ export interface SessionStore {
     ): void;
     /** The whole folder tree, every parent ahead of what is nested under it. */
     listFolders(): readonly Folder[];
+    folderCatalog(): ListFoldersResponse;
     getFolder(folderId: string): Folder | undefined;
     createFolder(request: CreateFolderRequest): Folder;
     updateFolder(
@@ -118,9 +120,19 @@ export interface SessionStore {
         expectedVersion?: number,
     ): Folder | undefined;
     /** Puts a folder away together with everything nested under it. */
-    archiveFolder(folderId: string): Folder | undefined;
+    archiveFolder(
+        folderId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Folder | undefined;
     /** Files one chat into a folder, or takes it back out into Unsorted with `null`. */
-    setSessionFolder(sessionId: string, folderId: string | null): InMemorySession | undefined;
+    setSessionFolder(
+        sessionId: string,
+        folderId: string | null,
+        afterId?: string | null,
+        mutationId?: string,
+    ): InMemorySession | undefined;
+    sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean;
     listProjects(): readonly Project[];
     listWorkspaces(projectId?: string): readonly ProjectWorkspace[];
     registerProject(request: RegisterProjectRequest): Promise<Project>;

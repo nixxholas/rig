@@ -51,6 +51,7 @@ export const createFolderRequestSchema = Type.Object(
         /** Client-chosen cuid2 identity. Repeating it returns the same folder. */
         id: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
         name: Type.String({ maxLength: FOLDER_NAME_MAX_LENGTH, minLength: 1 }),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         parentId: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
         rules: Type.Optional(Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH })),
     },
@@ -71,6 +72,7 @@ export const updateFolderRequestSchema = Type.Object(
             Type.Union([Type.String({ maxLength: FOLDER_ICON_MAX_LENGTH }), Type.Null()]),
         ),
         name: Type.Optional(Type.String({ maxLength: FOLDER_NAME_MAX_LENGTH, minLength: 1 })),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         rules: Type.Optional(
             Type.Union([Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH }), Type.Null()]),
         ),
@@ -87,18 +89,12 @@ export type UpdateFolderRequest = Static<typeof updateFolderRequestSchema>;
 export const moveFolderRequestSchema = Type.Object(
     {
         afterId: Type.Union([Type.String({ maxLength: 128, minLength: 1 }), Type.Null()]),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         parentId: Type.Union([Type.String({ maxLength: 128, minLength: 1 }), Type.Null()]),
     },
     { additionalProperties: false },
 );
 export type MoveFolderRequest = Static<typeof moveFolderRequestSchema>;
-
-/** Putting one chat into a folder, or taking it back out into Unsorted with `null`. */
-export const setSessionFolderRequestSchema = Type.Object(
-    { folderId: Type.Union([Type.String({ maxLength: 128, minLength: 1 }), Type.Null()]) },
-    { additionalProperties: false },
-);
-export type SetSessionFolderRequest = Static<typeof setSessionFolderRequestSchema>;
 
 export const folderErrorCodeSchema = Type.Union([
     Type.Literal("invalid_request"),
@@ -106,6 +102,7 @@ export const folderErrorCodeSchema = Type.Union([
     Type.Literal("parent_not_found"),
     Type.Literal("sibling_not_found"),
     Type.Literal("cycle"),
+    Type.Literal("version_conflict"),
     Type.Literal("storage_unavailable"),
 ]);
 export type FolderErrorCode = Static<typeof folderErrorCodeSchema>;
@@ -123,23 +120,33 @@ export type FolderErrorResponse = Static<typeof folderErrorResponseSchema>;
 
 export interface ListFoldersResponse {
     folders: readonly Folder[];
+    /** Durable tree revision represented by this response. */
+    revision: number;
 }
 
 export interface FolderResponse {
     folder: Folder;
+    /** Durable tree revision committed with this folder response. */
+    revision: number;
 }
 
 export interface BaseFolderEvent<TType extends string, TData> {
     createdAt: number;
     data: TData;
-    folderId: string;
     id: EventId;
     type: TType;
 }
 
-export type FolderEvent =
-    | BaseFolderEvent<"folder_created", { folder: Folder; mutationId?: string }>
-    | BaseFolderEvent<"folder_updated", { folder: Folder; mutationId?: string }>;
+/**
+ * A light invalidation for the folder catalog.
+ *
+ * Folder entities travel by request-response. The durable revision lets a client keep loading until
+ * its snapshot includes every invalidation it has already observed.
+ */
+export type FolderEvent = BaseFolderEvent<
+    "folders_changed",
+    { mutationId?: string; revision: number }
+>;
 
 /**
  * How long a chat may stay in Unsorted before Rig puts it away. A chat that never files itself into

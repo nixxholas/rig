@@ -8,7 +8,6 @@ import {
     sqliteTable,
     text,
     unique,
-    uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 export const rigDataIdentityTable = sqliteTable(
@@ -184,10 +183,15 @@ export const sessions = sqliteTable(
     {
         id: text("id").primaryKey(),
         agentId: text("agent_id").notNull(),
-        projectId: text("project_id")
+        scopeKind: text("scope_kind", {
+            enum: ["project", "workspace", "folder", "unsorted"],
+        })
             .notNull()
-            .references(() => projects.id),
+            .default("project"),
+        projectId: text("project_id").references(() => projects.id),
         workspaceId: text("workspace_id").references(() => projectWorkspaces.id),
+        /** Folder scope identity; null for every other scope. */
+        folderId: text("folder_id").references(() => folders.id),
         orderKey: text("order_key").notNull(),
         sessionKind: text("session_kind").notNull(),
         parentSessionId: text("parent_session_id"),
@@ -250,8 +254,6 @@ export const sessions = sqliteTable(
         workspaceQueueWaiting: integer("workspace_queue_waiting", { mode: "boolean" })
             .notNull()
             .default(false),
-        /** Folder this chat filed itself into. Null keeps it in Unsorted. */
-        folderId: text("folder_id").references(() => folders.id),
         /** When a chat started out belonging nowhere. Null once it has been filed, or never was. */
         unsortedSinceMs: integer("unsorted_since_ms"),
     },
@@ -273,9 +275,41 @@ export const sessions = sqliteTable(
             sql`${table.lastMessageAtMs} DESC`,
             sql`${table.updatedAtMs} DESC`,
         ),
-        index("sessions_parent_order").on(table.projectId, table.workspaceId, table.orderKey),
-        index("sessions_folder").on(table.folderId, desc(table.updatedAtMs)),
+        index("sessions_project_order").on(table.scopeKind, table.projectId, table.orderKey),
+        index("sessions_workspace_order").on(table.scopeKind, table.workspaceId, table.orderKey),
+        index("sessions_folder_order").on(table.scopeKind, table.folderId, table.orderKey),
+        index("sessions_unsorted_order").on(table.scopeKind, table.orderKey),
     ],
+);
+
+/** Singleton revision for light folder-catalog invalidations. */
+export const folderCatalog = sqliteTable("folder_catalog", {
+    id: integer("id").primaryKey(),
+    revision: integer("revision").notNull(),
+});
+
+/** Bounded receipts that make ambiguous folder mutation retries idempotent. */
+export const folderMutations = sqliteTable(
+    "folder_mutations",
+    {
+        mutationId: text("mutation_id").primaryKey(),
+        action: text("action").notNull(),
+        folderId: text("folder_id").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [index("folder_mutations_created").on(table.createdAtMs, table.mutationId)],
+);
+
+/** Bounded receipts that make ambiguous session mutation retries idempotent. */
+export const sessionMutations = sqliteTable(
+    "session_mutations",
+    {
+        mutationId: text("mutation_id").primaryKey(),
+        action: text("action").notNull(),
+        sessionId: text("session_id").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [index("session_mutations_created").on(table.createdAtMs, table.mutationId)],
 );
 
 export const sessionEvents = sqliteTable(

@@ -71,6 +71,7 @@ function sessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary
         modelId: "openai/gpt-5.5",
         permissionMode: "workspace_write",
         providerId: "codex",
+        scope: { kind: "project", projectId: "project-1" },
         status: "completed",
         titleStatus: "ready",
         updatedAt: 1_700_000_001_000,

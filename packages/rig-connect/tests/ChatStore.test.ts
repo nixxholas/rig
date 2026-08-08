@@ -43,7 +43,7 @@ function hello(overrides: Partial<SessionStreamHello> = {}): SessionStreamHello 
             orderKey: "a0",
             pendingUserInputs: [],
             permissionMode: "auto",
-            projectId: "project-1",
+            scope: { kind: "project", projectId: "project-1" },
             providerId: "claude",
             snapshot: { messages: [] },
             status: "idle",
@@ -3065,7 +3065,6 @@ describe("ChatStore", () => {
                         },
                     ],
                     permissionMode: "read_only",
-                    projectId: "project-1",
                     recap: "Ready to ship",
                     serviceTier: "priority",
                     subagents: [
@@ -3091,7 +3090,11 @@ describe("ChatStore", () => {
                             subject: "Verify",
                         },
                     ],
-                    workspaceId: "workspace-1",
+                    scope: {
+                        kind: "workspace",
+                        projectId: "project-1",
+                        workspaceId: "workspace-1",
+                    },
                 },
             });
 
@@ -3108,12 +3111,15 @@ describe("ChatStore", () => {
                 pendingSteeringMessages: [{ runId: "run-1" }],
                 pendingUserInputs: [{ requestId: "input-1" }],
                 permissionMode: "read_only",
-                projectId: "project-1",
+                scope: {
+                    kind: "workspace",
+                    projectId: "project-1",
+                    workspaceId: "workspace-1",
+                },
                 recap: "Ready to ship",
                 serviceTier: "priority",
                 subagents: [{ id: "session-2" }],
                 tasks: [{ id: "task-1" }],
-                workspaceId: "workspace-1",
             });
         });
 

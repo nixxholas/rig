@@ -1,4 +1,4 @@
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Value } from "@sinclair/typebox/value";
 
@@ -31,14 +31,14 @@ export interface FolderRoute {
 export async function serveFolderRequest(
     store: SessionStore,
     route: FolderRoute,
-    request: { method?: string | undefined },
+    request: Pick<IncomingMessage, "headers" | "method">,
     response: ServerResponse,
     readJson: (limitBytes: number) => Promise<unknown>,
 ): Promise<void> {
     try {
         if (route.name === "folders") {
             if (request.method === "GET") {
-                sendJson<ListFoldersResponse>(response, 200, { folders: store.listFolders() });
+                sendJson<ListFoldersResponse>(response, 200, store.folderCatalog());
                 return;
             }
             if (request.method !== "POST") {
@@ -50,7 +50,16 @@ export async function serveFolderRequest(
                 sendFolderError(response, 400, "invalid_request", "A folder name is required.");
                 return;
             }
-            sendJson<FolderResponse>(response, 201, { folder: store.createFolder(body) });
+            const mutationId = requestMutationId(request);
+            if (!matchingMutationIds(body.mutationId, mutationId)) {
+                sendFolderError(response, 400, "invalid_request", "The mutation ID did not match.");
+                return;
+            }
+            const created = store.createFolder({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            });
+            sendJson<FolderResponse>(response, 201, folderResponse(store, created.id, created));
             return;
         }
         const folderId = route.folderId;
@@ -65,7 +74,7 @@ export async function serveFolderRequest(
                     sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
                     return;
                 }
-                sendJson<FolderResponse>(response, 200, { folder });
+                sendJson<FolderResponse>(response, 200, folderResponse(store, folderId, folder));
                 return;
             }
             if (request.method !== "PATCH") {
@@ -82,12 +91,31 @@ export async function serveFolderRequest(
                 );
                 return;
             }
-            const folder = store.updateFolder(folderId, body);
+            const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+            if (expectedVersion === undefined) {
+                sendFolderError(
+                    response,
+                    428,
+                    "invalid_request",
+                    "A folder update needs its current version.",
+                );
+                return;
+            }
+            const mutationId = requestMutationId(request);
+            if (!matchingMutationIds(body.mutationId, mutationId)) {
+                sendFolderError(response, 400, "invalid_request", "The mutation ID did not match.");
+                return;
+            }
+            const folder = store.updateFolder(
+                folderId,
+                { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
+                expectedVersion,
+            );
             if (folder === undefined) {
                 sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
                 return;
             }
-            sendJson<FolderResponse>(response, 200, { folder });
+            sendJson<FolderResponse>(response, 200, folderResponse(store, folderId, folder));
             return;
         }
         if (request.method !== "POST") {
@@ -95,12 +123,26 @@ export async function serveFolderRequest(
             return;
         }
         if (route.name === "folder-archive") {
-            const folder = store.archiveFolder(folderId);
+            const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+            if (expectedVersion === undefined) {
+                sendFolderError(
+                    response,
+                    428,
+                    "invalid_request",
+                    "Archiving a folder needs its current version.",
+                );
+                return;
+            }
+            const folder = store.archiveFolder(
+                folderId,
+                expectedVersion,
+                requestMutationId(request),
+            );
             if (folder === undefined) {
                 sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
                 return;
             }
-            sendJson<FolderResponse>(response, 200, { folder });
+            sendJson<FolderResponse>(response, 200, folderResponse(store, folderId, folder));
             return;
         }
         const body = await readJson(8 * 1024);
@@ -113,14 +155,44 @@ export async function serveFolderRequest(
             );
             return;
         }
-        const folder = store.moveFolder(folderId, body);
+        const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+        if (expectedVersion === undefined) {
+            sendFolderError(
+                response,
+                428,
+                "invalid_request",
+                "Moving a folder needs its current version.",
+            );
+            return;
+        }
+        const mutationId = requestMutationId(request);
+        if (!matchingMutationIds(body.mutationId, mutationId)) {
+            sendFolderError(response, 400, "invalid_request", "The mutation ID did not match.");
+            return;
+        }
+        const folder = store.moveFolder(
+            folderId,
+            { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
+            expectedVersion,
+        );
         if (folder === undefined) {
             sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
             return;
         }
-        sendJson<FolderResponse>(response, 200, { folder });
+        sendJson<FolderResponse>(response, 200, folderResponse(store, folderId, folder));
     } catch (error) {
         if (error instanceof FolderError) {
+            if (error.code === "version_conflict" && route.folderId !== undefined) {
+                const current = store.getFolder(route.folderId);
+                if (current !== undefined) {
+                    sendJson<FolderResponse>(
+                        response,
+                        409,
+                        folderResponse(store, route.folderId, current),
+                    );
+                    return;
+                }
+            }
             sendFolderError(response, statusForCode(error.code), error.code, error.message);
             return;
         }
@@ -137,9 +209,41 @@ function statusForCode(code: FolderErrorCode): number {
         case "cycle":
         case "invalid_request":
             return 400;
+        case "version_conflict":
+            return 409;
         case "storage_unavailable":
             return 500;
     }
+}
+
+function folderResponse(
+    store: SessionStore,
+    folderId: string,
+    fallback: FolderResponse["folder"],
+): FolderResponse {
+    const catalog = store.folderCatalog();
+    return {
+        folder: catalog.folders.find((folder) => folder.id === folderId) ?? fallback,
+        revision: catalog.revision,
+    };
+}
+
+function requestMutationId(request: Pick<IncomingMessage, "headers">): string | undefined {
+    const value = request.headers["x-rig-mutation-id"];
+    return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined;
+}
+
+function matchingMutationIds(body: string | undefined, header: string | undefined): boolean {
+    return body === undefined || header === undefined || body === header;
+}
+
+function parseEntityVersion(value: string | readonly string[] | undefined): number | undefined {
+    const raw = Array.isArray(value) ? value[0] : value;
+    if (raw === undefined) return undefined;
+    const match = /^(?:"(0|[1-9]\d*)"|(0|[1-9]\d*))$/.exec(raw);
+    if (match === null) return undefined;
+    const version = Number(match[1] ?? match[2]);
+    return Number.isSafeInteger(version) ? version : undefined;
 }
 
 function sendFolderError(

@@ -65,12 +65,14 @@ function session(id: string, projectId: string, workspaceId?: string): SessionSu
         modelId: "sonnet-5",
         orderKey: id,
         permissionMode: "auto",
-        projectId,
+        scope:
+            workspaceId === undefined
+                ? { kind: "project", projectId }
+                : { kind: "workspace", projectId, workspaceId },
         providerId: "claude",
         status: "idle",
         titleStatus: "idle",
         updatedAt: 1,
-        ...(workspaceId === undefined ? {} : { workspaceId }),
     };
 }
 
@@ -115,6 +117,21 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
 }
 
 describe("GroupStore and sessions that are not in the list", () => {
+    it("never projects folder or Unsorted chats into projects or workspaces", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                sessions: [
+                    session("project", "p1"),
+                    { ...session("folder", "p1"), scope: { folderId: "f1", kind: "folder" } },
+                    { ...session("unsorted", "p1"), scope: { kind: "unsorted" } },
+                ],
+            }),
+        );
+
+        expect(store.projects()[0]?.sessions.map((entry) => entry.id)).toEqual(["project"]);
+    });
+
     it("keeps a subagent out of the sidebar however it arrives", () => {
         const store = new GroupStore();
         // Absent, not present-and-empty: the session has no position at all.
@@ -218,15 +235,14 @@ describe("GroupStore holds recent events against their session", () => {
         // Far more distinct sessions than the queue is allowed to track, none of
         // which the client will ever be told about.
         for (let index = 0; index < 5_000; index += 1) {
-            store.apply(
-                event(
-                    "session_title_changed",
-                    { status: "idle", title: `t${index}` },
-                    {
-                        sessionId: `ghost-${index}`,
-                    },
-                ),
+            const update = event(
+                "session_title_changed",
+                { status: "idle", title: `t${index}` },
+                {
+                    sessionId: `ghost-${index}`,
+                },
             );
+            store.apply(update, update.id);
         }
 
         store.applyHello(
@@ -254,15 +270,14 @@ describe("GroupStore holds recent events against their session", () => {
     it("keeps only recent events for one very busy session", () => {
         const store = new GroupStore();
         for (let index = 0; index < 1_000; index += 1) {
-            store.apply(
-                event(
-                    "session_title_changed",
-                    { status: "idle", title: `t${index}` },
-                    {
-                        sessionId: "busy",
-                    },
-                ),
+            const update = event(
+                "session_title_changed",
+                { status: "idle", title: `t${index}` },
+                {
+                    sessionId: "busy",
+                },
             );
+            store.apply(update, update.id);
         }
 
         // The newest event still wins over a snapshot that predates it, which is
@@ -308,6 +323,95 @@ describe("GroupStore holds recent events against their session", () => {
 });
 
 describe("GroupStore", () => {
+    it("keeps a newly streamed session when an older catalog omits it", () => {
+        const store = new GroupStore();
+        const streamed = session("new-session", "project-1");
+        const eventId = "01800000-0000-7000-8000-000000000001";
+        const streamCursor = "01900000-0000-7000-8000-000000000009";
+        store.applyHello(hello({ sessions: [] }));
+        store.apply(
+            {
+                createdAt: 2,
+                data: { session: streamed },
+                id: eventId,
+                sessionId: streamed.id,
+                type: "session_updated",
+            },
+            streamCursor,
+        );
+
+        store.applyHello(
+            hello({
+                cursor: "01900000-0000-7000-8000-000000000001",
+                sessions: [],
+            }),
+        );
+
+        expect(store.sessionSummary(streamed.id)?.id).toBe(streamed.id);
+    });
+
+    it("records the wrapper cursor when SSE echoes a request-response session", () => {
+        const store = new GroupStore();
+        const streamed = {
+            ...session("new-session", "project-1"),
+            title: "New",
+        };
+        const event = {
+            createdAt: 2,
+            data: { session: streamed },
+            id: "01800000-0000-7000-8000-000000000001",
+            sessionId: streamed.id,
+            type: "session_updated" as const,
+        };
+        store.applyHello(hello({ sessions: [] }));
+        store.apply(event);
+        store.apply(event, "01900000-0000-7000-8000-000000000009");
+
+        store.applyHello(
+            hello({
+                cursor: "01900000-0000-7000-8000-000000000001",
+                sessions: [{ ...streamed, lastEventId: event.id, title: "Old" }],
+            }),
+        );
+
+        expect(store.sessionSummary(streamed.id)?.title).toBe("New");
+    });
+
+    it("does not mistake an older SSE event for the matching request-response echo", () => {
+        const store = new GroupStore();
+        const newest = {
+            ...session("new-session", "project-1"),
+            title: "Newest",
+        };
+        store.applyHello(hello({ sessions: [] }));
+        store.apply({
+            createdAt: 3,
+            data: { session: newest },
+            id: "01900000-0000-7000-8000-000000000003",
+            sessionId: newest.id,
+            type: "session_updated",
+        });
+        store.apply(
+            {
+                createdAt: 2,
+                data: { session: { ...newest, title: "Older" } },
+                id: "01900000-0000-7000-8000-000000000002",
+                sessionId: newest.id,
+                type: "session_updated",
+            },
+            "01900000-0000-7000-8000-000000000009",
+        );
+
+        store.applyHello(
+            hello({
+                cursor: "01900000-0000-7000-8000-000000000001",
+                sessions: [{ ...newest, title: "Snapshot" }],
+            }),
+        );
+
+        expect(store.sessionSummary(newest.id)?.title).toBe("Newest");
+    });
+
     it("projects daemon identity and the global model catalog from the opening frame", () => {
         const store = new GroupStore();
         store.applyHello(
@@ -836,7 +940,14 @@ describe("GroupStore", () => {
         store.apply(
             event(
                 "session_updated",
-                { session: { cwd: "/work/p1", id: "s1", projectId: "p1", status: "running" } },
+                {
+                    session: {
+                        cwd: "/work/p1",
+                        id: "s1",
+                        scope: { kind: "project", projectId: "p1" },
+                        status: "running",
+                    },
+                },
                 { sessionId: "s1" },
             ),
         );

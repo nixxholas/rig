@@ -28,14 +28,14 @@ export function markGitStateFromSessionEvent(
     live?: { projectId: string; workspaceId?: string },
 ): void {
     if (!isWorkSignal(event)) return;
-    const session = live ?? store.get(event.sessionId)?.snapshot();
-    if (session === undefined) return;
-    const project = store.getProject(session.projectId);
+    const loaded = live ?? store.get(event.sessionId)?.projectIdentity();
+    if (loaded === undefined) return;
+    const project = store.getProject(loaded.projectId);
     if (project === undefined) return;
     const workspace =
-        session.workspaceId === undefined
+        loaded.workspaceId === undefined
             ? undefined
-            : store.getWorkspace(session.projectId, session.workspaceId);
+            : store.getWorkspace(loaded.projectId, loaded.workspaceId);
     const entity = resolveGitTrackedEntity(project, workspace);
     if (entity === undefined) return;
     tracker.markChanged(entity);

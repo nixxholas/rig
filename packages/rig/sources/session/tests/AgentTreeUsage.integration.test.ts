@@ -129,12 +129,14 @@ describe("agent tree usage session wiring", () => {
             });
             loadedSessions.push(root);
             await waitFor(
-                () => store?.getProject(root.snapshot().projectId),
+                () => store?.getProject(root.snapshot().projectId!),
                 (project) =>
                     project.initializationStatus === "ready" ||
                     project.initializationStatus === "failed",
             );
-            expect(store.getProject(root.snapshot().projectId)?.initializationStatus).toBe("ready");
+            expect(store.getProject(root.snapshot().projectId!)?.initializationStatus).toBe(
+                "ready",
+            );
 
             await submitAndWait(root, "First root turn.");
             expect(root.state()).toMatchObject({

@@ -16,7 +16,8 @@ import {
     createFolderRequestSchema as daemonCreateFolderRequestSchema,
     folderSchema as daemonFolderSchema,
     moveFolderRequestSchema as daemonMoveFolderRequestSchema,
-    setSessionFolderRequestSchema as daemonSetSessionFolderRequestSchema,
+    moveSessionRequestSchema as daemonMoveSessionRequestSchema,
+    sessionScopeSchema as daemonSessionScopeSchema,
     updateFolderRequestSchema as daemonUpdateFolderRequestSchema,
     discoverPluginCatalogRequestSchema as daemonDiscoverPluginCatalogRequestSchema,
     discoverPluginCatalogResponseSchema as daemonDiscoverPluginCatalogResponseSchema,
@@ -48,8 +49,9 @@ import {
     installPluginRequestSchema,
     moveFolderRequestSchema,
     rigProfileSchema,
+    moveSessionRequestSchema,
     projectWorkspaceSchema,
-    setSessionFolderRequestSchema,
+    sessionScopeSchema,
     systemNoticePayloadSchema,
     updateFolderRequestSchema,
 } from "@/protocol.js";
@@ -180,10 +182,7 @@ type _FolderResponse = Assignable<local.FolderResponse, daemon.FolderResponse>;
 type _CreateFolderRequest = Assignable<daemon.CreateFolderRequest, local.CreateFolderRequest>;
 type _UpdateFolderRequest = Assignable<daemon.UpdateFolderRequest, local.UpdateFolderRequest>;
 type _MoveFolderRequest = Assignable<daemon.MoveFolderRequest, local.MoveFolderRequest>;
-type _SetSessionFolderRequest = Assignable<
-    daemon.SetSessionFolderRequest,
-    local.SetSessionFolderRequest
->;
+type _SessionScope = Assignable<local.SessionScope, daemon.SessionScope>;
 type _HappyCloudStatus = Assignable<local.HappyCloudStatus, daemon.HappyCloudStatus>;
 type _HappyCloudChangedEvent = Assignable<
     local.HappyCloudChangedEvent,
@@ -456,7 +455,8 @@ describe("protocol conformance", () => {
         expect(createFolderRequestSchema).toStrictEqual(daemonCreateFolderRequestSchema);
         expect(updateFolderRequestSchema).toStrictEqual(daemonUpdateFolderRequestSchema);
         expect(moveFolderRequestSchema).toStrictEqual(daemonMoveFolderRequestSchema);
-        expect(setSessionFolderRequestSchema).toStrictEqual(daemonSetSessionFolderRequestSchema);
+        expect(moveSessionRequestSchema).toStrictEqual(daemonMoveSessionRequestSchema);
+        expect(sessionScopeSchema).toStrictEqual(daemonSessionScopeSchema);
     });
 
     it("accepts and refuses exactly the same folder payloads", () => {

@@ -1,6 +1,8 @@
 import { Buffer } from "node:buffer";
 import { isDeepStrictEqual } from "node:util";
 
+const REFRESH_SCOPE_RUNTIME = Symbol("refresh-scope-runtime");
+
 import { createId } from "@paralleldrive/cuid2";
 import { Executor } from "@slopus/rig-execution";
 import { areProviderModelsCompatible, type ProviderUsage } from "@slopus/rig-providers";
@@ -30,6 +32,7 @@ import type { BashContext } from "../agent/context/BashContext.js";
 import type { FolderContext } from "../agent/context/FolderContext.js";
 import type { SlotContext } from "../agent/context/SlotContext.js";
 import { FolderError, type FolderRepository } from "../folders/FolderRepository.js";
+import type { SessionScopeMove } from "../persistence/session/sessionMoveScope.js";
 import type { SlotEntryStore } from "../slots/index.js";
 import type { AppletStore } from "../applets/index.js";
 import {
@@ -72,6 +75,7 @@ import type {
     SessionPermissionReview,
     SessionInterruption,
     SessionStatus,
+    SessionScope,
     SessionSummary,
     SystemNoticePayload,
     SessionTokenCount,
@@ -279,13 +283,6 @@ export interface PersistedSessionState {
     contextMessages?: readonly Message[];
     createdAt?: number;
     effort?: string;
-    /**
-     * Folder this chat was filed into, absent while it is still Unsorted.
-     *
-     * Read back when a session is restored. Filing is the only thing that writes the column, so a
-     * saved session never carries it back and cannot undo a chat that was filed meanwhile.
-     */
-    folderId?: string;
     serviceTier?: ServiceTier;
     id: string;
     instructions?: string;
@@ -302,8 +299,8 @@ export interface PersistedSessionState {
     permissionMode: PermissionMode;
     permissionReviews?: readonly SessionPermissionReview[];
     pendingContextMessages?: readonly PersistedPendingContextMessage[];
-    projectId?: string;
-    workspaceId?: string;
+    scope: SessionScope;
+    unsortedSince?: number;
     secretIds?: readonly string[];
     queuedRuns: readonly PersistedQueuedRun[];
     recap?: string;
@@ -403,8 +400,9 @@ export interface InMemorySessionPersistence {
         cwd: string;
         sessionId: string;
         state: SessionWorkspaceTransferState;
+        projectId: string;
         workspaceId: string;
-    }): void;
+    }): string;
     upsertMessage(sessionId: string, message: PersistedSessionMessage): void;
     upsertExternalToolCall?(call: ExternalToolCall): void;
     upsertDurableUserInput?(call: DurableUserInputCall): void;
@@ -441,14 +439,13 @@ export interface InMemorySessionOptions {
     presence?: { state(): PresenceState };
     request: CreateSessionRequest;
     projectSecretIds?: readonly string[];
-    projectId?: string;
+    scope?: SessionScope;
     secretRegistry?: SecretRegistry;
     restore?: PersistedSessionState;
     /** The slot and applet stores this session's agent may drive through its common tools. */
     slotStores?: SessionSlotStores;
     taskDrain?: TaskDrain;
     workspaceFeatures?: WorkspaceFeatures;
-    workspaceId?: string;
     /** Durable server decision that gates every runtime and queued run for a managed workspace. */
     workspaceRunReadiness?: (target: {
         cwd: string;
@@ -614,7 +611,6 @@ export class InMemorySession {
         shadowed: new Map(),
     };
     #externalToolWaiters = new Map<string, ExternalToolWaiter>();
-    #folderId: string | undefined;
     #folders: FolderRepository | undefined;
     #instructions: string | undefined;
     #interruption: SessionInterruption | undefined;
@@ -672,7 +668,10 @@ export class InMemorySession {
     #slotStores: SessionSlotStores | undefined;
     #userInputPresenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
     #providerId: string;
-    #projectId: string;
+    #scope: SessionScope;
+    #unsortedSince: number | undefined;
+    #scopeRuntimeRefreshPending = false;
+    #scopeRuntimeRefresh: Promise<void> | undefined;
     #permissionMode: PermissionMode;
     #queue: PersistedQueuedRun[] = [];
     #recap: string | undefined;
@@ -689,7 +688,6 @@ export class InMemorySession {
     #unread: SessionUnreadState | undefined;
     #suspendedRunIds = new Set<string>();
     #systemPrompt: string | undefined;
-    #workspaceId: string | undefined;
     #suspendOnAbort = false;
     #shutdownCleanup: Promise<void> | undefined;
     #shellCommandCompletions = new Map<number, Promise<void>>();
@@ -794,9 +792,14 @@ export class InMemorySession {
                 options.request.permissionMode ??
                 DEFAULT_PERMISSION_MODE,
         );
-        this.#projectId = options.restore?.projectId ?? options.projectId ?? createId();
-        this.#workspaceId = options.restore?.workspaceId ?? options.workspaceId;
-        this.#folderId = options.restore?.folderId;
+        this.#scope =
+            options.restore?.scope ??
+            options.scope ??
+            ({ kind: "project", projectId: createId() } as const);
+        this.#unsortedSince =
+            this.#scope.kind === "unsorted"
+                ? (options.restore?.unsortedSince ?? this.#createdAt)
+                : undefined;
         // A subagent belongs to the session that started it, not to any ordered
         // list, so it holds no position no matter what a caller or an older
         // stored row supplies. An empty key is how "no position" is stored.
@@ -883,7 +886,7 @@ export class InMemorySession {
         this.#workspaceQueueWaiting = options.restore?.workspaceQueueWaiting === true;
         this.#workspaceReleaseMetadataBarrier =
             options.restore !== undefined &&
-            options.workspaceId !== undefined &&
+            this.#scope.kind === "workspace" &&
             options.restore.activeRunId === undefined &&
             this.#queue.length > 0 &&
             this.#workspaceQueueWaiting;
@@ -1663,7 +1666,7 @@ export class InMemorySession {
             );
         }
         this.#setWorkspaceTransferState({ status: "scheduled", targetWorkspaceId });
-        return { projectId: this.#projectId, sourceWorkspaceId };
+        return { projectId: this.#projectScope().projectId, sourceWorkspaceId };
     }
 
     beginWorkspaceTransfer(
@@ -1673,7 +1676,7 @@ export class InMemorySession {
         this.#assertAcceptingWork();
         const sourceWorkspaceId =
             options.scheduled === true
-                ? this.#workspaceId
+                ? this.#workspaceScope()?.workspaceId
                 : this.#workspaceTransferSource(targetWorkspaceId);
         if (sourceWorkspaceId === undefined) {
             throw new Error("Only a session in a managed workspace can be transferred.");
@@ -1700,14 +1703,14 @@ export class InMemorySession {
             );
         }
         this.#setWorkspaceTransferState({ status: "transferring", targetWorkspaceId });
-        return { projectId: this.#projectId, sourceWorkspaceId };
+        return { projectId: this.#projectScope().projectId, sourceWorkspaceId };
     }
 
     async completeWorkspaceTransfer(input: {
         commit: string;
         targetWorkspaceId: string;
         workspacePath: string;
-    }): Promise<ProtocolSession & { workspaceId: string }> {
+    }): Promise<ProtocolSession> {
         if (
             this.#workspaceTransfer.status !== "transferring" ||
             this.#workspaceTransfer.targetWorkspaceId !== input.targetWorkspaceId
@@ -1748,9 +1751,11 @@ export class InMemorySession {
             targetWorkspaceId: input.targetWorkspaceId,
         };
 
-        this.#persistence?.transferWorkspace?.({
+        const projectId = this.#projectScope().projectId;
+        const orderKey = this.#persistence?.transferWorkspace?.({
             contextMessages: nextContextMessages,
             cwd: input.workspacePath,
+            projectId,
             sessionId: this.id,
             state: succeeded,
             workspaceId: input.targetWorkspaceId,
@@ -1761,12 +1766,17 @@ export class InMemorySession {
             cwd: input.workspacePath,
             workspaceId: input.targetWorkspaceId,
         };
-        this.#workspaceId = input.targetWorkspaceId;
+        this.#scope = {
+            kind: "workspace",
+            projectId,
+            workspaceId: input.targetWorkspaceId,
+        };
+        if (orderKey !== undefined) this.#orderKey = orderKey;
         this.#git = undefined;
         this.#contextMessages = nextContextMessages;
         this.#workspaceTransfer = succeeded;
         this.#append("session_updated", { session: this.snapshot() });
-        return { ...this.snapshot(), workspaceId: input.targetWorkspaceId };
+        return this.snapshot();
     }
 
     failWorkspaceTransfer(
@@ -2190,11 +2200,12 @@ export class InMemorySession {
      * Project and workspace identity without building a protocol snapshot. Observers on hot paths
      * need only these two fields, and `snapshot()` walks every message to produce them.
      */
-    projectIdentity(): { projectId: string; workspaceId?: string } {
-        return {
-            projectId: this.#projectId,
-            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
-        };
+    projectIdentity(): { projectId: string; workspaceId?: string } | undefined {
+        if (this.#scope.kind === "project") return { projectId: this.#scope.projectId };
+        if (this.#scope.kind === "workspace") {
+            return { projectId: this.#scope.projectId, workspaceId: this.#scope.workspaceId };
+        }
+        return undefined;
     }
 
     /**
@@ -2204,14 +2215,144 @@ export class InMemorySession {
      * session only carries what was already accepted. A chat with no folder is Unsorted and is put
      * away on its own once it has been there long enough.
      */
-    fileIntoFolder(folderId: string | null): Folder | undefined {
+    fileIntoFolder(
+        folderId: string | null,
+        afterId?: string | null,
+        mutationId?: string,
+    ): Folder | undefined {
         const folders = this.#folderRepository();
-        folders.setSessionFolder(this.id, folderId);
+        if (afterId === undefined && folderId === null && this.#scope.kind === "unsorted") {
+            return undefined;
+        }
         const filed = folderId === null ? undefined : folders.getFolder(folderId);
-        if (this.#folderId === (folderId ?? undefined)) return filed;
-        this.#folderId = folderId ?? undefined;
-        this.#append("session_updated", { session: this.snapshot() });
+        if (
+            folderId !== null &&
+            afterId === undefined &&
+            this.#scope.kind === "folder" &&
+            this.#scope.folderId === folderId
+        ) {
+            return filed;
+        }
+        if (this.#persistence === undefined) {
+            if (folderId !== null && (filed === undefined || filed.archivedAt !== undefined)) {
+                throw new FolderError("folder_not_found", "That folder was not found.");
+            }
+            const storage =
+                folderId === null
+                    ? folders.createUnsortedSessionDirectory(this.id)
+                    : { created: false, path: folders.activeFolderStoragePath(folderId) };
+            try {
+                this.applyScopeMove({
+                    cwd: storage.path,
+                    orderKey: generateKeyBetween(null, null),
+                    scope: folderId === null ? { kind: "unsorted" } : { folderId, kind: "folder" },
+                    ...(folderId === null
+                        ? { unsortedSince: this.#unsortedSince ?? this.#now() }
+                        : {}),
+                });
+            } catch (error) {
+                if (storage.created) {
+                    folders.removeNewUnsortedSessionDirectory(this.id, storage.path);
+                }
+                throw error;
+            }
+            return filed;
+        }
+        const moved = folders.setSessionFolder(this.id, folderId, afterId, mutationId);
+        this.applyScopeMove(moved);
         return filed;
+    }
+
+    /** Applies a scope transition already committed by the owning store. */
+    applyScopeMove(moved: SessionScopeMove): void {
+        const executionContextChanged =
+            this.#request.cwd !== moved.cwd || !isDeepStrictEqual(this.#scope, moved.scope);
+        if (executionContextChanged && !this.isSubagent()) {
+            void this.#agentManager
+                ?.stopDescendantsForContextChange(this.id)
+                .catch(rethrowDatabaseFailure);
+        }
+        this.#scope = moved.scope;
+        this.#unsortedSince = moved.unsortedSince;
+        this.#orderKey = moved.orderKey;
+        if (executionContextChanged) {
+            const { docker: _docker, local: _local, ...request } = this.#request;
+            this.#request = { ...request, cwd: moved.cwd };
+            for (const secretId of this.#secrets.projectIds()) {
+                this.#secrets.detach(secretId, "project");
+            }
+            this.#scopeRuntimeRefreshPending = this.#runtime !== undefined;
+            if (this.#scopeRuntimeRefreshPending && this.#activeRun === undefined) {
+                this.#startScopeRuntimeRefresh();
+            }
+        }
+        this.#append("session_updated", { session: this.snapshot() });
+    }
+
+    /** Retires a runtime whose trusted folder metadata or virtual ancestry changed. */
+    folderContextChanged(): void {
+        if (this.#scope.kind !== "folder" || this.#runtime === undefined) return;
+        this.#scopeRuntimeRefreshPending = true;
+        if (this.#activeRun === undefined) this.#startScopeRuntimeRefresh();
+    }
+
+    /** Whether this session currently executes inside one of the supplied virtual folders. */
+    belongsToFolderContext(folderIds: ReadonlySet<string>): boolean {
+        return this.#scope.kind === "folder" && folderIds.has(this.#scope.folderId);
+    }
+
+    /** Retires this chat and its complete retained tree after its folder was archived. */
+    recordFolderArchived(): Promise<void> {
+        const descendants =
+            this.#agentManager?.stopDescendantsForContextChange(this.id) ?? Promise.resolve(0);
+        const own = this.retireForContextChange();
+        return Promise.all([descendants, own]).then(() => undefined);
+    }
+
+    /**
+     * Permanently retires a saved agent whose old execution context must never be resumed.
+     *
+     * The state transition happens synchronously before cleanup yields, so another caller cannot
+     * restart this session between the authority change and process teardown.
+     */
+    retireForContextChange(): Promise<void> {
+        if (this.#workspaceArchived) return this.beginShutdown();
+        const activeRun = this.#activeRun;
+        const runIds = new Set([
+            ...(activeRun === undefined ? [] : [activeRun.runId]),
+            ...(this.#restoredActiveRunId === undefined ? [] : [this.#restoredActiveRunId]),
+            ...this.#queue.map((run) => run.runId),
+        ]);
+        for (const runId of runIds) {
+            this.#cancelExternalToolCalls(runId);
+            this.#cancelDurableUserInputs(runId);
+            this.#cancelDurableWaits(runId);
+        }
+        const queuedRuns = this.#queue;
+        for (const run of queuedRuns) this.#persistence?.deleteQueuedRun(this.id, run.runId);
+        this.#queue = [];
+        for (const run of queuedRuns) {
+            this.#append("run_error", {
+                errorMessage: "The queued run was stopped because its execution context changed.",
+                modelLocked: false,
+                runId: run.runId,
+            });
+        }
+        this.#finishElapsedInterval();
+        this.#activeRun = undefined;
+        this.#restoredActiveRunId = undefined;
+        this.#activePartial = undefined;
+        this.#pendingSteeringMessages.clear();
+        this.#pendingSteeringContinuations.clear();
+        this.#suspendedRunIds.clear();
+        this.#suspendOnAbort = false;
+        this.#pauseActiveGoal();
+        this.#status = "archived";
+        this.#archived = true;
+        this.#append("session_archived", { archived: true });
+        this.#workspaceArchived = true;
+        activeRun?.controller.abort();
+        return this.beginShutdown();
     }
 
     setArchived(archived: boolean, mutationId?: string): ProtocolSession {
@@ -4048,9 +4189,8 @@ export class InMemorySession {
             agentId: this.#agentId,
             ...(this.#git === undefined ? {} : { git: structuredClone(this.#git) }),
             archived: this.#archived,
-            ...(this.#folderId === undefined ? {} : { folderId: this.#folderId }),
-            projectId: this.#projectId,
-            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
+            scope: { ...this.#scope },
+            ...scopeConvenienceFields(this.#scope),
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             ...(this.#appendSystemPrompt !== undefined
@@ -4123,9 +4263,8 @@ export class InMemorySession {
         return {
             id: this.id,
             archived: this.#archived,
-            ...(this.#folderId === undefined ? {} : { folderId: this.#folderId }),
-            projectId: this.#projectId,
-            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
+            scope: { ...this.#scope },
+            ...scopeConvenienceFields(this.#scope),
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             cwd: this.#request.cwd,
@@ -4220,8 +4359,8 @@ export class InMemorySession {
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
             permissionReviews: [...this.#permissionReviews.values()],
-            projectId: this.#projectId,
-            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
+            scope: { ...this.#scope },
+            ...(this.#unsortedSince === undefined ? {} : { unsortedSince: this.#unsortedSince }),
             workspaceTransfer: structuredClone(this.#workspaceTransfer),
             workspaceQueueWaiting: this.#workspaceQueueWaiting,
             secretIds: this.#secrets.sessionIds(),
@@ -5545,6 +5684,7 @@ export class InMemorySession {
         this.#activeSince ??= this.#now();
         let runtime: CodingAssistantRuntime | undefined;
         try {
+            await this.#settleScopeRuntimeRefresh();
             runtime = this.#ensureRuntime();
             const result = await runtime.agent.run({
                 signal: controller.signal,
@@ -5571,6 +5711,7 @@ export class InMemorySession {
             if (this.#activeRun?.runId === runId) this.#activeRun = undefined;
             this.#syncContextMessages();
             await this.#completePendingWorkspaceTransfer(runId);
+            await this.#settleScopeRuntimeRefresh();
             this.#saveSession();
         }
     }
@@ -6495,6 +6636,38 @@ export class InMemorySession {
         return folders;
     }
 
+    #folderScopeInstruction(): string | undefined {
+        if (this.#scope.kind === "unsorted") {
+            return [
+                "This chat is currently in Unsorted.",
+                `Its private physical working directory is ${JSON.stringify(this.#request.cwd)}.`,
+                "File it into a suitable folder once its purpose is clear.",
+            ].join("\n");
+        }
+        if (this.#scope.kind !== "folder") return undefined;
+        const folders = this.#folderRepository().listFolders();
+        const byId = new Map(folders.map((folder) => [folder.id, folder]));
+        const current = byId.get(this.#scope.folderId);
+        if (current === undefined) throw new Error("This chat's folder is no longer available.");
+        const physicalPath = this.#folderRepository().activeFolderStoragePath(current.id);
+        const ancestry: string[] = [];
+        const seen = new Set<string>();
+        let cursor: Folder | undefined = current;
+        while (cursor !== undefined && !seen.has(cursor.id)) {
+            ancestry.unshift(cursor.name);
+            seen.add(cursor.id);
+            cursor = cursor.parentId === undefined ? undefined : byId.get(cursor.parentId);
+        }
+        return [
+            `This chat belongs to the virtual folder ${JSON.stringify(ancestry.join(" / "))}.`,
+            `Its physical working directory is ${JSON.stringify(physicalPath)}.`,
+            ...(current.description === undefined
+                ? []
+                : [`Folder description: ${current.description}`]),
+            ...(current.rules === undefined ? [] : [`Folder rules:\n${current.rules}`]),
+        ].join("\n");
+    }
+
     /** The slot and applet surface handed to this session's tools, with this session as author. */
     #slotContext(): SlotContext {
         const stores = this.#slotStores;
@@ -6564,6 +6737,7 @@ export class InMemorySession {
         const agentManager = this.#agentManager;
         const appendSystemPrompt = [
             this.#appendSystemPrompt,
+            this.#folderScopeInstruction(),
             this.#presence === undefined
                 ? undefined
                 : modelPresenceInstruction(this.#presence.state(), false),
@@ -6572,11 +6746,9 @@ export class InMemorySession {
             .join("\n\n");
         const options: CreateCodingAssistantAgentOptions = {
             agentId: this.#agentId,
-            attachmentScope: {
-                projectId: this.#projectId,
-                sessionId: this.id,
-                ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
-            },
+            ...(this.projectIdentity() === undefined
+                ? {}
+                : { attachmentScope: { ...this.projectIdentity()!, sessionId: this.id } }),
             ...(agentManager === undefined
                 ? {}
                 : {
@@ -6695,7 +6867,11 @@ export class InMemorySession {
                 spawn: (request, signal) => agentManager.spawn(this.id, request, signal),
                 wait: (timeoutMs, signal) => agentManager.wait(this.id, timeoutMs, signal),
             };
-            if (!this.isSubagent() && this.#workspaceFeatures.workspaces) {
+            if (
+                !this.isSubagent() &&
+                this.#workspaceFeatures.workspaces &&
+                (this.#scope.kind === "project" || this.#scope.kind === "workspace")
+            ) {
                 const crossWorkspace = this.#workspaceFeatures.crossWorkspace;
                 const workspaceResult = (workspace: {
                     id: string;
@@ -6765,7 +6941,6 @@ export class InMemorySession {
         const snapshot = runtime.agent.snapshot();
         this.#runtime = runtime;
         this.#agentId = snapshot.id;
-        this.#appendSystemPrompt = snapshot.appendSystemPrompt;
         this.#providerId = runtime.executor.id;
         this.#modelId = snapshot.modelId;
         this.#effort = snapshot.effort;
@@ -7243,13 +7418,14 @@ export class InMemorySession {
             // leave the workspace unnamed for good.
             const named = this.#metadataNamed;
             this.#metadataNamed = true;
-            if (!named && this.#workspaceId !== undefined) {
+            const workspaceScope = this.#workspaceScope();
+            if (!named && workspaceScope !== undefined) {
                 try {
                     this.#onInitialTitle?.({
-                        projectId: this.#projectId,
+                        projectId: workspaceScope.projectId,
                         sessionId: this.id,
                         title: metadata.title,
-                        workspaceId: this.#workspaceId,
+                        workspaceId: workspaceScope.workspaceId,
                     });
                 } catch (error) {
                     if (isDatabaseFailure(error)) throw error;
@@ -7357,6 +7533,7 @@ export class InMemorySession {
                 runId: queued.runId,
                 sessionId: this.id,
             });
+            await this.#settleScopeRuntimeRefresh();
             runtime = this.#ensureRuntime();
             await this.#ensureMcpTools(runtime, controller.signal, queued.interactive !== false);
             const runtimeSnapshot = runtime.agent.snapshot();
@@ -7377,29 +7554,49 @@ export class InMemorySession {
                 this.#saveSession();
             }
             for (;;) {
-                const result = await runtime.agent.run({
-                    ...(debugLog === undefined ? {} : { debug: debugLog }),
-                    beforeInference: async () => {
-                        const revision = runtime!.agent.context.worklets?.toolRevision?.();
-                        if (revision === undefined || revision === this.#workletToolRevision) {
-                            return;
-                        }
-                        await this.#ensureMcpTools(
-                            runtime!,
-                            controller.signal,
-                            queued.interactive !== false,
-                        );
-                    },
-                    signal: controller.signal,
-                    onEvent: async (event) => {
-                        this.#appendAgentEvent(queued.runId, event);
-                        await debugLog?.record("agent-event", { event, runId: queued.runId });
-                    },
-                    onMessage: async (message) => {
-                        this.#appendAgentMessage(queued.runId, message);
-                        await debugLog?.record("agent-message", { message, runId: queued.runId });
-                    },
-                });
+                let result: AgentRunResult;
+                try {
+                    result = await runtime.agent.run({
+                        ...(debugLog === undefined ? {} : { debug: debugLog }),
+                        beforeInference: async () => {
+                            if (this.#scopeRuntimeRefreshPending) {
+                                throw REFRESH_SCOPE_RUNTIME;
+                            }
+                            const revision = runtime!.agent.context.worklets?.toolRevision?.();
+                            if (revision === undefined || revision === this.#workletToolRevision) {
+                                return;
+                            }
+                            await this.#ensureMcpTools(
+                                runtime!,
+                                controller.signal,
+                                queued.interactive !== false,
+                            );
+                        },
+                        signal: controller.signal,
+                        onEvent: async (event) => {
+                            this.#appendAgentEvent(queued.runId, event);
+                            await debugLog?.record("agent-event", { event, runId: queued.runId });
+                        },
+                        onMessage: async (message) => {
+                            this.#appendAgentMessage(queued.runId, message);
+                            await debugLog?.record("agent-message", {
+                                message,
+                                runId: queued.runId,
+                            });
+                        },
+                    });
+                } catch (error) {
+                    if (error !== REFRESH_SCOPE_RUNTIME) throw error;
+                    this.#syncContextMessages();
+                    await this.#settleScopeRuntimeRefresh();
+                    runtime = this.#ensureRuntime();
+                    await this.#ensureMcpTools(
+                        runtime,
+                        controller.signal,
+                        queued.interactive !== false,
+                    );
+                    continue;
+                }
                 if (this.#activeRun?.runId !== queued.runId) {
                     return;
                 }
@@ -7499,6 +7696,7 @@ export class InMemorySession {
                 this.#syncContextMessages();
                 await this.#completePendingWorkspaceTransfer(queued.runId);
             }
+            await this.#settleScopeRuntimeRefresh();
             this.#saveSession();
             await this.#closeDebugLog(queued);
         }
@@ -7609,14 +7807,37 @@ export class InMemorySession {
     }
 
     #currentWorkspaceRunReadiness(): WorkspaceRunReadiness {
-        if (this.#workspaceId === undefined) return { state: "ready" };
+        const workspace = this.#workspaceScope();
+        if (workspace === undefined) return { state: "ready" };
         return (
             this.#workspaceRunReadiness?.({
                 cwd: this.#request.cwd,
-                projectId: this.#projectId,
-                workspaceId: this.#workspaceId,
+                projectId: workspace.projectId,
+                workspaceId: workspace.workspaceId,
             }) ?? { state: "ready" }
         );
+    }
+
+    #projectScope(): Extract<SessionScope, { kind: "project" | "workspace" }> {
+        if (this.#scope.kind === "project" || this.#scope.kind === "workspace") return this.#scope;
+        throw new Error("This operation is available only in a project or workspace chat.");
+    }
+
+    #workspaceScope(): Extract<SessionScope, { kind: "workspace" }> | undefined {
+        return this.#scope.kind === "workspace" ? this.#scope : undefined;
+    }
+
+    #startScopeRuntimeRefresh(): void {
+        if (!this.#scopeRuntimeRefreshPending || this.#scopeRuntimeRefresh !== undefined) return;
+        this.#scopeRuntimeRefreshPending = false;
+        this.#scopeRuntimeRefresh = this.#teardownRuntimeForWorkspaceTransfer().finally(() => {
+            this.#scopeRuntimeRefresh = undefined;
+        });
+    }
+
+    async #settleScopeRuntimeRefresh(): Promise<void> {
+        this.#startScopeRuntimeRefresh();
+        await this.#scopeRuntimeRefresh;
     }
 
     #assertAcceptingWork(): void {
@@ -7699,7 +7920,7 @@ export class InMemorySession {
         ) {
             throw new Error("This session already has a workspace transfer in progress.");
         }
-        const sourceWorkspaceId = this.#workspaceId;
+        const sourceWorkspaceId = this.#workspaceScope()?.workspaceId;
         if (sourceWorkspaceId === undefined) {
             throw new Error("Only a session in a managed workspace can be transferred.");
         }
@@ -8080,10 +8301,6 @@ function cloneWorkflowRun(run: WorkflowRun): WorkflowRun {
     };
 }
 
-function textOfContentBlocks(blocks: readonly ContentBlock[]): string {
-    return blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
-}
-
 function modelPresenceInstruction(state: PresenceState, changed: boolean): string {
     const presence = state.presence;
     const lines = [
@@ -8206,4 +8423,16 @@ function requireFolder(folder: Folder | undefined): Folder {
         throw new FolderError("folder_not_found", "That folder was not found.");
     }
     return folder;
+}
+
+function scopeConvenienceFields(scope: SessionScope): {
+    folderId?: string;
+    projectId?: string;
+    workspaceId?: string;
+} {
+    if (scope.kind === "project") return { projectId: scope.projectId };
+    if (scope.kind === "workspace") {
+        return { projectId: scope.projectId, workspaceId: scope.workspaceId };
+    }
+    return scope.kind === "folder" ? { folderId: scope.folderId } : {};
 }

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { FolderStore } from "@/FolderStore.js";
-import type { Folder, GlobalEvent, GlobalStreamHello } from "@/protocol.js";
+import type {
+    Folder,
+    GlobalEvent,
+    GlobalStreamHello,
+    SessionScope,
+    SessionSummary,
+} from "@/protocol.js";
 
 function folder(id: string, overrides: Partial<Folder> = {}): Folder {
     return {
@@ -16,15 +22,41 @@ function folder(id: string, overrides: Partial<Folder> = {}): Folder {
     };
 }
 
-function hello(folders: readonly Folder[], cursor = "c1"): GlobalStreamHello {
+function session(
+    id: string,
+    scope: SessionScope,
+    orderKey: string,
+    overrides: Partial<SessionSummary> = {},
+): SessionSummary {
+    return {
+        archived: false,
+        createdAt: 1,
+        cwd: "/work",
+        id,
+        modelId: "model",
+        orderKey,
+        permissionMode: "auto",
+        providerId: "codex",
+        scope,
+        status: "idle",
+        titleStatus: "ready",
+        updatedAt: 1,
+        ...overrides,
+    };
+}
+
+function hello(
+    folders: readonly Folder[],
+    sessions: readonly SessionSummary[] = [],
+): GlobalStreamHello {
     return {
         catalog: {
-            defaultModelId: "sonnet-5",
-            defaultProviderId: "claude",
+            defaultModelId: "model",
+            defaultProviderId: "codex",
             models: [],
             providers: [],
         },
-        cursor,
+        cursor: "c1",
         folders,
         identity: { version: "test" },
         presence: {
@@ -32,7 +64,7 @@ function hello(folders: readonly Folder[], cursor = "c1"): GlobalStreamHello {
                 answerWaitMs: null,
                 emoji: "🟢",
                 id: "online",
-                prompt: "The user is at the keyboard.",
+                prompt: "Online",
                 title: "Online",
             },
             presences: [],
@@ -40,233 +72,134 @@ function hello(folders: readonly Folder[], cursor = "c1"): GlobalStreamHello {
         },
         projects: [],
         protocolVersion: 11,
-        sessions: [],
+        sessions,
         sessionsComplete: true,
         terminalGroups: [],
         workspaces: [],
     };
 }
 
-function created(value: Folder, id = `e-${value.id}-${String(value.version)}`): GlobalEvent {
-    return {
-        createdAt: 1,
-        data: { folder: value },
-        folderId: value.id,
-        id,
-        type: "folder_created",
-    };
-}
-
-function updated(value: Folder, id = `e-${value.id}-${String(value.version)}`): GlobalEvent {
+function updated(value: SessionSummary): GlobalEvent {
     return {
         createdAt: 2,
-        data: { folder: value },
-        folderId: value.id,
-        id,
-        type: "folder_updated",
+        data: { session: value },
+        id: "event-2",
+        sessionId: value.id,
+        type: "session_updated",
     };
 }
 
-/** The names in the tree, depth first, each nested level indented by a slash. */
 function outline(store: FolderStore): string[] {
-    const lines: string[] = [];
-    const walk = (
-        nodes: readonly { children: readonly never[]; name: string }[],
-        depth: number,
-    ) => {
+    const result: string[] = [];
+    const visit = (nodes: ReturnType<FolderStore["folders"]>, depth: number): void => {
         for (const node of nodes) {
-            lines.push(`${"/".repeat(depth)}${node.name}`);
-            walk(node.children, depth + 1);
+            result.push(`${"/".repeat(depth)}${node.name}`);
+            visit(node.children, depth + 1);
         }
     };
-    walk(store.folders() as never, 0);
-    return lines;
+    visit(store.folders(), 0);
+    return result;
 }
 
 describe("FolderStore", () => {
-    it("nests the whole tree carried by the opening catalog", () => {
-        const store = new FolderStore();
-
-        const deltas = store.applyHello(
-            hello([
-                folder("media", { orderKey: "a" }),
-                folder("videos", { orderKey: "a", parentId: "media" }),
-                folder("stills", { orderKey: "b", parentId: "media" }),
-                folder("writing", { orderKey: "b" }),
-            ]),
-        );
-
-        expect(outline(store)).toEqual(["media", "/videos", "/stills", "writing"]);
-        expect(deltas[0]).toMatchObject({ type: "folders_changed" });
-        expect(deltas.filter((delta) => delta.type === "folder_added")).toHaveLength(4);
-        expect(store.folders()[0]?.path).toBe("/work/folders/media");
-    });
-
-    it("adds a folder created live and applies a later change to it", () => {
-        const store = new FolderStore();
-        store.applyHello(hello([folder("media", { orderKey: "a" })]));
-
-        const added = store.apply(created(folder("writing", { orderKey: "b" })));
-        expect(added).toContainEqual({ folderId: "writing", type: "folder_added" });
-        expect(outline(store)).toEqual(["media", "writing"]);
-
-        const renamed = store.apply(
-            updated(folder("writing", { name: "Notes", orderKey: "b", version: 2 })),
-        );
-        expect(renamed.filter((delta) => delta.type === "folder_added")).toEqual([]);
-        expect(outline(store)).toEqual(["media", "Notes"]);
-    });
-
-    it("ignores a folder update that is older than what it already holds", () => {
-        const store = new FolderStore();
-        store.applyHello(hello([folder("media", { name: "Media", version: 4 })]));
-
-        expect(store.apply(updated(folder("media", { name: "Stale", version: 3 })))).toEqual([]);
-        expect(store.folder("media")?.name).toBe("Media");
-    });
-
-    it("reorders siblings when a move gives one a new order key", () => {
+    it("projects nested folders, their independently ordered chats, and global Unsorted", () => {
         const store = new FolderStore();
         store.applyHello(
-            hello([
-                folder("media", { orderKey: "a" }),
-                folder("writing", { orderKey: "b" }),
-                folder("travel", { orderKey: "c" }),
-            ]),
-        );
-        expect(outline(store)).toEqual(["media", "writing", "travel"]);
-
-        // The daemon derived this key from the drop; the client never invents one.
-        store.apply(updated(folder("travel", { orderKey: "a5", version: 2 })));
-
-        expect(outline(store)).toEqual(["media", "travel", "writing"]);
-    });
-
-    it("moves a folder under a new parent when the daemon reparents it", () => {
-        const store = new FolderStore();
-        store.applyHello(
-            hello([folder("media", { orderKey: "a" }), folder("videos", { orderKey: "b" })]),
-        );
-
-        store.apply(updated(folder("videos", { orderKey: "a0", parentId: "media", version: 2 })));
-
-        expect(outline(store)).toEqual(["media", "/videos"]);
-    });
-
-    it("drops an archived folder and everything the daemon archived with it", () => {
-        const store = new FolderStore();
-        store.applyHello(
-            hello([
-                folder("media", { orderKey: "a" }),
-                folder("videos", { orderKey: "a", parentId: "media" }),
-                folder("writing", { orderKey: "b" }),
-            ]),
-        );
-
-        // Archiving a folder archives its whole subtree, one update per folder.
-        store.apply(updated(folder("videos", { orderKey: "a", parentId: "media", version: 2 })));
-        const deltas = [
-            ...store.apply(
-                updated(
-                    folder("videos", {
-                        archivedAt: 9,
-                        orderKey: "a",
-                        parentId: "media",
-                        version: 3,
-                    }),
-                ),
+            hello(
+                [
+                    folder("media", { orderKey: "a" }),
+                    folder("video", { orderKey: "a", parentId: "media" }),
+                ],
+                [
+                    session("folder-b", { folderId: "media", kind: "folder" }, "b"),
+                    session("folder-a", { folderId: "media", kind: "folder" }, "a"),
+                    session("unsorted-b", { kind: "unsorted" }, "b"),
+                    session("unsorted-a", { kind: "unsorted" }, "a"),
+                    session("project", { kind: "project", projectId: "p1" }, "a"),
+                    session(
+                        "workspace",
+                        { kind: "workspace", projectId: "p1", workspaceId: "w1" },
+                        "a",
+                    ),
+                ],
             ),
-            ...store.apply(updated(folder("media", { archivedAt: 9, orderKey: "a", version: 2 }))),
-        ];
+        );
 
-        expect(outline(store)).toEqual(["writing"]);
-        expect(deltas).toContainEqual({ folderId: "videos", type: "folder_removed" });
-        expect(deltas).toContainEqual({ folderId: "media", type: "folder_removed" });
+        expect(outline(store)).toEqual(["media", "/video"]);
+        expect(store.folders()[0]?.sessions.map((item) => item.id)).toEqual([
+            "folder-a",
+            "folder-b",
+        ]);
+        expect(store.unsorted().map((item) => item.id)).toEqual(["unsorted-a", "unsorted-b"]);
     });
 
-    it("keeps a folder that a catalog snapshot reports at an older version", () => {
+    it("moves a streamed chat atomically between Unsorted and one folder", () => {
         const store = new FolderStore();
-        store.apply(created(folder("media", { name: "Media", version: 5 })));
+        const unsorted = session("chat", { kind: "unsorted" }, "a");
+        store.applyHello(hello([folder("media")], [unsorted]));
 
-        store.applyHello(hello([folder("media", { name: "Older", version: 4 })], "c2"));
+        const deltas = store.apply(
+            updated({ ...unsorted, scope: { folderId: "media", kind: "folder" } }),
+        );
 
-        expect(store.folder("media")?.name).toBe("Media");
+        expect(store.unsorted()).toEqual([]);
+        expect(store.folders()[0]?.sessions.map((item) => item.id)).toEqual(["chat"]);
+        expect(deltas.filter((delta) => delta.type === "folders_changed")).toHaveLength(1);
     });
 
-    it("keeps every unrelated folder as the same object across a change", () => {
+    it("keeps unrelated folder and session references stable", () => {
+        const store = new FolderStore();
+        const mediaChat = session("media-chat", { folderId: "media", kind: "folder" }, "a");
+        const writingChat = session("writing-chat", { folderId: "writing", kind: "folder" }, "a");
+        store.applyHello(
+            hello(
+                [folder("media", { orderKey: "a" }), folder("writing", { orderKey: "b" })],
+                [mediaChat, writingChat],
+            ),
+        );
+        const media = store.folders()[0];
+        const mediaSession = media?.sessions[0];
+
+        store.apply(updated({ ...writingChat, title: "Changed", updatedAt: 2 }));
+
+        expect(store.folders()[0]).toBe(media);
+        expect(store.folders()[0]?.sessions[0]).toBe(mediaSession);
+        expect(store.folders()[1]?.sessions[0]?.title).toBe("Changed");
+    });
+
+    it("archives a complete subtree in one optimistic frame and restores it on undo", () => {
         const store = new FolderStore();
         store.applyHello(
             hello([
                 folder("media", { orderKey: "a" }),
-                folder("videos", { orderKey: "a", parentId: "media" }),
+                folder("video", { orderKey: "a", parentId: "media" }),
                 folder("writing", { orderKey: "b" }),
             ]),
         );
-        const before = store.folders();
-        const media = before[0];
-        const writing = before[1];
 
-        store.apply(updated(folder("writing", { name: "Notes", orderKey: "b", version: 2 })));
+        const changed = store.applyOptimisticArchive("media", 10);
+        expect(outline(store)).toEqual(["writing"]);
+        expect(changed.deltas.filter((delta) => delta.type === "folders_changed")).toHaveLength(1);
 
-        const after = store.folders();
-        expect(after).not.toBe(before);
-        expect(after[0]).toBe(media);
-        expect(after[0]?.children[0]).toBe(media?.children[0]);
-        expect(after[1]).not.toBe(writing);
-        expect(after[1]?.name).toBe("Notes");
+        changed.undo();
+        expect(outline(store)).toEqual(["media", "/video", "writing"]);
     });
 
-    it("reports nothing and keeps the tree object when a snapshot changes nothing", () => {
+    it("preserves a newer known folder when an older snapshot arrives", () => {
+        const store = new FolderStore();
+        store.replaceFolders([folder("media", { name: "New", version: 4 })]);
+
+        store.replaceFolders([folder("media", { name: "Old", version: 3 })]);
+
+        expect(store.folder("media")?.name).toBe("New");
+    });
+
+    it("keeps an unchanged application view by reference", () => {
         const store = new FolderStore();
         store.applyHello(hello([folder("media")]));
-        const before = store.folders();
+        const before = store.view();
 
-        expect(store.applyHello(hello([folder("media")], "c2"))).toEqual([]);
-        expect(store.folders()).toBe(before);
-    });
-
-    it("draws a folder at the root while its parent is not in the tree", () => {
-        const store = new FolderStore();
-
-        store.applyHello(hello([folder("videos", { parentId: "media" })]));
-
-        expect(outline(store)).toEqual(["videos"]);
-        expect(store.folders()[0]?.parentId).toBe("media");
-    });
-
-    it("orders siblings that share an order key by their identity", () => {
-        const store = new FolderStore();
-
-        store.applyHello(
-            hello([folder("writing", { orderKey: "a" }), folder("media", { orderKey: "a" })]),
-        );
-
-        expect(outline(store)).toEqual(["media", "writing"]);
-    });
-
-    it("reports the connection state a view renders while the stream is away", () => {
-        const store = new FolderStore();
-
-        expect(store.state()).toEqual({ connection: "connecting" });
-        expect(store.setConnection("live")).toEqual([
-            { state: { connection: "live" }, type: "folders_state_changed" },
-        ]);
-        expect(store.setConnection("live")).toEqual([]);
-        expect(store.setConnection("reconnecting")).toEqual([
-            { state: { connection: "reconnecting" }, type: "folders_state_changed" },
-        ]);
-    });
-
-    it("ignores an event that is not about a folder", () => {
-        const store = new FolderStore();
-
-        expect(
-            store.apply({
-                createdAt: 1,
-                data: { presence: undefined as never },
-                id: "e1",
-                type: "presence_changed",
-            }),
-        ).toEqual([]);
+        expect(store.applyHello(hello([folder("media")]))).toEqual([]);
+        expect(store.view()).toBe(before);
     });
 });

@@ -1150,6 +1150,9 @@ function toHappySession(
     if (agentId === undefined) {
         throw new Error(`Rig could not resolve the agent for session ${session.id}.`);
     }
+    if (session.projectId === undefined) {
+        throw new Error("Happy plugin sessions must belong to a project or workspace.");
+    }
     return {
         agentId,
         archived: session.archived,

@@ -54,7 +54,7 @@ describe("PersistentSessionStore", () => {
                 workspacesDirectory: join(root, "workspaces"),
             });
             const owner = store.create({ cwd: repository });
-            const workspace = await store.createWorkspace(owner.snapshot().projectId, {
+            const workspace = await store.createWorkspace(owner.snapshot().projectId!, {
                 baseRef: "HEAD",
                 id: "w6q0tc4rmq9f4a6adczq9eis",
                 name: "Waiting",
@@ -3658,6 +3658,7 @@ function sessionState(overrides: Partial<PersistedSessionState> = {}): Persisted
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],
+        scope: { kind: "project", projectId: "project-1" },
         nextTaskId: 1,
         status: "idle",
         tasks: [],

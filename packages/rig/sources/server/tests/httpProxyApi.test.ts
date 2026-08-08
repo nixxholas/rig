@@ -41,7 +41,7 @@ describe("daemon HTTP proxy", () => {
         const rig = await startRigProxy();
         try {
             const session = await rig.client.createSession({ cwd: "/tmp/rig-http-proxy" });
-            const scope = { projectId: session.session.projectId };
+            const scope = { projectId: session.session.projectId! };
             const port = (upstream.address() as AddressInfo).port;
             const response = await rig.client.proxyHttpRequest(scope, {
                 body: Buffer.from("request body"),
@@ -80,7 +80,7 @@ describe("daemon HTTP proxy", () => {
         const rig = await startRigProxy();
         try {
             const session = await rig.client.createSession({ cwd: "/tmp/rig-connect-proxy" });
-            const scope = { projectId: session.session.projectId };
+            const scope = { projectId: session.session.projectId! };
             const port = (upstream.address() as AddressInfo).port;
             const tunnel = await rig.client.connectHttpProxy(scope, `127.0.0.1:${String(port)}`);
             const echoed = new Promise<string>((resolve) => {
@@ -92,7 +92,7 @@ describe("daemon HTTP proxy", () => {
 
             const unauthorized = await rawTunnelRequest(
                 rig.socketPath,
-                `/projects/${encodeURIComponent(session.session.projectId)}/proxy`,
+                `/projects/${encodeURIComponent(session.session.projectId!)}/proxy`,
             );
             expect(unauthorized).toBe(401);
             const oldSessionRoute = await rawTunnelRequest(
@@ -115,7 +115,7 @@ describe("daemon HTTP proxy", () => {
             const session = await rig.client.createSession({ cwd: "/tmp/rig-close-proxy" });
             const port = (upstream.address() as AddressInfo).port;
             const tunnel = await rig.client.connectHttpProxy(
-                { projectId: session.session.projectId },
+                { projectId: session.session.projectId! },
                 `127.0.0.1:${String(port)}`,
             );
             const closed = new Promise<void>((resolve) => tunnel.once("close", () => resolve()));
@@ -146,7 +146,7 @@ describe("daemon HTTP proxy", () => {
                 cwd: "/tmp/rig-docker-proxy",
                 docker: { container: "not-started", workingDirectory: "/workspace" },
             });
-            const scope = { projectId: session.session.projectId };
+            const scope = { projectId: session.session.projectId! };
             const response = await rig.client.proxyHttpRequest(scope, { url: target });
             expect(response.statusCode).toBe(200);
             expect(await readText(response.body)).toBe("unexpected");

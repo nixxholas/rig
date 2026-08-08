@@ -24,9 +24,12 @@ export function queryExpiredUnsortedSessions(
             sql`
                 SELECT id FROM sessions
                 WHERE unsorted_since_ms IS NOT NULL
+                    AND scope_kind = 'unsorted'
                     AND unsorted_since_ms <= ${unsortedBefore}
                     AND folder_id IS NULL
                     AND archived = 0
+                    AND active_run_id IS NULL
+                    AND status NOT IN ('queued', 'running')
                     AND session_kind = 'primary'
                     AND parent_session_id IS NULL
                     AND delegated_by_session_id IS NULL

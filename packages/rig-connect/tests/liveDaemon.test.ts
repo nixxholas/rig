@@ -105,7 +105,7 @@ describe("rig-connect against a live daemon", () => {
                     pendingSteeringMessages: [],
                     pendingUserInputs: [],
                     permissionMode: session.snapshot().permissionMode,
-                    projectId: session.snapshot().projectId,
+                    scope: session.snapshot().scope,
                     sessionId: session.id,
                     shellCommands: [],
                     subagents: [],

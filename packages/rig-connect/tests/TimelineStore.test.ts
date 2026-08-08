@@ -156,7 +156,7 @@ describe("TimelineStore", () => {
                     agentId: "agent-new",
                     id: "new",
                     modelId: "model",
-                    projectId: "p1",
+                    scope: { kind: "project", projectId: "p1" },
                     providerId: "codex",
                     title: "Fix the parser",
                 },
@@ -182,7 +182,7 @@ describe("TimelineStore", () => {
                     id: "far",
                     modelId: "model",
                     // A project this chart was never told about; global means global.
-                    projectId: "some-other-project",
+                    scope: { kind: "project", projectId: "some-other-project" },
                     providerId: "codex",
                 },
             }),
@@ -201,7 +201,7 @@ describe("TimelineStore", () => {
                     agentId: "agent-other",
                     id: "other",
                     modelId: "model",
-                    projectId: "p2",
+                    scope: { kind: "project", projectId: "p2" },
                     providerId: "codex",
                 },
             }),
@@ -281,7 +281,7 @@ describe("TimelineStore", () => {
             createdAt: 0,
             depth: 0,
             modelId: "model",
-            projectId: "p1",
+            scope: { kind: "project", projectId: "p1" },
             providerId: "codex",
             sessionId: "s",
             type: "primary",
@@ -308,7 +308,9 @@ function snapshot(agents: readonly TimelineAgent[]): GetTimelineResponse {
 }
 
 function scopeFor(agent: TimelineAgent): GetTimelineResponse["scope"] {
-    return { kind: "project", projectId: agent.projectId };
+    return agent.scope.kind === "project" || agent.scope.kind === "workspace"
+        ? { kind: "project", projectId: agent.scope.projectId }
+        : { kind: "global" };
 }
 
 function agent(overrides: Partial<TimelineAgent> & { sessionId: string }): TimelineAgent {
@@ -318,7 +320,7 @@ function agent(overrides: Partial<TimelineAgent> & { sessionId: string }): Timel
         depth: 0,
         label: "Untitled chat",
         modelId: "model",
-        projectId: "p1",
+        scope: { kind: "project", projectId: "p1" },
         providerId: "codex",
         spans: [],
         type: "primary",

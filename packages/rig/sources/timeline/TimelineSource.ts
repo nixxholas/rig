@@ -1,4 +1,4 @@
-import type { SessionAgentType } from "../protocol/index.js";
+import type { SessionAgentType, SessionScope } from "../protocol/index.js";
 
 /**
  * Everything the fold needs to know about one agent.
@@ -16,7 +16,7 @@ export interface TimelineAgentSource {
     modelId: string;
     parentSessionId?: string;
     parentToolCallId?: string;
-    projectId: string;
+    scope: SessionScope;
     providerId: string;
     sessionId: string;
     taskName?: string;
@@ -24,5 +24,4 @@ export interface TimelineAgentSource {
     type: SessionAgentType;
     /** True while the session still has work in flight, which leaves a span open. */
     working: boolean;
-    workspaceId?: string;
 }

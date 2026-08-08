@@ -32,7 +32,7 @@ describe("InMemorySession abort", () => {
                 modelId: "test/parent-abort",
                 providerId: "test",
             },
-            workspaceId: "workspace-1",
+            scope: { kind: "workspace", projectId: "project-1", workspaceId: "workspace-1" },
         });
         const session = new InMemorySession({
             createEventId: createEventIdFactory(),
@@ -102,7 +102,7 @@ describe("InMemorySession abort", () => {
                 providers: [{ models: [model], providerId: provider.id }],
             },
             request: { cwd: "/tmp/rig-archive-active-run", modelId: model.id },
-            workspaceId: "workspace-1",
+            scope: { kind: "workspace", projectId: "project-1", workspaceId: "workspace-1" },
         });
 
         session.submit({ text: "Keep running until archival." });

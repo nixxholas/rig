@@ -144,6 +144,7 @@ function createRestoredSession(
         ],
         providerId: "test",
         queuedRuns: [],
+        scope: { kind: "project", projectId: "project-1" },
         status: "completed",
         tasks: [],
         titleStatus: "ready",

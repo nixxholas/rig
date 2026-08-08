@@ -55,6 +55,12 @@ export function createHappySessionMetadata(options: {
     const runningWorkflows = workflows.filter((workflow) => workflow.status === "running").length;
     const processes = session.backgroundProcesses ?? [];
     const tasks = session.tasks ?? [];
+    const happyProjectId =
+        session.scope.kind === "project" || session.scope.kind === "workspace"
+            ? session.scope.projectId
+            : session.scope.kind === "folder"
+              ? `folder:${session.scope.folderId}`
+              : `unsorted:${session.id}`;
 
     return {
         activity: {
@@ -143,7 +149,7 @@ export function createHappySessionMetadata(options: {
         path: session.cwd,
         permissionMode: session.permissionMode,
         project: options.project ?? {
-            id: session.projectId,
+            id: happyProjectId,
             kind: "regular",
             name: session.cwd.split(/[\\/]/u).filter(Boolean).at(-1) ?? "Project",
         },

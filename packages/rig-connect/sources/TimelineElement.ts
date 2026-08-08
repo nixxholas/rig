@@ -1,5 +1,5 @@
 import type { ConnectionState } from "./ChatElement.js";
-import type { TimelineScope, TimelineSpan } from "./protocol.js";
+import type { SessionScope, TimelineScope, TimelineSpan } from "./protocol.js";
 
 /**
  * One agent's row in the chart, with the agents it started nested inside it.
@@ -18,14 +18,13 @@ export interface TimelineAgentNode {
     readonly modelId: string;
     readonly parentSessionId?: string;
     readonly parentToolCallId?: string;
-    readonly projectId: string;
+    readonly scope: SessionScope;
     readonly providerId: string;
     readonly sessionId: string;
     readonly spans: readonly TimelineSpan[];
     /** When this agent first did anything, which is where its bar begins. */
     readonly startedAt: number;
     readonly type: "primary" | "subagent";
-    readonly workspaceId?: string;
 }
 
 /** Live facts about the chart as a whole. */

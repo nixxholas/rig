@@ -17,6 +17,7 @@ import {
     readOptionalString,
     readString,
 } from "./impl/sqliteRow.js";
+import { sessionScopeFromRow } from "./impl/sessionScope.js";
 
 export function querySessionSummaries(
     tx: TX,
@@ -27,7 +28,7 @@ export function querySessionSummaries(
         SELECT listed_sessions.*
         FROM (
             SELECT
-                id, project_id, workspace_id, folder_id, order_key, archived, track_unread,
+                id, scope_kind, project_id, workspace_id, folder_id, order_key, archived, track_unread,
                 unread_reason, unread_since_ms, cwd, draft, draft_updated_at_ms,
                 docker_json, secret_ids_json, provider_id, model_id, permission_mode,
                 effort, service_tier, status, title, title_status, title_error, recap,
@@ -38,11 +39,11 @@ export function querySessionSummaries(
             WHERE parent_session_id IS NULL
                 ${activeOnly ? sql`AND archived = 0` : sql``}
         ) AS listed_sessions
-        JOIN projects ON projects.id = listed_sessions.project_id
+        LEFT JOIN projects ON projects.id = listed_sessions.project_id
         LEFT JOIN project_workspaces ON project_workspaces.id = listed_sessions.workspace_id
         ORDER BY
+            listed_sessions.scope_kind ASC,
             projects.order_key ASC,
-            listed_sessions.workspace_id IS NOT NULL ASC,
             project_workspaces.order_key ASC,
             listed_sessions.order_key ASC,
             listed_sessions.id ASC
@@ -70,18 +71,20 @@ export function querySessionSummaries(
                 : (JSON.parse(dockerJson) as DockerExecutionConfig);
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
-        const workspaceId = readOptionalString(row, "workspace_id");
-        const folderId = readOptionalString(row, "folder_id");
+        const scope = sessionScopeFromRow(row);
         // An empty stored key means the session has no place in an ordered
         // list, which the protocol says by leaving the position out.
         const orderKey = readString(row, "order_key");
         return {
             id: readString(row, "id"),
             archived: readNumber(row, "archived") !== 0,
-            ...(folderId === undefined ? {} : { folderId }),
-            projectId: readString(row, "project_id"),
+            scope,
+            ...(scope.kind === "project" || scope.kind === "workspace"
+                ? { projectId: scope.projectId }
+                : {}),
+            ...(scope.kind === "workspace" ? { workspaceId: scope.workspaceId } : {}),
+            ...(scope.kind === "folder" ? { folderId: scope.folderId } : {}),
             ...(orderKey === "" ? {} : { orderKey }),
-            ...(workspaceId === undefined ? {} : { workspaceId }),
             trackUnread: readNumber(row, "track_unread") !== 0,
             ...(unreadReason !== undefined && unreadSince !== undefined
                 ? { unread: { reason: unreadReason as SessionUnreadReason, since: unreadSince } }

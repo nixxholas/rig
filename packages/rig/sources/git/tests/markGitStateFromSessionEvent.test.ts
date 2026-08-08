@@ -134,7 +134,7 @@ async function createFixture(): Promise<{
         tuning: { debounceMs: 10_000, maximumDebounceMs: 10_000, reconcileIntervalMs: 60_000 },
     });
     const session = store.create({ cwd: repository });
-    const projectId = session.snapshot().projectId;
+    const projectId = session.snapshot().projectId!;
     const entity: GitTrackedEntity = { path: repository, projectId };
     tracker.watch(entity);
     const originalMark = tracker.markChanged.bind(tracker);

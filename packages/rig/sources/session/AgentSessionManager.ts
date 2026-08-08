@@ -176,7 +176,7 @@ export class AgentSessionManager {
         }
         // An agent describes the work when it asks for a workspace, so that name stands rather
         // than being replaced by whatever the first chat inside it ends up called.
-        const workspace = await create(ownerSessionId, owner.snapshot().projectId, {
+        const workspace = await create(ownerSessionId, codeSessionIdentity(owner).projectId, {
             ...input,
             nameConfigured: true,
         });
@@ -190,7 +190,11 @@ export class AgentSessionManager {
         if (owner === undefined || archive === undefined) {
             throw new Error("This session cannot archive managed workspaces.");
         }
-        const workspace = await archive(ownerSessionId, owner.snapshot().projectId, workspaceId);
+        const workspace = await archive(
+            ownerSessionId,
+            codeSessionIdentity(owner).projectId,
+            workspaceId,
+        );
         if (workspace === undefined) {
             throw new Error("This workspace was not created by the current session.");
         }
@@ -222,7 +226,7 @@ export class AgentSessionManager {
     listProjects(sessionId: string): readonly AgentProject[] {
         const list = this.#repository.listProjects;
         if (list === undefined) throw new Error("This session cannot list projects.");
-        const currentProjectId = this.#current(sessionId).snapshot().projectId;
+        const currentProjectId = codeSessionIdentity(this.#current(sessionId)).projectId;
         return list().map((project) => ({
             current: project.id === currentProjectId,
             id: project.id,
@@ -236,7 +240,7 @@ export class AgentSessionManager {
         if (register === undefined) throw new Error("This session cannot add projects.");
         const project = await register(path);
         return {
-            current: project.id === this.#current(sessionId).snapshot().projectId,
+            current: project.id === codeSessionIdentity(this.#current(sessionId)).projectId,
             id: project.id,
             name: project.name,
             path: project.path,
@@ -297,7 +301,7 @@ export class AgentSessionManager {
             throw new Error("That workspace was not found in that project.");
         }
         workspace = await this.#workspaceReady(projectId, workspace, signal);
-        if (workspace.id === snapshot.workspaceId) {
+        if (snapshot.scope.kind === "workspace" && workspace.id === snapshot.scope.workspaceId) {
             throw new Error("That workspace is the one this session already works in.");
         }
         const sessionId = createId();
@@ -380,7 +384,7 @@ export class AgentSessionManager {
         projectId: string | undefined,
         options: { crossWorkspace: boolean },
     ): string {
-        const currentProjectId = this.#current(sessionId).snapshot().projectId;
+        const currentProjectId = codeSessionIdentity(this.#current(sessionId)).projectId;
         if (projectId === undefined || projectId === currentProjectId) return currentProjectId;
         if (!options.crossWorkspace) {
             throw new Error(
@@ -454,7 +458,7 @@ export class AgentSessionManager {
         if (parent === undefined || resolveWorkspace === undefined) {
             throw new Error("This session cannot start workspace agents.");
         }
-        const projectId = parent.snapshot().projectId;
+        const projectId = codeSessionIdentity(parent).projectId;
         throwIfAborted(signal);
         let workspace = resolveWorkspace(parentSessionId, projectId, request.workspaceId);
         if (workspace === undefined) {
@@ -586,6 +590,9 @@ export class AgentSessionManager {
             }
         }
         const childStatus = child.subagentSummary().status;
+        if (childStatus === "archived") {
+            throw new Error("That subagent was retired with its previous execution context.");
+        }
         if (childStatus !== "running" && childStatus !== "queued") {
             this.#assertTurnSlotAvailable(child.agentMetadata().rootSessionId);
         }
@@ -759,6 +766,26 @@ export class AgentSessionManager {
             }),
         );
         return active.length + suspended.length;
+    }
+
+    /**
+     * Stops the whole retained tree before its root adopts a different execution context.
+     *
+     * Workflow children are included here: unlike an ordinary parent interruption, changing cwd,
+     * secrets, and filesystem permissions makes every old descendant context unsafe to retain.
+     */
+    async stopDescendantsForContextChange(parentSessionId: string): Promise<number> {
+        const parent = this.#repository.get(parentSessionId);
+        if (parent === undefined) return 0;
+        const descendants = this.#descendantsOf(parentSessionId);
+        for (const child of descendants) this.#stoppedExplicitly.add(child.id);
+        await Promise.all(
+            descendants.map(async (child) => {
+                await child.retireForContextChange();
+                this.recordChanged(child);
+            }),
+        );
+        return descendants.length;
     }
 
     list(parentSessionId: string, pathPrefix?: string): readonly ManagedSubagent[] {
@@ -936,9 +963,11 @@ export class AgentSessionManager {
                 // Always written, never inherited. A capability the parent holds says nothing
                 // about this child, whose grant was reviewed on its own spawn or not at all.
             };
+            const parentScope = parent.snapshot().scope;
             const configuredChildRequest =
                 request.workspaceId !== undefined &&
-                request.workspaceId !== parent.snapshot().workspaceId
+                (parentScope.kind !== "workspace" ||
+                    request.workspaceId !== parentScope.workspaceId)
                     ? (this.#repository.configureWorkspaceRequest?.(childRequest) ?? childRequest)
                     : childRequest;
             const inheritedContextMessages = (() => {
@@ -1583,4 +1612,16 @@ function agentMessageHeader(
         "Payload:",
         "",
     ].join("\n");
+}
+
+function codeSessionIdentity(session: InMemorySession): {
+    projectId: string;
+    workspaceId?: string;
+} {
+    const scope = session.snapshot().scope;
+    if (scope.kind === "project") return { projectId: scope.projectId };
+    if (scope.kind === "workspace") {
+        return { projectId: scope.projectId, workspaceId: scope.workspaceId };
+    }
+    throw new Error("This operation is available only in a project or workspace chat.");
 }

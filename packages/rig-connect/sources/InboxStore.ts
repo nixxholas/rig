@@ -59,12 +59,11 @@ export class InboxStore {
             const item: InboxItem = {
                 createdAt: event.createdAt,
                 id,
-                projectId: session?.projectId ?? "",
                 questions: request.questions,
                 requestId: request.requestId,
                 sessionId: event.sessionId,
                 status: "pending",
-                ...(session?.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+                ...(session === undefined ? {} : { scope: session.scope }),
             };
             this.#items = sortItems([
                 ...this.#items.filter((candidate) => candidate.id !== item.id),
@@ -122,7 +121,6 @@ function itemsForSession(session: SessionSummary): InboxItem[] {
     return (session.inboxItems ?? []).map((item) => ({
         createdAt: item.createdAt,
         id: inboxItemId(session.id, item.requestId),
-        projectId: session.projectId,
         questions: item.questions,
         requestId: item.requestId,
         sessionId: session.id,
@@ -130,7 +128,7 @@ function itemsForSession(session: SessionSummary): InboxItem[] {
         ...(item.answers === undefined ? {} : { answers: item.answers }),
         ...(item.resolvedAt === undefined ? {} : { resolvedAt: item.resolvedAt }),
         ...(session.title === undefined ? {} : { title: session.title }),
-        ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+        scope: session.scope,
     }));
 }
 

@@ -41,13 +41,12 @@ import { queryPendingContextMessages } from "./queryPendingContextMessages.js";
 import { querySessionTranscriptPage } from "./querySessionTranscriptPage.js";
 import { queryDurableWaits } from "../scheduling/queryDurableWaits.js";
 import { queryScheduledMessages } from "../scheduling/queryScheduledMessages.js";
+import { sessionScopeFromRow } from "./impl/sessionScope.js";
 
 export interface SessionRestore {
     lastEventId?: string;
-    projectId: string;
     request: CreateSessionRequest;
     restore: PersistedSessionState;
-    workspaceId?: string;
 }
 
 export function querySessionRestore(tx: TX, sessionId: string): SessionRestore | undefined {
@@ -99,9 +98,8 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     const goalJson = readOptionalString(row, "goal_json");
     const lastEventId = readOptionalString(row, "last_event_id");
     const id = readString(row, "id");
-    const projectId = readString(row, "project_id");
-    const workspaceId = readOptionalString(row, "workspace_id");
-    const folderId = readOptionalString(row, "folder_id");
+    const scope = sessionScopeFromRow(row);
+    const unsortedSince = readOptionalNumber(row, "unsorted_since_ms");
     const workspaceTransfer = parseWorkspaceTransferState(
         readString(row, "workspace_transfer_json"),
     );
@@ -131,7 +129,8 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         ...(draft === undefined ? {} : { draft }),
         ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
         elapsedMs: readNumber(row, "elapsed_ms"),
-        ...(folderId === undefined ? {} : { folderId }),
+        scope,
+        ...(unsortedSince === undefined ? {} : { unsortedSince }),
         ...(dockerJson === undefined
             ? {}
             : { docker: JSON.parse(dockerJson) as DockerExecutionConfig }),
@@ -159,8 +158,6 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         providerId: readString(row, "provider_id"),
         permissionMode,
         pendingContextMessages: queryPendingContextMessages(tx, sessionId),
-        projectId,
-        ...(workspaceId === undefined ? {} : { workspaceId }),
         workspaceTransfer,
         workspaceQueueWaiting: readNumber(row, "workspace_queue_waiting") !== 0,
         secretIds: secretIdsJson === undefined ? [] : (JSON.parse(secretIdsJson) as string[]),
@@ -212,10 +209,8 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     };
     return {
         ...(lastEventId === undefined ? {} : { lastEventId }),
-        projectId,
         request,
         restore,
-        ...(workspaceId === undefined ? {} : { workspaceId }),
     };
 }
 

@@ -17,6 +17,7 @@ import type {
     SessionInterruption,
     ScheduledMessage,
     SessionStatus,
+    SessionScope,
     SessionTask,
     SessionTokenCount,
     SessionUsageSnapshot,
@@ -267,9 +268,11 @@ export interface SessionState {
     agentId?: string;
     agent?: SessionAgentMetadata;
     lastEventId?: string;
-    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    /** The only application collection containing this chat. */
+    scope: SessionScope;
+    /** Derived conveniences; never use these to decide collection membership. */
     folderId?: string;
-    projectId: string;
+    projectId?: string;
     workspaceId?: string;
     /**
      * Position in the ordered list of the project's chats.
@@ -342,6 +345,11 @@ export interface SessionState {
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 
 export type MutationAction =
+    | "create_folder"
+    | "update_folder"
+    | "move_folder"
+    | "archive_folder"
+    | "move_session"
     | "create_workspace"
     | "archive_workspace"
     | "create_session"

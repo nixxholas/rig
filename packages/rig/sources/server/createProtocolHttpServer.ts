@@ -281,7 +281,7 @@ import {
 import { listGitWorkingTreeFiles } from "../git/listGitWorkingTreeFiles.js";
 import { serveFolderRequest } from "./folderApi.js";
 import { FolderError } from "../folders/FolderRepository.js";
-import { setSessionFolderRequestSchema } from "../protocol/index.js";
+import { moveSessionRequestSchema, sessionScopeSchema } from "../protocol/index.js";
 import { createNodeFileSystemContext } from "../agent/context/createNodeFileSystemContext.js";
 import {
     FileTreeChangedError,
@@ -2835,10 +2835,28 @@ async function handleRequest(
             sendJson(response, 400, { error: "The project ID must be a cuid2 identity." });
             return;
         }
+        if (
+            body.scope !== undefined &&
+            (!Value.Check(sessionScopeSchema, body.scope) ||
+                (body.scope.kind !== "folder" && body.scope.kind !== "unsorted") ||
+                body.workspaceId !== undefined ||
+                body.projectId !== undefined)
+        ) {
+            sendJson(response, 400, {
+                error: "Choose exactly one folder, Unsorted, project, or workspace for this chat.",
+            });
+            return;
+        }
         try {
-            const sessionRequest = configureSessionRequest(body, defaultDocker, () =>
-                store.queryProjectSettings(body.cwd),
-            );
+            const sessionRequest =
+                body.scope === undefined
+                    ? configureSessionRequest(body, defaultDocker, () =>
+                          store.queryProjectSettings(body.cwd),
+                      )
+                    : (() => {
+                          const { docker: _docker, local: _local, ...folderRequest } = body;
+                          return folderRequest;
+                      })();
             const session =
                 body.id === undefined
                     ? store.create(sessionRequest)
@@ -2980,20 +2998,53 @@ async function handleRequest(
         return;
     }
 
-    if (request.method === "PUT" && route.name === "session-folder") {
+    if (request.method === "PUT" && route.name === "session-scope") {
         const body = await readJson<unknown>(request, 8 * 1024);
-        if (!Value.Check(setSessionFolderRequestSchema, body)) {
+        if (!Value.Check(moveSessionRequestSchema, body)) {
             sendJson(response, 400, {
-                error: "The folder must be named, or null to return this chat to Unsorted.",
+                error: "Choose a folder or Unsorted location and a preceding chat.",
             });
             return;
         }
+        const headerMutationId = requestMutationId(request);
+        if (
+            body.mutationId !== undefined &&
+            headerMutationId !== undefined &&
+            body.mutationId !== headerMutationId
+        ) {
+            sendJson(response, 400, {
+                error: "The mutation id header must match the request body.",
+            });
+            return;
+        }
+        const mutationId = body.mutationId ?? headerMutationId;
         try {
-            const filed = store.setSessionFolder(sessionId, body.folderId);
+            if (
+                sessionMutationCompleted(session, mutationId) ||
+                (mutationId !== undefined &&
+                    store.sessionScopeMutationApplied(sessionId, mutationId))
+            ) {
+                sendJson(response, 200, { session: session.snapshot() });
+                return;
+            }
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 400, { error: errorToMessage(error) });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        try {
+            const filed = store.setSessionFolder(
+                sessionId,
+                body.scope.kind === "folder" ? body.scope.folderId : null,
+                body.afterId,
+                mutationId,
+            );
             if (filed === undefined) {
                 sendJson(response, 404, { error: "That chat is gone." });
                 return;
             }
+            filed.recordMutationApplied(mutationId);
             sendJson(response, 200, { session: filed.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3003,7 +3054,7 @@ async function handleRequest(
                 });
                 return;
             }
-            throw error;
+            sendJson(response, 400, { error: errorToMessage(error) });
         }
         return;
     }
@@ -3082,11 +3133,23 @@ async function handleRequest(
             });
             return;
         }
-        if (route.name === "unarchive" && session.snapshot().status === "archived") {
-            sendJson(response, 409, {
-                error: "A session archived with its workspace cannot be restored.",
-            });
-            return;
+        if (route.name === "unarchive") {
+            const snapshot = session.snapshot();
+            if (snapshot.status === "archived") {
+                sendJson(response, 409, {
+                    error: "A session retired with its execution context cannot be restored.",
+                });
+                return;
+            }
+            if (snapshot.scope.kind === "folder") {
+                const folder = store.getFolder(snapshot.scope.folderId);
+                if (folder === undefined || folder.archivedAt !== undefined) {
+                    sendJson(response, 409, {
+                        error: "A chat cannot be restored while its folder is archived.",
+                    });
+                    return;
+                }
+            }
         }
         /*
          * Archive state controls listing visibility only. It never stops or deletes a session:
@@ -3112,7 +3175,9 @@ async function handleRequest(
         const archived = session.setArchived(route.name === "archive", mutationId);
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
-            store.unarchiveProject(archived.projectId);
+            if (archived.scope.kind === "project" || archived.scope.kind === "workspace") {
+                store.unarchiveProject(archived.scope.projectId);
+            }
         }
         sendJson<SessionArchiveResponse>(response, 200, { session: archived });
         return;
@@ -4003,18 +4068,21 @@ function resolveAppletContext(
             };
         }
         const identity = session.projectIdentity();
-        if (request.projectId !== undefined && request.projectId !== identity.projectId) {
-            return {
-                code: "invalid_request",
-                message: `The session ${request.sessionId} belongs to project ${identity.projectId}, not project ${request.projectId}.`,
-                type: "error",
-            };
-        }
-        if (request.workspaceId !== undefined && request.workspaceId !== identity.workspaceId) {
+        if (request.projectId !== undefined && request.projectId !== identity?.projectId) {
             return {
                 code: "invalid_request",
                 message:
-                    identity.workspaceId === undefined
+                    identity === undefined
+                        ? `The session ${request.sessionId} does not belong to a project.`
+                        : `The session ${request.sessionId} belongs to project ${identity.projectId}, not project ${request.projectId}.`,
+                type: "error",
+            };
+        }
+        if (request.workspaceId !== undefined && request.workspaceId !== identity?.workspaceId) {
+            return {
+                code: "invalid_request",
+                message:
+                    identity?.workspaceId === undefined
                         ? `The session ${request.sessionId} does not belong to a workspace.`
                         : `The session ${request.sessionId} belongs to workspace ${identity.workspaceId}, not workspace ${request.workspaceId}.`,
                 type: "error",
@@ -4024,8 +4092,8 @@ function resolveAppletContext(
             applet: applet.name,
             version: applet.currentVersion,
             sessionId: request.sessionId,
-            projectId: identity.projectId,
-            ...(identity.workspaceId === undefined ? {} : { workspaceId: identity.workspaceId }),
+            ...(identity === undefined ? {} : { projectId: identity.projectId }),
+            ...(identity?.workspaceId === undefined ? {} : { workspaceId: identity.workspaceId }),
         };
         scope = "session";
     } else {
@@ -4280,7 +4348,7 @@ function matchRoute(pathname: string):
               | "secrets"
               | "service-tier"
               | "session"
-              | "session-folder"
+              | "session-scope"
               | "stream"
               | "session-state"
               | "steer"
@@ -4623,8 +4691,8 @@ function matchRoute(pathname: string):
     if (parts.length === 3 && parts[2] === "reorder") {
         return { name: "reorder", sessionId };
     }
-    if (parts.length === 3 && parts[2] === "folder") {
-        return { name: "session-folder", sessionId };
+    if (parts.length === 3 && parts[2] === "scope") {
+        return { name: "session-scope", sessionId };
     }
     if (parts.length === 4 && parts[2] === "terminal-connections" && parts[3] !== undefined) {
         return {
@@ -5197,7 +5265,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
         (method === "POST" && routeName === "user-input") ||
         (method === "DELETE" && routeName === "secret") ||
         (method === "PUT" && routeName === "draft") ||
-        (method === "PUT" && routeName === "session-folder") ||
+        (method === "PUT" && routeName === "session-scope") ||
         (method === "PATCH" &&
             ["effort", "model", "permissions", "service-tier"].includes(routeName))
     );

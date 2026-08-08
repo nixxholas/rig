@@ -16,7 +16,10 @@ import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
 import { projectComputeGeneration } from "../migrations/12-project-compute-generation.js";
 import { projectUserMutationVersion } from "../migrations/16-project-user-mutation-version.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
-import { dropSchemaAddedAfterIdentityMigrations } from "./dropSchemaAddedAfterIdentityMigrations.js";
+import {
+    dropSchemaAddedAfterIdentityMigrations,
+    dropSessionScopeSchema,
+} from "./dropSchemaAddedAfterIdentityMigrations.js";
 import * as schema from "../schema.js";
 
 const directories: string[] = [];
@@ -120,9 +123,10 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
         opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
         opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
-        opened.database.run(sql.raw("DROP INDEX sessions_unsorted"));
+        dropSessionScopeSchema(opened.database);
+        opened.database.run(sql.raw("DROP INDEX IF EXISTS sessions_unsorted"));
         opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
-        opened.database.run(sql.raw("DROP INDEX sessions_folder"));
+        opened.database.run(sql.raw("DROP INDEX IF EXISTS sessions_folder"));
         opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
         opened.database.run(sql.raw("DROP TABLE folders"));
         // A real database at version 28 predates worklets, so rewinding to it takes their schema
@@ -130,6 +134,9 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("DROP TABLE worklet_versions"));
         opened.database.run(sql.raw("DROP TABLE worklets"));
         opened.database.run(sql.raw("DROP TABLE rig_profiles"));
+        opened.database.run(sql.raw("DROP TABLE session_mutations"));
+        opened.database.run(sql.raw("DROP TABLE folder_mutations"));
+        opened.database.run(sql.raw("DROP TABLE folder_catalog"));
         opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
         migrateSessionDatabase(opened.database);

@@ -22,7 +22,7 @@ describe("remote terminal WebSocket protocol", () => {
         const { client, directory } = await startServer();
         const createdSession = await client.createSession({ cwd: directory });
         const otherSession = await client.createSession({ cwd: directory });
-        const scope = { projectId: createdSession.session.projectId };
+        const scope = { projectId: createdSession.session.projectId! };
         expect(otherSession.session.projectId).toBe(scope.projectId);
         const created = await client.createRemoteTerminal(scope, {
             cols: 24,
@@ -58,7 +58,7 @@ describe("remote terminal WebSocket protocol", () => {
     it("rejects lease reuse, resumes input after a dropped client, broadcasts resize, and enforces auth", async () => {
         const { client, directory, socketPath } = await startServer();
         const createdSession = await client.createSession({ cwd: directory });
-        const scope = { projectId: createdSession.session.projectId };
+        const scope = { projectId: createdSession.session.projectId! };
         const created = await client.createRemoteTerminal(scope, {
             cols: 20,
             command: 'while IFS= read -r value; do printf "[%s]\\n" "$value"; done',
@@ -139,7 +139,7 @@ describe("remote terminal WebSocket protocol", () => {
         await execFile("git", ["-C", directory, "commit", "--allow-empty", "-m", "Initial"]);
         const rootSession = await client.createSession({ cwd: directory });
         const createdWorkspace = await client.createProjectWorkspace(
-            rootSession.session.projectId,
+            rootSession.session.projectId!,
             {
                 baseRef: "HEAD",
                 name: "Terminal workspace",
@@ -148,7 +148,7 @@ describe("remote terminal WebSocket protocol", () => {
         let workspace = createdWorkspace.workspace;
         await vi.waitFor(async () => {
             workspace = (
-                await client.listProjectWorkspaces(rootSession.session.projectId)
+                await client.listProjectWorkspaces(rootSession.session.projectId!)
             ).workspaces.find((candidate) => candidate.id === workspace.id)!;
             expect(workspace.status).toBe("ready");
         });
@@ -157,7 +157,7 @@ describe("remote terminal WebSocket protocol", () => {
             workspaceId: workspace.id,
         });
         const scope = {
-            projectId: rootSession.session.projectId,
+            projectId: rootSession.session.projectId!,
             workspaceId: workspace.id,
         };
         const created = await client.createRemoteTerminal(scope, {
@@ -176,7 +176,7 @@ describe("remote terminal WebSocket protocol", () => {
     it("stops project terminals when the project is archived", async () => {
         const { client, directory } = await startServer();
         const session = await client.createSession({ cwd: directory });
-        const scope = { projectId: session.session.projectId };
+        const scope = { projectId: session.session.projectId! };
         const created = await client.createRemoteTerminal(scope, {
             command: "while :; do sleep 1; done",
         });

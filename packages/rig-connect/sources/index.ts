@@ -1,6 +1,5 @@
 export {
     connectRig,
-    FolderRequestError,
     ProjectRegistrationError,
     ProjectRegistrationProtocolError,
 } from "./connectRig.js";
@@ -29,8 +28,6 @@ export type {
     CreateWorkspaceInput,
     DraftUpdate,
     FolderCreateOptions,
-    FolderOperationOptions,
-    FolderRequestErrorCode,
     GoalStatus,
     GroupTarget,
     HappyCloudCommandInput,
@@ -136,7 +133,13 @@ export type {
     UninstalledPluginSummary,
 } from "./protocol.js";
 export { FolderStore } from "./FolderStore.js";
-export type { FolderDelta, FolderNode, FoldersState } from "./FolderElement.js";
+export type {
+    FolderDelta,
+    FolderNode,
+    FolderSession,
+    FolderView,
+    FoldersState,
+} from "./FolderElement.js";
 export { InboxStore } from "./InboxStore.js";
 export { ProviderUsageStore } from "./ProviderUsageStore.js";
 export type { ProviderUsageDelta, ProviderUsageState } from "./ProviderUsageElement.js";
@@ -236,15 +239,17 @@ export {
     createFolderRequestSchema,
     folderErrorResponseSchema,
     folderResponseSchema,
+    listFoldersResponseSchema,
     folderSchema,
     moveFolderRequestSchema,
-    setSessionFolderRequestSchema,
+    moveSessionRequestSchema,
     updateFolderRequestSchema,
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
     projectWorkspaceSchema,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     SERVICE_NOTICE_TEXT_MAX_LENGTH,
     serviceNoticeSchema,
+    sessionScopeSchema,
     systemNoticePayloadSchema,
 } from "./protocol.js";
 export type {
@@ -263,7 +268,8 @@ export type {
     FolderResponse,
     ListFoldersResponse,
     MoveFolderRequest,
-    SetSessionFolderRequest,
+    MoveSessionRequest,
+    SessionScope,
     UpdateFolderRequest,
     GitChangeSnapshot,
     ComputePreparationEvent,

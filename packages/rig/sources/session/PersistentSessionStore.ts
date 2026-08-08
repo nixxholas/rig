@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { createId } from "@paralleldrive/cuid2";
 
 import {
     createEventIdFactory,
@@ -34,6 +35,7 @@ import type {
     SessionActivityWait,
     SessionInterruption,
     SessionSummary,
+    SessionScope,
     SessionTranscriptWindow,
     SubagentSummary,
     TimelineAgent,
@@ -68,6 +70,7 @@ import type { ExternalToolCall } from "../external-tools/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
 import type { DurableWait, ScheduledMessage } from "../scheduling/index.js";
 import type { GitCommandRunner } from "../git/types.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import {
@@ -189,6 +192,9 @@ const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
 const UNSORTED_SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
 /** How many Unsorted chats one sweep may put away, so a long backlog is worked through in batches. */
 const UNSORTED_SWEEP_LIMIT = 100;
+/** One pass drains a useful backlog without monopolizing the synchronous database. */
+const UNSORTED_SWEEP_MAX_SESSIONS = 1_000;
+const UNSORTED_SWEEP_MAX_MS = 250;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -243,6 +249,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly #workspaceTransferReservations = new Map<string, string>();
     #scheduledMessageTimer: ReturnType<typeof setTimeout> | undefined;
     #unsortedSweepTimer: ReturnType<typeof setInterval> | undefined;
+    #unsortedSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
         reference: WeakRef<InMemorySession>;
@@ -353,6 +360,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : { homeDirectory: options.homeDirectory }),
             now: this.#now,
             onEvent: (event) => this.#publishGlobalEvent(event),
+            onFolderContextChanged: (folderIds) => {
+                this.#afterTransactionCommit(() => {
+                    const affected = new Set(folderIds);
+                    for (const session of this.#cachedSessions()) {
+                        if (session.belongsToFolderContext(affected))
+                            session.folderContextChanged();
+                    }
+                });
+            },
+            onSessionsArchived: (sessionIds) => {
+                this.#afterTransactionCommit(() => {
+                    for (const sessionId of sessionIds) {
+                        void this.get(sessionId)
+                            ?.recordFolderArchived()
+                            .catch(rethrowDatabaseFailure);
+                    }
+                });
+            },
             transaction: (body) => this.#transaction(body),
         });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
@@ -465,10 +490,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (session === undefined) return undefined;
         this.#secrets.reference(secretId);
         if (scope === "project") {
-            const projectId = session.snapshot().projectId;
+            const projectId = persistentCodeScope(session.snapshot().scope).projectId;
             projectSecretAttach(this.#tx(), projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
-                if (candidate.snapshot().projectId === projectId) {
+                const candidateScope = candidate.snapshot().scope;
+                if (
+                    (candidateScope.kind === "project" || candidateScope.kind === "workspace") &&
+                    candidateScope.projectId === projectId
+                ) {
                     candidate.attachSecret(secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
@@ -523,6 +552,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearInterval(this.#unsortedSweepTimer);
             this.#unsortedSweepTimer = undefined;
         }
+        if (this.#unsortedSweepFollowup !== undefined) {
+            clearImmediate(this.#unsortedSweepFollowup);
+            this.#unsortedSweepFollowup = undefined;
+        }
         void this.remoteTerminals.close();
         this.#workspaceReadyWaiters.close();
         this.#projects.close();
@@ -566,10 +599,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
-            const projectId = session.snapshot().projectId;
+            const projectId = persistentCodeScope(session.snapshot().scope).projectId;
             projectSecretDetach(this.#tx(), projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
-                if (candidate.snapshot().projectId === projectId) {
+                const candidateScope = candidate.snapshot().scope;
+                if (
+                    (candidateScope.kind === "project" || candidateScope.kind === "workspace") &&
+                    candidateScope.projectId === projectId
+                ) {
                     candidate.detachSecret(secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
@@ -595,22 +632,41 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         const source = this.get(sessionId);
         if (source === undefined) return undefined;
-        const state = source.createForkState();
         const sourceSnapshot = source.snapshot();
-        if (sourceSnapshot.workspaceId !== undefined) {
-            this.#assertWorkspaceAcceptingSessions(sourceSnapshot.workspaceId);
+        const folderPath =
+            sourceSnapshot.scope.kind === "folder"
+                ? this.#folders.activeFolderStoragePath(sourceSnapshot.scope.folderId)
+                : undefined;
+        const state = source.createForkState();
+        const forkState =
+            folderPath === undefined
+                ? state
+                : (() => {
+                      const { docker: _docker, ...rest } = state;
+                      return { ...rest, cwd: folderPath };
+                  })();
+        const sourceRequest = source.requestForSubagent();
+        const forkRequest =
+            folderPath === undefined
+                ? sourceRequest
+                : (() => {
+                      const { docker: _docker, ...rest } = sourceRequest;
+                      return { ...rest, cwd: folderPath };
+                  })();
+        if (sourceSnapshot.scope.kind === "workspace") {
+            this.#assertWorkspaceAcceptingSessions(sourceSnapshot.scope.workspaceId);
         }
-        if (sourceSnapshot.workspaceId !== undefined) {
+        if (sourceSnapshot.scope.kind === "workspace") {
             const workspace = this.#projects.getWorkspace(
-                sourceSnapshot.projectId,
-                sourceSnapshot.workspaceId,
+                sourceSnapshot.scope.projectId,
+                sourceSnapshot.scope.workspaceId,
             );
             if (
                 workspace === undefined ||
                 workspaceRunReadiness(this.#projects, {
                     cwd: sourceSnapshot.cwd,
-                    projectId: sourceSnapshot.projectId,
-                    workspaceId: sourceSnapshot.workspaceId,
+                    projectId: sourceSnapshot.scope.projectId,
+                    workspaceId: sourceSnapshot.scope.workspaceId,
                 }).state !== "ready"
             ) {
                 throw new Error("A session in an unavailable workspace cannot be forked.");
@@ -640,29 +696,26 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 persistence: this,
                 folders: this.#folders,
                 slotStores: { entries: this.slots, applets: this.applets },
-                request: source.requestForSubagent(),
-                projectId: sourceSnapshot.projectId,
-                projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
+                request: forkRequest,
+                ...(sourceSnapshot.scope.kind === "project" ||
+                sourceSnapshot.scope.kind === "workspace"
+                    ? { projectSecretIds: this.#projectSecrets(sourceSnapshot.scope.projectId) }
+                    : {}),
                 secretRegistry: this.#secrets,
                 restore: {
-                    ...state,
+                    ...forkState,
                     ...(targetSessionId === undefined
                         ? {}
                         : {
-                              agent: { ...state.agent, rootSessionId: targetSessionId },
+                              agent: { ...forkState.agent, rootSessionId: targetSessionId },
                               id: targetSessionId,
                           }),
-                    orderKey: this.#newLastSessionOrderKey(
-                        sourceSnapshot.projectId,
-                        sourceSnapshot.workspaceId,
-                    ),
+                    orderKey: this.#newLastSessionOrderKey(sourceSnapshot.scope),
                 },
-                ...(sourceSnapshot.workspaceId === undefined
-                    ? {}
-                    : { workspaceId: sourceSnapshot.workspaceId }),
+                scope: sourceSnapshot.scope,
                 ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
             });
-            for (const message of state.messages) {
+            for (const message of forkState.messages) {
                 this.upsertMessage(session.id, message);
             }
             session.emitCreatedEvent();
@@ -678,106 +731,188 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         id?: string,
     ): InMemorySession {
         this.#assertAcceptingMutations();
+        const sessionId = id ?? createId();
         let session!: InMemorySession;
-        this.#transaction(() => {
-            const inherited =
-                metadata?.parentSessionId === undefined
-                    ? undefined
-                    : this.get(metadata.parentSessionId)?.snapshot();
-            if (metadata?.parentSessionId !== undefined && inherited === undefined) {
-                throw new Error("The parent session was not found.");
-            }
-            if (inherited?.status === "archived") {
-                throw new Error("An archived session cannot create a subagent.");
-            }
-            const inheritedWorkspace =
-                inherited?.workspaceId === undefined
-                    ? undefined
-                    : this.#projects.getWorkspace(inherited.projectId, inherited.workspaceId);
-            if (
-                inherited?.workspaceId !== undefined &&
-                (inheritedWorkspace === undefined ||
-                    workspaceRunReadiness(this.#projects, {
-                        cwd: inherited.cwd,
-                        projectId: inherited.projectId,
-                        workspaceId: inherited.workspaceId,
-                    }).state !== "ready")
-            ) {
-                throw new Error("The parent session workspace is not ready and available.");
-            }
-            const ownership = (() => {
-                if (inherited === undefined) {
-                    if (request.workspaceId !== undefined) {
-                        return this.#projects.resolveSessionOwnership(
+        let newUnsortedStorage: { created: boolean; path: string } | undefined;
+        try {
+            this.#transaction(() => {
+                const inherited =
+                    metadata?.parentSessionId === undefined
+                        ? undefined
+                        : this.get(metadata.parentSessionId)?.snapshot();
+                if (metadata?.parentSessionId !== undefined && inherited === undefined) {
+                    throw new Error("The parent session was not found.");
+                }
+                if (inherited?.status === "archived") {
+                    throw new Error("An archived session cannot create a subagent.");
+                }
+                const inheritedWorkspace =
+                    inherited?.scope.kind === "workspace"
+                        ? this.#projects.getWorkspace(
+                              inherited.scope.projectId,
+                              inherited.scope.workspaceId,
+                          )
+                        : undefined;
+                if (
+                    inherited?.scope.kind === "workspace" &&
+                    (inheritedWorkspace === undefined ||
+                        workspaceRunReadiness(this.#projects, {
+                            cwd: inherited.cwd,
+                            projectId: inherited.scope.projectId,
+                            workspaceId: inherited.scope.workspaceId,
+                        }).state !== "ready")
+                ) {
+                    throw new Error("The parent session workspace is not ready and available.");
+                }
+                const resolved = (() => {
+                    if (inherited === undefined) {
+                        if (request.scope?.kind === "folder") {
+                            return {
+                                request: {
+                                    ...request,
+                                    cwd: this.#folders.activeFolderStoragePath(
+                                        request.scope.folderId,
+                                    ),
+                                },
+                                scope: request.scope,
+                            };
+                        }
+                        if (request.scope?.kind === "unsorted") {
+                            newUnsortedStorage =
+                                this.#folders.createUnsortedSessionDirectory(sessionId);
+                            return {
+                                request: {
+                                    ...request,
+                                    cwd: newUnsortedStorage.path,
+                                },
+                                scope: request.scope,
+                            };
+                        }
+                        if (request.workspaceId !== undefined) {
+                            const ownership = this.#projects.resolveSessionOwnership(
+                                request.cwd,
+                                request.workspaceId,
+                                request.projectId,
+                            );
+                            return {
+                                ownership,
+                                request,
+                                scope: {
+                                    kind: "workspace" as const,
+                                    projectId: ownership.project.id,
+                                    workspaceId: ownership.workspace?.id ?? request.workspaceId,
+                                },
+                            };
+                        }
+                        const ownership = this.#projects.resolve(
                             request.cwd,
-                            request.workspaceId,
+                            undefined,
                             request.projectId,
                         );
+                        return {
+                            ownership,
+                            request,
+                            scope:
+                                ownership.workspace === undefined
+                                    ? { kind: "project" as const, projectId: ownership.project.id }
+                                    : {
+                                          kind: "workspace" as const,
+                                          projectId: ownership.project.id,
+                                          workspaceId: ownership.workspace.id,
+                                      },
+                        };
                     }
-                    return this.#projects.resolve(request.cwd, undefined, request.projectId);
+                    if (
+                        request.workspaceId !== undefined &&
+                        (inherited.scope.kind !== "workspace" ||
+                            request.workspaceId !== inherited.scope.workspaceId)
+                    ) {
+                        const inheritedCode = persistentCodeScope(inherited.scope);
+                        const ownership = this.#projects.resolve(
+                            request.cwd,
+                            request.workspaceId,
+                            inheritedCode.projectId,
+                        );
+                        return {
+                            ownership,
+                            request,
+                            scope: {
+                                kind: "workspace" as const,
+                                projectId: ownership.project.id,
+                                workspaceId: ownership.workspace?.id ?? request.workspaceId,
+                            },
+                        };
+                    }
+                    if (inherited.scope.kind === "folder") {
+                        const { docker: _docker, local: _local, ...inheritedRequest } = request;
+                        return {
+                            request: {
+                                ...inheritedRequest,
+                                cwd: this.#folders.activeFolderStoragePath(
+                                    inherited.scope.folderId,
+                                ),
+                            },
+                            scope: inherited.scope,
+                        };
+                    }
+                    return {
+                        request: { ...request, cwd: inherited.cwd },
+                        scope: inherited.scope,
+                    };
+                })();
+                if (resolved.scope.kind === "workspace") {
+                    this.#assertWorkspaceAcceptingSessions(resolved.scope.workspaceId);
                 }
-                if (
-                    request.workspaceId !== undefined &&
-                    request.workspaceId !== inherited.workspaceId
-                ) {
-                    return this.#projects.resolve(
-                        request.cwd,
-                        request.workspaceId,
-                        inherited.projectId,
-                    );
-                }
-                const project = this.#projects.getProject(inherited.projectId);
-                if (project === undefined) {
-                    throw new Error("The parent session project was not found.");
-                }
-                return {
-                    project,
-                    ...(inheritedWorkspace === undefined ? {} : { workspace: inheritedWorkspace }),
-                };
-            })();
-            if (ownership.workspace !== undefined) {
-                this.#assertWorkspaceAcceptingSessions(ownership.workspace.id);
-            }
-            session = new InMemorySession({
-                presence: this.presence,
-                agentManager: this.#agentManager,
-                workspaceFeatures: this.#workspaceFeatures,
-                workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
-                createEventId: createEventIdFactory(),
-                ...(this.#createRuntime === undefined
-                    ? {}
-                    : { createRuntime: this.#createRuntime }),
-                deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
-                emitCreatedEvent: false,
-                modelCatalog: this.#modelCatalog,
-                now: this.#now,
-                onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
-                ...(this.#mcpToolProvider !== undefined
-                    ? { mcpToolProvider: this.#mcpToolProvider }
-                    : {}),
-                ...(metadata !== undefined ? { metadata } : {}),
-                ...(contextMessages !== undefined
-                    ? { initialContextMessages: contextMessages }
-                    : {}),
-                ...(id === undefined ? {} : { id }),
-                onAppendEvent: (event) => this.#appendEvent(event),
-                orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
-                    this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
-                ),
-                persistence: this,
-                folders: this.#folders,
-                slotStores: { entries: this.slots, applets: this.applets },
-                projectId: ownership.project.id,
-                projectSecretIds: this.#projectSecrets(ownership.project.id),
-                request,
-                ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
-                secretRegistry: this.#secrets,
-                ...(ownership.workspace === undefined
-                    ? {}
-                    : { workspaceId: ownership.workspace.id }),
+                const projectId =
+                    resolved.scope.kind === "project" || resolved.scope.kind === "workspace"
+                        ? resolved.scope.projectId
+                        : undefined;
+                session = new InMemorySession({
+                    presence: this.presence,
+                    agentManager: this.#agentManager,
+                    workspaceFeatures: this.#workspaceFeatures,
+                    workspaceRunReadiness: (target) =>
+                        workspaceRunReadiness(this.#projects, target),
+                    createEventId: createEventIdFactory(),
+                    ...(this.#createRuntime === undefined
+                        ? {}
+                        : { createRuntime: this.#createRuntime }),
+                    deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
+                    emitCreatedEvent: false,
+                    modelCatalog: this.#modelCatalog,
+                    now: this.#now,
+                    onInitialTitle: (metadata) => this.#inheritWorkspaceName(metadata),
+                    ...(this.#mcpToolProvider !== undefined
+                        ? { mcpToolProvider: this.#mcpToolProvider }
+                        : {}),
+                    ...(metadata !== undefined ? { metadata } : {}),
+                    ...(contextMessages !== undefined
+                        ? { initialContextMessages: contextMessages }
+                        : {}),
+                    id: sessionId,
+                    onAppendEvent: (event) => this.#appendEvent(event),
+                    orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
+                        this.#newLastSessionOrderKey(resolved.scope),
+                    ),
+                    persistence: this,
+                    folders: this.#folders,
+                    slotStores: { entries: this.slots, applets: this.applets },
+                    ...(projectId === undefined
+                        ? {}
+                        : { projectSecretIds: this.#projectSecrets(projectId) }),
+                    request: resolved.request,
+                    scope: resolved.scope,
+                    ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
+                    secretRegistry: this.#secrets,
+                });
+                session.emitCreatedEvent();
             });
-            session.emitCreatedEvent();
-        });
+        } catch (error) {
+            if (newUnsortedStorage?.created === true) {
+                this.#folders.removeNewUnsortedSessionDirectory(sessionId, newUnsortedStorage.path);
+            }
+            throw error;
+        }
         this.#cacheSession(session);
         return session;
     }
@@ -989,6 +1124,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     ): void {
         for (const session of this.#cachedSessions()) {
             const identity = session.projectIdentity();
+            if (identity === undefined) continue;
             if (identity.projectId !== target.projectId) continue;
             if (identity.workspaceId !== target.workspaceId) continue;
             session.recordGitState(git);
@@ -997,6 +1133,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     listFolders(): readonly Folder[] {
         return this.#folders.listFolders();
+    }
+
+    folderCatalog() {
+        return this.#folders.folderCatalog();
     }
 
     getFolder(folderId: string): Folder | undefined {
@@ -1023,16 +1163,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#folders.moveFolder(folderId, request, expectedVersion);
     }
 
-    archiveFolder(folderId: string): Folder | undefined {
-        return this.#folders.archiveFolder(folderId);
+    archiveFolder(
+        folderId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Folder | undefined {
+        return this.#folders.archiveFolder(folderId, expectedVersion, mutationId);
     }
 
-    setSessionFolder(sessionId: string, folderId: string | null): InMemorySession | undefined {
+    setSessionFolder(
+        sessionId: string,
+        folderId: string | null,
+        afterId?: string | null,
+        mutationId?: string,
+    ): InMemorySession | undefined {
         this.#assertAcceptingMutations();
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
-        session.fileIntoFolder(folderId);
+        session.fileIntoFolder(folderId, afterId, mutationId);
         return session;
+    }
+
+    sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean {
+        return this.#folders.sessionScopeMutationApplied(sessionId, mutationId);
     }
 
     listProjects(): readonly Project[] {
@@ -1095,11 +1248,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const snapshot = session.snapshot();
         this.#transaction(() => {
             session.setOrderKey(
-                orderKeyAfter(
-                    this.#sessionOrderItems(snapshot.projectId, snapshot.workspaceId),
-                    sessionId,
-                    request.afterId,
-                ),
+                orderKeyAfter(this.#sessionOrderItems(snapshot.scope), sessionId, request.afterId),
             );
         });
         return session;
@@ -1319,7 +1468,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             const runId = state.activeRunId ?? state.queuedRuns.at(0)?.runId;
             if (
                 activeRunId === undefined &&
-                state.workspaceId !== undefined &&
+                state.scope.kind === "workspace" &&
                 state.queuedRuns.length > 0 &&
                 state.workspaceQueueWaiting === true
             ) {
@@ -1384,6 +1533,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearInterval(this.#unsortedSweepTimer);
             this.#unsortedSweepTimer = undefined;
         }
+        if (this.#unsortedSweepFollowup !== undefined) {
+            clearImmediate(this.#unsortedSweepFollowup);
+            this.#unsortedSweepFollowup = undefined;
+        }
         const closingSessions = new Set(this.#cachedSessions());
         const cleanup = [
             ...[...closingSessions].map((session) => session.beginShutdown()),
@@ -1413,7 +1566,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     saveSession(state: PersistedSessionState): void {
-        const projectId = state.projectId ?? this.#projects.resolve(state.cwd).project.id;
         const contextMessages =
             state.contextMessages ??
             state.messages
@@ -1423,7 +1575,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         sessionSave(this.#tx(), state, {
             contextMessages,
             now: this.#now(),
-            projectId,
         });
     }
 
@@ -1438,9 +1589,17 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         cwd: string;
         sessionId: string;
         state: Parameters<typeof sessionTransferWorkspace>[1]["state"];
+        projectId: string;
         workspaceId: string;
-    }): void {
-        sessionTransferWorkspace(this.#tx(), { ...input, now: this.#now() });
+    }): string {
+        const scope: SessionScope = {
+            kind: "workspace",
+            projectId: input.projectId,
+            workspaceId: input.workspaceId,
+        };
+        const orderKey = this.#newLastSessionOrderKey(scope);
+        sessionTransferWorkspace(this.#tx(), { ...input, now: this.#now(), orderKey });
+        return orderKey;
     }
 
     async transferSession(
@@ -1598,24 +1757,39 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * that never started out Unsorted, which is every chat a project or workspace holds, is not
      * swept at all.
      */
-    archiveExpiredUnsortedSessions(): void {
-        if (!this.#client.open) return;
+    archiveExpiredUnsortedSessions(): boolean {
+        if (!this.#client.open) return false;
         const unsortedBefore = this.#now() - UNSORTED_SESSION_ARCHIVE_AFTER_MS;
-        const expired = queryExpiredUnsortedSessions(
-            this.#tx(),
-            unsortedBefore,
-            UNSORTED_SWEEP_LIMIT,
-        );
-        for (const sessionId of expired) {
-            if (!this.#client.open) return;
-            this.get(sessionId)?.setArchived(true);
+        const deadline = Date.now() + UNSORTED_SWEEP_MAX_MS;
+        let archived = 0;
+        while (archived < UNSORTED_SWEEP_MAX_SESSIONS && Date.now() <= deadline) {
+            const expired = queryExpiredUnsortedSessions(
+                this.#tx(),
+                unsortedBefore,
+                Math.min(UNSORTED_SWEEP_LIMIT, UNSORTED_SWEEP_MAX_SESSIONS - archived),
+            );
+            if (expired.length === 0) return false;
+            for (const sessionId of expired) {
+                if (!this.#client.open) return false;
+                const session = this.get(sessionId);
+                if (session !== undefined) {
+                    // An Unsorted root may be idle while one of its background agents is still
+                    // running. Expiry is terminal for the whole retained tree, just like archiving
+                    // the folder that owns one, so no hidden descendant keeps acting after the
+                    // root disappears from Unsorted.
+                    void session.recordFolderArchived().catch(rethrowDatabaseFailure);
+                }
+                archived += 1;
+            }
+            if (expired.length < UNSORTED_SWEEP_LIMIT) return false;
         }
+        return true;
     }
 
     #armUnsortedSweepTimer(): void {
         // The first pass waits for the constructor to finish, the way other startup maintenance
         // does, so opening the store never blocks on working through a backlog of stale chats.
-        setImmediate(() => this.#sweepUnsortedSessions());
+        this.#scheduleUnsortedSweep();
         this.#unsortedSweepTimer = setInterval(
             () => this.#sweepUnsortedSessions(),
             UNSORTED_SWEEP_INTERVAL_MS,
@@ -1625,13 +1799,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     #sweepUnsortedSessions(): void {
         try {
-            this.archiveExpiredUnsortedSessions();
+            if (this.archiveExpiredUnsortedSessions()) this.#scheduleUnsortedSweep();
         } catch (error) {
             // Sweeping runs on its own, outside any request. A database that could not answer is
             // still fatal; one chat that refused to be put away must not take the daemon down.
             if (!this.#client.open) return;
             if (isDatabaseFailure(error)) throw error;
         }
+    }
+
+    #scheduleUnsortedSweep(): void {
+        if (!this.#client.open || this.#unsortedSweepFollowup !== undefined) return;
+        this.#unsortedSweepFollowup = setImmediate(() => {
+            this.#unsortedSweepFollowup = undefined;
+            this.#sweepUnsortedSessions();
+        });
+        this.#unsortedSweepFollowup.unref();
     }
 
     #deliverDueScheduledMessages(): void {
@@ -1789,6 +1972,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #loadSession(sessionId: string): InMemorySession | undefined {
         const loaded = querySessionRestore(this.#tx(), sessionId);
         if (loaded === undefined) return undefined;
+        const folderPath =
+            loaded.restore.scope.kind === "folder"
+                ? this.#folders.folderStoragePath(loaded.restore.scope.folderId)
+                : undefined;
+        const request =
+            folderPath === undefined
+                ? loaded.request
+                : (() => {
+                      const { docker: _docker, ...request } = loaded.request;
+                      return { ...request, cwd: folderPath };
+                  })();
+        const restore =
+            folderPath === undefined
+                ? loaded.restore
+                : (() => {
+                      const { docker: _docker, ...restore } = loaded.restore;
+                      return { ...restore, cwd: folderPath };
+                  })();
         return new InMemorySession({
             presence: this.presence,
             agentManager: this.#agentManager,
@@ -1811,12 +2012,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             persistence: this,
             folders: this.#folders,
             slotStores: { entries: this.slots, applets: this.applets },
-            projectSecretIds: queryProjectSecretIds(this.#tx(), loaded.projectId),
-            projectId: loaded.projectId,
-            request: loaded.request,
+            ...(loaded.restore.scope.kind === "project" || loaded.restore.scope.kind === "workspace"
+                ? {
+                      projectSecretIds: queryProjectSecretIds(
+                          this.#tx(),
+                          loaded.restore.scope.projectId,
+                      ),
+                  }
+                : {}),
+            request,
             secretRegistry: this.#secrets,
-            restore: loaded.restore,
-            ...(loaded.workspaceId === undefined ? {} : { workspaceId: loaded.workspaceId }),
+            restore,
+            scope: loaded.restore.scope,
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });
     }
@@ -1843,8 +2050,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return sessions;
     }
 
-    #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {
-        const items = this.#sessionOrderItems(projectId, workspaceId);
+    #newLastSessionOrderKey(scope: SessionScope): string {
+        const items = this.#sessionOrderItems(scope);
         return generateKeyBetween(items.at(-1)?.orderKey ?? null, null);
     }
 
@@ -1870,11 +2077,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    #sessionOrderItems(
-        projectId: string,
-        workspaceId: string | undefined,
-    ): { id: string; orderKey: string }[] {
-        return querySessionOrderItems(this.#tx(), projectId, workspaceId);
+    #sessionOrderItems(scope: SessionScope): { id: string; orderKey: string }[] {
+        return querySessionOrderItems(this.#tx(), scope);
     }
 
     #transcriptWindowForMessages(
@@ -2078,4 +2282,11 @@ function sessionEventFacts(event: SessionEvent): {
         ...(typeof data.runId === "string" ? { runId: data.runId } : {}),
         ...(typeof inner?.toolCallId === "string" ? { toolCallId: inner.toolCallId } : {}),
     };
+}
+
+function persistentCodeScope(
+    scope: SessionScope,
+): Extract<SessionScope, { kind: "project" | "workspace" }> {
+    if (scope.kind === "project" || scope.kind === "workspace") return scope;
+    throw new Error("This operation is available only for project or workspace chats.");
 }

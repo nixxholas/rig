@@ -1,6 +1,6 @@
-import { and, isNull, sql } from "drizzle-orm";
+import { and, inArray, isNull, sql } from "drizzle-orm";
 
-import { folders } from "../database/schema.js";
+import { folders, sessions } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 
 /**
@@ -9,24 +9,44 @@ import type { TX } from "../Transaction.js";
  * A folder that is already archived keeps the moment it was archived, so re-archiving a subtree
  * that was partly put away earlier only touches what is still visible.
  */
-export function folderArchive(tx: TX, id: string, now: number): number {
-    return Number(
+export function folderArchive(
+    tx: TX,
+    id: string,
+    now: number,
+): { folders: number; sessionIds: readonly string[] } {
+    const subtree = sql`
+        WITH RECURSIVE subtree(id) AS (
+            SELECT id FROM folders WHERE id = ${id}
+            UNION ALL
+            SELECT folders.id FROM folders JOIN subtree ON folders.parent_id = subtree.id
+        )
+        SELECT id FROM subtree
+    `;
+    const sessionIds = tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(
+            and(
+                sql`${sessions.folderId} IN (${subtree})`,
+                sql`${sessions.scopeKind} = 'folder'`,
+                sql`${sessions.sessionKind} = 'primary'`,
+                isNull(sessions.parentSessionId),
+            ),
+        )
+        .all()
+        .map((row) => row.id);
+    const archivedFolders = Number(
         tx
             .update(folders)
             .set({ archivedAtMs: now, updatedAtMs: now, version: sql`${folders.version} + 1` })
-            .where(
-                and(
-                    sql`${folders.id} IN (
-                        WITH RECURSIVE subtree(id) AS (
-                            SELECT id FROM folders WHERE id = ${id}
-                            UNION ALL
-                            SELECT folders.id FROM folders JOIN subtree ON folders.parent_id = subtree.id
-                        )
-                        SELECT id FROM subtree
-                    )`,
-                    isNull(folders.archivedAtMs),
-                ),
-            )
+            .where(and(sql`${folders.id} IN (${subtree})`, isNull(folders.archivedAtMs)))
             .run().changes,
     );
+    if (sessionIds.length > 0) {
+        tx.update(sessions)
+            .set({ archived: true, updatedAtMs: now })
+            .where(inArray(sessions.id, sessionIds))
+            .run();
+    }
+    return { folders: archivedFolders, sessionIds };
 }

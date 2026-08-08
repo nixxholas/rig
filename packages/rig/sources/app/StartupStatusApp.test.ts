@@ -121,6 +121,7 @@ describe("StartupStatusApp", () => {
                     permissionMode: "workspace_write",
                     projectId: "project-1",
                     providerId: "codex",
+                    scope: { kind: "project", projectId: "project-1" },
                     recap: "Reworked the startup screen.",
                     sessionTokenCount: { lastContextTokens: 34_500, totalTokens: 90_000 },
                     status: "idle",

@@ -156,7 +156,7 @@ describe("P2P HTTP between two real daemon servers", () => {
             token: "first-token",
         });
         const createdSession = await peerClient.createSession({ cwd: process.cwd() });
-        const scope = { projectId: createdSession.session.projectId };
+        const scope = { projectId: createdSession.session.projectId! };
         const createdTerminal = await peerClient.createRemoteTerminal(scope, {
             command: 'printf "p2p-terminal-ok\\n"',
         });

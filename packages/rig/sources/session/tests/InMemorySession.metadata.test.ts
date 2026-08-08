@@ -585,11 +585,13 @@ function createHarness(
                           options.inheritedTitles?.push(title);
                       }),
               }),
-        projectId: "project-1",
+        scope:
+            options.workspaceId === undefined
+                ? { kind: "project", projectId: "project-1" }
+                : { kind: "workspace", projectId: "project-1", workspaceId: options.workspaceId },
         request: { cwd: "/tmp/rig-metadata-test", modelId: model.id, providerId: provider.id },
         ...(options.restore === undefined ? {} : { restore: options.restore }),
         ...(options.taskDrain === undefined ? {} : { taskDrain: options.taskDrain }),
-        ...(options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId }),
         ...(options.workspaceRunReadiness === undefined
             ? {}
             : { workspaceRunReadiness: options.workspaceRunReadiness }),

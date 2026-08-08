@@ -881,6 +881,28 @@ export type SessionStatus =
     | "error"
     | "archived";
 
+/** The one application collection containing a visible primary chat. */
+export const sessionScopeSchema = Type.Union([
+    Type.Object(
+        { kind: Type.Literal("project"), projectId: Type.String({ minLength: 1 }) },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            kind: Type.Literal("workspace"),
+            projectId: Type.String({ minLength: 1 }),
+            workspaceId: Type.String({ minLength: 1 }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        { folderId: Type.String({ minLength: 1 }), kind: Type.Literal("folder") },
+        { additionalProperties: false },
+    ),
+    Type.Object({ kind: Type.Literal("unsorted") }, { additionalProperties: false }),
+]);
+export type SessionScope = Static<typeof sessionScopeSchema>;
+
 export interface ProtocolSession {
     id: string;
     activity: SessionActivity;
@@ -889,9 +911,11 @@ export interface ProtocolSession {
     agent?: SessionAgentMetadata;
     archived: boolean;
     appendSystemPrompt?: string;
-    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    /** The only project, workspace, folder, or Unsorted collection containing this chat. */
+    scope: SessionScope;
+    /** Derived conveniences; `scope` alone decides catalog membership. */
     folderId?: string;
-    projectId: string;
+    projectId?: string;
     workspaceId?: string;
     /** Absent for a session with no place in an ordered list, such as a subagent. */
     orderKey?: string;
@@ -1322,9 +1346,11 @@ export interface GitRepositoryFacts {
 export interface SessionSummary {
     id: string;
     archived: boolean;
-    /** Folder this chat was filed into. Absent while it is still Unsorted. */
+    /** The only project, workspace, folder, or Unsorted collection containing this chat. */
+    scope: SessionScope;
+    /** Derived conveniences; `scope` alone decides catalog membership. */
     folderId?: string;
-    projectId: string;
+    projectId?: string;
     workspaceId?: string;
     cwd: string;
     draft?: string;
@@ -1630,6 +1656,7 @@ export const createFolderRequestSchema = Type.Object(
         /** Client-chosen cuid2 identity. Repeating it returns the same folder. */
         id: Type.Optional(folderIdSchema),
         name: Type.String({ maxLength: FOLDER_NAME_MAX_LENGTH, minLength: 1 }),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         parentId: Type.Optional(folderIdSchema),
         rules: Type.Optional(Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH })),
     },
@@ -1650,6 +1677,7 @@ export const updateFolderRequestSchema = Type.Object(
             Type.Union([Type.String({ maxLength: FOLDER_ICON_MAX_LENGTH }), Type.Null()]),
         ),
         name: Type.Optional(Type.String({ maxLength: FOLDER_NAME_MAX_LENGTH, minLength: 1 })),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         rules: Type.Optional(
             Type.Union([Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH }), Type.Null()]),
         ),
@@ -1666,20 +1694,40 @@ export type UpdateFolderRequest = Static<typeof updateFolderRequestSchema>;
 export const moveFolderRequestSchema = Type.Object(
     {
         afterId: Type.Union([folderIdSchema, Type.Null()]),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         parentId: Type.Union([folderIdSchema, Type.Null()]),
     },
     exact,
 );
 export type MoveFolderRequest = Static<typeof moveFolderRequestSchema>;
 
-/** Putting one chat into a folder, or taking it back out into Unsorted with `null`. */
-export const setSessionFolderRequestSchema = Type.Object(
-    { folderId: Type.Union([folderIdSchema, Type.Null()]) },
+export const moveSessionRequestSchema = Type.Object(
+    {
+        afterId: Type.Union([folderIdSchema, Type.Null()]),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        scope: Type.Union([
+            Type.Object(
+                {
+                    folderId: folderIdSchema,
+                    kind: Type.Literal("folder"),
+                },
+                exact,
+            ),
+            Type.Object({ kind: Type.Literal("unsorted") }, exact),
+        ]),
+    },
     exact,
 );
-export type SetSessionFolderRequest = Static<typeof setSessionFolderRequestSchema>;
+export type MoveSessionRequest = Static<typeof moveSessionRequestSchema>;
 
-export const folderResponseSchema = Type.Object({ folder: folderSchema }, exact);
+export const folderResponseSchema = Type.Object(
+    { folder: folderSchema, revision: Type.Integer({ minimum: 0 }) },
+    exact,
+);
+export const listFoldersResponseSchema = Type.Object(
+    { folders: Type.Array(folderSchema), revision: Type.Integer({ minimum: 0 }) },
+    exact,
+);
 
 export const folderErrorCodeSchema = Type.Union([
     Type.Literal("invalid_request"),
@@ -1688,6 +1736,7 @@ export const folderErrorCodeSchema = Type.Union([
     Type.Literal("sibling_not_found"),
     Type.Literal("cycle"),
     Type.Literal("storage_unavailable"),
+    Type.Literal("version_conflict"),
 ]);
 export type FolderErrorCode = Static<typeof folderErrorCodeSchema>;
 
@@ -1704,10 +1753,12 @@ export type FolderErrorResponse = Static<typeof folderErrorResponseSchema>;
 
 export interface ListFoldersResponse {
     folders: readonly Folder[];
+    revision: number;
 }
 
 export interface FolderResponse {
     folder: Folder;
+    revision: number;
 }
 
 /**
@@ -1719,14 +1770,14 @@ export interface FolderResponse {
 export interface BaseFolderEvent<TType extends string, TData> {
     createdAt: number;
     data: TData;
-    folderId: string;
     id: EventId;
     type: TType;
 }
 
-export type FolderEvent =
-    | BaseFolderEvent<"folder_created", { folder: Folder; mutationId?: MutationId }>
-    | BaseFolderEvent<"folder_updated", { folder: Folder; mutationId?: MutationId }>;
+export type FolderEvent = BaseFolderEvent<
+    "folders_changed",
+    { mutationId?: MutationId; revision: number }
+>;
 
 const pluginResourcePathSchema = Type.String({
     maxLength: 160,
@@ -2134,12 +2185,11 @@ export interface TimelineAgent {
     modelId: string;
     parentSessionId?: string;
     parentToolCallId?: string;
-    projectId: string;
+    scope: SessionScope;
     providerId: string;
     sessionId: string;
     spans: readonly TimelineSpan[];
     type: "primary" | "subagent";
-    workspaceId?: string;
 }
 
 export interface GetTimelineRequest {

@@ -29,7 +29,7 @@ describe("Project files over HTTP", () => {
         await mkdir(join(repository, "empty"));
         await writeFile(join(repository, ".context", "notes.md"), "scratch\n");
         await writeFile(join(repository, ".gitignore"), ".context/\n");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         const first = await fixture.get(`/projects/${projectId}/file-tree?path=&limit=2`);
 
@@ -78,7 +78,7 @@ describe("Project files over HTTP", () => {
         const repository = await createRepository(fixture.root);
         await mkdir(join(repository, "target"));
         await symlink(join(repository, "target"), join(repository, "link"));
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         expect((await fixture.get(`/projects/${projectId}/file-tree?path=.git`)).status).toBe(403);
         expect((await fixture.get(`/projects/${projectId}/file-tree?path=.GIT`)).status).toBe(403);
@@ -100,7 +100,7 @@ describe("Project files over HTTP", () => {
         await writeFile(join(repository, "sources", "b.txt"), "b\n");
         await writeFile(join(repository, ".gitignore"), "ignored.txt\n");
         await writeFile(join(repository, "ignored.txt"), "hidden\n");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         const response = await fixture.get(`/projects/${projectId}/file-paths`);
 
@@ -119,7 +119,7 @@ describe("Project files over HTTP", () => {
         const folder = await mkdtemp(join(tmpdir(), "rig-plain-folder-"));
         cleanups.push(async () => await rm(folder, { force: true, recursive: true }));
         await writeFile(join(folder, "a.txt"), "a\n");
-        const projectId = fixture.store.create({ cwd: folder }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: folder }).snapshot().projectId!;
 
         const response = await fixture.get(`/projects/${projectId}/file-paths`);
 
@@ -132,7 +132,7 @@ describe("Project files over HTTP", () => {
         const repository = await createRepository(fixture.root);
         const worktree = join(fixture.root, "worktree");
         await git(repository, ["worktree", "add", "--quiet", "--detach", worktree, "HEAD"]);
-        const projectId = fixture.store.create({ cwd: worktree }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: worktree }).snapshot().projectId!;
         expect((await fixture.get(`/projects/${projectId}/file-paths`)).body.paths).toEqual([
             "seed.txt",
         ]);
@@ -154,7 +154,7 @@ describe("Project files over HTTP", () => {
         await writeFile(join(repository, "seed.txt"), "changed\n");
 
         const response = await fixture.get(
-            `/projects/${fixture.store.create({ cwd: repository }).snapshot().projectId}` +
+            `/projects/${fixture.store.create({ cwd: repository }).snapshot().projectId!}` +
                 `/file-revision?path=seed.txt&revision=${base}`,
         );
 
@@ -167,7 +167,7 @@ describe("Project files over HTTP", () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "added.txt"), "new\n");
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         const added = await fixture.get(
             `/projects/${projectId}/file-revision?path=added.txt&revision=HEAD`,
@@ -185,7 +185,7 @@ describe("Project files over HTTP", () => {
     it("refuses a path outside the folder and a revision Git would read as an option", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         const outside = await fixture.get(
             `/projects/${projectId}/file-revision?path=${encodeURIComponent("../escape.txt")}&revision=HEAD`,
@@ -201,7 +201,7 @@ describe("Project files over HTTP", () => {
     it("serves both routes for a workspace as it does for a project", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
         const workspace = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
             name: "check",
@@ -230,7 +230,7 @@ describe("Project files over HTTP", () => {
     it("reports an unknown project and an unknown workspace as missing", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId!;
 
         expect((await fixture.get("/projects/nope/file-paths")).status).toBe(404);
         expect(
