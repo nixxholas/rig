@@ -279,7 +279,7 @@ export class AgentSessionManager {
      * Starts a user-visible conversation in another workspace on behalf of a session.
      *
      * The new session is a primary one: it holds its own place in the session list and the user
-     * may take it over. The delegator is recorded so it can be told when they do, and it talks to
+     * may take it over. The delegator is recorded so completion can flow back and it can talk to
      * the session afterwards through the ordinary agent messaging tools.
      */
     async delegate(
@@ -346,40 +346,6 @@ export class AgentSessionManager {
             workspaceId: workspace.id,
             workspacePath: workspace.path,
         };
-    }
-
-    /**
-     * Tells a delegator that the user has taken their delegated session over.
-     *
-     * The delegator keeps working, but it must not assume it is still the only voice in that
-     * conversation, so it is given what the user actually said.
-     */
-    notifyDelegatorOfUserMessage(sessionId: string, text: string): void {
-        const delegate = this.#repository.get(sessionId);
-        const delegatorSessionId = delegate?.agentMetadata().delegatedBySessionId;
-        if (delegate === undefined || delegatorSessionId === undefined) return;
-        const delegator = this.#repository.get(delegatorSessionId);
-        if (delegator === undefined || delegator.isClosing?.() === true) return;
-        const title = delegate.agentIdentity().title ?? "the delegated conversation";
-        try {
-            delegator.deliverNotification({
-                displayText: `The user replied in "${title}" themselves.`,
-                text: [
-                    "<delegated-session-notification>",
-                    `Session: ${delegate.id}`,
-                    `Agent ID: ${delegate.agentIdentity().agentId}`,
-                    `Title: ${title}`,
-                    "The user wrote to this delegated session directly. They are steering it now.",
-                    "User message:",
-                    text,
-                    "</delegated-session-notification>",
-                ].join("\n"),
-            });
-        } catch (error) {
-            // Reaching the delegator is best effort; a delegator that cannot take the news must
-            // not break the user's own message. A database that cannot record it still must.
-            if (isDatabaseFailure(error)) throw error;
-        }
     }
 
     #targetProjectId(

@@ -4755,9 +4755,6 @@ export class InMemorySession {
         this.#commitEvent(event);
         this.#startDrainQueue();
         this.#restartMetadataSettlement();
-        if (options.source === undefined && request.provenance !== "agent") {
-            this.#reportUserInterventionToDelegator(displayText);
-        }
         return {
             ...(queued.debugDirectory === undefined
                 ? {}
@@ -4766,17 +4763,6 @@ export class InMemorySession {
             runId,
             sessionId: this.id,
         };
-    }
-
-    /**
-     * Tells whichever session delegated this conversation that the user is speaking here now.
-     *
-     * A delegated session belongs to the user, not to the agent that started it, so the delegator
-     * has to learn when they take it over instead of continuing to assume it is alone.
-     */
-    #reportUserInterventionToDelegator(text: string): void {
-        if (this.#agentMetadata.delegatedBySessionId === undefined) return;
-        this.#agentManager?.notifyDelegatorOfUserMessage(this.id, text);
     }
 
     steer(request: SteerMessageRequest): SteerMessageResponse {
@@ -4850,7 +4836,6 @@ export class InMemorySession {
             });
             this.#rememberSteeringContinuationMessage(continuation, userMessage.id);
             this.#restartMetadataSettlement();
-            this.#reportUserInterventionToDelegator(displayText);
             return {
                 delivery: "steer",
                 eventId: event.id,
@@ -4892,7 +4877,6 @@ export class InMemorySession {
             });
         }
         this.#restartMetadataSettlement();
-        this.#reportUserInterventionToDelegator(displayText);
         return {
             delivery: "steer",
             eventId: event.id,

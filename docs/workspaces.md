@@ -198,12 +198,8 @@ Model and reasoning effort are required here too. `provider`, `read_only`, and
 `service_tier` are optional and have the same meaning as for a hidden workspace
 agent.
 
-Two things flow back to you automatically:
-
-- when the delegated run finishes, you receive a notification with its status and
-  result;
-- when **the user writes into that conversation themselves**, you are told what
-  they said. You are no longer the only voice there; do not assume you still are.
+When the delegated run finishes, you receive a notification with its status and
+result. Messages the user writes in that conversation stay there.
 
 `delegate_to_workspace` is reviewed in Auto mode, because it starts a user-visible
 agent working outside your own workspace. Only a primary session can delegate —

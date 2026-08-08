@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
 import { NativeProcessManager } from "../../processes/index.js";
@@ -11,55 +11,19 @@ import {
     defineProvider,
     type AssistantMessage,
 } from "@slopus/rig-execution";
-import type { AgentSessionManager } from "../AgentSessionManager.js";
 import { InMemorySession } from "../InMemorySession.js";
 
-/**
- * A delegated session is the user's conversation, not the delegating agent's. The delegator keeps
- * working while the user is in there, so it has to be told the moment they say something.
- */
+/** A delegated session exposes its parent relationship for completion and agent-tree ownership. */
 describe("InMemorySession delegated conversations", () => {
-    it("reports a user message to the session that delegated the work", async () => {
-        const notifyDelegatorOfUserMessage = vi.fn();
-        const session = createDelegatedSession(notifyDelegatorOfUserMessage);
-
-        const submitted = session.submit({ text: "Rewrite the summary instead." });
-        await session.waitForRun(submitted.runId);
-
-        expect(notifyDelegatorOfUserMessage).toHaveBeenCalledWith(
-            session.id,
-            "Rewrite the summary instead.",
-        );
-
-        await session.beginShutdown();
-    });
-
-    it("stays quiet when its own delegator is the one writing", async () => {
-        const notifyDelegatorOfUserMessage = vi.fn();
-        const session = createDelegatedSession(notifyDelegatorOfUserMessage);
-
-        const submitted = session.submit({
-            provenance: "agent",
-            text: "Start with the changelog.",
-        });
-        await session.waitForRun(submitted.runId);
-
-        expect(notifyDelegatorOfUserMessage).not.toHaveBeenCalled();
-
-        await session.beginShutdown();
-    });
-
-    it("keeps the delegator on its metadata across a reload", () => {
-        const session = createDelegatedSession(vi.fn());
+    it("exposes the delegator in its metadata and snapshot", () => {
+        const session = createDelegatedSession();
 
         expect(session.agentMetadata().delegatedBySessionId).toBe("delegator-session");
         expect(session.snapshot().agent.delegatedBySessionId).toBe("delegator-session");
     });
 });
 
-function createDelegatedSession(
-    notifyDelegatorOfUserMessage: (sessionId: string, text: string) => void,
-): InMemorySession {
+function createDelegatedSession(): InMemorySession {
     const model = defineModel({
         defaultThinkingLevel: "off",
         id: "test/delegated",
@@ -86,7 +50,6 @@ function createDelegatedSession(
     };
     const sessionId = "delegated-session";
     return new InMemorySession({
-        agentManager: { notifyDelegatorOfUserMessage } as unknown as AgentSessionManager,
         createEventId: createEventIdFactory(),
         createRuntime: (options) => createRuntime(options, provider),
         id: sessionId,

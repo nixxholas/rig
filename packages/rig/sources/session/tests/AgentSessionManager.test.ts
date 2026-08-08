@@ -2635,47 +2635,6 @@ describe("AgentSessionManager", () => {
         });
     });
 
-    it("tells the delegator what the user said when they take a delegated session over", () => {
-        const deliverNotification = vi.fn();
-        const delegator = delegatorSession({ deliverNotification });
-        const delegated = {
-            agentIdentity: () => ({
-                agentId: "delegate-agent",
-                folder: "changelog",
-                title: "Update the changelog",
-            }),
-            agentMetadata: () => ({
-                delegatedBySessionId: "root-1",
-                depth: 0,
-                rootSessionId: "delegate-1",
-                type: "primary" as const,
-            }),
-            id: "delegate-1",
-            isSubagent: () => false,
-        } as unknown as InMemorySession;
-        const manager = new AgentSessionManager({
-            repository: {
-                createSubagent: vi.fn(),
-                get: (id) =>
-                    id === delegator.id ? delegator : id === delegated.id ? delegated : undefined,
-                listByRoot: () => [],
-            },
-        });
-
-        manager.notifyDelegatorOfUserMessage(delegated.id, "Stop and rewrite the summary.");
-
-        expect(deliverNotification).toHaveBeenCalledOnce();
-        const notification = deliverNotification.mock.calls[0]![0] as {
-            displayText: string;
-            text: string;
-        };
-        expect(notification.displayText).toBe(
-            'The user replied in "Update the changelog" themselves.',
-        );
-        expect(notification.text).toContain("Stop and rewrite the summary.");
-        expect(notification.text).toContain("They are steering it now.");
-    });
-
     it("keeps another project's workspaces and conversations behind cross-workspace access", () => {
         const delegator = delegatorSession();
         const manager = new AgentSessionManager({

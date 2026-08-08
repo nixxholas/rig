@@ -172,11 +172,9 @@ Two tools start work in another workspace; see
   user's session list. It keeps your session as its parent and returns an
   `agentId`, so you keep talking to it with `agent_info` + `agent_send`.
 
-A delegated session sends two kinds of news back to its delegator: the run's
-completion (status and result) and, importantly, **any message the user writes
-into it themselves** — including the text. When that arrives you are no longer
-the only voice in that conversation; take the user's steering into account rather
-than continuing as if nothing happened.
+A delegated session sends the run's completion status and result back to its
+delegator. Messages the user writes in that conversation stay in that
+conversation.
 
 Only a primary session can delegate, and never into its own workspace.
 

@@ -336,7 +336,7 @@ export const delegateToWorkspaceTool = defineTool({
     name: "delegate_to_workspace",
     label: "Delegate to workspace",
     description:
-        "Start a visible conversation in another workspace and give it a task. If its checkout is still initializing, this call waits for it to become ready without starting the conversation early. The new session appears in the user's session list, keeps this session as its parent, and can be reached afterwards with agent_info and agent_send using the returned agent ID. When the user writes to it themselves, this session is told what they said.",
+        "Start a visible conversation in another workspace and give it a task. If its checkout is still initializing, this call waits for it to become ready without starting the conversation early. The new session appears in the user's session list, keeps this session as its parent, and can be reached afterwards with agent_info and agent_send using the returned agent ID.",
     arguments: Type.Object(
         {
             workspace_id: Type.String({
