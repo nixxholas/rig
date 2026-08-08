@@ -5,11 +5,11 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
 /**
  * When a chat started out belonging nowhere.
  *
- * A chat with no folder is not automatically Unsorted: every chat that exists today has no folder
- * because folders are new, and none of them should be put away. Unsorted is the state a chat is
- * created in when it is started from the folder tree without one, and this column is the moment
- * that happened. Filing the chat into a folder clears it, so only a chat that is still waiting to
- * be sorted can run out of time.
+ * Unsorted is where a chat is born, not merely somewhere a chat without a folder ends up. A chat
+ * that belongs to a project or a workspace is sorted by belonging there and is never a candidate,
+ * which is every chat that exists today. This column is set only when a chat is started from the
+ * folder tree with no folder, and it holds the moment that happened for as long as the chat has
+ * none, so filing and unfiling move the chat without rewriting where it came from.
  */
 export function unsortedChats(database: SessionDatabase): void {
     const sessions = database.get<{ name: string }>(

@@ -6,13 +6,13 @@ import { readString } from "./impl/sqliteRow.js";
 /**
  * The Unsorted chats that have run out of time, oldest first.
  *
- * Unsorted is a state a chat is started in, recorded as the moment it began belonging nowhere, not
- * merely the absence of a folder: an ordinary project chat has no folder either and must never be
- * swept. Such a chat can file itself while the user talks to it, which clears that moment; one that
- * never does is put away once it has been waiting since before `unsortedBefore`. Only chats of the
- * user's own belong there: a subagent belongs to the session that started it and a delegated chat
- * to the agent that opened it, so neither is ever a candidate. The batch is bounded so one sweep
- * cannot load the whole history.
+ * Unsorted is where a chat is born, recorded as the moment it began belonging nowhere, and not
+ * merely the absence of a folder: a chat that belongs to a project or a workspace has no folder
+ * either and is sorted by belonging there, so it must never be swept. An Unsorted chat can file
+ * itself while the user talks to it, and one that still has no folder a day later is put away. Only
+ * chats of the user's own belong there: a subagent belongs to the session that started it and a
+ * delegated chat to the agent that opened it, so neither is ever a candidate. The batch is bounded
+ * so one sweep cannot load the whole history.
  */
 export function queryExpiredUnsortedSessions(
     tx: TX,

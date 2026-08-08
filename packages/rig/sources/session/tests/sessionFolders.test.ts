@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { sql } from "drizzle-orm";
+
 import { defineModel, defineProvider } from "@slopus/rig-execution";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -100,6 +102,21 @@ describe("chats and folders", () => {
         expect(summaryOf(reopened, session.id)?.folderId).toBe(folder.id);
     });
 
+    it("never sweeps a chat taken back out of a folder, which was never Unsorted", async () => {
+        const { databasePath, root } = await createFixture();
+        let now = 1_700_000_000_000;
+        const store = openStore({ databasePath, now: () => now, root });
+        const folder = store.createFolder({ name: "Filed" });
+        const session = store.create({ cwd: root });
+        store.setSessionFolder(session.id, folder.id);
+        store.setSessionFolder(session.id, null);
+
+        now += UNSORTED_SESSION_ARCHIVE_AFTER_MS * 30;
+        store.archiveExpiredUnsortedSessions();
+
+        expect(store.get(session.id)?.snapshot().archived).toBe(false);
+    });
+
     it("never sweeps a chat that was created outside the folder tree", async () => {
         const { databasePath, root } = await createFixture();
         let now = 1_700_000_000_000;
@@ -120,8 +137,9 @@ describe("chats and folders", () => {
         const sorted = store.create({ cwd: root });
         store.setSessionFolder(sorted.id, folder.id);
         const stale = store.create({ cwd: root });
-        // Waiting to be sorted is a state a chat is put in, not merely the absence of a folder.
-        store.setSessionFolder(stale.id, null);
+        // Unsorted is where a chat is born. Nothing starts one yet, so the test states the fact
+        // directly rather than pretending that unfiling a project chat creates one.
+        markBornUnsorted(databasePath, stale.id, now);
         store.saveSession(
             storedSession({
                 agent: {
@@ -293,4 +311,22 @@ function storedSession(
         tools: [],
         ...overrides,
     };
+}
+
+/**
+ * States that a chat was born Unsorted.
+ *
+ * Nothing starts an Unsorted chat yet: a chat is created in a project or a workspace, which is why
+ * unfiling one never makes it Unsorted. Until the folder tree can start a chat of its own, a test
+ * that needs one writes the fact itself.
+ */
+function markBornUnsorted(databasePath: string, sessionId: string, since: number): void {
+    const opened = openSessionDatabase(databasePath);
+    try {
+        opened.database.run(
+            sql`UPDATE sessions SET unsorted_since_ms = ${since} WHERE id = ${sessionId}`,
+        );
+    } finally {
+        opened.client.close();
+    }
 }

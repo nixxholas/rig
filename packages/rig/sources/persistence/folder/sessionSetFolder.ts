@@ -4,10 +4,13 @@ import { sessions } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 
 /**
- * Files one chat into a folder. `null` takes it back out into Unsorted.
+ * Files one chat into a folder, or takes it back out with `null`.
  *
- * Filing ends the wait: a chat that started out belonging nowhere stops being a candidate for the
- * Unsorted sweep the moment it lands somewhere, and starts waiting again if it is taken back out.
+ * Only the folder changes. Whether a chat is Unsorted is decided when it is created and never by
+ * filing: a chat born in a project or a workspace is sorted by belonging there, so taking it out of
+ * a folder leaves it exactly as sorted as it was. A chat born in the folder tree with no folder
+ * keeps waiting to be sorted for as long as it has none, and filing it ends that wait by giving it
+ * one rather than by forgetting where it came from.
  */
 export function sessionSetFolder(
     tx: TX,
@@ -18,11 +21,7 @@ export function sessionSetFolder(
     return Number(
         tx
             .update(sessions)
-            .set({
-                folderId,
-                updatedAtMs: now,
-                unsortedSinceMs: folderId === null ? now : null,
-            })
+            .set({ folderId, updatedAtMs: now })
             .where(eq(sessions.id, sessionId))
             .run().changes,
     );
