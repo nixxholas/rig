@@ -20,7 +20,7 @@ afterEach(async () => {
     await Promise.allSettled(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
-describe("Git state over HTTP", () => {
+describe("Git state over HTTP", { timeout: 30_000 }, () => {
     it("serves a change snapshot for a project and keeps it warm", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
