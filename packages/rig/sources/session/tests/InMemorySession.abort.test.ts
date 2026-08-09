@@ -362,6 +362,76 @@ describe("InMemorySession abort", () => {
         }
     });
 
+    it("stops background processes while aborting an active run", async () => {
+        const started = deferred<void>();
+        const release = deferred<void>();
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/active-abort-background",
+            name: "Active abort background",
+            thinkingLevels: ["off"],
+        });
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream() {
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        started.resolve();
+                        await release.promise;
+                        yield* [];
+                    },
+                    async result() {
+                        return assistantMessage("Late response.", model.id);
+                    },
+                };
+            },
+        });
+        let runtime: CodingAssistantRuntime | undefined;
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime(options) {
+                runtime = createRuntime(options, provider);
+                return runtime;
+            },
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ models: [model], providerId: provider.id }],
+            },
+            request: {
+                cwd: tmpdir(),
+                modelId: model.id,
+                permissionMode: "full_access",
+            },
+        });
+
+        await session.runShellCommand({
+            command: "sleep 60",
+            commandId: "active-abort-background",
+        });
+        if (runtime === undefined) throw new Error("Runtime was not created.");
+        expect(runtime.processManager.activeCount()).toBe(1);
+
+        const submitted = session.submit({ text: "Keep running until I abort." });
+        await started.promise;
+
+        try {
+            await expect(session.abort()).resolves.toMatchObject({
+                aborted: true,
+                stoppedProcesses: 1,
+            });
+            expect(runtime.processManager.activeCount()).toBe(0);
+        } finally {
+            release.resolve();
+            await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+                status: "aborted",
+            });
+            await session.beginShutdown();
+        }
+    });
+
     it("continues the same run immediately when aborting with pending steering", async () => {
         const started = deferred<void>();
         const contexts: Context[] = [];

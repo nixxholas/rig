@@ -1264,7 +1264,7 @@ export class InMemorySession {
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
         await Promise.all([
-            this.#killRuntimeProcesses(),
+            this.#killRuntimeProcesses({ includeBackground: true }),
             stopDescendants,
             ...discardedQueue.map((queued) => this.#closeDebugLog(queued)),
         ]);
@@ -3753,9 +3753,8 @@ export class InMemorySession {
         }
         await Promise.all(workflowRuns.map((run) => run.completion));
         this.#workflowRuns.clear();
-        // Aborting spares background work, but a reset throws away the
-        // conversation that knew its task ids. Nothing would ever read or stop
-        // those commands again, so they go with the history that started them.
+        // A reset throws away the conversation that knew its task ids. Make
+        // sure no commands remain even when there was no active run to abort.
         await this.#killRuntimeProcesses({ includeBackground: true });
         this.#runtime?.context.attachments?.discard();
         await this.#ensureRuntime().agent.reset();
@@ -7206,7 +7205,7 @@ export class InMemorySession {
      * Stops the session's processes.
      *
      * Work the agent deliberately left running in the background is spared
-     * unless this session is going away for good.
+     * unless the caller explicitly includes it.
      */
     async #killRuntimeProcesses(
         options: { forceAfterMs?: number; includeBackground?: boolean } = {},
