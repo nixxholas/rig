@@ -75,7 +75,7 @@ describe("gitWatchTargets", () => {
     });
 });
 
-describe("watchGitRepositoryChanges", () => {
+describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
     it("keeps noticing commits after the first one", async () => {
         const repository = await createRepository();
         await commit(repository, "a.txt", "one\n");
@@ -93,7 +93,7 @@ describe("watchGitRepositoryChanges", () => {
         await waitFor(() => dirty.count > afterFirst + 1);
 
         expect(dirty.count).toBeGreaterThan(afterFirst + 1);
-    }, 30_000);
+    });
 
     it("notices a branch whose name contains a slash", async () => {
         const repository = await createRepository();
