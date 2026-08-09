@@ -10,7 +10,11 @@ import { finished } from "node:stream/promises";
 import type { ConfigIrohTransport } from "../config/types.js";
 import { errorToMessage } from "../errorToMessage.js";
 import type { P2pPeerStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
-import { createIrohFrameDuplex, P2pFrameWriteTimeoutError } from "./P2pFrameDuplex.js";
+import {
+    createIrohFrameDuplex,
+    finishWrites,
+    P2pFrameWriteTimeoutError,
+} from "./P2pFrameDuplex.js";
 import {
     readP2pHttpRequest,
     readP2pHttpResponse,
@@ -49,6 +53,7 @@ const STREAM_KIND_HTTP = 2;
 const STREAM_KIND_HELLO = 3;
 const STREAM_KIND_TUNNEL = 4;
 const PONG = Buffer.from([STREAM_KIND_PING]);
+const CLOSE_CANCELLED = 499n;
 const CLOSE_UNAUTHORIZED = 403n;
 const CLOSE_SHUTDOWN = 0n;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
@@ -63,6 +68,7 @@ const DEFAULT_RESTART_COOLDOWN_MS = 30_000;
 const INITIAL_RETRY_MS = 250;
 const MAXIMUM_STANDARD_CONNECTS_PER_PEER = 2;
 const MAXIMUM_HTTP_REQUESTS = 32;
+const MAXIMUM_CONNECTION_STREAMS = MAXIMUM_HTTP_REQUESTS + 1;
 const MAXIMUM_RETRY_MS = 10_000;
 const REQUEST_BODY_TIMEOUT_MS = 120_000;
 const RESPONSE_HEAD_TIMEOUT_MS = 30_000;
@@ -109,6 +115,29 @@ export interface CreateIrohNetworkOptions {
     onStatusChange?: (status: P2pTransportStatus) => void;
 }
 
+interface IrohOutgoingConnectionEntry {
+    activeApplicationStreams: number;
+    closeWhenIdle?: boolean;
+    connection?: Connection;
+    promise?: Promise<IrohSharedConnection>;
+}
+
+interface IrohSharedConnection {
+    connection: Connection;
+    entry: IrohOutgoingConnectionEntry;
+    identity: P2pPeerIdentity;
+}
+
+interface IrohConnectedEndpoint {
+    connection: Connection;
+    endpoint: Endpoint;
+}
+
+interface IrohPeerStream {
+    entry: IrohOutgoingConnectionEntry;
+    stream: Awaited<ReturnType<Connection["openBi"]>>;
+}
+
 export class IrohNetwork implements P2pTransport {
     readonly kind = "iroh";
     readonly #apiExposed: boolean;
@@ -133,6 +162,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #onStatusChange: ((status: P2pTransportStatus) => void) | undefined;
     readonly #pendingConnectChanges = new Map<string, AbortController>();
     readonly #pendingConnects = new Map<string, Set<Promise<Connection>>>();
+    readonly #outgoingConnections = new Map<string, IrohOutgoingConnectionEntry>();
     readonly #peerAddresses: Map<string, EndpointAddr>;
     readonly #peerDiscoveryProbes = new Set<string>();
     readonly #peerNeedsDiscovery = new Set<string>();
@@ -155,7 +185,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #updatePeerAddress:
         | ((identity: P2pPeerIdentity, endpointId: string, ticket: string) => Promise<void>)
         | undefined;
-    readonly #httpConnections = new Set<Connection>();
+    readonly #authenticatedConnections = new Set<Connection>();
     #endpointClosePending: Promise<void> | undefined;
     #endpointRestart: Promise<void> | undefined;
     #lastEndpointRestartAt = 0;
@@ -265,6 +295,17 @@ export class IrohNetwork implements P2pTransport {
         if (endpointId === this.localAddress()) {
             throw new Error("A P2P peer must not use this daemon's own Iroh endpoint ID.");
         }
+        const previousIdentity = this.#peerIdentities.get(endpointId);
+        if (
+            previousIdentity !== undefined &&
+            (previousIdentity.instanceId !== identity.instanceId ||
+                previousIdentity.publicKey !== identity.publicKey)
+        ) {
+            const connection = this.#outgoingConnections.get(endpointId);
+            if (connection !== undefined) {
+                this.#retireOutgoingConnection(endpointId, connection, "close");
+            }
+        }
         this.#peerIdentities.set(endpointId, identity);
         if (ticket !== undefined) this.#setPeerTicket(endpointId, ticket);
         this.#peerNames.set(endpointId, name);
@@ -325,50 +366,40 @@ export class IrohNetwork implements P2pTransport {
             throw new Error("Too many P2P HTTP requests are already active.");
         }
         this.#httpRequestCount += 1;
-        let connection: Connection | undefined;
+        let peerStream: IrohPeerStream | undefined;
         let released = false;
-        const release = (): void => {
+        const release = (completed = false): void => {
             if (released) return;
             released = true;
             signal.removeEventListener("abort", abort);
-            if (connection !== undefined) {
-                this.#httpConnections.delete(connection);
-                connection.close(CLOSE_SHUTDOWN, []);
+            if (peerStream !== undefined) {
+                if (completed) {
+                    this.#track(
+                        finishIrohHttpStream(
+                            peerStream.stream,
+                            this.#responseWriteProgressTimeoutMs,
+                        ),
+                    );
+                } else cancelIrohStream(peerStream.stream);
+                this.#releaseOutgoingApplicationStream(peerStream.entry);
             }
             this.#httpRequestCount -= 1;
         };
-        const abort = (): void => release();
+        const abort = (): void => release(false);
         try {
             signal.throwIfAborted();
-            connection = await connectOnce(
-                this.#endpoint,
-                this.#peerAddress(endpointId),
-                this.#connectTimeoutMs,
+            peerStream = await this.#openPeerStream(
+                endpointId,
+                peerId,
                 signal,
+                "The peer did not open an HTTP stream in time.",
             );
-            if (connection.remoteId().toString() !== endpointId) {
-                throw new Error("Iroh connected to a different endpoint identity.");
-            }
-            const authenticated = await this.#authenticateOutgoing(connection, endpointId);
-            if (authenticated.instanceId !== peerId) {
-                throw new Error("The Iroh endpoint belongs to a different P2P instance.");
-            }
-            this.#rememberPeer(endpointId, authenticated);
-            this.#httpConnections.add(connection);
             signal.addEventListener("abort", abort, { once: true });
-            const stream = await withAbort(
-                withDeadline(
-                    connection.openBi(),
-                    this.#handshakeTimeoutMs,
-                    "The peer did not open an HTTP stream in time.",
-                ),
-                signal,
-            );
-            await withAbort(stream.send.writeAll([STREAM_KIND_HTTP]), signal);
-            const duplex = createIrohFrameDuplex(stream.recv, stream.send);
+            await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_HTTP]), signal);
+            const duplex = createIrohFrameDuplex(peerStream.stream.recv, peerStream.stream.send);
             await withAbort(
                 withDeadline(
-                    writeP2pHttpRequest(duplex.send, request),
+                    writeP2pHttpRequest(duplex.send, request, { finish: false }),
                     REQUEST_BODY_TIMEOUT_MS,
                     "The P2P HTTP request took too long to send.",
                 ),
@@ -383,7 +414,7 @@ export class IrohNetwork implements P2pTransport {
                 signal,
             );
         } catch (error) {
-            release();
+            release(false);
             throw error;
         }
     }
@@ -398,37 +429,30 @@ export class IrohNetwork implements P2pTransport {
             throw new Error("Too many P2P tunnels are already active.");
         }
         this.#httpRequestCount += 1;
-        let connection: Connection | undefined;
+        let peerStream: IrohPeerStream | undefined;
         let released = false;
         const release = (): void => {
             if (released) return;
             released = true;
             signal.removeEventListener("abort", abort);
-            if (connection !== undefined) {
-                this.#httpConnections.delete(connection);
-                connection.close(CLOSE_SHUTDOWN, []);
+            if (peerStream !== undefined) {
+                cancelIrohStream(peerStream.stream);
+                this.#releaseOutgoingApplicationStream(peerStream.entry);
             }
             this.#httpRequestCount -= 1;
         };
         const abort = (): void => release();
         try {
             signal.throwIfAborted();
-            connection = await connectOnce(
-                this.#endpoint,
-                this.#peerAddress(endpointId),
-                this.#connectTimeoutMs,
+            peerStream = await this.#openPeerStream(
+                endpointId,
+                peerId,
                 signal,
+                "The peer did not open a tunnel stream in time.",
             );
-            const authenticated = await this.#authenticateOutgoing(connection, endpointId);
-            if (authenticated.instanceId !== peerId) {
-                throw new Error("The Iroh endpoint belongs to a different P2P instance.");
-            }
-            this.#rememberPeer(endpointId, authenticated);
-            this.#httpConnections.add(connection);
             signal.addEventListener("abort", abort, { once: true });
-            const stream = await withAbort(connection.openBi(), signal);
-            await withAbort(stream.send.writeAll([STREAM_KIND_TUNNEL]), signal);
-            const duplex = createIrohFrameDuplex(stream.recv, stream.send);
+            await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_TUNNEL]), signal);
+            const duplex = createIrohFrameDuplex(peerStream.stream.recv, peerStream.stream.send);
             await withAbort(writeP2pTunnelRequest(duplex.send, request), signal);
             const response = await withAbort(
                 withDeadline(
@@ -459,7 +483,11 @@ export class IrohNetwork implements P2pTransport {
         this.#retryWake.abort();
         for (const controller of this.#pendingConnectChanges.values()) controller.abort();
         this.#pendingConnectChanges.clear();
-        for (const connection of this.#httpConnections) {
+        for (const [endpointId, entry] of this.#outgoingConnections) {
+            this.#retireOutgoingConnection(endpointId, entry, "close");
+        }
+        this.#outgoingConnections.clear();
+        for (const connection of this.#authenticatedConnections) {
             connection.close(CLOSE_SHUTDOWN, []);
         }
         const endpointClose = this.#endpointClosePending ?? this.#endpoint.close();
@@ -542,7 +570,7 @@ export class IrohNetwork implements P2pTransport {
                 connection.close(CLOSE_UNAUTHORIZED, [...Buffer.from("endpoint not allowed")]);
                 return;
             }
-            connection.setMaxConcurrentBiStreams(BigInt(MAXIMUM_HTTP_REQUESTS));
+            connection.setMaxConcurrentBiStreams(BigInt(MAXIMUM_CONNECTION_STREAMS));
             const stream = await withDeadline(
                 connection.acceptBi(),
                 this.#handshakeTimeoutMs,
@@ -575,22 +603,36 @@ export class IrohNetwork implements P2pTransport {
                 this.#handshakeTimeoutMs,
                 "The peer did not finish its signed identity hello in time.",
             );
+            await withDeadline(
+                stream.recv.readToEnd(0),
+                this.#handshakeTimeoutMs,
+                "The peer did not finish its signed identity hello stream in time.",
+            );
             this.#rememberPeer(remoteId, authenticated);
-            this.#httpConnections.add(connection);
+            this.#authenticatedConnections.add(connection);
             tracked = true;
             await this.#serveConnection(connection, authenticated.instanceId);
         } catch {
             connection?.close(CLOSE_SHUTDOWN, []);
         } finally {
-            if (tracked && connection !== undefined) this.#httpConnections.delete(connection);
+            if (tracked && connection !== undefined) {
+                this.#authenticatedConnections.delete(connection);
+            }
         }
     }
 
     async #serveConnection(connection: Connection, peerId: string): Promise<void> {
         const streams = new Set<Promise<void>>();
+        const controller = new AbortController();
+        if (typeof connection.closed === "function") {
+            void connection.closed().then(
+                (reason) => controller.abort(new Error(reason)),
+                (error: unknown) => controller.abort(error),
+            );
+        }
         try {
             while (!this.#abort.signal.aborted) {
-                if (streams.size >= MAXIMUM_HTTP_REQUESTS) {
+                if (streams.size >= MAXIMUM_CONNECTION_STREAMS) {
                     await Promise.race(streams);
                     continue;
                 }
@@ -599,7 +641,7 @@ export class IrohNetwork implements P2pTransport {
                     this.#idleTimeoutMs,
                     "The peer did not open a P2P stream in time.",
                 );
-                const serving = this.#serveStream(connection, peerId, stream).catch(
+                const serving = this.#serveStream(peerId, stream, controller.signal).catch(
                     () => undefined,
                 );
                 streams.add(serving);
@@ -609,25 +651,55 @@ export class IrohNetwork implements P2pTransport {
                 );
             }
         } finally {
-            await Promise.allSettled(streams);
+            connection.close(CLOSE_SHUTDOWN, []);
+            controller.abort(new Error("The Iroh connection stopped."));
+            await withDeadline(
+                Promise.allSettled(streams),
+                this.#closeTimeoutMs,
+                "The Iroh connection's active streams did not stop in time.",
+            ).catch(() => undefined);
         }
     }
 
     async #serveStream(
-        connection: Connection,
         peerId: string,
         stream: Awaited<ReturnType<Connection["acceptBi"]>>,
+        connectionSignal: AbortSignal,
     ): Promise<void> {
-        const kind = (
-            await withDeadline(
-                stream.recv.readExact(1),
-                this.#pingTimeoutMs,
-                "The peer did not identify its P2P request in time.",
-            )
-        )[0];
+        let kind: number | undefined;
+        try {
+            kind = (
+                await withDeadline(
+                    stream.recv.readExact(1),
+                    this.#pingTimeoutMs,
+                    "The peer did not identify its P2P request in time.",
+                )
+            )[0];
+        } catch (error) {
+            cancelIrohStream(stream);
+            throw error;
+        }
         if (kind === STREAM_KIND_PING) {
-            await stream.send.writeAll([...PONG]);
-            await stream.send.finish();
+            try {
+                await withDeadline(
+                    stream.recv.readToEnd(0),
+                    this.#pingTimeoutMs,
+                    "The peer did not finish its ping request in time.",
+                );
+                await withDeadline(
+                    stream.send.writeAll([...PONG]),
+                    this.#pingTimeoutMs,
+                    "The peer did not accept its pong in time.",
+                );
+                await withDeadline(
+                    stream.send.finish(),
+                    this.#pingTimeoutMs,
+                    "The peer did not finish its pong in time.",
+                );
+            } catch (error) {
+                cancelIrohStream(stream);
+                throw error;
+            }
             return;
         }
         if (
@@ -635,22 +707,23 @@ export class IrohNetwork implements P2pTransport {
             (kind === STREAM_KIND_TUNNEL && this.#serveTunnel === undefined) ||
             (kind !== STREAM_KIND_HTTP && kind !== STREAM_KIND_TUNNEL)
         ) {
-            await stream.send.reset(
+            cancelIrohStream(
+                stream,
                 kind === STREAM_KIND_HTTP || kind === STREAM_KIND_TUNNEL ? 403n : 400n,
             );
             return;
         }
         if (this.#incomingHttpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
-            await stream.send.reset(429n);
+            cancelIrohStream(stream, 429n);
             return;
         }
         this.#incomingHttpRequestCount += 1;
         const duplex = createIrohFrameDuplex(stream.recv, stream.send);
         const controller = new AbortController();
-        void connection.closed().then(
-            () => controller.abort(),
-            () => controller.abort(),
-        );
+        const abortFromConnection = (): void => controller.abort(connectionSignal.reason);
+        if (connectionSignal.aborted) abortFromConnection();
+        else connectionSignal.addEventListener("abort", abortFromConnection, { once: true });
+        let completed = false;
         try {
             if (kind === STREAM_KIND_TUNNEL) {
                 await this.#serveTunnelStream(peerId, duplex, controller);
@@ -660,6 +733,16 @@ export class IrohNetwork implements P2pTransport {
                     REQUEST_BODY_TIMEOUT_MS,
                     "The peer did not finish its HTTP request in time.",
                 );
+                if (typeof stream.recv.receivedReset === "function") {
+                    void stream.recv.receivedReset().then(
+                        (errorCode) => {
+                            if (errorCode !== null) {
+                                controller.abort(new Error("The peer reset the P2P stream."));
+                            }
+                        },
+                        (error: unknown) => controller.abort(error),
+                    );
+                }
                 const response = await withDeadline(
                     this.#serveRequest!(peerId, request, controller.signal),
                     RESPONSE_HEAD_TIMEOUT_MS,
@@ -671,6 +754,7 @@ export class IrohNetwork implements P2pTransport {
                     this.#responseWriteProgressTimeoutMs,
                 );
             }
+            completed = true;
         } catch (error) {
             if (!controller.signal.aborted && !(error instanceof P2pFrameWriteTimeoutError)) {
                 if (kind === STREAM_KIND_TUNNEL) {
@@ -688,9 +772,10 @@ export class IrohNetwork implements P2pTransport {
                 }
             }
         } finally {
+            connectionSignal.removeEventListener("abort", abortFromConnection);
             controller.abort();
             this.#incomingHttpRequestCount -= 1;
-            connection.close(CLOSE_SHUTDOWN, []);
+            if (kind === STREAM_KIND_TUNNEL || !completed) cancelIrohStream(stream);
         }
     }
 
@@ -712,6 +797,7 @@ export class IrohNetwork implements P2pTransport {
         await writeP2pTunnelResponse(duplex.send, connection.response);
         if (connection.response.status !== (request.method === "GET" ? 101 : 200)) {
             connection.stream.destroy();
+            await finishWrites(duplex.send, this.#responseWriteProgressTimeoutMs);
             return;
         }
         const tunnel = createP2pTunnelStream(duplex, {
@@ -745,13 +831,9 @@ export class IrohNetwork implements P2pTransport {
             throw new Error("The Iroh endpoint cannot be rebuilt on this platform.");
         }
         if (this.#endpointRestart !== undefined) return this.#endpointRestart;
-        if (
-            this.#httpRequestCount > 0 ||
-            this.#httpConnections.size > 0 ||
-            this.#incomingHttpRequestCount > 0
-        ) {
+        if (this.#httpRequestCount > 0 || this.#incomingHttpRequestCount > 0) {
             throw new IrohEndpointRestartDeferredError(
-                "The Iroh endpoint was not rebuilt because a P2P request or connection is still active.",
+                "The Iroh endpoint was not rebuilt because a P2P request is still active.",
             );
         }
         if (
@@ -781,6 +863,15 @@ export class IrohNetwork implements P2pTransport {
         const restart = (async () => {
             const previous = this.#endpoint;
             const endpointId = previous.id().toString();
+            for (const [peerId, entry] of this.#outgoingConnections) {
+                if (entry.connection !== undefined) {
+                    this.#retireOutgoingConnection(peerId, entry, "close");
+                }
+            }
+            for (const connection of this.#authenticatedConnections) {
+                connection.close(CLOSE_SHUTDOWN, []);
+            }
+            this.#authenticatedConnections.clear();
             const closing = previous.close();
             this.#endpointClosePending = closing;
             void closing.then(
@@ -834,25 +925,27 @@ export class IrohNetwork implements P2pTransport {
         let retryMs = INITIAL_RETRY_MS;
         let consecutiveFailures = 0;
         while (!this.#abort.signal.aborted) {
-            let connection: Connection | undefined;
+            let shared: IrohSharedConnection | undefined;
             try {
                 this.#setPeerStatus(endpointId, this.#statusFor(endpointId, "connecting"));
-                connection = await this.#connect(endpointId);
-                if (connection.remoteId().toString() !== endpointId) {
-                    throw new Error("Iroh connected to a different endpoint identity.");
-                }
-                const authenticated = await this.#authenticateOutgoing(connection, endpointId);
-                this.#rememberPeer(endpointId, authenticated);
+                shared = await this.#outgoingConnection(endpointId, this.#abort.signal);
+                const authenticated = shared.identity;
                 consecutiveFailures = 0;
                 this.#peerNeedsDiscovery.delete(endpointId);
                 retryMs = INITIAL_RETRY_MS;
+                let consecutivePingFailures = 0;
                 while (!this.#abort.signal.aborted) {
                     const startedAt = Date.now();
-                    await withDeadline(
-                        exchangePing(connection),
-                        this.#pingTimeoutMs,
-                        "The peer did not answer its ping in time.",
-                    );
+                    try {
+                        await exchangePing(shared.connection, this.#pingTimeoutMs);
+                        consecutivePingFailures = 0;
+                    } catch (error) {
+                        if (isConnectionClosed(shared.connection)) throw error;
+                        consecutivePingFailures += 1;
+                        if (consecutivePingFailures >= 2) throw error;
+                        await this.#wait(INITIAL_RETRY_MS);
+                        continue;
+                    }
                     this.#setPeerStatus(endpointId, {
                         address: endpointId,
                         lastSeenAt: Date.now(),
@@ -866,6 +959,9 @@ export class IrohNetwork implements P2pTransport {
                 }
             } catch (error) {
                 if (this.#abort.signal.aborted) return;
+                if (shared !== undefined) {
+                    this.#retireOutgoingConnection(endpointId, shared.entry, "drain");
+                }
                 consecutiveFailures += 1;
                 if (consecutiveFailures >= 2 && this.#peerAddresses.has(endpointId)) {
                     this.#peerNeedsDiscovery.add(endpointId);
@@ -876,13 +972,137 @@ export class IrohNetwork implements P2pTransport {
                 });
                 await this.#wait(retryMs);
                 retryMs = Math.min(MAXIMUM_RETRY_MS, retryMs * 2);
-            } finally {
-                connection?.close(CLOSE_SHUTDOWN, []);
             }
         }
     }
 
-    async #connect(endpointId: string): Promise<Connection> {
+    async #openPeerStream(
+        endpointId: string,
+        peerId: string,
+        signal: AbortSignal,
+        timeoutMessage: string,
+    ): Promise<IrohPeerStream> {
+        for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+            const shared = await this.#outgoingConnection(endpointId, signal);
+            if (shared.identity.instanceId !== peerId) {
+                this.#retireOutgoingConnection(endpointId, shared.entry, "close");
+                throw new Error("The Iroh endpoint belongs to a different P2P instance.");
+            }
+            let opening: ReturnType<Connection["openBi"]> | undefined;
+            try {
+                opening = shared.connection.openBi();
+                const stream = await withAbort(
+                    withDeadline(opening, this.#handshakeTimeoutMs, timeoutMessage),
+                    signal,
+                );
+                shared.entry.activeApplicationStreams += 1;
+                return { entry: shared.entry, stream };
+            } catch (error) {
+                if (opening !== undefined) {
+                    void opening.then(cancelIrohStream, () => undefined);
+                }
+                if (signal.aborted || attemptIndex > 0) throw error;
+                this.#retireOutgoingConnection(
+                    endpointId,
+                    shared.entry,
+                    isConnectionClosed(shared.connection) ? "closed" : "drain",
+                );
+            }
+        }
+        throw new Error("The Iroh peer connection could not open a stream.");
+    }
+
+    async #outgoingConnection(
+        endpointId: string,
+        signal: AbortSignal,
+    ): Promise<IrohSharedConnection> {
+        let entry = this.#outgoingConnections.get(endpointId);
+        if (entry?.connection !== undefined && isConnectionClosed(entry.connection)) {
+            this.#retireOutgoingConnection(endpointId, entry, "closed");
+            entry = undefined;
+        }
+        if (entry === undefined) {
+            entry = { activeApplicationStreams: 0 };
+            this.#outgoingConnections.set(endpointId, entry);
+            entry.promise = this.#establishOutgoingConnection(endpointId, entry);
+            void entry.promise.catch(() => undefined);
+        }
+        return await withAbort(entry.promise!, signal);
+    }
+
+    async #establishOutgoingConnection(
+        endpointId: string,
+        entry: IrohOutgoingConnectionEntry,
+    ): Promise<IrohSharedConnection> {
+        let connection: Connection | undefined;
+        try {
+            const connected = await this.#connect(endpointId);
+            connection = connected.connection;
+            if (connection.remoteId().toString() !== endpointId) {
+                throw new Error("Iroh connected to a different endpoint identity.");
+            }
+            const identity = await this.#authenticateOutgoing(connection, endpointId);
+            if (
+                this.#closed ||
+                this.#abort.signal.aborted ||
+                connected.endpoint !== this.#endpoint ||
+                this.#outgoingConnections.get(endpointId) !== entry
+            ) {
+                throw new Error("Iroh networking stopped before the connection was ready.");
+            }
+            entry.connection = connection;
+            this.#authenticatedConnections.add(connection);
+            this.#rememberPeer(endpointId, identity);
+            if (typeof connection.closed === "function") {
+                void connection.closed().then(
+                    () => this.#retireOutgoingConnection(endpointId, entry, "closed"),
+                    () => this.#retireOutgoingConnection(endpointId, entry, "closed"),
+                );
+            }
+            return { connection, entry, identity };
+        } catch (error) {
+            connection?.close(CLOSE_SHUTDOWN, []);
+            this.#retireOutgoingConnection(endpointId, entry, "closed");
+            throw error;
+        }
+    }
+
+    #retireOutgoingConnection(
+        endpointId: string,
+        entry: IrohOutgoingConnectionEntry,
+        mode: "close" | "closed" | "drain",
+    ): void {
+        const connection = entry.connection;
+        if (this.#outgoingConnections.get(endpointId) === entry) {
+            this.#outgoingConnections.delete(endpointId);
+            this.#wakeRetries();
+        }
+        if (connection === undefined) return;
+        if (
+            mode === "drain" &&
+            entry.activeApplicationStreams > 0 &&
+            !isConnectionClosed(connection)
+        ) {
+            entry.closeWhenIdle = true;
+            return;
+        }
+        delete entry.connection;
+        this.#authenticatedConnections.delete(connection);
+        if (mode !== "closed") connection.close(CLOSE_SHUTDOWN, []);
+    }
+
+    #releaseOutgoingApplicationStream(entry: IrohOutgoingConnectionEntry): void {
+        entry.activeApplicationStreams = Math.max(0, entry.activeApplicationStreams - 1);
+        if (!entry.closeWhenIdle || entry.activeApplicationStreams > 0) return;
+        delete entry.closeWhenIdle;
+        const connection = entry.connection;
+        if (connection === undefined) return;
+        delete entry.connection;
+        this.#authenticatedConnections.delete(connection);
+        connection.close(CLOSE_SHUTDOWN, []);
+    }
+
+    async #connect(endpointId: string): Promise<IrohConnectedEndpoint> {
         if (
             typeof this.#endpoint.isClosed === "function" &&
             this.#endpoint.isClosed() &&
@@ -955,11 +1175,14 @@ export class IrohNetwork implements P2pTransport {
         };
         void attempt.then(settled, settled);
         try {
-            return await withDeadline(
-                attempt,
-                this.#connectTimeoutMs,
-                "The Iroh connection attempt timed out.",
-            );
+            return {
+                connection: await withDeadline(
+                    attempt,
+                    this.#connectTimeoutMs,
+                    "The Iroh connection attempt timed out.",
+                ),
+                endpoint,
+            };
         } catch (error) {
             if (!(error instanceof IrohOperationTimeoutError)) throw error;
             void attempt.then(
@@ -1041,7 +1264,7 @@ export class IrohNetwork implements P2pTransport {
             "Rig could not open a signed identity hello in time.",
         );
         await stream.send.writeAll([STREAM_KIND_HELLO]);
-        return await withDeadline(
+        const identity = await withDeadline(
             runP2pInitiatorHello(createIrohFrameDuplex(stream.recv, stream.send), {
                 commitPeer: (identity, address) => this.#commitAuthenticatedPeer(identity, address),
                 identity: this.#identity,
@@ -1054,6 +1277,12 @@ export class IrohNetwork implements P2pTransport {
             this.#handshakeTimeoutMs,
             "The peer did not finish its signed identity hello in time.",
         );
+        await withDeadline(
+            stream.recv.readToEnd(0),
+            this.#handshakeTimeoutMs,
+            "The peer did not finish its signed identity hello stream in time.",
+        );
+        return identity;
     }
 
     async #validateAuthenticatedPeer(identity: P2pPeerIdentity, endpointId: string): Promise<void> {
@@ -1197,33 +1426,73 @@ class IrohEndpointRestartDeferredError extends Error {
     }
 }
 
-async function exchangePing(connection: Connection): Promise<void> {
-    const stream = await connection.openBi();
-    await stream.send.writeAll([STREAM_KIND_PING]);
-    await stream.send.finish();
-    const response = Buffer.from(await stream.recv.readToEnd(16));
-    if (!response.equals(PONG)) throw new Error("The peer returned an invalid pong.");
-}
-
-async function connectOnce(
-    endpoint: Endpoint,
-    address: EndpointAddr,
-    timeoutMs: number,
-    signal: AbortSignal,
-): Promise<Connection> {
-    const attempt = endpoint.connect(address, IROH_ALPN);
+async function exchangePing(connection: Connection, timeoutMs: number): Promise<void> {
+    let stream: Awaited<ReturnType<Connection["openBi"]>> | undefined;
+    let opening: ReturnType<Connection["openBi"]> | undefined;
     try {
-        return await withAbort(
-            withDeadline(attempt, timeoutMs, "The Iroh connection attempt timed out."),
-            signal,
+        opening = connection.openBi();
+        stream = await withDeadline(
+            opening,
+            timeoutMs,
+            "The peer did not open a ping stream in time.",
         );
+        await withDeadline(
+            stream.send.writeAll([STREAM_KIND_PING]),
+            timeoutMs,
+            "The peer did not accept a ping in time.",
+        );
+        await withDeadline(
+            stream.send.finish(),
+            timeoutMs,
+            "The peer did not finish a ping request in time.",
+        );
+        const response = Buffer.from(
+            await withDeadline(
+                stream.recv.readToEnd(16),
+                timeoutMs,
+                "The peer did not answer its ping in time.",
+            ),
+        );
+        if (!response.equals(PONG)) throw new Error("The peer returned an invalid pong.");
     } catch (error) {
-        void attempt.then(
-            (lateConnection) => lateConnection.close(CLOSE_SHUTDOWN, []),
-            () => undefined,
-        );
+        if (stream !== undefined) cancelIrohStream(stream);
+        else if (opening !== undefined) void opening.then(cancelIrohStream, () => undefined);
         throw error;
     }
+}
+
+function cancelIrohStream(
+    stream: Awaited<ReturnType<Connection["openBi"]>>,
+    errorCode = CLOSE_CANCELLED,
+): void {
+    void stream.send.reset(errorCode).catch(() => undefined);
+    void stream.recv.stop(errorCode).catch(() => undefined);
+}
+
+async function finishIrohHttpStream(
+    stream: Awaited<ReturnType<Connection["openBi"]>>,
+    timeoutMs: number,
+): Promise<void> {
+    try {
+        await Promise.all([
+            withDeadline(
+                stream.send.finish(),
+                timeoutMs,
+                "The peer did not finish the P2P request stream in time.",
+            ),
+            withDeadline(
+                stream.recv.readToEnd(0),
+                timeoutMs,
+                "The peer did not finish the P2P response stream in time.",
+            ),
+        ]);
+    } catch {
+        cancelIrohStream(stream);
+    }
+}
+
+function isConnectionClosed(connection: Connection): boolean {
+    return typeof connection.closeReason === "function" && connection.closeReason() !== null;
 }
 
 function withDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {

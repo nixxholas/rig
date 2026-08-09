@@ -52,9 +52,9 @@ describe("P2P HTTP framing", () => {
             headers: { "content-type": "text/event-stream" },
             status: 200,
         });
-        let closed = false;
-        const response = await readP2pHttpResponse(wire.recv(), () => {
-            closed = true;
+        let completed: boolean | undefined;
+        const response = await readP2pHttpResponse(wire.recv(), (bodyCompleted) => {
+            completed = bodyCompleted;
         });
         const chunks: string[] = [];
         for await (const chunk of response.body) chunks.push(Buffer.from(chunk).toString("utf8"));
@@ -62,7 +62,29 @@ describe("P2P HTTP framing", () => {
         expect(response.status).toBe(200);
         expect(response.headers).toEqual({ "content-type": "text/event-stream" });
         expect(chunks).toEqual(["first", "second"]);
-        expect(closed).toBe(true);
+        expect(completed).toBe(true);
+    });
+
+    it("reports an HTTP response body that its consumer stops reading", async () => {
+        const wire = new MemoryWire();
+        await writeP2pHttpResponse(wire.send, {
+            body: (async function* () {
+                yield Buffer.from("first");
+                yield Buffer.from("second");
+            })(),
+            headers: {},
+            status: 200,
+        });
+        let completed: boolean | undefined;
+        const response = await readP2pHttpResponse(wire.recv(), (bodyCompleted) => {
+            completed = bodyCompleted;
+        });
+        const body = response.body[Symbol.asyncIterator]();
+
+        await expect(body.next()).resolves.toMatchObject({ done: false });
+        await body.return?.();
+
+        expect(completed).toBe(false);
     });
 
     it("times out when a peer stops reading a response write", async () => {

@@ -447,6 +447,303 @@ describe("IrohNetwork", () => {
         await vi.waitFor(() => expect(cancellationObserved).toBe(true));
     });
 
+    it("reuses one authenticated QUIC connection for sequential and concurrent HTTP streams", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const [rawClientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const observed = observeEndpointConnections(rawClientEndpoint);
+        const clientId = rawClientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        let concurrentRequests = 0;
+        let markConcurrentReady!: () => void;
+        let releaseConcurrent!: () => void;
+        const concurrentReady = new Promise<void>((resolve) => {
+            markConcurrentReady = resolve;
+        });
+        const concurrentReleased = new Promise<void>((resolve) => {
+            releaseConcurrent = resolve;
+        });
+        const client = await IrohNetwork.create({
+            config: {},
+            endpointIds: [serverId],
+            endpoint: observed.endpoint,
+            identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 25,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            config: {},
+            endpointIds: [clientId],
+            endpoint: serverEndpoint,
+            identity: serverIdentity,
+            knownPeer: () => namedPeer(clientIdentity, "Client Rig"),
+            peerAddresses: new Map([[clientId, rawClientEndpoint.addr()]]),
+            pingIntervalMs: 25,
+            relayMode: RelayMode.disabled(),
+            secretKey: serverKey,
+            serveRequest: async (_peerId, request) => {
+                if (request.path.startsWith("/concurrent/")) {
+                    concurrentRequests += 1;
+                    if (concurrentRequests === 32) markConcurrentReady();
+                    await concurrentReleased;
+                }
+                return {
+                    body: (async function* () {
+                        yield Buffer.from(request.path);
+                    })(),
+                    headers: { "content-type": "text/plain" },
+                    status: 200,
+                };
+            },
+        });
+        networks.push(server);
+
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]).toMatchObject({ status: "connected" }),
+        );
+        expect(observed.connections).toHaveLength(1);
+        const sharedConnectionId = observed.connections[0]!.stableId();
+
+        await expect(fetchBody(client, serverIdentity.instanceId, "/sequential/one")).resolves.toBe(
+            "/sequential/one",
+        );
+        await expect(fetchBody(client, serverIdentity.instanceId, "/sequential/two")).resolves.toBe(
+            "/sequential/two",
+        );
+        const concurrentPaths = Array.from(
+            { length: 32 },
+            (_, index) => `/concurrent/${String(index)}`,
+        );
+        const concurrentResponses = Promise.all(
+            concurrentPaths.map((path) => fetchBody(client, serverIdentity.instanceId, path)),
+        );
+        await concurrentReady;
+        const pingBeforeConcurrentRequests = client.status().peers[0]!.lastSeenAt!;
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]!.lastSeenAt).toBeGreaterThan(
+                pingBeforeConcurrentRequests,
+            ),
+        );
+        releaseConcurrent();
+        await expect(concurrentResponses).resolves.toEqual(concurrentPaths);
+
+        expect(observed.connections).toHaveLength(1);
+        expect(observed.connections[0]!.stableId()).toBe(sharedConnectionId);
+
+        observed.connections[0]!.close(0n, []);
+        await observed.connections[0]!.closed();
+        await expect(fetchBody(client, serverIdentity.instanceId, "/reconnected")).resolves.toBe(
+            "/reconnected",
+        );
+        expect(observed.connections).toHaveLength(2);
+        expect(observed.connections[1]!.stableId()).not.toBe(sharedConnectionId);
+    });
+
+    it("cancels individual HTTP streams without disrupting multiplexed siblings", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const [rawClientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const observed = observeEndpointConnections(rawClientEndpoint);
+        const clientId = rawClientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        const abortedPaths = new Set<string>();
+        let releaseSurvivor!: () => void;
+        const survivorReleased = new Promise<void>((resolve) => {
+            releaseSurvivor = resolve;
+        });
+        const client = await IrohNetwork.create({
+            config: {},
+            endpointIds: [serverId],
+            endpoint: observed.endpoint,
+            identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 60_000,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            config: {},
+            endpointIds: [clientId],
+            endpoint: serverEndpoint,
+            identity: serverIdentity,
+            knownPeer: () => namedPeer(clientIdentity, "Client Rig"),
+            peerAddresses: new Map([[clientId, rawClientEndpoint.addr()]]),
+            pingIntervalMs: 60_000,
+            relayMode: RelayMode.disabled(),
+            secretKey: serverKey,
+            serveRequest: async (_peerId, request, signal) => ({
+                body:
+                    request.path === "/survivor"
+                        ? (async function* () {
+                              yield Buffer.from("started");
+                              await survivorReleased;
+                              yield Buffer.from("finished");
+                          })()
+                        : request.path.startsWith("/cancel/")
+                          ? (async function* () {
+                                yield Buffer.from("started");
+                                await new Promise<void>((resolve) => {
+                                    if (signal.aborted) return resolve();
+                                    signal.addEventListener("abort", () => resolve(), {
+                                        once: true,
+                                    });
+                                });
+                                abortedPaths.add(request.path);
+                            })()
+                          : (async function* () {
+                                yield Buffer.from(request.path);
+                            })(),
+                headers: { "content-type": "text/event-stream" },
+                status: 200,
+            }),
+        });
+        networks.push(server);
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]).toMatchObject({ status: "connected" }),
+        );
+
+        const signalCancellation = new AbortController();
+        const [iteratorResponse, signalResponse, survivorResponse] = await Promise.all([
+            client.fetch(
+                serverIdentity.instanceId,
+                {
+                    body: new Uint8Array(),
+                    headers: {},
+                    method: "GET",
+                    path: "/cancel/iterator",
+                },
+                new AbortController().signal,
+            ),
+            client.fetch(
+                serverIdentity.instanceId,
+                {
+                    body: new Uint8Array(),
+                    headers: {},
+                    method: "GET",
+                    path: "/cancel/signal",
+                },
+                signalCancellation.signal,
+            ),
+            client.fetch(
+                serverIdentity.instanceId,
+                { body: new Uint8Array(), headers: {}, method: "GET", path: "/survivor" },
+                new AbortController().signal,
+            ),
+        ]);
+        const iteratorCancelled = iteratorResponse.body[Symbol.asyncIterator]();
+        const signalCancelled = signalResponse.body[Symbol.asyncIterator]();
+        const survivor = survivorResponse.body[Symbol.asyncIterator]();
+        await Promise.all([iteratorCancelled.next(), signalCancelled.next(), survivor.next()]);
+
+        await iteratorCancelled.return?.();
+        signalCancellation.abort();
+        await signalCancelled.return?.();
+        await vi.waitFor(() =>
+            expect([...abortedPaths].sort()).toEqual(["/cancel/iterator", "/cancel/signal"]),
+        );
+
+        releaseSurvivor();
+        await expect(survivor.next()).resolves.toMatchObject({
+            done: false,
+            value: new Uint8Array(Buffer.from("finished")),
+        });
+        await expect(survivor.next()).resolves.toMatchObject({ done: true });
+        await expect(
+            fetchBody(client, serverIdentity.instanceId, "/after-cancellation"),
+        ).resolves.toBe("/after-cancellation");
+        expect(observed.connections).toHaveLength(1);
+    });
+
+    it("closes one shared QUIC connection and aborts every active HTTP stream on shutdown", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const [rawClientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const observed = observeEndpointConnections(rawClientEndpoint);
+        const clientId = rawClientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        let abortedStreams = 0;
+        const client = await IrohNetwork.create({
+            config: {},
+            endpointIds: [serverId],
+            endpoint: observed.endpoint,
+            identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 60_000,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            config: {},
+            endpointIds: [clientId],
+            endpoint: serverEndpoint,
+            identity: serverIdentity,
+            knownPeer: () => namedPeer(clientIdentity, "Client Rig"),
+            peerAddresses: new Map([[clientId, rawClientEndpoint.addr()]]),
+            pingIntervalMs: 60_000,
+            relayMode: RelayMode.disabled(),
+            secretKey: serverKey,
+            serveRequest: async (_peerId, request, signal) => ({
+                body: (async function* () {
+                    yield Buffer.from(request.path);
+                    await new Promise<void>((resolve) => {
+                        if (signal.aborted) return resolve();
+                        signal.addEventListener("abort", () => resolve(), { once: true });
+                    });
+                    abortedStreams += 1;
+                })(),
+                headers: { "content-type": "text/event-stream" },
+                status: 200,
+            }),
+        });
+        networks.push(server);
+        await vi.waitFor(() =>
+            expect(client.status().peers[0]).toMatchObject({ status: "connected" }),
+        );
+
+        const responses = await Promise.all([
+            client.fetch(
+                serverIdentity.instanceId,
+                { body: new Uint8Array(), headers: {}, method: "GET", path: "/stream/one" },
+                new AbortController().signal,
+            ),
+            client.fetch(
+                serverIdentity.instanceId,
+                { body: new Uint8Array(), headers: {}, method: "GET", path: "/stream/two" },
+                new AbortController().signal,
+            ),
+        ]);
+        const iterators = responses.map((response) => response.body[Symbol.asyncIterator]());
+        await Promise.all(iterators.map((iterator) => iterator.next()));
+        expect(observed.connections).toHaveLength(1);
+
+        await client.close();
+        await vi.waitFor(() => expect(abortedStreams).toBe(2));
+        expect(observed.connections[0]!.closeReason()).not.toBeNull();
+    });
+
     it("keeps retrying after the maximum pending native connections time out", async () => {
         const ownEndpointId = SecretKey.generate().public();
         const peerEndpointId = SecretKey.generate().public();
@@ -490,7 +787,8 @@ describe("IrohNetwork", () => {
         await vi.waitFor(
             () => {
                 expect(connectCount).toBe(3);
-                expect(network.status().peers[0]).toMatchObject({ status: "connected" });
+                const status = network.status().peers[0];
+                expect(status, status?.error).toMatchObject({ status: "connected" });
             },
             { timeout: 1_000 },
         );
@@ -742,7 +1040,7 @@ describe("IrohNetwork", () => {
         expect(endpointFactory).not.toHaveBeenCalled();
     });
 
-    it("does not rebuild while an authenticated incoming connection is active", async () => {
+    it("rebuilds a wedged endpoint despite an idle authenticated incoming connection", async () => {
         const ownEndpointId = SecretKey.generate().public();
         const peerEndpointId = SecretKey.generate().public();
         const ownId = ownEndpointId.toString();
@@ -759,6 +1057,9 @@ describe("IrohNetwork", () => {
             markIncomingReady = resolve;
         });
         let acceptedStreams = 0;
+        const closeIncoming = vi.fn(() =>
+            rejectServing(new Error("The test closed the incoming connection.")),
+        );
         const incomingConnection = {
             acceptBi: async () => {
                 acceptedStreams += 1;
@@ -766,7 +1067,7 @@ describe("IrohNetwork", () => {
                 markIncomingReady();
                 return serving;
             },
-            close: () => rejectServing(new Error("The test closed the incoming connection.")),
+            close: closeIncoming,
             remoteId: () => peerEndpointId,
             setMaxConcurrentBiStreams: () => undefined,
         } as unknown as Connection;
@@ -821,11 +1122,12 @@ describe("IrohNetwork", () => {
         networks.push(network);
 
         await incomingReady;
-        await vi.waitFor(() => expect(outgoingConnects).toBe(3));
-        expect(endpointFactory).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(endpointFactory).toHaveBeenCalledOnce());
+        expect(outgoingConnects).toBeGreaterThanOrEqual(3);
+        expect(closeIncoming).toHaveBeenCalled();
     });
 
-    it("does not rebuild while an outgoing request is authenticating", async () => {
+    it("does not rebuild while a shared outgoing connection is authenticating", async () => {
         const ownEndpointId = SecretKey.generate().public();
         const peerEndpointId = SecretKey.generate().public();
         const peerId = peerEndpointId.toString();
@@ -851,8 +1153,7 @@ describe("IrohNetwork", () => {
             close,
             connect: () => {
                 connectCount += 1;
-                if (connectCount === 2) return Promise.resolve(requestConnection);
-                return new Promise<Connection>(() => undefined);
+                return Promise.resolve(requestConnection);
             },
             id: () => ownEndpointId,
             isClosed: () => endpointClosed,
@@ -882,14 +1183,15 @@ describe("IrohNetwork", () => {
             { body: new Uint8Array(), headers: {}, method: "GET", path: "/health" },
             cancellation.signal,
         );
-        await vi.waitFor(() => expect(connectCount).toBe(2));
+        const requestOutcome = expect(request).rejects.toBeDefined();
+        expect(connectCount).toBe(1);
         endpointClosed = true;
         await new Promise((resolve) => setTimeout(resolve, 400));
 
         expect(endpointFactory).not.toHaveBeenCalled();
         expect(close).not.toHaveBeenCalled();
         cancellation.abort();
-        await expect(request).rejects.toBeDefined();
+        await requestOutcome;
     });
 
     it("creates a stable ticket without starting an uncancellable online watcher", async () => {
@@ -1107,6 +1409,40 @@ function namedPeer(
     return { ...identity, name };
 }
 
+function observeEndpointConnections(endpoint: Endpoint): {
+    connections: Connection[];
+    endpoint: Endpoint;
+} {
+    const connections: Connection[] = [];
+    return {
+        connections,
+        endpoint: new Proxy(endpoint, {
+            get(target, property) {
+                if (property === "connect") {
+                    return async (...args: Parameters<Endpoint["connect"]>) => {
+                        const connection = await target.connect(...args);
+                        connections.push(connection);
+                        return connection;
+                    };
+                }
+                const value = Reflect.get(target, property, target);
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        }),
+    };
+}
+
+async function fetchBody(network: IrohNetwork, peerId: string, path: string): Promise<string> {
+    const response = await network.fetch(
+        peerId,
+        { body: new Uint8Array(), headers: {}, method: "GET", path },
+        new AbortController().signal,
+    );
+    const chunks: Buffer[] = [];
+    for await (const chunk of response.body) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks).toString("utf8");
+}
+
 function fakePingConnection(
     peerEndpointId: string,
     clientEndpointId: string,
@@ -1162,18 +1498,29 @@ function duplexPair(): {
 function bytePipe(): { recv: RecvStream; send: SendStream } {
     const bytes: number[] = [];
     const waiters: (() => void)[] = [];
+    let finished = false;
     const wake = () => waiters.splice(0).forEach((waiter) => waiter());
     return {
         recv: {
             readExact: async (length: number) => {
-                while (bytes.length < length) {
+                while (bytes.length < length && !finished) {
                     await new Promise<void>((resolve) => waiters.push(resolve));
                 }
+                if (bytes.length < length) throw new Error("The test stream ended early.");
                 return bytes.splice(0, length);
+            },
+            readToEnd: async (sizeLimit: number) => {
+                while (!finished) await new Promise<void>((resolve) => waiters.push(resolve));
+                if (bytes.length > sizeLimit)
+                    throw new Error("The test stream exceeded its limit.");
+                return bytes.splice(0);
             },
         } as unknown as RecvStream,
         send: {
-            finish: async () => undefined,
+            finish: async () => {
+                finished = true;
+                wake();
+            },
             write: async (chunk: number[]) => {
                 bytes.push(...chunk);
                 wake();

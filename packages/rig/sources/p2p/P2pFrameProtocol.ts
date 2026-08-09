@@ -43,8 +43,10 @@ export async function readP2pHttpRequest(recv: P2pFrameReader): Promise<P2pHttpR
 export async function writeP2pHttpRequest(
     send: P2pFrameWriter,
     request: P2pHttpRequest,
-    writeProgressTimeoutMs = DEFAULT_WRITE_PROGRESS_TIMEOUT_MS,
+    options: { finish?: boolean; writeProgressTimeoutMs?: number } = {},
 ): Promise<void> {
+    const writeProgressTimeoutMs =
+        options.writeProgressTimeoutMs ?? DEFAULT_WRITE_PROGRESS_TIMEOUT_MS;
     if (request.body.byteLength > P2P_HTTP_MAXIMUM_BODY_BYTES) {
         throw new Error("The forwarded request body is too large.");
     }
@@ -56,12 +58,12 @@ export async function writeP2pHttpRequest(
     );
     await writeU32(send, request.body.byteLength, writeProgressTimeoutMs);
     await writeBytes(send, request.body, writeProgressTimeoutMs);
-    await finishWrites(send, writeProgressTimeoutMs);
+    if (options.finish !== false) await finishWrites(send, writeProgressTimeoutMs);
 }
 
 export async function readP2pHttpResponse(
     recv: P2pFrameReader,
-    close: () => void,
+    close: (completed: boolean) => void,
 ): Promise<P2pHttpResponse> {
     const firstFrame = await readU8(recv);
     if (firstFrame === FRAME_ERROR) throw new Error((await readError(recv)).message);
@@ -118,12 +120,16 @@ export async function writeP2pHttpFailure(
 
 async function* readResponseBody(
     recv: P2pFrameReader,
-    close: () => void,
+    close: (completed: boolean) => void,
 ): AsyncIterable<Uint8Array> {
+    let completed = false;
     try {
         while (true) {
             const frame = await readU8(recv);
-            if (frame === FRAME_END) return;
+            if (frame === FRAME_END) {
+                completed = true;
+                return;
+            }
             if (frame === FRAME_ERROR) throw new Error((await readError(recv)).message);
             if (frame !== FRAME_CHUNK) {
                 throw new Error("The peer returned an invalid HTTP response frame.");
@@ -135,7 +141,7 @@ async function* readResponseBody(
             if (length > 0) yield await recv.read(length);
         }
     } finally {
-        close();
+        close(completed);
     }
 }
 
