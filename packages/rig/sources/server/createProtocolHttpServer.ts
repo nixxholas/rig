@@ -2492,14 +2492,6 @@ async function handleRequest(
                     ? store.getWorkspace(requested.projectId, requested.workspaceId)
                     : undefined;
             if (typeof requested.workspaceId === "string" && workspace === undefined) continue;
-            if (
-                authenticatedOwnerId !== undefined &&
-                (project.createdBy?.instanceId !== authenticatedOwnerId ||
-                    (workspace !== undefined &&
-                        workspace.createdBy?.instanceId !== authenticatedOwnerId))
-            ) {
-                continue;
-            }
             const entity = resolveGitTrackedEntity(project, workspace);
             if (entity !== undefined) tracker.watch(entity);
         }
@@ -2509,7 +2501,7 @@ async function handleRequest(
                 .filter(
                     (event) =>
                         authenticatedOwnerId === undefined ||
-                        globalLiveEventVisibleToOwner(
+                        globalLiveEventVisibleToPeer(
                             event,
                             authenticatedOwnerId,
                             store,
@@ -3235,7 +3227,7 @@ async function handleRequest(
             authenticatedOwnerId === undefined
                 ? undefined
                 : (entry) =>
-                      globalLiveEventVisibleToOwner(
+                      globalLiveEventVisibleToPeer(
                           entry.event,
                           authenticatedOwnerId,
                           store,
@@ -6502,22 +6494,13 @@ function buildGroupCatalog(
         }))
         .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
         .filter((summary) => !summary.archived);
-    const projects = store
-        .listProjects()
-        .filter(
-            (project) =>
-                project.archivedAt === undefined &&
-                (ownerInstanceId === undefined ||
-                    project.createdBy?.instanceId === ownerInstanceId),
-        );
+    const projects = store.listProjects().filter((project) => project.archivedAt === undefined);
     const projectIds = new Set(projects.map((project) => project.id));
     const workspaces = store
         .listWorkspaces()
         .filter(
             (workspace) =>
                 projectIds.has(workspace.projectId) &&
-                (ownerInstanceId === undefined ||
-                    workspace.createdBy?.instanceId === ownerInstanceId) &&
                 workspace.archivedAt === undefined &&
                 workspace.status !== "archiving" &&
                 workspace.status !== "archived",
@@ -6788,10 +6771,8 @@ function authorizeRemoteProjectCreator(
             });
             return false;
         }
-        if (
-            runtimeConfig.canP2pPeerUseRemoteWork?.(peerId) !== true ||
-            runtimeConfig.profiles?.owns(body.identity, peerId) !== true
-        ) {
+        if (!authorizeP2pRemoteWork(peerId, response, runtimeConfig)) return false;
+        if (runtimeConfig.profiles?.owns(body.identity, peerId) !== true) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
                 error: "That human profile is not owned by the authenticated peer Rig.",
@@ -6850,31 +6831,23 @@ function authorizeRemoteSessionTarget(
     return true;
 }
 
-function globalLiveEventVisibleToOwner(
+function globalLiveEventVisibleToPeer(
     event: GlobalEvent,
-    ownerInstanceId: string,
+    peerInstanceId: string,
     store: SessionStore,
     runtimeConfig: ProtocolServerRuntimeConfig,
 ): boolean {
     if ("sessionId" in event) {
-        return store.get(event.sessionId)?.snapshot().ownerInstanceId === ownerInstanceId;
+        return store.get(event.sessionId)?.snapshot().ownerInstanceId === peerInstanceId;
     }
-    if ("projectId" in event) {
-        if ("workspaceId" in event) {
-            return (
-                store.getWorkspace(event.projectId, event.workspaceId)?.createdBy?.instanceId ===
-                ownerInstanceId
-            );
-        }
-        return store.getProject(event.projectId)?.createdBy?.instanceId === ownerInstanceId;
-    }
+    if ("projectId" in event) return true;
     if (event.type === "profile_changed") {
         return (
-            runtimeConfig.profiles?.get(event.data.profileId)?.parentInstanceId === ownerInstanceId
+            runtimeConfig.profiles?.get(event.data.profileId)?.parentInstanceId === peerInstanceId
         );
     }
-    // Events without a credential owner can contain another owner's project, folder, peer, or
-    // daemon activity. Remote clients reload their owner-scoped catalog instead of receiving it.
+    // Events without a shared project/workspace or credential owner can contain folder, peer, or
+    // daemon activity that is not exposed over the P2P catalog.
     return false;
 }
 
@@ -6894,10 +6867,8 @@ function authorizeMessageProfile(
             });
             return false;
         }
-        if (
-            runtimeConfig.canP2pPeerUseRemoteWork?.(peerId) !== true ||
-            runtimeConfig.profiles?.owns(profileId, peerId) !== true
-        ) {
+        if (!authorizeP2pRemoteWork(peerId, response, runtimeConfig)) return false;
+        if (runtimeConfig.profiles?.owns(profileId, peerId) !== true) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
                 error: "That human profile is not registered to the authenticated peer Rig.",
@@ -6915,6 +6886,19 @@ function authorizeMessageProfile(
         return false;
     }
     return true;
+}
+
+function authorizeP2pRemoteWork(
+    peerId: string,
+    response: ServerResponse,
+    runtimeConfig: ProtocolServerRuntimeConfig,
+): boolean {
+    if (runtimeConfig.canP2pPeerUseRemoteWork?.(peerId) === true) return true;
+    sendJson(response, 403, {
+        code: "remote_work_not_allowed",
+        error: "This Rig accepts remote work only from trusted peer Rigs.",
+    });
+    return false;
 }
 
 async function prepareSessionGitCredential(

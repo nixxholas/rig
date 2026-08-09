@@ -861,7 +861,7 @@ async function runOwnedLocalProtocolServer(
                     loadedConfig.config.p2p.exposeApi ||
                     ((isP2pCredentialPath(request.path) || isP2pProfilePath(request.path)) &&
                         isTrustedP2pPeer(peerId)) ||
-                    (canP2pPeerConfigure(peerId) &&
+                    (isTrustedP2pPeer(peerId) &&
                         isP2pRemoteWorkPath(request.path, request.method)) ||
                     (canP2pPeerConfigure(peerId) && isP2pConfigurationPath(request.path)),
                 socketPath,
@@ -1116,7 +1116,7 @@ async function runOwnedLocalProtocolServer(
                       }),
                 canP2pPeerConfigure,
                 canP2pPeerProvision: isTrustedP2pPeer,
-                canP2pPeerUseRemoteWork: canP2pPeerConfigure,
+                canP2pPeerUseRemoteWork: isTrustedP2pPeer,
                 plugins,
                 ...(worklets === undefined ? {} : { worklets }),
                 getProviderQuota: (providerId, ownerInstanceId, credential) =>

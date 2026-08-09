@@ -13,7 +13,9 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 const PRIMARY_ID = "aprimaryinstance000000001";
 const SECONDARY_ID = "asecondaryinstance0000001";
 const OTHER_ID = "aotherpeerinstance00000001";
+const UNTRUSTED_ID = "auntrustedinstance00000001";
 const PROFILE_ID = "aprofile000000000000000004";
+const OTHER_PROFILE_ID = "aotherprofile0000000000001";
 
 describe("P2P human profiles", () => {
     const close: (() => Promise<void>)[] = [];
@@ -22,7 +24,7 @@ describe("P2P human profiles", () => {
         for (const stop of close.splice(0).reverse()) await stop();
     });
 
-    it("accepts replicas only from the active primary and requires them on remote messages", async () => {
+    it("lets trusted peers own remote work without giving them configuration authority", async () => {
         const homeDirectory = await mkdtemp(join(tmpdir(), "rig-p2p-profile-"));
         close.push(() => rm(homeDirectory, { force: true, recursive: true }));
         const store = new PersistentSessionStore({
@@ -42,7 +44,8 @@ describe("P2P human profiles", () => {
         const started = await startServer(
             createProtocolHttpServer({
                 canP2pPeerConfigure: (peerId) => peerId === PRIMARY_ID,
-                canP2pPeerUseRemoteWork: (peerId) => peerId === PRIMARY_ID,
+                canP2pPeerProvision: (peerId) => peerId === PRIMARY_ID || peerId === OTHER_ID,
+                canP2pPeerUseRemoteWork: (peerId) => peerId === PRIMARY_ID || peerId === OTHER_ID,
                 p2pNode: () => ({
                     name: "Secondary",
                     primaryId: PRIMARY_ID,
@@ -70,7 +73,7 @@ describe("P2P human profiles", () => {
 
         expect(
             await send(started.socketPath, "PUT", `/profiles/${PROFILE_ID}`, replicaBody, OTHER_ID),
-        ).toMatchObject({ status: 403 });
+        ).toMatchObject({ status: 409 });
         expect(
             await send(
                 started.socketPath,
@@ -88,6 +91,27 @@ describe("P2P human profiles", () => {
         ).toMatchObject({ body: { profile }, status: 200 });
         expect(await send(started.socketPath, "GET", "/profiles", undefined, PRIMARY_ID)).toEqual({
             body: { profiles: [profile] },
+            status: 200,
+        });
+        const otherProfile = {
+            createdAt: 2_000,
+            email: "other@example.test",
+            id: OTHER_PROFILE_ID,
+            name: "Other peer operator",
+            parentInstanceId: OTHER_ID,
+            updatedAt: 2_000,
+            version: 1,
+        };
+        expect(
+            await send(
+                started.socketPath,
+                "PUT",
+                `/profiles/${OTHER_PROFILE_ID}`,
+                JSON.stringify({ profile: otherProfile }),
+                OTHER_ID,
+            ),
+        ).toMatchObject({
+            body: { profile: otherProfile },
             status: 200,
         });
         const remoteProjectRequest = {
@@ -178,11 +202,55 @@ describe("P2P human profiles", () => {
                 started.socketPath,
                 "POST",
                 "/projects/clone",
-                JSON.stringify(remoteProjectRequest),
-                "a-trusted-but-not-primary-rig",
+                JSON.stringify({
+                    ...remoteProjectRequest,
+                    identity: "aunknownprofile000000000001",
+                }),
+                PRIMARY_ID,
             ),
-        ).toMatchObject({ status: 403 });
-        expect(createRemoteProject).toHaveBeenCalledTimes(1);
+        ).toMatchObject({
+            body: { code: "profile_not_owned" },
+            status: 403,
+        });
+        const otherRemoteProject = await send(
+            started.socketPath,
+            "POST",
+            "/projects/clone",
+            JSON.stringify({
+                ...remoteProjectRequest,
+                identity: OTHER_PROFILE_ID,
+                name: "Other peer project",
+                temporaryGitSecret: { kind: "github", token: "other-peer-token" },
+            }),
+            OTHER_ID,
+        );
+        expect(otherRemoteProject).toMatchObject({
+            body: {
+                project: {
+                    createdBy: {
+                        instanceId: OTHER_ID,
+                        profileId: OTHER_PROFILE_ID,
+                    },
+                },
+            },
+            status: 202,
+        });
+        expect(
+            await send(
+                started.socketPath,
+                "POST",
+                "/projects/clone",
+                JSON.stringify(remoteProjectRequest),
+                UNTRUSTED_ID,
+            ),
+        ).toMatchObject({
+            body: {
+                code: "remote_work_not_allowed",
+                error: "This Rig accepts remote work only from trusted peer Rigs.",
+            },
+            status: 403,
+        });
+        expect(createRemoteProject).toHaveBeenCalledTimes(2);
         const projectId = managedProject.id;
         const workspace = {
             branch: "001-remote-workspace",
@@ -233,6 +301,32 @@ describe("P2P human profiles", () => {
                 githubToken: "workspace-token",
             },
         );
+        vi.spyOn(store, "listWorkspaces").mockReturnValue([workspace]);
+        expect(
+            await send(started.socketPath, "GET", "/catalog", undefined, OTHER_ID),
+        ).toMatchObject({
+            body: {
+                projects: expect.arrayContaining([
+                    expect.objectContaining({
+                        createdBy: {
+                            instanceId: PRIMARY_ID,
+                            profileId: PROFILE_ID,
+                        },
+                        id: managedProject.id,
+                    }),
+                ]),
+                workspaces: [
+                    expect.objectContaining({
+                        createdBy: {
+                            instanceId: PRIMARY_ID,
+                            profileId: PROFILE_ID,
+                        },
+                        id: workspace.id,
+                    }),
+                ],
+            },
+            status: 200,
+        });
         expect(
             await send(
                 started.socketPath,

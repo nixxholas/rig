@@ -104,6 +104,18 @@ describe("global event stream", () => {
         stream.close();
     });
 
+    it("shares project updates with every authenticated peer", async () => {
+        const fixture = await startServer();
+        const stream = await fixture.openStream("/events/live", "aremotepeerinstance0000001");
+        await stream.waitForText("event: hello");
+
+        fixture.store.create({ cwd: "/tmp/rig-shared-project" });
+        await stream.waitForText("project_created");
+
+        expect(stream.frames.join("")).toContain("project_created");
+        stream.close();
+    });
+
     it("resumes from a cursor without replaying what the client already holds", async () => {
         const fixture = await startServer();
         const earlier = fixture.store.create({ cwd: "/tmp/rig-group-a" });
@@ -131,7 +143,10 @@ describe("global event stream", () => {
 
 async function startServer(): Promise<{
     catalog: () => Promise<GlobalStreamHello>;
-    openStream: (path: string) => Promise<{
+    openStream: (
+        path: string,
+        peerId?: string,
+    ) => Promise<{
         close: () => void;
         frames: string[];
         settle: () => Promise<void>;
@@ -177,10 +192,14 @@ async function startServer(): Promise<{
         return JSON.parse(body) as GlobalStreamHello;
     };
 
-    const openStream = async (path: string) => {
+    const openStream = async (path: string, peerId?: string) => {
         const frames: string[] = [];
         const call = httpRequest({
-            headers: { accept: "text/event-stream", authorization: "Bearer t" },
+            headers: {
+                accept: "text/event-stream",
+                authorization: "Bearer t",
+                ...(peerId === undefined ? {} : { "x-rig-p2p-peer": peerId }),
+            },
             path,
             socketPath,
         });
