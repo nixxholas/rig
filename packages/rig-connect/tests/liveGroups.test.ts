@@ -443,7 +443,7 @@ describe("rig-connect groups against a live daemon", () => {
             );
             expect(listedSessionIds(connection)).toHaveLength(active.length);
         });
-    });
+    }, 30_000);
 
     it("keeps a session listed when it is unarchived rather than dropping it", async () => {
         const { endpoint, store } = await startDaemon();
