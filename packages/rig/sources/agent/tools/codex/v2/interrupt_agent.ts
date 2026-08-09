@@ -26,10 +26,10 @@ export const codexInterruptAgentTool = defineTool({
         previous_status: codexAgentStatusSchema,
     }),
     shouldReviewInAutoMode: () => false,
-    execute: ({ target }, context) => {
+    execute: async ({ target }, context) => {
         const subagents = requireSubagentContext(context);
         const previous = findManagedSubagent(subagents, target);
-        subagents.interrupt(target);
+        await subagents.interrupt(target);
         if (previous === undefined) throw new Error(`Subagent '${target}' was not found.`);
         return {
             agent_id: previous.agentId,

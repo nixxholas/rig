@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const RESTARTED_MARKER = "DAEMON_STARTED_WITH_UNREADABLE_EVENT_PAYLOAD";
@@ -36,15 +37,21 @@ describe("daemon startup with persisted event history", () => {
     }, 120_000);
 });
 
-const corruptPersistedEventScript = String.raw`
-import { DatabaseSync } from "node:sqlite";
-
-const database = new DatabaseSync("/home/rig/.local/state/rig/sessions.sqlite");
-const event = database.prepare("SELECT seq FROM session_events ORDER BY seq LIMIT 1").get();
+const corruptPersistedEventScript = libsqlEsmScript(String.raw`
+const database = await openDatabase("/home/rig/.local/state/rig/sessions.sqlite");
+try {
+const event = (
+    await database.execute("SELECT seq FROM session_events ORDER BY seq LIMIT 1")
+).rows[0];
 if (event === undefined) throw new Error("Expected a persisted session event.");
-database.prepare("UPDATE session_events SET data_json = ? WHERE seq = ?").run("{", event.seq);
-database.close();
-`;
+await database.execute({
+    sql: "UPDATE session_events SET data_json = ? WHERE seq = ?",
+    args: ["{", event.seq],
+});
+} finally {
+    await database.close();
+}
+`);
 
 const restartWithUnreadableEventScript = String.raw`#!/usr/bin/env bash
 set -euo pipefail

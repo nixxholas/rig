@@ -78,10 +78,10 @@ describe("InMemorySession reset", () => {
             request: { cwd: "/tmp/rig-reset-boundary", modelId: model.id },
         });
 
-        const active = session.submit({ text: "Active before reset." });
+        const active = await session.submit({ text: "Active before reset." });
         await started.promise;
-        session.steer({ text: "Pending steering before reset." });
-        const queued = session.submit({ text: "Queued before reset." });
+        await session.steer({ text: "Pending steering before reset." });
+        const queued = await session.submit({ text: "Queued before reset." });
 
         await session.reset();
 

@@ -251,7 +251,7 @@ async function startServer(
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
-    const server = createProtocolHttpServer({
+    const server = await createProtocolHttpServer({
         p2pNetwork,
         ...(prepareP2pRequest === undefined ? {} : { prepareP2pRequest }),
         token: "test-token",

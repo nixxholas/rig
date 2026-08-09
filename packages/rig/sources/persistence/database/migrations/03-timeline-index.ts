@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     // A timeline reads only the handful of lifecycle event types that open and
@@ -9,6 +9,6 @@ const statements = [
     "CREATE INDEX session_events_session_type_seq ON session_events(session_id, type, seq)",
 ] as const;
 
-export function timelineIndex(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function timelineIndex(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

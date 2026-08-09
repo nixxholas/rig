@@ -13,7 +13,7 @@ const LOCAL_INSTANCE_ID = "alocalinstance00000000001";
 
 describe("onboarding daemon wiring", () => {
     it("advances through provider setup and profile creation over the real HTTP surface", async () => {
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             localInstanceId: LOCAL_INSTANCE_ID,
         });
@@ -36,12 +36,14 @@ describe("onboarding daemon wiring", () => {
                     : { enabled: false };
             },
             persistence: store,
-            profileComplete: () =>
-                profiles.list().some((profile) => profile.parentInstanceId === LOCAL_INSTANCE_ID),
+            profileComplete: async () =>
+                (await profiles.list()).some(
+                    (profile) => profile.parentInstanceId === LOCAL_INSTANCE_ID,
+                ),
             providersConfigured: () => providersConfigured,
         });
         const started = await startServer(
-            createProtocolHttpServer({
+            await createProtocolHttpServer({
                 onboarding,
                 profiles,
                 store,
@@ -85,7 +87,7 @@ describe("onboarding daemon wiring", () => {
             });
         } finally {
             await started.close();
-            store.close();
+            await store.close();
         }
     });
 });

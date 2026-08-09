@@ -16,21 +16,21 @@ import {
     happyCloudSessionBlobs,
 } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope, TX } from "../Transaction.js";
 import { HappyCloudPersistenceError } from "./HappyCloudPersistenceError.js";
 import { queryHappyCloudStatus } from "./queryHappyCloudStatus.js";
 
 const MAX_MUTATION_RECEIPTS = 4_096;
 export const HAPPY_CLOUD_SESSION_BLOB_LIMIT = 64;
 
-export function happyCloudApplyCommand(
-    tx: TX,
+export async function happyCloudApplyCommand(
+    tx: DatabaseScope,
     command: HappyCloudCommand,
     now: number,
-): HappyCloudCommandResponse {
-    return inTx(tx, (tx) => {
+): Promise<HappyCloudCommandResponse> {
+    return await inTx(tx, async (tx) => {
         const requestFingerprint = commandFingerprint(command);
-        const receipt = tx
+        const receipt = await tx
             .select({
                 requestFingerprint: happyCloudMutationReceipts.requestFingerprint,
                 responseJson: happyCloudMutationReceipts.responseJson,
@@ -49,23 +49,24 @@ export function happyCloudApplyCommand(
                 happyCloudCommandResponseSchema,
                 JSON.parse(receipt.responseJson) as unknown,
             );
-            const current = queryHappyCloudStatus(tx);
+            const current = await queryHappyCloudStatus(tx);
             return current.version === original.status.version ? original : { status: current };
         }
 
-        const current = queryHappyCloudStatus(tx);
+        const current = await queryHappyCloudStatus(tx);
         if (current.version !== command.expectedVersion) {
             throw new HappyCloudPersistenceError(
                 "version_conflict",
                 "Happy Cloud settings changed before this command arrived.",
             );
         }
-        ensureRoot(tx, now);
+        await ensureRoot(tx, now);
         const nextVersion = current.version + 1;
-        applyCommand(tx, command, nextVersion, now);
-        const response = { status: queryHappyCloudStatus(tx) };
+        await applyCommand(tx, command, nextVersion, now);
+        const response = { status: await queryHappyCloudStatus(tx) };
         const responseJson = JSON.stringify(response);
-        tx.insert(happyCloudMutationReceipts)
+        await tx
+            .insert(happyCloudMutationReceipts)
             .values({
                 createdAtMs: now,
                 mutationId: command.mutationId,
@@ -73,7 +74,7 @@ export function happyCloudApplyCommand(
                 responseJson,
             })
             .run();
-        tx.run(sql`DELETE FROM happy_cloud_mutation_receipts
+        await tx.run(sql`DELETE FROM happy_cloud_mutation_receipts
             WHERE seq NOT IN (
                 SELECT seq FROM happy_cloud_mutation_receipts
                 ORDER BY seq DESC LIMIT ${MAX_MUTATION_RECEIPTS}
@@ -82,8 +83,9 @@ export function happyCloudApplyCommand(
     });
 }
 
-function ensureRoot(tx: TX, now: number): void {
-    tx.insert(happyCloudEnrollment)
+async function ensureRoot(tx: TX, now: number): Promise<void> {
+    await tx
+        .insert(happyCloudEnrollment)
         .values({
             singletonId: 1,
             contractVersion: HAPPY_CLOUD_CONTRACT_VERSION,
@@ -107,10 +109,16 @@ function ensureRoot(tx: TX, now: number): void {
         .run();
 }
 
-function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, now: number): void {
+async function applyCommand(
+    tx: TX,
+    command: HappyCloudCommand,
+    nextVersion: number,
+    now: number,
+): Promise<void> {
     if (command.action === "set_enrollment") {
         const revoking = command.state === "not_enrolled";
-        tx.update(happyCloudEnrollment)
+        await tx
+            .update(happyCloudEnrollment)
             .set({
                 enrollmentState: command.state,
                 enrollmentChangedAtMs: now,
@@ -134,11 +142,11 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
             })
             .where(eq(happyCloudEnrollment.singletonId, 1))
             .run();
-        if (revoking) tx.delete(happyCloudSessionBlobs).run();
+        if (revoking) await tx.delete(happyCloudSessionBlobs).run();
         return;
     }
 
-    const current = queryHappyCloudStatus(tx);
+    const current = await queryHappyCloudStatus(tx);
     if (current.enrollment.state !== "enrolled") {
         throw new HappyCloudPersistenceError(
             "not_enrolled",
@@ -147,12 +155,14 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
     }
     if (command.action === "set_capability") {
         const update = capabilityUpdate(command.capability, command.consent, now);
-        tx.update(happyCloudEnrollment)
+        await tx
+            .update(happyCloudEnrollment)
             .set({ ...update, updatedAtMs: now, version: nextVersion })
             .where(eq(happyCloudEnrollment.singletonId, 1))
             .run();
         if (command.consent === "denied" && command.capability === "happy_profile") {
-            tx.update(happyCloudEnrollment)
+            await tx
+                .update(happyCloudEnrollment)
                 .set({
                     profileChangedAtMs: now,
                     profileCiphertext: null,
@@ -162,13 +172,14 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
                 .run();
         }
         if (command.consent === "denied" && command.capability === "session_blob_persistence") {
-            tx.delete(happyCloudSessionBlobs).run();
+            await tx.delete(happyCloudSessionBlobs).run();
         }
         return;
     }
     if (command.action === "put_profile" || command.action === "delete_profile") {
         requireCapability(current, "happy_profile");
-        tx.update(happyCloudEnrollment)
+        await tx
+            .update(happyCloudEnrollment)
             .set({
                 profileChangedAtMs: now,
                 profileCiphertext: command.action === "put_profile" ? command.ciphertext : null,
@@ -183,7 +194,8 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
 
     requireCapability(current, "session_blob_persistence");
     if (command.action === "put_session_blob") {
-        tx.insert(happyCloudSessionBlobs)
+        await tx
+            .insert(happyCloudSessionBlobs)
             .values({
                 ciphertext: command.ciphertext,
                 sessionId: command.sessionId,
@@ -199,25 +211,27 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
                 target: happyCloudSessionBlobs.sessionId,
             })
             .run();
-        tx.run(sql`DELETE FROM happy_cloud_session_blobs
+        await tx.run(sql`DELETE FROM happy_cloud_session_blobs
             WHERE session_id NOT IN (
                 SELECT session_id FROM happy_cloud_session_blobs
                 ORDER BY version DESC, session_id DESC
                 LIMIT ${HAPPY_CLOUD_SESSION_BLOB_LIMIT}
             )`);
     } else {
-        tx.delete(happyCloudSessionBlobs)
+        await tx
+            .delete(happyCloudSessionBlobs)
             .where(eq(happyCloudSessionBlobs.sessionId, command.sessionId))
             .run();
     }
-    tx.update(happyCloudEnrollment)
+    await tx
+        .update(happyCloudEnrollment)
         .set({ updatedAtMs: now, version: nextVersion })
         .where(eq(happyCloudEnrollment.singletonId, 1))
         .run();
 }
 
 function requireCapability(
-    status: ReturnType<typeof queryHappyCloudStatus>,
+    status: Awaited<ReturnType<typeof queryHappyCloudStatus>>,
     capability: "happy_profile" | "session_blob_persistence",
 ): void {
     if (status.capabilities[capability].consent === "granted") return;

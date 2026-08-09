@@ -1,6 +1,7 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import type { SessionTokenCount, SubagentSummary } from "../../protocol/index.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { parsePersistedUsage } from "./impl/persistedUsage.js";
 import {
     readNumber,
@@ -9,12 +10,13 @@ import {
     readString,
 } from "./impl/sqliteRow.js";
 
-export function querySubagentSummaries(
-    tx: TX,
+export async function querySubagentSummaries(
+    tx: DatabaseScope,
     parentSessionId: string,
-): readonly SubagentSummary[] {
-    return tx
-        .all<Record<string, unknown>>(sql`
+): Promise<readonly SubagentSummary[]> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx.all<Record<string, unknown>>(sql`
             WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM sessions WHERE parent_session_id = ${parentSessionId}
                 UNION ALL
@@ -29,7 +31,7 @@ export function querySubagentSummaries(
             WHERE id IN descendants
             ORDER BY created_at_ms ASC
         `)
-        .map((row) => {
+        ).map((row) => {
             const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
             const taskName = readOptionalString(row, "task_name");
             const activeSince = readOptionalNumber(row, "active_since_ms");
@@ -58,4 +60,5 @@ export function querySubagentSummaries(
                 ...(persistedUsage === undefined ? {} : { usage: persistedUsage.committed }),
             };
         });
+    });
 }

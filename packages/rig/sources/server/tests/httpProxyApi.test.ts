@@ -165,7 +165,7 @@ async function startRigProxy(): Promise<{
     const directory = await createTestSocketDirectory();
     directories.push(directory);
     const socketPath = join(directory, "server.sock");
-    const server = createProtocolHttpServer({ token: "secret" });
+    const server = await createProtocolHttpServer({ token: "secret" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, resolve);

@@ -9,10 +9,10 @@ import { P2pCredentialStore } from "./P2pCredentialStore.js";
 describe("P2pCredentialStore", () => {
     let database: PersistentSessionStore | undefined;
 
-    afterEach(() => database?.close());
+    afterEach(async () => await database?.close());
 
-    it("keeps same-ID provider snapshots isolated by authenticated owner", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("keeps same-ID provider snapshots isolated by authenticated owner", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const receiver = createP2pInstanceIdentity();
         const firstOwner = createP2pInstanceIdentity();
         const secondOwner = createP2pInstanceIdentity();
@@ -23,33 +23,33 @@ describe("P2pCredentialStore", () => {
         });
 
         expect(
-            credentials.replace(firstOwner.instanceId, snapshot(firstOwner, "first-key")),
+            await credentials.replace(firstOwner.instanceId, snapshot(firstOwner, "first-key")),
         ).toEqual({ changed: true, version: 1 });
         expect(
-            credentials.replace(secondOwner.instanceId, snapshot(secondOwner, "second-key")),
+            await credentials.replace(secondOwner.instanceId, snapshot(secondOwner, "second-key")),
         ).toEqual({ changed: true, version: 1 });
-        expect(credentials.list(firstOwner.instanceId)).toMatchObject([
+        expect(await credentials.list(firstOwner.instanceId)).toMatchObject([
             { material: { apiKey: "first-key" }, providerId: "codex" },
         ]);
-        expect(credentials.list(secondOwner.instanceId)).toMatchObject([
+        expect(await credentials.list(secondOwner.instanceId)).toMatchObject([
             { material: { apiKey: "second-key" }, providerId: "codex" },
         ]);
 
         expect(
-            credentials.replace(firstOwner.instanceId, {
+            await credentials.replace(firstOwner.instanceId, {
                 owner: peer(firstOwner),
                 providers: [],
                 version: 2,
             }),
         ).toEqual({ changed: true, version: 2 });
-        expect(credentials.list(firstOwner.instanceId)).toEqual([]);
-        expect(credentials.list(secondOwner.instanceId)).toMatchObject([
+        expect(await credentials.list(firstOwner.instanceId)).toEqual([]);
+        expect(await credentials.list(secondOwner.instanceId)).toMatchObject([
             { material: { apiKey: "second-key" }, providerId: "codex" },
         ]);
     });
 
-    it("does not rewrite an identical owner snapshot", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("does not rewrite an identical owner snapshot", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const receiver = createP2pInstanceIdentity();
         const owner = createP2pInstanceIdentity();
         let now = 1_000;
@@ -60,96 +60,106 @@ describe("P2pCredentialStore", () => {
         });
         const first = snapshot(owner, "same-key");
 
-        expect(credentials.replace(owner.instanceId, first)).toEqual({
+        expect(await credentials.replace(owner.instanceId, first)).toEqual({
             changed: true,
             version: 1,
         });
-        const stored = database.query((tx) => queryP2pProvisionedProviders(tx, owner.instanceId));
+        const stored = await database.query((tx) =>
+            queryP2pProvisionedProviders(tx, owner.instanceId),
+        );
         now = 2_000;
-        expect(credentials.replace(owner.instanceId, first)).toEqual({
+        expect(await credentials.replace(owner.instanceId, first)).toEqual({
             changed: false,
             version: 1,
         });
-        expect(database.query((tx) => queryP2pProvisionedProviders(tx, owner.instanceId))).toEqual(
-            stored,
-        );
+        expect(
+            await database.query((tx) => queryP2pProvisionedProviders(tx, owner.instanceId)),
+        ).toEqual(stored);
     });
 
-    it("rejects stale replays and same-version conflicts after rotation or revocation", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("rejects stale replays and same-version conflicts after rotation or revocation", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const receiver = createP2pInstanceIdentity();
         const owner = createP2pInstanceIdentity();
         const credentials = new P2pCredentialStore({ database, identity: receiver });
         const first = snapshot(owner, "first-key", 1);
         const rotated = snapshot(owner, "rotated-key", 2);
 
-        expect(credentials.replace(owner.instanceId, first)).toEqual({
+        expect(await credentials.replace(owner.instanceId, first)).toEqual({
             changed: true,
             version: 1,
         });
-        expect(credentials.replace(owner.instanceId, rotated)).toEqual({
+        expect(await credentials.replace(owner.instanceId, rotated)).toEqual({
             changed: true,
             version: 2,
         });
-        expect(() => credentials.replace(owner.instanceId, first)).toThrow(
+        await expect(credentials.replace(owner.instanceId, first)).rejects.toThrow(
             "older than saved state",
         );
-        expect(() =>
+        await expect(
             credentials.replace(owner.instanceId, snapshot(owner, "conflicting-key", 2)),
-        ).toThrow("conflicts with the saved version");
+        ).rejects.toThrow("conflicts with the saved version");
 
         const revoked: P2pCredentialSnapshot = {
             owner: peer(owner),
             providers: [],
             version: 3,
         };
-        expect(credentials.replace(owner.instanceId, revoked)).toEqual({
+        expect(await credentials.replace(owner.instanceId, revoked)).toEqual({
             changed: true,
             version: 3,
         });
-        expect(credentials.list(owner.instanceId)).toEqual([]);
-        expect(() => credentials.replace(owner.instanceId, rotated)).toThrow(
+        expect(await credentials.list(owner.instanceId)).toEqual([]);
+        await expect(credentials.replace(owner.instanceId, rotated)).rejects.toThrow(
             "older than saved state",
         );
     });
 
-    it("assigns stable durable versions to this Rig's outgoing snapshots", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("assigns stable durable versions to this Rig's outgoing snapshots", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const owner = createP2pInstanceIdentity();
         const credentials = new P2pCredentialStore({ database, identity: owner });
 
-        const first = credentials.prepareOwnSnapshot(snapshot(owner, "first-key"));
+        const first = await credentials.prepareOwnSnapshot(snapshot(owner, "first-key"));
         expect(first.version).toBe(1);
-        expect(credentials.prepareOwnSnapshot(snapshot(owner, "first-key")).version).toBe(1);
-        expect(credentials.prepareOwnSnapshot(snapshot(owner, "rotated-key")).version).toBe(2);
+        expect((await credentials.prepareOwnSnapshot(snapshot(owner, "first-key"))).version).toBe(
+            1,
+        );
+        expect((await credentials.prepareOwnSnapshot(snapshot(owner, "rotated-key"))).version).toBe(
+            2,
+        );
         expect(
-            credentials.prepareOwnSnapshot({
-                owner: peer(owner),
-                providers: [],
-                version: 1,
-            }).version,
+            (
+                await credentials.prepareOwnSnapshot({
+                    owner: peer(owner),
+                    providers: [],
+                    version: 1,
+                })
+            ).version,
         ).toBe(3);
     });
 
-    it("fast-forwards a reset owner's current payload above a receiver version", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("fast-forwards a reset owner's current payload above a receiver version", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const owner = createP2pInstanceIdentity();
         const credentials = new P2pCredentialStore({ database, identity: owner });
-        const resetSnapshot = credentials.prepareOwnSnapshot(snapshot(owner, "current-key"));
+        const resetSnapshot = await credentials.prepareOwnSnapshot(snapshot(owner, "current-key"));
 
         expect(resetSnapshot.version).toBe(1);
-        expect(credentials.fastForwardOwnSnapshot(resetSnapshot, 7)).toMatchObject({
+        expect(await credentials.fastForwardOwnSnapshot(resetSnapshot, 7)).toMatchObject({
             providers: [{ material: { apiKey: "current-key" } }],
             version: 8,
         });
-        expect(credentials.prepareOwnSnapshot(snapshot(owner, "current-key")).version).toBe(8);
-        expect(() =>
+        expect((await credentials.prepareOwnSnapshot(snapshot(owner, "current-key"))).version).toBe(
+            8,
+        );
+        await expect(
             credentials.fastForwardOwnSnapshot(snapshot(owner, "stale-local-key"), 9),
-        ).toThrow("changed while its version was reconciled");
+        ).rejects.toThrow("changed while its version was reconciled");
     });
 
-    it("decrypts an authenticated peer envelope and keeps material encrypted at rest", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("decrypts an authenticated peer envelope and keeps material encrypted at rest", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const receiver = createP2pInstanceIdentity();
         const owner = createP2pInstanceIdentity();
         const receiverStore = new P2pCredentialStore({ database, identity: receiver });
@@ -160,28 +170,28 @@ describe("P2pCredentialStore", () => {
         );
 
         expect(
-            receiverStore.replaceEncrypted(owner.instanceId, owner.publicKey, encrypted),
+            await receiverStore.replaceEncrypted(owner.instanceId, owner.publicKey, encrypted),
         ).toEqual({ changed: true, version: 1 });
-        expect(receiverStore.list(owner.instanceId)).toMatchObject([
+        expect(await receiverStore.list(owner.instanceId)).toMatchObject([
             { material: { apiKey: "secret-key" }, providerId: "codex" },
         ]);
         expect(
-            database.query((tx) => queryP2pProvisionedProviders(tx, owner.instanceId))[0]
+            (await database.query((tx) => queryP2pProvisionedProviders(tx, owner.instanceId)))[0]
                 ?.encryptedMaterialJson,
         ).not.toContain("secret-key");
     });
 
-    it("rejects mismatched owners and invalid credential material", () => {
-        database = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("rejects mismatched owners and invalid credential material", async () => {
+        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const receiver = createP2pInstanceIdentity();
         const owner = createP2pInstanceIdentity();
         const anotherOwner = createP2pInstanceIdentity();
         const credentials = new P2pCredentialStore({ database, identity: receiver });
 
-        expect(() =>
+        await expect(
             credentials.replace(anotherOwner.instanceId, snapshot(owner, "owner-key")),
-        ).toThrow("does not match its authenticated owner");
-        expect(() =>
+        ).rejects.toThrow("does not match its authenticated owner");
+        await expect(
             credentials.replace(owner.instanceId, {
                 ...snapshot(owner, "owner-key"),
                 providers: [
@@ -193,16 +203,16 @@ describe("P2pCredentialStore", () => {
                     },
                 ],
             } as unknown as P2pCredentialSnapshot),
-        ).toThrow("snapshot is invalid");
+        ).rejects.toThrow("snapshot is invalid");
 
         const senderStore = new P2pCredentialStore({ database, identity: owner });
         const envelope = senderStore.encryptForPeer(
             snapshot(owner, "owner-key"),
             receiver.publicKey,
         );
-        expect(() =>
+        await expect(
             credentials.replaceEncrypted(anotherOwner.instanceId, owner.publicKey, envelope),
-        ).toThrow("not owned by its sender");
+        ).rejects.toThrow("not owned by its sender");
     });
 });
 

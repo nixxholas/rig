@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe("P2pCredentialRuntimeRegistry", () => {
-    it("keeps the remote owner's IDs authoritative and attributes colliding local extras", () => {
+    it("keeps the remote owner's IDs authoritative and attributes colliding local extras", async () => {
         const runtimeDirectory = mkdtempSync(join(tmpdir(), "rig-credential-runtime-"));
         directories.push(runtimeDirectory);
         const localProviders: ConfigProviders = {
@@ -47,7 +47,7 @@ describe("P2pCredentialRuntimeRegistry", () => {
                     ],
                 ]),
         } as unknown as P2pCredentialStore;
-        const registry = new P2pCredentialRuntimeRegistry({
+        const registry = await P2pCredentialRuntimeRegistry.open({
             localCatalog: createModelCatalog({ providers: localProviders }),
             localInstanceId,
             localName: () => "Build Rig",
@@ -78,7 +78,7 @@ describe("P2pCredentialRuntimeRegistry", () => {
         expect(scope.providers.codex).toMatchObject({ apiKey: "remote" });
     });
 
-    it("materializes only an access-token lease and removes it after revocation", () => {
+    it("materializes only an access-token lease and removes it after revocation", async () => {
         const runtimeDirectory = mkdtempSync(join(tmpdir(), "rig-credential-runtime-"));
         directories.push(runtimeDirectory);
         let snapshots = new Map([
@@ -101,7 +101,7 @@ describe("P2pCredentialRuntimeRegistry", () => {
         const store = {
             listAll: () => snapshots,
         } as unknown as P2pCredentialStore;
-        const registry = new P2pCredentialRuntimeRegistry({
+        const registry = await P2pCredentialRuntimeRegistry.open({
             localCatalog: createModelCatalog({
                 providers: { localCodex: { apiKey: "local", enabled: true, type: "codex" } },
             }),
@@ -138,7 +138,7 @@ describe("P2pCredentialRuntimeRegistry", () => {
         expect(readFileSync(authFile!, "utf8")).not.toContain("refresh");
 
         snapshots = new Map();
-        registry.refresh();
+        await registry.refresh();
         expect(existsSync(authFile!)).toBe(false);
     });
 });

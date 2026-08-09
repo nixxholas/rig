@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -6,28 +7,30 @@ import {
     type Applet,
     type AppletVersion,
 } from "../../protocol/AppletProtocol.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 import { appletIconUrl } from "../../applets/readAppletIcon.js";
 
 /** Lists every applet with its complete version history, alphabetically by name. */
-export function queryApplets(tx: TX): readonly Applet[] {
-    const appletRows = tx.all<Record<string, unknown>>(
-        sql`SELECT * FROM applets ORDER BY name ASC`,
-    );
-    const versionRows = tx.all<Record<string, unknown>>(
-        sql`SELECT * FROM applet_versions ORDER BY applet_name ASC, version ASC`,
-    );
-    const versionsByName = new Map<string, AppletVersion[]>();
-    for (const row of versionRows) {
-        const name = readString(row, "applet_name");
-        const versions = versionsByName.get(name) ?? [];
-        versions.push(readAppletVersionRow(row));
-        versionsByName.set(name, versions);
-    }
-    return appletRows.map((row) =>
-        readAppletRow(row, versionsByName.get(readString(row, "name")) ?? []),
-    );
+export async function queryApplets(tx: DatabaseScope): Promise<readonly Applet[]> {
+    return await inDatabase(tx, async (tx) => {
+        const appletRows = await tx.all<Record<string, unknown>>(
+            sql`SELECT * FROM applets ORDER BY name ASC`,
+        );
+        const versionRows = await tx.all<Record<string, unknown>>(
+            sql`SELECT * FROM applet_versions ORDER BY applet_name ASC, version ASC`,
+        );
+        const versionsByName = new Map<string, AppletVersion[]>();
+        for (const row of versionRows) {
+            const name = readString(row, "applet_name");
+            const versions = versionsByName.get(name) ?? [];
+            versions.push(readAppletVersionRow(row));
+            versionsByName.set(name, versions);
+        }
+        return appletRows.map((row) =>
+            readAppletRow(row, versionsByName.get(readString(row, "name")) ?? []),
+        );
+    });
 }
 
 export function readAppletRow(

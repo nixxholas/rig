@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function pendingContextMessages(database: SessionDatabase): void {
-    database.run(
+export async function pendingContextMessages(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE pending_context_messages (
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -16,7 +16,7 @@ export function pendingContextMessages(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE INDEX pending_context_messages_session_fifo
         ON pending_context_messages (session_id, position)

@@ -33,7 +33,7 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
     const sessions = new Map<number, JustBashSession>();
     let nextSessionId = 1;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
-    let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
+    let onSessionExit: ((exit: BashSessionExit) => void | Promise<void>) | undefined;
     const activeSessionCount = () =>
         [...sessions.values()].filter((session) => session.result === undefined && !session.evicted)
             .length;
@@ -246,14 +246,14 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
                     controller.abort();
                 }, runOptions.timeoutMs);
             }
-            void session.completion.then((result) => {
+            void session.completion.then(async (result) => {
                 session.result = result;
                 if (session.timeout !== undefined) clearTimeout(session.timeout);
                 const awaited = session.consumingWaiters > 0;
                 onActiveSessionCountChange?.(activeSessionCount());
                 trimSessions();
                 if (!awaited && !session.exitObserved) {
-                    onSessionExit?.({
+                    await onSessionExit?.({
                         command: session.command,
                         exitCode: result.exitCode,
                         sessionId,

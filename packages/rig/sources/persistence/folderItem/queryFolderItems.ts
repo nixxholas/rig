@@ -1,22 +1,34 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { asc, eq } from "drizzle-orm";
 
 import type { FolderItem } from "../../protocol/index.js";
 import { folderItems } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function queryFolderItems(tx: TX, folderId?: string): readonly FolderItem[] {
-    return tx
-        .select()
-        .from(folderItems)
-        .where(folderId === undefined ? undefined : eq(folderItems.folderId, folderId))
-        .orderBy(asc(folderItems.folderId), asc(folderItems.orderKey), asc(folderItems.id))
-        .all()
-        .map(read);
+export async function queryFolderItems(
+    tx: DatabaseScope,
+    folderId?: string,
+): Promise<readonly FolderItem[]> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx
+                .select()
+                .from(folderItems)
+                .where(folderId === undefined ? undefined : eq(folderItems.folderId, folderId))
+                .orderBy(asc(folderItems.folderId), asc(folderItems.orderKey), asc(folderItems.id))
+                .all()
+        ).map(read);
+    });
 }
 
-export function queryFolderItem(tx: TX, itemId: string): FolderItem | undefined {
-    const row = tx.select().from(folderItems).where(eq(folderItems.id, itemId)).get();
-    return row === undefined ? undefined : read(row);
+export async function queryFolderItem(
+    tx: DatabaseScope,
+    itemId: string,
+): Promise<FolderItem | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx.select().from(folderItems).where(eq(folderItems.id, itemId)).get();
+        return row === undefined ? undefined : read(row);
+    });
 }
 
 function read(row: typeof folderItems.$inferSelect): FolderItem {

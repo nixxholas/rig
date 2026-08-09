@@ -2,7 +2,8 @@ import { sql } from "drizzle-orm";
 
 import type { SessionAgentType, TimelineScope } from "../../protocol/index.js";
 import type { TimelineAgentSource } from "../../timeline/index.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope, TX } from "../Transaction.js";
+import { inDatabase } from "../database/inDatabase.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 import { sessionScopeFromRow } from "../session/impl/sessionScope.js";
 
@@ -20,27 +21,29 @@ const COLUMNS = sql`
  * and a session covers itself together with the subagents it started, however
  * deeply they nest.
  */
-export function queryTimelineAgents(
-    tx: TX,
+export async function queryTimelineAgents(
+    tx: DatabaseScope,
     scope: TimelineScope,
     includeArchived: boolean,
-): readonly TimelineAgentSource[] {
-    return agentRows(tx, scope)
-        .map(readTimelineAgentRow)
-        .filter((agent) => includeArchived || !agent.archived);
+): Promise<readonly TimelineAgentSource[]> {
+    return await inDatabase(tx, async (tx) =>
+        (await agentRows(tx, scope))
+            .map(readTimelineAgentRow)
+            .filter((agent) => includeArchived || !agent.archived),
+    );
 }
 
-function agentRows(tx: TX, scope: TimelineScope): Record<string, unknown>[] {
+async function agentRows(tx: TX, scope: TimelineScope): Promise<Record<string, unknown>[]> {
     if (scope.kind === "global") {
         // Deliberately unfiltered. A global timeline grows with everything Rig
         // has ever run, and callers bound it with `since` when that matters.
-        return tx.all<Record<string, unknown>>(sql`
+        return await tx.all<Record<string, unknown>>(sql`
             SELECT ${COLUMNS} FROM sessions
             ORDER BY created_at_ms ASC
         `);
     }
     if (scope.kind === "session") {
-        return tx.all<Record<string, unknown>>(sql`
+        return await tx.all<Record<string, unknown>>(sql`
             WITH RECURSIVE descendants(id) AS (
                 SELECT id FROM sessions WHERE id = ${scope.sessionId}
                 UNION
@@ -53,13 +56,13 @@ function agentRows(tx: TX, scope: TimelineScope): Record<string, unknown>[] {
         `);
     }
     if (scope.kind === "workspace") {
-        return tx.all<Record<string, unknown>>(sql`
+        return await tx.all<Record<string, unknown>>(sql`
             SELECT ${COLUMNS} FROM sessions
             WHERE workspace_id = ${scope.workspaceId}
             ORDER BY created_at_ms ASC
         `);
     }
-    return tx.all<Record<string, unknown>>(sql`
+    return await tx.all<Record<string, unknown>>(sql`
         SELECT ${COLUMNS} FROM sessions
         WHERE project_id = ${scope.projectId}
         ORDER BY created_at_ms ASC

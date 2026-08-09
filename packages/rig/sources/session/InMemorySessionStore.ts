@@ -60,7 +60,6 @@ import {
 } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
-import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
@@ -93,6 +92,7 @@ import type { DurableUserInputCall } from "../user-input/index.js";
 import { PresenceStore, resolvePresences } from "../presence/index.js";
 import {
     openSessionDatabase,
+    type OpenSessionDatabase,
     type SessionDatabase,
 } from "../persistence/database/openSessionDatabase.js";
 import { buildTimeline, isTimelineEventType } from "../timeline/index.js";
@@ -111,6 +111,12 @@ import {
 import { workspaceRunReadiness } from "./workspaceRunReadiness.js";
 import { queryRigProfile } from "../persistence/profile/queryRigProfiles.js";
 import { createWorkspaceReadyWaiters } from "./workspaceReadyWaiters.js";
+import {
+    deferSessionTransactionCommit,
+    isSessionTransactionPostCommitError,
+    runSessionTransaction,
+    sessionTransactionScope,
+} from "./SessionTransactionContext.js";
 
 export interface InMemorySessionStoreOptions {
     projectClone?: ProjectRepositoryOptions["cloneRemote"];
@@ -142,7 +148,6 @@ export class InMemorySessionStore implements SessionStore {
         | ((error: unknown, projectId: string, workspaceId: string) => void)
         | undefined;
     #projectSecretIds = new Map<string, Set<string>>();
-    readonly #client: ReturnType<typeof openSessionDatabase>["client"];
     readonly #database: SessionDatabase;
     readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
@@ -162,34 +167,56 @@ export class InMemorySessionStore implements SessionStore {
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
     readonly #workspaceTransferReservations = new Map<string, string>();
-    #activeTransaction: TX | undefined;
-    #transactionCommitCallbacks: (() => void)[] | undefined;
+    static async open(options: InMemorySessionStoreOptions = {}): Promise<InMemorySessionStore> {
+        const opened = await openSessionDatabase(":memory:");
+        try {
+            const localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
+            await migrateSessionDatabase(opened.database, { localInstanceId });
+            const dataEpoch = await queryRigDataEpoch(opened.database);
+            const dataSchemaVersion = await querySessionDatabaseVersion(opened.database);
+            if (dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
+                throw new Error(
+                    "The in-memory Rig store did not reach the current schema version.",
+                );
+            }
+            return new InMemorySessionStore(
+                options,
+                opened,
+                localInstanceId,
+                dataEpoch,
+                dataSchemaVersion,
+            );
+        } catch (error) {
+            await opened.database.close();
+            throw error;
+        }
+    }
 
-    constructor(options: InMemorySessionStoreOptions = {}) {
-        this.localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
+    private constructor(
+        options: InMemorySessionStoreOptions,
+        opened: OpenSessionDatabase,
+        localInstanceId: string,
+        dataEpoch: string,
+        dataSchemaVersion: number,
+    ) {
+        this.localInstanceId = localInstanceId;
         this.#resolveModelCatalog =
             options.resolveModelCatalog ?? (() => options.modelCatalog ?? createModelCatalog());
-        const opened = openSessionDatabase(":memory:");
-        this.#client = opened.client;
         this.#database = opened.database;
-        migrateSessionDatabase(this.#database, { localInstanceId: this.localInstanceId });
-        this.dataEpoch = queryRigDataEpoch(this.#database);
-        this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
-        if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
-            throw new Error("The in-memory Rig store did not reach the current schema version.");
-        }
+        this.dataEpoch = dataEpoch;
+        this.dataSchemaVersion = dataSchemaVersion;
         this.applets = new AppletStore({
             publish: (event) => this.#publishGlobalEvent(event),
-            tx: () => this.#activeTransaction ?? this.#database,
+            tx: () => this.#tx(),
         });
-        this.worklets = new WorkletStore({ tx: () => this.#activeTransaction ?? this.#database });
+        this.worklets = new WorkletStore({ tx: () => this.#tx() });
         this.slots = new SlotEntryStore({
             publish: (event) => this.#publishGlobalEvent(event),
-            sessionExists: (sessionId) => this.#sessions.has(sessionId),
-            tx: () => this.#activeTransaction ?? this.#database,
-            applet: (name) => this.applets.get(name),
+            sessionExists: (_tx, sessionId) => this.#sessions.has(sessionId),
+            tx: () => this.#tx(),
         });
         this.#projects = new ProjectRepository({
+            afterTransactionCommit: (callback) => this.#afterTransactionCommit(callback),
             ...(options.projectClone === undefined ? {} : { cloneRemote: options.projectClone }),
             database: this.#database,
             ...(options.gitCredentialBroker === undefined
@@ -222,8 +249,8 @@ export class InMemorySessionStore implements SessionStore {
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#publishGlobalEvent(event),
-            onFolderContextChanged: (folderIds) => {
-                this.#afterTransactionCommit(() => {
+            onFolderContextChanged: async (folderIds) => {
+                await this.#afterTransactionCommit(() => {
                     const affected = new Set(folderIds);
                     for (const session of this.#sessions.values()) {
                         if (session.belongsToFolderContext(affected))
@@ -231,14 +258,14 @@ export class InMemorySessionStore implements SessionStore {
                     }
                 });
             },
-            onSessionsArchived: (sessionIds) => {
-                this.#afterTransactionCommit(() => {
-                    for (const sessionId of sessionIds) {
-                        void this.#sessions
-                            .get(sessionId)
-                            ?.recordFolderArchived()
-                            .catch(rethrowDatabaseFailure);
-                    }
+            onSessionsArchived: async (sessionIds) => {
+                await this.#afterTransactionCommit(async () => {
+                    await Promise.all(
+                        sessionIds.flatMap((sessionId) => {
+                            const session = this.#sessions.get(sessionId);
+                            return session === undefined ? [] : [session.recordFolderArchived()];
+                        }),
+                    );
                 });
             },
             transaction: (body) => this.#transaction(body),
@@ -288,12 +315,15 @@ export class InMemorySessionStore implements SessionStore {
             localInstanceId: this.localInstanceId,
             repository: {
                 archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
-                    this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
-                    undefined
+                    (await this.#projects.getOwnedWorkspace(
+                        ownerSessionId,
+                        projectId,
+                        workspaceId,
+                    )) === undefined
                         ? undefined
                         : this.archiveWorkspace(projectId, workspaceId),
                 createOwnedWorkspace: (ownerSessionId, projectId, request) => {
-                    const owner = this.get(ownerSessionId)?.snapshot();
+                    const owner = this.#sessions.get(ownerSessionId)?.snapshot();
                     const createdBy =
                         owner?.profileId === undefined
                             ? undefined
@@ -314,8 +344,13 @@ export class InMemorySessionStore implements SessionStore {
                 configureWorkspaceRequest: (request) => this.#configureWorkspaceRequest(request),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
-                findByAgentId: (agentId) => this.findByAgentId(agentId),
-                get: (sessionId) => this.get(sessionId),
+                findByAgentId: (agentId) => {
+                    const matches = [...this.#sessions.values()].filter(
+                        (session) => session.agentIdentity().agentId === agentId,
+                    );
+                    return matches.length === 1 ? matches[0] : undefined;
+                },
+                get: (sessionId) => this.#sessions.get(sessionId),
                 listByRoot: (rootSessionId) =>
                     [...this.#sessions.values()].filter(
                         (session) =>
@@ -323,7 +358,8 @@ export class InMemorySessionStore implements SessionStore {
                             session.isSubagent(),
                     ),
                 registerProject: (path) => this.#projects.registerProject({ path }),
-                queryAgentTreeUsage: (sessionId) => this.queryAgentTreeUsage(sessionId),
+                queryAgentTreeUsage: (sessionId) =>
+                    queryLiveAgentTreeUsage(this.#sessions.values(), sessionId),
                 ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
                 waitForWorkspaceReady: (projectId, workspaceId, signal) =>
@@ -339,7 +375,7 @@ export class InMemorySessionStore implements SessionStore {
                     }
                 },
                 scheduleSessionTransfer: (sessionId, targetWorkspaceId) => {
-                    const session = this.get(sessionId);
+                    const session = this.#sessions.get(sessionId);
                     if (session === undefined) {
                         throw new Error("The session is no longer available.");
                     }
@@ -366,30 +402,33 @@ export class InMemorySessionStore implements SessionStore {
         });
     }
 
-    changeEffort(sessionId: string, request: ChangeEffortRequest): InMemorySession | undefined {
-        const session = this.get(sessionId);
+    async changeEffort(
+        sessionId: string,
+        request: ChangeEffortRequest,
+    ): Promise<InMemorySession | undefined> {
+        const session = await this.get(sessionId);
         if (session === undefined) {
             return undefined;
         }
 
-        session.changeEffort(request);
+        await session.changeEffort(request);
         return session;
     }
 
-    #configureWorkspaceRequest(request: CreateSessionRequest): CreateSessionRequest {
+    async #configureWorkspaceRequest(request: CreateSessionRequest): Promise<CreateSessionRequest> {
         const { docker: _docker, local: _local, ...base } = request;
-        return configureSessionRequest(base, this.#defaultDocker, () =>
+        return await configureSessionRequest(base, this.#defaultDocker, () =>
             this.#projects.queryProjectSettings(request.cwd),
         );
     }
 
-    attachSecret(
+    async attachSecret(
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
         mutationId?: string,
-    ): InMemorySession | undefined {
-        const session = this.get(sessionId);
+    ): Promise<InMemorySession | undefined> {
+        const session = await this.get(sessionId);
         if (session === undefined) return undefined;
         this.#secrets.reference(secretId);
         if (scope === "project") {
@@ -399,7 +438,7 @@ export class InMemorySessionStore implements SessionStore {
             this.#projectSecretIds.set(projectId, ids);
             for (const candidate of this.#sessions.values()) {
                 if (codeScopeOrUndefined(candidate.snapshot().scope)?.projectId === projectId) {
-                    candidate.attachSecret(secretId, {
+                    await candidate.attachSecret(secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
                             : {}),
@@ -408,7 +447,7 @@ export class InMemorySessionStore implements SessionStore {
                 }
             }
         } else {
-            session.attachSecret(secretId, {
+            await session.attachSecret(secretId, {
                 ...(mutationId === undefined ? {} : { mutationId }),
                 scope,
             });
@@ -416,44 +455,47 @@ export class InMemorySessionStore implements SessionStore {
         return session;
     }
 
-    changeServiceTier(
+    async changeServiceTier(
         sessionId: string,
         request: ChangeServiceTierRequest,
-    ): InMemorySession | undefined {
-        const session = this.get(sessionId);
+    ): Promise<InMemorySession | undefined> {
+        const session = await this.get(sessionId);
         if (session === undefined) return undefined;
-        session.changeServiceTier(request);
+        await session.changeServiceTier(request);
         return session;
     }
 
-    create(request: CreateSessionRequest, options: SessionCreationOptions = {}): InMemorySession {
-        return this.#createSession(request, undefined, undefined, undefined, options);
+    async create(
+        request: CreateSessionRequest,
+        options: SessionCreationOptions = {},
+    ): Promise<InMemorySession> {
+        return await this.#createSession(request, undefined, undefined, undefined, options);
     }
 
-    createWithId(
+    async createWithId(
         id: string,
         request: CreateSessionRequest,
         options: SessionCreationOptions = {},
-    ): InMemorySession {
-        const existing = this.get(id);
-        if (existing !== undefined) return retriedSession(existing, request);
-        return this.#createSession(request, undefined, undefined, id, options);
+    ): Promise<InMemorySession> {
+        const existing = await this.get(id);
+        if (existing !== undefined) return await retriedSession(existing, request);
+        return await this.#createSession(request, undefined, undefined, id, options);
     }
 
-    detachSecret(
+    async detachSecret(
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
         mutationId?: string,
-    ): InMemorySession | undefined {
-        const session = this.get(sessionId);
+    ): Promise<InMemorySession | undefined> {
+        const session = await this.get(sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
             const projectId = codeScope(session.snapshot().scope).projectId;
             this.#projectSecretIds.get(projectId)?.delete(secretId);
             for (const candidate of this.#sessions.values()) {
                 if (codeScopeOrUndefined(candidate.snapshot().scope)?.projectId === projectId) {
-                    candidate.detachSecret(secretId, {
+                    await candidate.detachSecret(secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
                             : {}),
@@ -462,7 +504,7 @@ export class InMemorySessionStore implements SessionStore {
                 }
             }
         } else {
-            session.detachSecret(secretId, {
+            await session.detachSecret(secretId, {
                 ...(mutationId === undefined ? {} : { mutationId }),
                 scope,
             });
@@ -470,17 +512,17 @@ export class InMemorySessionStore implements SessionStore {
         return session;
     }
 
-    fork(sessionId: string, targetSessionId?: string): InMemorySession | undefined {
+    async fork(sessionId: string, targetSessionId?: string): Promise<InMemorySession | undefined> {
         if (targetSessionId !== undefined) {
-            const existing = this.get(targetSessionId);
+            const existing = await this.get(targetSessionId);
             if (existing !== undefined) return existing;
         }
-        const source = this.get(sessionId);
+        const source = await this.get(sessionId);
         if (source === undefined) return undefined;
         const sourceSnapshot = source.snapshot();
         const folderPath =
             sourceSnapshot.scope.kind === "folder"
-                ? this.#folders.activeFolderStoragePath(sourceSnapshot.scope.folderId)
+                ? await this.#folders.activeFolderStoragePath(sourceSnapshot.scope.folderId)
                 : undefined;
         const state = source.createForkState();
         const forkState =
@@ -502,22 +544,24 @@ export class InMemorySessionStore implements SessionStore {
             this.#assertWorkspaceAcceptingSessions(sourceSnapshot.scope.workspaceId);
         }
         if (sourceSnapshot.scope.kind === "workspace") {
-            const workspace = this.#projects.getWorkspace(
+            const workspace = await this.#projects.getWorkspace(
                 sourceSnapshot.scope.projectId,
                 sourceSnapshot.scope.workspaceId,
             );
             if (
                 workspace === undefined ||
-                workspaceRunReadiness(this.#projects, {
-                    cwd: sourceSnapshot.cwd,
-                    projectId: sourceSnapshot.scope.projectId,
-                    workspaceId: sourceSnapshot.scope.workspaceId,
-                }).state !== "ready"
+                (
+                    await workspaceRunReadiness(this.#projects, {
+                        cwd: sourceSnapshot.cwd,
+                        projectId: sourceSnapshot.scope.projectId,
+                        workspaceId: sourceSnapshot.scope.workspaceId,
+                    })
+                ).state !== "ready"
             ) {
                 throw new Error("A session in an unavailable workspace cannot be forked.");
             }
         }
-        const session = new InMemorySession({
+        const session = await InMemorySession.open({
             presence: this.presence,
             agentManager: this.#agentManager,
             workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
@@ -555,23 +599,23 @@ export class InMemorySessionStore implements SessionStore {
             scope: sourceSnapshot.scope,
         });
         this.#sessions.set(session.id, session);
-        session.emitCreatedEvent();
+        await session.emitCreatedEvent();
         return session;
     }
 
-    #createSession(
+    async #createSession(
         request: CreateSessionRequest,
         metadata?: SessionAgentMetadata,
         contextMessages?: readonly Message[],
         id?: string,
         options: SessionCreationOptions = {},
-    ): InMemorySession {
+    ): Promise<InMemorySession> {
         const sessionId = id ?? createId();
         let newUnsortedStorage: { created: boolean; path: string } | undefined;
         const inherited =
             metadata?.parentSessionId === undefined
                 ? undefined
-                : this.get(metadata.parentSessionId)?.snapshot();
+                : (await this.get(metadata.parentSessionId))?.snapshot();
         if (metadata?.parentSessionId !== undefined && inherited === undefined) {
             throw new Error("The parent session was not found.");
         }
@@ -585,14 +629,14 @@ export class InMemorySessionStore implements SessionStore {
                 : validOwnerInstanceId(options.ownerInstanceId));
         const profileId = inherited?.profileId ?? options.profileId ?? request.identity;
         if (profileId !== undefined) {
-            const profile = queryRigProfile(this.#database, profileId);
+            const profile = await queryRigProfile(this.#database, profileId);
             if (profile?.parentInstanceId !== ownerInstanceId) {
                 throw new Error("The session profile is not owned by the session's Rig.");
             }
         }
         const inheritedWorkspace =
             inherited?.scope.kind === "workspace"
-                ? this.#projects.getWorkspace(
+                ? await this.#projects.getWorkspace(
                       inherited.scope.projectId,
                       inherited.scope.workspaceId,
                   )
@@ -600,21 +644,25 @@ export class InMemorySessionStore implements SessionStore {
         if (
             inherited?.scope.kind === "workspace" &&
             (inheritedWorkspace === undefined ||
-                workspaceRunReadiness(this.#projects, {
-                    cwd: inherited.cwd,
-                    projectId: inherited.scope.projectId,
-                    workspaceId: inherited.scope.workspaceId,
-                }).state !== "ready")
+                (
+                    await workspaceRunReadiness(this.#projects, {
+                        cwd: inherited.cwd,
+                        projectId: inherited.scope.projectId,
+                        workspaceId: inherited.scope.workspaceId,
+                    })
+                ).state !== "ready")
         ) {
             throw new Error("The parent session workspace is not ready and available.");
         }
-        const resolved = (() => {
+        const resolved = await (async () => {
             if (inherited === undefined) {
                 if (request.scope?.kind === "folder") {
                     return {
                         request: {
                             ...request,
-                            cwd: this.#folders.activeFolderStoragePath(request.scope.folderId),
+                            cwd: await this.#folders.activeFolderStoragePath(
+                                request.scope.folderId,
+                            ),
                         },
                         scope: request.scope,
                     };
@@ -630,7 +678,7 @@ export class InMemorySessionStore implements SessionStore {
                     };
                 }
                 if (request.workspaceId !== undefined) {
-                    const ownership = this.#projects.resolveSessionOwnership(
+                    const ownership = await this.#projects.resolveSessionOwnership(
                         request.cwd,
                         request.workspaceId,
                         request.projectId,
@@ -645,7 +693,11 @@ export class InMemorySessionStore implements SessionStore {
                         },
                     };
                 }
-                const ownership = this.#projects.resolve(request.cwd, undefined, request.projectId);
+                const ownership = await this.#projects.resolve(
+                    request.cwd,
+                    undefined,
+                    request.projectId,
+                );
                 return {
                     ownership,
                     request,
@@ -665,7 +717,7 @@ export class InMemorySessionStore implements SessionStore {
                     request.workspaceId !== inherited.scope.workspaceId)
             ) {
                 const project = codeScope(inherited.scope);
-                const ownership = this.#projects.resolve(
+                const ownership = await this.#projects.resolve(
                     request.cwd,
                     request.workspaceId,
                     project.projectId,
@@ -685,7 +737,7 @@ export class InMemorySessionStore implements SessionStore {
                 return {
                     request: {
                         ...inheritedRequest,
-                        cwd: this.#folders.activeFolderStoragePath(inherited.scope.folderId),
+                        cwd: await this.#folders.activeFolderStoragePath(inherited.scope.folderId),
                     },
                     scope: inherited.scope,
                 };
@@ -703,7 +755,7 @@ export class InMemorySessionStore implements SessionStore {
                 resolved.scope.kind === "project" || resolved.scope.kind === "workspace"
                     ? resolved.scope.projectId
                     : undefined;
-            const session = new InMemorySession({
+            const session = await InMemorySession.open({
                 presence: this.presence,
                 agentManager: this.#agentManager,
                 workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
@@ -756,9 +808,9 @@ export class InMemorySessionStore implements SessionStore {
             : this.#resolveModelCatalog(ownerInstanceId);
     }
 
-    #inheritWorkspaceName(
+    async #inheritWorkspaceName(
         metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
-    ): void {
+    ): Promise<void> {
         const first = [...this.#sessions.values()]
             .filter((session) => {
                 const identity = session.projectIdentity();
@@ -775,34 +827,37 @@ export class InMemorySessionStore implements SessionStore {
                     left.id.localeCompare(right.id),
             )[0];
         if (first?.id !== metadata.sessionId) return;
-        this.#projects.inheritWorkspaceName(
+        await this.#projects.inheritWorkspaceName(
             metadata.projectId,
             metadata.workspaceId,
             metadata.title,
         );
     }
 
-    get(sessionId: string): InMemorySession | undefined {
+    async get(sessionId: string): Promise<InMemorySession | undefined> {
         return this.#sessions.get(sessionId);
     }
 
-    attachment(sessionId: string, attachmentId: string) {
-        return this.get(sessionId)?.attachment(attachmentId);
+    async attachment(sessionId: string, attachmentId: string) {
+        return (await this.get(sessionId))?.attachment(attachmentId);
     }
 
-    findByAgentId(agentId: string): InMemorySession | undefined {
+    async findByAgentId(agentId: string): Promise<InMemorySession | undefined> {
         const matches = [...this.#sessions.values()].filter(
             (session) => session.agentIdentity().agentId === agentId,
         );
         return matches.length === 1 ? matches[0] : undefined;
     }
 
-    list(options: { limit?: number } = {}): readonly SessionSummary[] {
+    async list(options: { limit?: number } = {}): Promise<readonly SessionSummary[]> {
         const projectOrder = new Map(
-            this.#projects.listProjects().map((project) => [project.id, project.orderKey]),
+            (await this.#projects.listProjects()).map((project) => [project.id, project.orderKey]),
         );
         const workspaceOrder = new Map(
-            this.#projects.listWorkspaces().map((workspace) => [workspace.id, workspace.orderKey]),
+            (await this.#projects.listWorkspaces()).map((workspace) => [
+                workspace.id,
+                workspace.orderKey,
+            ]),
         );
         const sessions = positioned(
             [...this.#sessions.values()]
@@ -812,8 +867,8 @@ export class InMemorySessionStore implements SessionStore {
         return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
     }
 
-    listActive(options: { limit?: number } = {}): readonly SessionSummary[] {
-        const sessions = this.list().filter((session) => !session.archived);
+    async listActive(options: { limit?: number } = {}): Promise<readonly SessionSummary[]> {
+        const sessions = (await this.list()).filter((session) => !session.archived);
         return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
     }
 
@@ -821,9 +876,9 @@ export class InMemorySessionStore implements SessionStore {
         return [...this.#sessions.values()];
     }
 
-    listExternalToolCalls(
+    async listExternalToolCalls(
         options: { limit?: number; status?: ExternalToolCall["status"] } = {},
-    ): readonly ExternalToolCall[] {
+    ): Promise<readonly ExternalToolCall[]> {
         return [...this.#sessions.values()]
             .flatMap((session) =>
                 session.externalToolCalls(
@@ -834,13 +889,13 @@ export class InMemorySessionStore implements SessionStore {
             .slice(0, options.limit ?? 100);
     }
 
-    listDurableUserInputs(): readonly DurableUserInputCall[] {
+    async listDurableUserInputs(): Promise<readonly DurableUserInputCall[]> {
         return [...this.#sessions.values()].flatMap(
             (session) => session.state().durableUserInputs ?? [],
         );
     }
 
-    listSubagents(parentSessionId: string): readonly SubagentSummary[] {
+    async listSubagents(parentSessionId: string): Promise<readonly SubagentSummary[]> {
         return [...this.#sessions.values()]
             .filter((session) => {
                 let ancestorId = session.agentMetadata().parentSessionId;
@@ -854,15 +909,15 @@ export class InMemorySessionStore implements SessionStore {
             .sort((left, right) => left.createdAt - right.createdAt);
     }
 
-    queryAgentTreeUsage(sessionId: string) {
+    async queryAgentTreeUsage(sessionId: string) {
         return queryLiveAgentTreeUsage(this.#sessions.values(), sessionId);
     }
 
-    listSecrets(): readonly SecretSummary[] {
+    async listSecrets(): Promise<readonly SecretSummary[]> {
         return this.#secrets.references();
     }
 
-    timeline(request: GetTimelineRequest): readonly TimelineAgent[] {
+    async timeline(request: GetTimelineRequest): Promise<readonly TimelineAgent[]> {
         const sessions = [...this.#sessions.values()].filter((session) =>
             this.#inTimelineScope(session, request.scope),
         );
@@ -894,7 +949,7 @@ export class InMemorySessionStore implements SessionStore {
         targetWorkspaceId: string,
         scheduled: boolean,
     ): Promise<TransferSessionResponse | undefined> {
-        const session = this.get(sessionId);
+        const session = await this.get(sessionId);
         if (session === undefined) return undefined;
         return executeSessionWorkspaceTransfer({
             hasAttachedSessions: (workspaceId) =>
@@ -940,14 +995,14 @@ export class InMemorySessionStore implements SessionStore {
         return false;
     }
 
-    registerSecret(request: RegisterSecretRequest): SecretSummary {
+    async registerSecret(request: RegisterSecretRequest): Promise<SecretSummary> {
         this.#secrets.register(request);
         return this.#secrets.reference(request.id);
     }
 
-    registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary {
+    async registerSpecialSecret(request: SpecialSecretRegistration): Promise<SecretSummary> {
         this.#secrets.register(request);
-        this.#projects.retryRemoteProjects(request.kind);
+        await this.#projects.retryRemoteProjects(request.kind);
         return this.#secrets.reference(request.kind);
     }
 
@@ -955,171 +1010,179 @@ export class InMemorySessionStore implements SessionStore {
         return this.#secrets.resolveSpecial(kind);
     }
 
-    unregisterSecret(secretId: string): boolean {
+    async unregisterSecret(secretId: string): Promise<boolean> {
         const secret = this.#secrets.references().find((candidate) => candidate.id === secretId);
         if (secret === undefined || secret.kind !== undefined) return false;
         const removed = this.#secrets.unregister(secretId);
         if (!removed) return false;
         for (const ids of this.#projectSecretIds.values()) ids.delete(secretId);
         for (const session of this.#sessions.values()) {
-            session.detachSecret(secretId, { scope: "project" });
-            session.detachSecret(secretId, { scope: "session" });
+            await session.detachSecret(secretId, { scope: "project" });
+            await session.detachSecret(secretId, { scope: "session" });
         }
         return true;
     }
 
-    unregisterSpecialSecret(kind: SpecialSecretKind): boolean {
+    async unregisterSpecialSecret(kind: SpecialSecretKind): Promise<boolean> {
         return this.#secrets.unregisterSpecial(kind);
     }
 
-    updateSecret(secretId: string, request: UpdateSecretRequest): SecretSummary | undefined {
+    async updateSecret(
+        secretId: string,
+        request: UpdateSecretRequest,
+    ): Promise<SecretSummary | undefined> {
         const updated = this.#secrets.updatedRegistration(secretId, request);
         if (updated === undefined) return undefined;
         this.#secrets.register(updated);
         return this.#secrets.reference(secretId);
     }
 
-    getProject(projectId: string): Project | undefined {
-        return this.#projects.getProject(projectId);
+    async getProject(projectId: string): Promise<Project | undefined> {
+        return await this.#projects.getProject(projectId);
     }
 
-    applyGitFacts(
+    async applyGitFacts(
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
-    ): void {
-        this.#projects.applyGitFacts(target, facts);
+    ): Promise<void> {
+        await this.#projects.applyGitFacts(target, facts);
     }
 
-    listFolders(): readonly Folder[] {
-        return this.#folders.listFolders();
+    async listFolders(): Promise<readonly Folder[]> {
+        return await this.#folders.listFolders();
     }
 
-    folderCatalog() {
-        return this.#folders.folderCatalog();
+    async folderCatalog() {
+        return await this.#folders.folderCatalog();
     }
 
-    getFolder(folderId: string): Folder | undefined {
-        return this.#folders.getFolder(folderId);
+    async getFolder(folderId: string): Promise<Folder | undefined> {
+        return await this.#folders.getFolder(folderId);
     }
 
-    getFolderItem(itemId: string): FolderItem | undefined {
-        return this.#folders.getFolderItem(itemId);
+    async getFolderItem(itemId: string): Promise<FolderItem | undefined> {
+        return await this.#folders.getFolderItem(itemId);
     }
 
-    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem {
-        return this.#folders.createFolderItem(folderId, request);
+    async createFolderItem(
+        folderId: string,
+        request: CreateFolderItemRequest,
+    ): Promise<FolderItem> {
+        return await this.#folders.createFolderItem(folderId, request);
     }
 
-    moveFolderItem(
+    async moveFolderItem(
         itemId: string,
         request: MoveFolderItemRequest,
         expectedVersion?: number,
-    ): FolderItem | undefined {
-        return this.#folders.moveFolderItem(itemId, request, expectedVersion);
+    ): Promise<FolderItem | undefined> {
+        return await this.#folders.moveFolderItem(itemId, request, expectedVersion);
     }
 
-    archiveFolderItem(
+    async archiveFolderItem(
         itemId: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): FolderItem | undefined {
-        return this.#folders.archiveFolderItem(itemId, expectedVersion, mutationId);
+    ): Promise<FolderItem | undefined> {
+        return await this.#folders.archiveFolderItem(itemId, expectedVersion, mutationId);
     }
 
-    createFolder(request: CreateFolderRequest): Folder {
-        return this.#folders.createFolder(request);
+    async createFolder(request: CreateFolderRequest): Promise<Folder> {
+        return await this.#folders.createFolder(request);
     }
 
-    updateFolder(
+    async updateFolder(
         folderId: string,
         request: UpdateFolderRequest,
         expectedVersion?: number,
-    ): Folder | undefined {
-        return this.#folders.updateFolder(folderId, request, expectedVersion);
+    ): Promise<Folder | undefined> {
+        return await this.#folders.updateFolder(folderId, request, expectedVersion);
     }
 
-    moveFolder(
+    async moveFolder(
         folderId: string,
         request: MoveFolderRequest,
         expectedVersion?: number,
-    ): Folder | undefined {
-        return this.#folders.moveFolder(folderId, request, expectedVersion);
+    ): Promise<Folder | undefined> {
+        return await this.#folders.moveFolder(folderId, request, expectedVersion);
     }
 
-    archiveFolder(
+    async archiveFolder(
         folderId: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): Folder | undefined {
-        const archived = this.#folders.archiveFolder(folderId, expectedVersion, mutationId);
+    ): Promise<Folder | undefined> {
+        const archived = await this.#folders.archiveFolder(folderId, expectedVersion, mutationId);
         if (archived === undefined) return undefined;
         const archivedFolderIds = new Set(
-            this.#folders
-                .listFolders()
+            (await this.#folders.listFolders())
                 .filter((folder) => folder.archivedAt !== undefined)
                 .map((folder) => folder.id),
         );
         for (const session of this.#sessions.values()) {
             const scope = session.snapshot().scope;
             if (scope.kind !== "folder" || !archivedFolderIds.has(scope.folderId)) continue;
-            void session.recordFolderArchived().catch(rethrowDatabaseFailure);
+            await session.recordFolderArchived().catch(rethrowDatabaseFailure);
         }
         return archived;
     }
 
-    sharedFolderState(rootFolderId: string) {
-        return this.#folders.sharedFolderState(rootFolderId);
+    async sharedFolderState(rootFolderId: string): Promise<SharedFolderState> {
+        return await this.#folders.sharedFolderState(rootFolderId);
     }
 
-    sharedFolderGroup(folderId: string): string | undefined {
-        return this.#folders.sharedFolderGroup(folderId);
+    async sharedFolderGroup(folderId: string): Promise<string | undefined> {
+        return await this.#folders.sharedFolderGroup(folderId);
     }
 
-    sharedFolderRoot(groupId: string): string | undefined {
-        return this.#folders.sharedFolderRoot(groupId);
+    async sharedFolderRoot(groupId: string): Promise<string | undefined> {
+        return await this.#folders.sharedFolderRoot(groupId);
     }
 
-    assertFolderShareable(folderId: string): void {
-        this.#folders.assertFolderShareable(folderId);
+    async assertFolderShareable(folderId: string): Promise<void> {
+        await this.#folders.assertFolderShareable(folderId);
     }
 
-    markFolderShared(folderId: string, groupId: string): Folder {
-        return this.#folders.markFolderShared(folderId, groupId);
+    async markFolderShared(folderId: string, groupId: string): Promise<Folder> {
+        return await this.#folders.markFolderShared(folderId, groupId);
     }
 
-    applySharedFolderState(groupId: string, state: SharedFolderState): Folder {
-        return this.#folders.applySharedFolderState(groupId, state);
+    async applySharedFolderState(groupId: string, state: SharedFolderState): Promise<Folder> {
+        return await this.#folders.applySharedFolderState(groupId, state);
     }
 
-    getDocument(documentId: string): Document | undefined {
-        return this.#documents.getDocument(documentId);
+    async getDocument(documentId: string): Promise<Document | undefined> {
+        return await this.#documents.getDocument(documentId);
     }
 
-    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document {
-        return this.#documents.createDocument(request, createdBy);
+    async createDocument(
+        request: CreateDocumentRequest,
+        createdBy: DocumentCreatedBy,
+    ): Promise<Document> {
+        return await this.#documents.createDocument(request, createdBy);
     }
 
-    writeDocument(
+    async writeDocument(
         documentId: string,
         request: WriteDocumentRequest,
         expectedVersion: number,
-    ): Document | undefined {
-        return this.#documents.writeDocument(documentId, request, expectedVersion);
+    ): Promise<Document | undefined> {
+        return await this.#documents.writeDocument(documentId, request, expectedVersion);
     }
 
-    documentUpdates(
+    async documentUpdates(
         documentId: string,
         request: ListDocumentUpdatesRequest,
-    ): DocumentUpdatePage | undefined {
-        return this.#documents.documentUpdates(documentId, request);
+    ): Promise<DocumentUpdatePage | undefined> {
+        return await this.#documents.documentUpdates(documentId, request);
     }
 
-    setSessionFolder(
+    async setSessionFolder(
         sessionId: string,
         folderId: string | null,
         afterId?: string | null,
         mutationId?: string,
-    ): InMemorySession | undefined {
+    ): Promise<InMemorySession | undefined> {
         const session = this.#sessions.get(sessionId);
         if (session === undefined) return undefined;
         if (session.isSubagent()) throw new Error("Subagent histories cannot be moved.");
@@ -1127,14 +1190,17 @@ export class InMemorySessionStore implements SessionStore {
         const scope: SessionScope =
             folderId === null ? { kind: "unsorted" } : { folderId, kind: "folder" };
         if (afterId === undefined && sameScope(current.scope, scope)) return session;
-        const folder = folderId === null ? undefined : this.#folders.getFolder(folderId);
+        const folder = folderId === null ? undefined : await this.#folders.getFolder(folderId);
         if (folderId !== null && (folder === undefined || folder.archivedAt !== undefined)) {
             throw new Error("That folder was not found.");
         }
         const storage =
             folderId === null
                 ? this.#folders.createUnsortedSessionDirectory(sessionId)
-                : { created: false, path: this.#folders.activeFolderStoragePath(folderId) };
+                : {
+                      created: false,
+                      path: await this.#folders.activeFolderStoragePath(folderId),
+                  };
         try {
             const targetItems = [...this.#sessions.values()]
                 .filter((candidate) => !candidate.isSubagent())
@@ -1171,7 +1237,7 @@ export class InMemorySessionStore implements SessionStore {
                           sessionId,
                           afterId,
                       );
-            session.applyScopeMove({
+            await session.applyScopeMove({
                 cwd: storage.path,
                 orderKey,
                 scope,
@@ -1180,7 +1246,7 @@ export class InMemorySessionStore implements SessionStore {
                     : {}),
             });
             if (mutationId !== undefined) {
-                this.#folders.rememberSessionScopeMutation(sessionId, mutationId);
+                await this.#folders.rememberSessionScopeMutation(sessionId, mutationId);
             }
         } catch (error) {
             if (storage.created) {
@@ -1191,12 +1257,12 @@ export class InMemorySessionStore implements SessionStore {
         return session;
     }
 
-    sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean {
-        return this.#folders.sessionScopeMutationApplied(sessionId, mutationId);
+    async sessionScopeMutationApplied(sessionId: string, mutationId: string): Promise<boolean> {
+        return await this.#folders.sessionScopeMutationApplied(sessionId, mutationId);
     }
 
-    listProjects(): readonly Project[] {
-        return this.#projects.listProjects();
+    async listProjects(): Promise<readonly Project[]> {
+        return await this.#projects.listProjects();
     }
 
     registerProject(request: RegisterProjectRequest): Promise<Project> {
@@ -1216,50 +1282,61 @@ export class InMemorySessionStore implements SessionStore {
         });
     }
 
-    getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
-        return this.#projects.getWorkspace(projectId, workspaceId);
+    async getWorkspace(
+        projectId: string,
+        workspaceId: string,
+    ): Promise<ProjectWorkspace | undefined> {
+        return await this.#projects.getWorkspace(projectId, workspaceId);
     }
 
-    listWorkspaces(projectId?: string): readonly ProjectWorkspace[] {
-        return this.#projects.listWorkspaces(projectId);
+    async listWorkspaces(projectId?: string): Promise<readonly ProjectWorkspace[]> {
+        return await this.#projects.listWorkspaces(projectId);
     }
 
-    renameProject(
+    async renameProject(
         projectId: string,
         name: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): Project | undefined {
-        return this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
+    ): Promise<Project | undefined> {
+        return await this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
     }
 
-    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined {
-        return this.#projects.queryProjectSettings(cwd);
+    async queryProjectSettings(cwd: string): Promise<ProjectSessionSettings | undefined> {
+        return await this.#projects.queryProjectSettings(cwd);
     }
 
-    setProjectSettings(
+    async setProjectSettings(
         projectId: string,
         settings: ProjectSettingsUpdate,
         expectedVersion?: number,
         mutationId?: string,
-    ): Project | undefined {
-        return this.#projects.setProjectSettings(projectId, settings, expectedVersion, mutationId);
+    ): Promise<Project | undefined> {
+        return await this.#projects.setProjectSettings(
+            projectId,
+            settings,
+            expectedVersion,
+            mutationId,
+        );
     }
 
-    refreshProject(projectId: string): Project | undefined {
-        return this.#projects.refreshProject(projectId);
+    async refreshProject(projectId: string): Promise<Project | undefined> {
+        return await this.#projects.refreshProject(projectId);
     }
 
-    reorderProject(
+    async reorderProject(
         projectId: string,
         request: ReorderRequest,
         expectedVersion?: number,
-    ): Project | undefined {
-        return this.#projects.reorderProject(projectId, request, expectedVersion);
+    ): Promise<Project | undefined> {
+        return await this.#projects.reorderProject(projectId, request, expectedVersion);
     }
 
-    reorderSession(sessionId: string, request: ReorderRequest): InMemorySession | undefined {
-        const session = this.get(sessionId);
+    async reorderSession(
+        sessionId: string,
+        request: ReorderRequest,
+    ): Promise<InMemorySession | undefined> {
+        const session = await this.get(sessionId);
         if (session === undefined) return undefined;
         if (session.isSubagent()) {
             throw new Error("Subagent histories cannot be reordered.");
@@ -1272,27 +1349,32 @@ export class InMemorySessionStore implements SessionStore {
                 return sameScope(candidateSnapshot.scope, snapshot.scope);
             })
             .map((candidate) => candidate.summary());
-        session.setOrderKey(orderKeyAfter(positioned(siblings), sessionId, request.afterId));
+        await session.setOrderKey(orderKeyAfter(positioned(siblings), sessionId, request.afterId));
         return session;
     }
 
-    reorderWorkspace(
+    async reorderWorkspace(
         projectId: string,
         workspaceId: string,
         request: ReorderRequest,
         expectedVersion?: number,
-    ): ProjectWorkspace | undefined {
-        return this.#projects.reorderWorkspace(projectId, workspaceId, request, expectedVersion);
+    ): Promise<ProjectWorkspace | undefined> {
+        return await this.#projects.reorderWorkspace(
+            projectId,
+            workspaceId,
+            request,
+            expectedVersion,
+        );
     }
 
-    renameWorkspace(
+    async renameWorkspace(
         projectId: string,
         workspaceId: string,
         name: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): ProjectWorkspace | undefined {
-        return this.#projects.renameWorkspace(
+    ): Promise<ProjectWorkspace | undefined> {
+        return await this.#projects.renameWorkspace(
             projectId,
             workspaceId,
             name,
@@ -1314,11 +1396,11 @@ export class InMemorySessionStore implements SessionStore {
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<boolean> {
-        const session = this.get(sessionId);
+        const session = await this.get(sessionId);
         if (session === undefined) return false;
         const snapshot = session.snapshot();
         if (snapshot.projectId === undefined) return false;
-        const project = this.#projects.getProject(snapshot.projectId);
+        const project = await this.#projects.getProject(snapshot.projectId);
         if (
             project?.remoteSource?.kind !== "github" ||
             snapshot.ownerInstanceId !== creator.instanceId ||
@@ -1334,7 +1416,7 @@ export class InMemorySessionStore implements SessionStore {
         } else {
             await this.#projects.registerGitCredential(snapshot.projectId, creator, githubToken);
         }
-        session.refreshGitCommandSecret();
+        await session.refreshGitCommandSecret();
         return true;
     }
 
@@ -1347,57 +1429,133 @@ export class InMemorySessionStore implements SessionStore {
         expectedVersion?: number,
     ): Promise<Project | undefined> {
         let project: Project | undefined;
-        let workspaces: { cleanup: Promise<void>[]; workspaceId: string }[] = [];
-        this.#transaction(() => {
-            project = this.#projects.archiveProject(projectId, expectedVersion);
-            if (project === undefined) return;
-            for (const session of this.#sessions.values()) {
-                if (session.isSubagent()) continue;
-                const snapshot = session.snapshot();
-                if (snapshot.scope.kind !== "project" || snapshot.scope.projectId !== projectId) {
-                    continue;
-                }
-                session.setArchived(true);
-            }
-            workspaces = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
-                if (workspace.status === "archived" || workspace.status === "archiving") return [];
-                const archiving = this.#projects.beginWorkspaceArchive(projectId, workspace.id);
-                if (archiving === undefined || archiving.status === "archived") return [];
-                return [
-                    {
-                        cleanup: [...this.#sessions.values()]
-                            .filter((session) => isSessionInWorkspace(session, workspace.id))
-                            .map((session) => session.archiveForWorkspace(workspace.id)()),
-                        workspaceId: workspace.id,
-                    },
-                ];
-            });
+        let workspaces: { teardown: (() => Promise<void>)[]; workspaceId: string }[] = [];
+        const workspaceIds = new Set(
+            (await this.#projects.listWorkspaces(projectId)).map((workspace) => workspace.id),
+        );
+        const affectedSessions = [...this.#sessions.values()].filter((session) => {
+            const snapshot = session.snapshot();
+            return (
+                (snapshot.scope.kind === "project" &&
+                    snapshot.scope.projectId === projectId &&
+                    !session.isSubagent()) ||
+                (snapshot.scope.kind === "workspace" &&
+                    workspaceIds.has(snapshot.scope.workspaceId))
+            );
         });
-        if (project === undefined) return undefined;
+        const checkpoints = new Map(
+            affectedSessions.map(
+                (session) => [session, session.captureMutationCheckpoint()] as const,
+            ),
+        );
+        let postCommitError: unknown;
+        try {
+            await this.#transaction(async () => {
+                project = await this.#projects.archiveProject(projectId, expectedVersion);
+                if (project === undefined) return;
+                for (const session of this.#sessions.values()) {
+                    if (session.isSubagent()) continue;
+                    const snapshot = session.snapshot();
+                    if (
+                        snapshot.scope.kind !== "project" ||
+                        snapshot.scope.projectId !== projectId
+                    ) {
+                        continue;
+                    }
+                    await session.setArchived(true);
+                }
+                workspaces = (
+                    await Promise.all(
+                        (
+                            await this.#projects.listWorkspaces(projectId)
+                        ).map(async (workspace) => {
+                            if (
+                                workspace.status === "archived" ||
+                                workspace.status === "archiving"
+                            ) {
+                                return undefined;
+                            }
+                            const archiving = await this.#projects.beginWorkspaceArchive(
+                                projectId,
+                                workspace.id,
+                            );
+                            if (archiving === undefined || archiving.status === "archived") {
+                                return undefined;
+                            }
+                            return {
+                                teardown: await Promise.all(
+                                    [...this.#sessions.values()]
+                                        .filter((session) =>
+                                            isSessionInWorkspace(session, workspace.id),
+                                        )
+                                        .map((session) =>
+                                            session.archiveForWorkspace(workspace.id),
+                                        ),
+                                ),
+                                workspaceId: workspace.id,
+                            };
+                        }),
+                    )
+                ).filter(
+                    (
+                        workspace,
+                    ): workspace is {
+                        teardown: (() => Promise<void>)[];
+                        workspaceId: string;
+                    } => workspace !== undefined,
+                );
+            });
+        } catch (error) {
+            if (isSessionTransactionPostCommitError(error)) {
+                postCommitError = error;
+            } else {
+                for (const [session, checkpoint] of checkpoints) {
+                    session.restoreMutationCheckpoint(checkpoint);
+                }
+                throw error;
+            }
+        }
+        if (project === undefined) {
+            if (postCommitError !== undefined) throw postCommitError;
+            return undefined;
+        }
         // Every logical archive write above is complete before physical terminal
         // and worktree cleanup yields, so a later unarchive can never be
         // overtaken by stale child writes from this operation.
-        await this.remoteTerminals.closeProject(projectId);
-        for (const workspace of workspaces) {
-            await this.#completeWorkspaceArchive(
-                projectId,
-                workspace.workspaceId,
-                workspace.cleanup,
+        const cleanup = await Promise.allSettled([
+            this.remoteTerminals.closeProject(projectId),
+            ...workspaces.map((workspace) =>
+                this.#completeWorkspaceArchive(
+                    projectId,
+                    workspace.workspaceId,
+                    workspace.teardown.map((teardown) => teardown()),
+                ),
+            ),
+        ]);
+        const failures = [
+            ...(postCommitError === undefined ? [] : [postCommitError]),
+            ...cleanup.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
+        ];
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1) {
+            throw new AggregateError(
+                failures,
+                "Project archival committed, but its post-commit cleanup failed.",
             );
         }
-        return this.getProject(projectId);
+        return await this.getProject(projectId);
     }
 
-    unarchiveProject(projectId: string): Project | undefined {
-        return this.#projects.unarchiveProject(projectId);
+    async unarchiveProject(projectId: string): Promise<Project | undefined> {
+        return await this.#projects.unarchiveProject(projectId);
     }
 
-    archiveWorkspace(
+    async archiveWorkspace(
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        const workspace = this.#projects.beginWorkspaceArchive(
+        const workspace = await this.#projects.beginWorkspaceArchive(
             projectId,
             workspaceId,
             expectedVersion,
@@ -1405,9 +1563,39 @@ export class InMemorySessionStore implements SessionStore {
         if (workspace === undefined || workspace.status === "archived") {
             return Promise.resolve(workspace);
         }
-        const cleanup = [...this.#sessions.values()]
-            .filter((session) => isSessionInWorkspace(session, workspaceId))
-            .map((session) => session.archiveForWorkspace(workspaceId)());
+        const sessions = [...this.#sessions.values()].filter((session) =>
+            isSessionInWorkspace(session, workspaceId),
+        );
+        const checkpoints = new Map(
+            sessions.map((session) => [session, session.captureMutationCheckpoint()] as const),
+        );
+        const teardowns: Array<() => Promise<void>> = [];
+        try {
+            await this.#transaction(async () => {
+                for (const session of sessions) {
+                    teardowns.push(await session.archiveForWorkspace(workspaceId));
+                }
+            });
+        } catch (error) {
+            if (isSessionTransactionPostCommitError(error)) {
+                const cleanup = await Promise.allSettled(teardowns.map((teardown) => teardown()));
+                const failures = cleanup.flatMap((result) =>
+                    result.status === "rejected" ? [result.reason] : [],
+                );
+                if (failures.length > 0) {
+                    throw new AggregateError(
+                        [error, ...failures],
+                        "Workspace archival committed, but its post-commit work failed.",
+                    );
+                }
+            } else {
+                for (const [session, checkpoint] of checkpoints) {
+                    session.restoreMutationCheckpoint(checkpoint);
+                }
+            }
+            throw error;
+        }
+        const cleanup = teardowns.map((teardown) => teardown());
         cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
         void this.#completeWorkspaceArchive(projectId, workspaceId, cleanup).catch(
             (error: unknown) => {
@@ -1417,7 +1605,7 @@ export class InMemorySessionStore implements SessionStore {
                 this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
             },
         );
-        return Promise.resolve(workspace);
+        return workspace;
     }
 
     async #completeWorkspaceArchive(
@@ -1432,7 +1620,7 @@ export class InMemorySessionStore implements SessionStore {
                 this.#onWorkspaceCleanupError?.(result.reason, projectId, workspaceId);
             }
         }
-        return this.#projects.removeArchivedWorkspace(projectId, workspaceId);
+        return await this.#projects.removeArchivedWorkspace(projectId, workspaceId);
     }
 
     setProjectAvatar(
@@ -1443,21 +1631,24 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.setAvatar(projectId, "user", bytes, expectedVersion);
     }
 
-    clearProjectAvatar(projectId: string): Project | undefined {
-        return this.#projects.clearAvatar(projectId);
+    async clearProjectAvatar(projectId: string): Promise<Project | undefined> {
+        return await this.#projects.clearAvatar(projectId);
     }
 
     getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined> {
         return this.#projects.avatarAsset(hash);
     }
 
-    changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined {
-        const session = this.get(sessionId);
+    async changeModel(
+        sessionId: string,
+        request: ChangeModelRequest,
+    ): Promise<InMemorySession | undefined> {
+        const session = await this.get(sessionId);
         if (session === undefined) {
             return undefined;
         }
 
-        session.changeModel(request);
+        await session.changeModel(request);
         return session;
     }
 
@@ -1465,8 +1656,10 @@ export class InMemorySessionStore implements SessionStore {
         return [...(this.#projectSecretIds.get(projectId) ?? [])];
     }
 
-    #remoteTerminalContext(scope: RemoteTerminalScope): ProjectRemoteTerminalContext {
-        const project = this.#projects.getProject(scope.projectId);
+    async #remoteTerminalContext(
+        scope: RemoteTerminalScope,
+    ): Promise<ProjectRemoteTerminalContext> {
+        const project = await this.#projects.getProject(scope.projectId);
         if (project === undefined) throw new Error("Project not found.");
         if (project.archivedAt !== undefined) {
             throw new Error("Archived projects cannot open terminals.");
@@ -1474,23 +1667,27 @@ export class InMemorySessionStore implements SessionStore {
         const workspace =
             scope.workspaceId === undefined
                 ? undefined
-                : this.#projects.getWorkspace(scope.projectId, scope.workspaceId);
+                : await this.#projects.getWorkspace(scope.projectId, scope.workspaceId);
         if (scope.workspaceId !== undefined && workspace === undefined) {
             throw new Error("Workspace not found.");
         }
         if (
             workspace !== undefined &&
-            workspaceRunReadiness(this.#projects, {
-                cwd: workspace.path,
-                projectId: workspace.projectId,
-                workspaceId: workspace.id,
-            }).state !== "ready"
+            (
+                await workspaceRunReadiness(this.#projects, {
+                    cwd: workspace.path,
+                    projectId: workspace.projectId,
+                    workspaceId: workspace.id,
+                })
+            ).state !== "ready"
         ) {
             throw new Error("Only ready, available workspaces can open terminals.");
         }
         const cwd = workspace?.path ?? project.path;
-        const docker = configureSessionRequest({ cwd }, this.#defaultDocker, () =>
-            this.#projects.queryProjectSettings(cwd),
+        const docker = (
+            await configureSessionRequest({ cwd }, this.#defaultDocker, () =>
+                this.#projects.queryProjectSettings(cwd),
+            )
         ).docker;
         return {
             cwd,
@@ -1534,12 +1731,12 @@ export class InMemorySessionStore implements SessionStore {
         }
     }
 
-    #projectEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {
-        this.#publishGlobalEvent(event);
+    async #projectEvent(event: Parameters<GlobalEventQueue["append"]>[0]): Promise<void> {
+        await this.#publishGlobalEvent(event);
         if (event.type !== "workspace_created" && event.type !== "workspace_updated") return;
         if (event.data.workspace.status === "initializing") return;
-        this.#afterTransactionCommit(() => {
-            this.#workspaceReadyWaiters.changed(event.projectId, event.workspaceId);
+        await this.#afterTransactionCommit(async () => {
+            await this.#workspaceReadyWaiters.changed(event.projectId, event.workspaceId);
             for (const session of this.#sessions.values()) {
                 const state = session.state();
                 if (
@@ -1553,68 +1750,48 @@ export class InMemorySessionStore implements SessionStore {
         });
     }
 
-    #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {
+    async #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): Promise<void> {
         // Every event reaches the ephemeral stream, including the transient ones
         // the durable log drops, because one subscription has to be enough.
-        this.#afterTransactionCommit(() => this.liveEvents.publish(event));
+        await this.#afterTransactionCommit(() => {
+            this.liveEvents.publish(event);
+        });
         if (isLiveGlobalEvent(event)) {
-            this.#afterTransactionCommit(() => {
+            await this.#afterTransactionCommit(() => {
                 this.globalEventQueue.publishLive(event);
             });
             return;
         }
         if (!shouldPublishGlobalEvent(event)) return;
-        this.#afterTransactionCommit(() => {
-            const entry = this.globalEventQueue.append(event);
+        await this.#afterTransactionCommit(async () => {
+            const entry = await this.globalEventQueue.append(event);
             if (entry !== undefined) this.globalEventQueue.publish(entry);
         });
     }
 
-    #transaction<T>(body: (tx: TX) => T): T {
-        if (this.#activeTransaction !== undefined) return body(this.#activeTransaction);
-        this.#transactionCommitCallbacks = [];
-        try {
-            const value = inTx(this.#database, (tx) => {
-                this.#activeTransaction = tx;
-                try {
-                    return body(tx);
-                } finally {
-                    this.#activeTransaction = undefined;
-                }
-            });
-            const callbacks = this.#transactionCommitCallbacks;
-            this.#transactionCommitCallbacks = undefined;
-            for (const callback of callbacks) {
-                try {
-                    callback();
-                } catch (error) {
-                    if (isDatabaseFailure(error)) throw error;
-                    // The project transaction already committed; observers are best effort.
-                }
-            }
-            return value;
-        } catch (error) {
-            this.#activeTransaction = undefined;
-            this.#transactionCommitCallbacks = undefined;
-            throw error;
-        }
+    #tx(): TX {
+        return sessionTransactionScope(this.#database);
     }
 
-    close(): void {
-        void this.remoteTerminals.close();
+    #transaction<T>(body: (tx: TX) => T | Promise<T>): Promise<T> {
+        return runSessionTransaction(this.#database, body);
+    }
+
+    async close(): Promise<void> {
+        await this.remoteTerminals.close();
         this.#workspaceReadyWaiters.close();
-        this.#projects.close();
+        await this.#projects.close();
         this.liveEvents.close();
         this.globalEventQueue.deactivate();
-        this.#client.close();
+        await this.#database.close();
     }
 
-    #afterTransactionCommit(callback: () => void): void {
-        if (this.#client.inTransaction) {
-            this.#transactionCommitCallbacks?.push(callback);
-            return;
-        }
-        callback();
+    #afterTransactionCommit(callback: () => void | Promise<void>): Promise<void> {
+        return deferSessionTransactionCommit(callback, this.#database);
+    }
+
+    afterTransactionCommit(callback: () => void | Promise<void>): Promise<void> {
+        return this.#afterTransactionCommit(callback);
     }
 }
 

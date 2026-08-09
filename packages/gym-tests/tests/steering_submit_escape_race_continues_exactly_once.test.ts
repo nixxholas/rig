@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -223,15 +224,21 @@ async function readRaceEvents(gym: Gym): Promise<{
     pendingSubmittedIds: string[];
     submittedTexts: string[];
 }> {
-    const script = String.raw`
-const { DatabaseSync } = require("node:sqlite");
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite", { readOnly: true });
-const session = database.prepare(
-  "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1"
-).get();
-const events = database.prepare(
-  "SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq"
-).all(session.id).map((row) => ({ type: row.type, data: JSON.parse(row.data_json) }));
+    const script = libsqlCommonJsScript(String.raw`
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite", true);
+let result;
+try {
+const session = (
+    await database.execute(
+        "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
+    )
+).rows[0];
+const events = (
+    await database.execute({
+        sql: "SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq",
+        args: [session.id],
+    })
+).rows.map((row) => ({ type: row.type, data: JSON.parse(row.data_json) }));
 const submitted = events.filter((event) =>
   event.type === "message_submitted" && event.data.delivery === "steer"
 );
@@ -245,16 +252,19 @@ const firstAppliedIndex = events.findIndex((event) =>
 const secondSubmittedIndex = events.findIndex((event) =>
   event.type === "message_submitted" && event.data.message.id === submittedIds[1]
 );
-database.close();
-process.stdout.write(JSON.stringify({
+result = {
   abortRequested: events.filter((event) => event.type === "abort_requested").length,
   appliedCounts: submittedIds.map((id) => appliedIds.filter((appliedId) => appliedId === id).length),
   firstAppliedBeforeSecondSubmitted:
     firstAppliedIndex >= 0 && secondSubmittedIndex >= 0 && firstAppliedIndex < secondSubmittedIndex,
   pendingSubmittedIds: submittedIds.filter((id) => !appliedIds.includes(id)),
   submittedTexts: submitted.map((event) => event.data.displayText),
-}));
-`;
+};
+} finally {
+    await database.close();
+}
+process.stdout.write(JSON.stringify(result));
+`);
     const result = await gym.runInContainer("node", ["-e", script]);
     expect(result.stderr).toBe("");
     return JSON.parse(result.stdout) as {

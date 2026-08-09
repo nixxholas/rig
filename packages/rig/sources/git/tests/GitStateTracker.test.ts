@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { createClient } from "@libsql/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitChangeState } from "../../protocol/index.js";
@@ -8,6 +8,7 @@ import {
     type GitChangeSnapshot,
     type GitTrackedEntity,
 } from "../GitStateTracker.js";
+import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 const trackers: GitStateTracker[] = [];
 
@@ -19,7 +20,12 @@ describe("GitStateTracker", () => {
     it("publishes one snapshot for a burst of changes", async () => {
         const scan = countingScan();
         const published: GitChangeSnapshot[] = [];
-        const tracker = createTracker({ onSnapshot: (_entity, s) => published.push(s), scan });
+        const tracker = createTracker({
+            onSnapshot: (_entity, s) => {
+                published.push(s);
+            },
+            scan,
+        });
 
         tracker.watch(entity());
         for (let index = 0; index < 20; index += 1) tracker.markChanged(entity());
@@ -34,7 +40,12 @@ describe("GitStateTracker", () => {
     it("publishes nothing when a scan finds no difference", async () => {
         const scan = countingScan();
         const published: GitChangeSnapshot[] = [];
-        const tracker = createTracker({ onSnapshot: (_entity, s) => published.push(s), scan });
+        const tracker = createTracker({
+            onSnapshot: (_entity, s) => {
+                published.push(s);
+            },
+            scan,
+        });
 
         tracker.watch(entity());
         await waitFor(() => published.length === 1);
@@ -49,7 +60,12 @@ describe("GitStateTracker", () => {
         let insertions = 1;
         const scan = countingScan(() => ({ insertions }));
         const published: GitChangeSnapshot[] = [];
-        const tracker = createTracker({ onSnapshot: (_entity, s) => published.push(s), scan });
+        const tracker = createTracker({
+            onSnapshot: (_entity, s) => {
+                published.push(s);
+            },
+            scan,
+        });
 
         tracker.watch(entity());
         await waitFor(() => published.length === 1);
@@ -91,7 +107,9 @@ describe("GitStateTracker", () => {
         const published: GitChangeSnapshot[] = [];
         let insertions = 1;
         const tracker = createTracker({
-            onSnapshot: (_entity, s) => published.push(s),
+            onSnapshot: (_entity, s) => {
+                published.push(s);
+            },
             scan: countingScan(() => ({ insertions })),
             tuning: { trackedLimit: 1 },
         });
@@ -119,7 +137,9 @@ describe("GitStateTracker", () => {
         });
         const published: GitChangeSnapshot[] = [];
         const tracker = createTracker({
-            onSnapshot: (_entity, s) => published.push(s),
+            onSnapshot: (_entity, s) => {
+                published.push(s);
+            },
             scan: countingScan(
                 () => ({}),
                 async () => await gate,
@@ -140,7 +160,9 @@ describe("GitStateTracker", () => {
         const closed = vi.fn();
         const published: GitChangeSnapshot[] = [];
         const tracker = createTracker({
-            onSnapshot: (_entity, s) => published.push(s),
+            onSnapshot: (_entity, s) => {
+                published.push(s);
+            },
             scan: countingScan(),
             watch: () => closed,
         });
@@ -154,6 +176,43 @@ describe("GitStateTracker", () => {
         expect(closed).toHaveBeenCalledTimes(1);
         expect(published).toHaveLength(1);
         expect(tracker.trackedKeys).toEqual([]);
+    });
+
+    it("drains an async snapshot observer before shutdown completes", async () => {
+        let observerStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+            observerStarted = resolve;
+        });
+        let releaseObserver!: () => void;
+        const observer = new Promise<void>((resolve) => {
+            releaseObserver = resolve;
+        });
+        let persisted = false;
+        const taskDrain = new TrackedTaskDrain();
+        const tracker = createTracker({
+            onSnapshot: async () => {
+                observerStarted();
+                await observer;
+                persisted = true;
+            },
+            scan: countingScan(),
+            taskDrain,
+        });
+
+        tracker.watch(entity());
+        await started;
+        tracker.dispose();
+        let drained = false;
+        const draining = taskDrain.drain().then(() => {
+            drained = true;
+        });
+
+        expect(drained).toBe(false);
+        expect(persisted).toBe(false);
+        releaseObserver();
+        await draining;
+
+        expect(persisted).toBe(true);
     });
 
     it("expires interest that a client stopped renewing", async () => {
@@ -278,7 +337,9 @@ describe("GitStateTracker", () => {
         const versions: number[] = [];
         const tracker = createTracker({
             onLiveEvent: () => deliver,
-            onSnapshot: (_entity, snapshot) => versions.push(snapshot.version),
+            onSnapshot: (_entity, snapshot) => {
+                versions.push(snapshot.version);
+            },
             scan: countingScan(() => ({ insertions: 3 })),
         });
 
@@ -304,7 +365,9 @@ describe("GitStateTracker", () => {
                 failNext = false;
                 throw new Error("subscriber exploded");
             },
-            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            onSnapshot: (_entity, snapshot) => {
+                published.push(snapshot);
+            },
             scan: countingScan(() => ({ insertions })),
         });
 
@@ -351,7 +414,7 @@ describe("GitStateTracker", () => {
     });
 
     it("stops instead of reporting when the observer fails on the database", async () => {
-        const databaseError = captureDriverError();
+        const databaseError = await captureDriverError();
         let failing = false;
         const reported: unknown[] = [];
         const scan = countingScan(() => ({ insertions: failing ? 7 : 1 }));
@@ -401,7 +464,9 @@ describe("GitStateTracker", () => {
         let insertions = 1;
         const published: GitChangeSnapshot[] = [];
         const tracker = createTracker({
-            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            onSnapshot: (_entity, snapshot) => {
+                published.push(snapshot);
+            },
             scan: countingScan(() => ({ insertions })),
         });
 
@@ -427,7 +492,9 @@ describe("GitStateTracker", () => {
         let deliver = true;
         const seen: number[] = [];
         const tracker = createTracker({
-            onSnapshot: (_entity, snapshot) => seen.push(snapshot.version),
+            onSnapshot: (_entity, snapshot) => {
+                seen.push(snapshot.version);
+            },
             onLiveEvent: () => deliver,
             scan: countingScan(() => ({ insertions })),
         });
@@ -513,7 +580,9 @@ describe("GitStateTracker", () => {
         let insertions = 1;
         const published: GitChangeSnapshot[] = [];
         const tracker = createTracker({
-            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            onSnapshot: (_entity, snapshot) => {
+                published.push(snapshot);
+            },
             scan: countingScan(() => ({ insertions })),
         });
 
@@ -609,14 +678,14 @@ async function settle(): Promise<void> {
 }
 
 /** Uses a real driver fault so the test cannot drift from what SQLite actually throws. */
-function captureDriverError(): unknown {
-    const database = new Database(":memory:");
+async function captureDriverError(): Promise<unknown> {
+    const database = createClient({ url: "file::memory:" });
     try {
-        database.prepare("select * from missing_table").all();
+        await database.execute("select * from missing_table");
         throw new Error("Expected the driver to fail.");
     } catch (error) {
         return error;
     } finally {
-        database.close();
+        await database.close();
     }
 }

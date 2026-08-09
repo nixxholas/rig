@@ -193,7 +193,9 @@ async function prepareAppletAttachment(
     id: string,
     context: AgentContext,
 ) {
-    const applet = context.slots?.listApplets().find((candidate) => candidate.name === args.applet);
+    const applet = (await context.slots?.listApplets())?.find(
+        (candidate) => candidate.name === args.applet,
+    );
     if (applet === undefined) {
         throw new Error(`No applet named ${JSON.stringify(args.applet)} exists.`);
     }

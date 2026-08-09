@@ -4,24 +4,25 @@ import type {
     PersistedSessionMessage,
 } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { sessionSaveMessage } from "./sessionSaveMessage.js";
 
-export function sessionSavePendingContextMessage(
-    tx: TX,
+export async function sessionSavePendingContextMessage(
+    tx: DatabaseScope,
     sessionId: string,
     pending: PersistedPendingContextMessage,
     updatedAt: number,
-): void {
-    inTx(tx, (tx) => {
+): Promise<void> {
+    await inTx(tx, async (tx) => {
         const stored: PersistedSessionMessage = {
             isPartial: false,
             message: pending.message,
             position: pending.position,
             runId: pending.anchorRunId,
         };
-        sessionSaveMessage(tx, sessionId, stored, updatedAt);
-        tx.insert(pendingContextMessages)
+        await sessionSaveMessage(tx, sessionId, stored, updatedAt);
+        await tx
+            .insert(pendingContextMessages)
             .values({
                 anchorRunId: pending.anchorRunId,
                 createdAtMs: pending.createdAt,

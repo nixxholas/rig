@@ -53,7 +53,7 @@ describe("InMemorySession goals", () => {
             request: { cwd: "/tmp/rig-goal-test", modelId: model.id, providerId: provider.id },
         });
 
-        session.setGoal({ objective: "Finish the feature" });
+        await session.setGoal({ objective: "Finish the feature" });
         const started = session.events
             .since(undefined)
             ?.find((event) => event.type === "run_started");
@@ -106,7 +106,7 @@ describe("InMemorySession goals", () => {
             request: { cwd: "/tmp/rig-review-test", modelId: model.id, providerId: provider.id },
         });
 
-        const submitted = session.submit({ text: "/review focus on concurrency" });
+        const submitted = await session.submit({ text: "/review focus on concurrency" });
         await expect(session.waitForRun(submitted.runId)).resolves.toMatchObject({
             status: "completed",
         });
@@ -151,7 +151,7 @@ describe("InMemorySession goals", () => {
             request: { cwd: "/tmp/rig-goal-title", modelId: model.id, providerId: provider.id },
         });
 
-        session.setGoal({ objective: "Migrate the parser" });
+        await session.setGoal({ objective: "Migrate the parser" });
         const named = session.snapshot().title;
         expect(named).toBeDefined();
 
@@ -159,7 +159,7 @@ describe("InMemorySession goals", () => {
         await session.reset();
         expect(session.snapshot()).toMatchObject({ title: named, titleStatus: "ready" });
 
-        session.setGoal({ objective: "Rewrite the scheduler" });
+        await session.setGoal({ objective: "Rewrite the scheduler" });
         expect(session.snapshot().title).toBe(named);
     });
 });

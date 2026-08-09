@@ -9,15 +9,19 @@ import type { GlobalEvent } from "@/protocol.js";
 
 const started: { close: () => Promise<void> }[] = [];
 const controllers: AbortController[] = [];
+const stores = new Set<InMemorySessionStore>();
 
 afterEach(async () => {
     for (const controller of controllers.splice(0)) controller.abort();
     for (const server of started.splice(0)) await server.close();
+    for (const store of stores) await store.close();
+    stores.clear();
 });
 
 /** Serves one store, and can be stopped and restarted on the same port. */
 async function startDaemon(store: InMemorySessionStore, port = 0) {
-    const server = createProtocolHttpServer({ store, token: "secret" });
+    stores.add(store);
+    const server = await createProtocolHttpServer({ store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
     const address = server.address() as AddressInfo;
     const stop = async () => {
@@ -63,7 +67,7 @@ async function waitFor(predicate: () => boolean, description: string): Promise<v
 
 describe("following the live stream", () => {
     it("reports the position before any entity is loaded", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { endpoint } = await startDaemon(store);
         const follower = follow(endpoint);
 
@@ -74,14 +78,14 @@ describe("following the live stream", () => {
     });
 
     it("delivers events in cursor order and never repeats one", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { endpoint } = await startDaemon(store);
         const follower = follow(endpoint);
         await waitFor(() => follower.opens.length > 0, "the stream to open");
 
-        const session = store.create({ cwd: "/tmp/rig-live-client" });
-        session.setDraft({ draft: "typed", updatedAt: Date.now() });
-        session.setArchived(true);
+        const session = await store.create({ cwd: "/tmp/rig-live-client" });
+        await session.setDraft({ draft: "typed", updatedAt: Date.now() });
+        await session.setArchived(true);
         await waitFor(() => follower.events.length >= 3, "the events to arrive");
 
         const cursors = follower.events.map((entry) => entry.cursor);
@@ -90,12 +94,12 @@ describe("following the live stream", () => {
     });
 
     it("resumes across a daemon restart and reports the gap", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const first = await startDaemon(store);
         const follower = follow(first.endpoint);
         await waitFor(() => follower.opens.length > 0, "the stream to open");
 
-        store.create({ cwd: "/tmp/rig-live-restart" });
+        await store.create({ cwd: "/tmp/rig-live-restart" });
         await waitFor(() => follower.events.length > 0, "the first event");
         await first.stop();
         await waitFor(() => follower.drops.length > 0, "the drop to be reported");
@@ -103,7 +107,7 @@ describe("following the live stream", () => {
         // A fresh store on the same port is a restarted daemon: it has never
         // issued the cursor the client holds, so it must answer with a gap
         // rather than pretend the client is caught up.
-        const restarted = new InMemorySessionStore();
+        const restarted = await InMemorySessionStore.open();
         await startDaemon(restarted, first.port);
         await waitFor(() => follower.opens.length > 1, "the stream to reopen");
 
@@ -113,13 +117,13 @@ describe("following the live stream", () => {
 
         // And the stream keeps working, which is what makes a gap a recovery
         // path rather than a dead end.
-        restarted.create({ cwd: "/tmp/rig-live-after-restart" });
+        await restarted.create({ cwd: "/tmp/rig-live-after-restart" });
         const before = follower.events.length;
         await waitFor(() => follower.events.length > before, "events after the restart");
     });
 
     it("stops following once the caller aborts", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { endpoint } = await startDaemon(store);
         const controller = new AbortController();
         const follower: LiveStreamHello[] = [];
@@ -138,7 +142,7 @@ describe("following the live stream", () => {
     });
 
     it("gives up when the daemon refuses the request outright", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { endpoint } = await startDaemon(store);
         const controller = new AbortController();
         controllers.push(controller);

@@ -1,24 +1,27 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { eq, sql } from "drizzle-orm";
 
 import { folderItemMutations } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function queryFolderItemMutationReceipt(
-    tx: TX,
+export async function queryFolderItemMutationReceipt(
+    tx: DatabaseScope,
     mutationId: string,
-): { action: string; fingerprint: string; itemId: string } | undefined {
-    const row = tx
-        .select()
-        .from(folderItemMutations)
-        .where(eq(folderItemMutations.mutationId, mutationId))
-        .get();
-    return row === undefined
-        ? undefined
-        : { action: row.action, fingerprint: row.requestFingerprint, itemId: row.itemId };
+): Promise<{ action: string; fingerprint: string; itemId: string } | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx
+            .select()
+            .from(folderItemMutations)
+            .where(eq(folderItemMutations.mutationId, mutationId))
+            .get();
+        return row === undefined
+            ? undefined
+            : { action: row.action, fingerprint: row.requestFingerprint, itemId: row.itemId };
+    });
 }
 
-export function recordFolderItemMutationReceipt(
-    tx: TX,
+export async function recordFolderItemMutationReceipt(
+    tx: DatabaseScope,
     input: {
         action: string;
         fingerprint: string;
@@ -26,18 +29,20 @@ export function recordFolderItemMutationReceipt(
         mutationId: string;
         now: number;
     },
-): void {
-    tx.insert(folderItemMutations)
-        .values({
-            action: input.action,
-            createdAtMs: input.now,
-            itemId: input.itemId,
-            mutationId: input.mutationId,
-            requestFingerprint: input.fingerprint,
-        })
-        .run();
-    tx.run(
-        sql`
+): Promise<void> {
+    return await inDatabase(tx, async (tx) => {
+        await tx
+            .insert(folderItemMutations)
+            .values({
+                action: input.action,
+                createdAtMs: input.now,
+                itemId: input.itemId,
+                mutationId: input.mutationId,
+                requestFingerprint: input.fingerprint,
+            })
+            .run();
+        await tx.run(
+            sql`
         DELETE FROM folder_item_mutations
         WHERE item_id = ${input.itemId}
           AND action != 'create'
@@ -49,5 +54,6 @@ export function recordFolderItemMutationReceipt(
             LIMIT -1 OFFSET 10000
         )
         `,
-    );
+        );
+    });
 }

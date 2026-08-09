@@ -30,7 +30,7 @@ function assistantMessage(text: string, model: string, provider: string): Assist
 }
 
 describe("parseSessionMetadata", () => {
-    it("reads the tagged answer out of whatever else the model said", () => {
+    it("reads the tagged answer out of whatever else the model said", async () => {
         expect(
             parseSessionMetadata(
                 "Sure! Here is the metadata:\n" +
@@ -44,7 +44,7 @@ describe("parseSessionMetadata", () => {
         });
     });
 
-    it("shortens an oversized answer instead of throwing the whole title away", () => {
+    it("shortens an oversized answer instead of throwing the whole title away", async () => {
         const parsed = parseSessionMetadata(
             `<title>${"Word ".repeat(12).trim()}</title><recap>One. Two. Three.</recap>`,
         );
@@ -53,7 +53,7 @@ describe("parseSessionMetadata", () => {
         expect(parsed.recap).toBe("One. Two.");
     });
 
-    it("refuses an answer that named nothing", () => {
+    it("refuses an answer that named nothing", async () => {
         expect(() => parseSessionMetadata("I could not think of a title.")).toThrow(
             "must contain a title and a recap",
         );

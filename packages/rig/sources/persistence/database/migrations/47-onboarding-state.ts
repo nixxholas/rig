@@ -1,10 +1,10 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /** Durable, local facts that let onboarding avoid repeating completed work. */
-export function onboardingState(database: SessionDatabase): void {
-    database.run(
+export async function onboardingState(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS onboarding_state (
                 singleton INTEGER NOT NULL PRIMARY KEY
@@ -14,7 +14,7 @@ export function onboardingState(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "INSERT INTO onboarding_state (singleton) VALUES (1) ON CONFLICT (singleton) DO NOTHING",
         ),

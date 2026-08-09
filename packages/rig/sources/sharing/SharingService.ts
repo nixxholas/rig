@@ -59,8 +59,8 @@ const sharingMurmurProfileSchema = Type.Object(
 );
 
 interface SharingDatabase {
-    query<Result>(operation: (tx: TX) => Result): Result;
-    transaction<Result>(operation: (tx: TX) => Result): Result;
+    query<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
+    transaction<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
 }
 
 interface SharingFolderService {
@@ -165,12 +165,6 @@ export class SharingService implements SharingServiceContract {
         this.#publish = options.publish;
         this.#store = options.store;
         this.#version = this.#nextEventId();
-        const binding = this.#database.query(querySharingProfileBinding);
-        if (binding !== undefined) {
-            this.#database.transaction((tx) =>
-                sharingProfileBind(tx, binding.profileId, this.#identity, this.#now()),
-            );
-        }
     }
 
     static async open(options: OpenSharingServiceOptions): Promise<SharingService> {
@@ -211,6 +205,7 @@ export class SharingService implements SharingServiceContract {
                 ...(folderSharing === undefined ? {} : { folderSharing }),
                 store,
             });
+            await service.#initializeBinding();
             return service;
         } catch (error) {
             try {
@@ -284,26 +279,27 @@ export class SharingService implements SharingServiceContract {
                 identity: this.#identity,
                 incomingRequests: incomingRequests.map(toSharingContactRequest),
                 outgoingRequests: outgoingRequests.map(toSharingOutgoingContactRequest),
-                profileId: this.#database.query(querySharingProfileId) ?? null,
+                profileId:
+                    (await this.#database.query(async (tx) => querySharingProfileId(tx))) ?? null,
                 version: this.#version,
             };
         });
     }
 
-    bindProfile(profileId: string): void {
+    async bindProfile(profileId: string): Promise<void> {
         if (this.#closing) throw new Error("Sharing is closing.");
-        const profile = this.#profiles.get(profileId);
-        if (profile === undefined || !this.#profiles.isLocal(profileId)) {
+        const profile = await this.#profiles.get(profileId);
+        if (profile === undefined || !(await this.#profiles.isLocal(profileId))) {
             throw new Error("Sharing requires a profile owned by this Rig.");
         }
-        const result = this.#database.transaction((tx) =>
+        const result = await this.#database.transaction(async (tx) =>
             sharingProfileBind(tx, profileId, this.#identity, this.#now()),
         );
         if (result === "created") this.#changed();
     }
 
     async createInvitation(signal?: AbortSignal): Promise<CreateSharingInvitationResponse> {
-        this.#profile();
+        await this.#profile();
         const createdAt = this.#now();
         return this.#run(async () => {
             const invitation = await this.#client.createInvitation(this.#operationSignal(signal));
@@ -323,14 +319,14 @@ export class SharingService implements SharingServiceContract {
     }
 
     foldersChanged(): void {
-        this.#folderSharing?.foldersChanged();
+        void this.#folderSharing?.foldersChanged();
     }
 
     async requestContact(
         invitation: string,
         signal?: AbortSignal,
     ): Promise<SharingOutgoingContactRequest> {
-        const profile = encodeProfile(this.#profile());
+        const profile = encodeProfile(await this.#profile());
         return this.#run(async () => {
             const decodedInvitation = decodeBytes(invitation);
             const operationSignal = this.#operationSignal(signal);
@@ -348,7 +344,7 @@ export class SharingService implements SharingServiceContract {
     }
 
     async acceptContact(requestId: string): Promise<void> {
-        const profile = encodeProfile(this.#profile());
+        const profile = encodeProfile(await this.#profile());
         await this.#run(async () => {
             const request = await this.#request(requestId);
             if (decodeProfile(request.profile) === null) {
@@ -410,13 +406,22 @@ export class SharingService implements SharingServiceContract {
         return request;
     }
 
-    #profile(): RigProfile {
-        const profileId = this.#database.query(querySharingProfileId);
-        const profile = profileId === undefined ? undefined : this.#profiles.get(profileId);
-        if (profile === undefined || !this.#profiles.isLocal(profile.id)) {
+    async #profile(): Promise<RigProfile> {
+        const profileId = await this.#database.query(async (tx) => querySharingProfileId(tx));
+        const profile = profileId === undefined ? undefined : await this.#profiles.get(profileId);
+        if (profile === undefined || !(await this.#profiles.isLocal(profile.id))) {
             throw new Error("Choose a local Rig profile before using Sharing.");
         }
         return profile;
+    }
+
+    async #initializeBinding(): Promise<void> {
+        const binding = await this.#database.query(async (tx) => querySharingProfileBinding(tx));
+        if (binding !== undefined) {
+            await this.#database.transaction(async (tx) =>
+                sharingProfileBind(tx, binding.profileId, this.#identity, this.#now()),
+            );
+        }
     }
 
     #run<Result>(operation: () => Promise<Result>): Promise<Result> {

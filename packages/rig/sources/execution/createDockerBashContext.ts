@@ -130,7 +130,7 @@ export function createDockerBashContext(
     const cwd = environment.config.workingDirectory;
     let nextSessionId = 1;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
-    let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
+    let onSessionExit: ((exit: BashSessionExit) => void | Promise<void>) | undefined;
     let ambientEnvironmentVariables: Promise<readonly string[]> | undefined;
     let canonicalWorkspace: Promise<string> | undefined;
     let sandboxRuntime: Promise<PreparedDockerSandbox> | undefined;
@@ -521,7 +521,7 @@ export function createDockerBashContext(
                 trimFinishedSessions();
                 resolve();
                 if (!awaited && !session.exitObserved) {
-                    onSessionExit?.({
+                    await onSessionExit?.({
                         command: session.command,
                         exitCode: session.exitCode,
                         sessionId,

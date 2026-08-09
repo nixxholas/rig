@@ -2,7 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { folderItems, folders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export type FolderItemMoveResult =
     | { outcome: "folder_not_found" }
@@ -10,16 +10,16 @@ export type FolderItemMoveResult =
     | { outcome: "moved" }
     | { outcome: "version_conflict" };
 
-export function folderItemMove(
-    tx: TX,
+export async function folderItemMove(
+    tx: DatabaseScope,
     id: string,
     folderId: string,
     orderKey: string,
     now: number,
     version?: number,
-): FolderItemMoveResult {
-    return inTx(tx, (tx) => {
-        const item = tx
+): Promise<FolderItemMoveResult> {
+    return await inTx(tx, async (tx) => {
+        const item = await tx
             .select({ version: folderItems.version })
             .from(folderItems)
             .where(eq(folderItems.id, id))
@@ -28,7 +28,7 @@ export function folderItemMove(
         if (version !== undefined && item.version !== version) {
             return { outcome: "version_conflict" };
         }
-        const folder = tx
+        const folder = await tx
             .select({ archivedAtMs: folders.archivedAtMs })
             .from(folders)
             .where(eq(folders.id, folderId))
@@ -36,21 +36,23 @@ export function folderItemMove(
         if (folder === undefined || folder.archivedAtMs !== null) {
             return { outcome: "folder_not_found" };
         }
-        const changed = tx
-            .update(folderItems)
-            .set({
-                folderId,
-                orderKey,
-                updatedAtMs: now,
-                version: sql`${folderItems.version} + 1`,
-            })
-            .where(
-                and(
-                    eq(folderItems.id, id),
-                    version === undefined ? sql`1` : eq(folderItems.version, version),
-                ),
-            )
-            .run().changes;
+        const changed = (
+            await tx
+                .update(folderItems)
+                .set({
+                    folderId,
+                    orderKey,
+                    updatedAtMs: now,
+                    version: sql`${folderItems.version} + 1`,
+                })
+                .where(
+                    and(
+                        eq(folderItems.id, id),
+                        version === undefined ? sql`1` : eq(folderItems.version, version),
+                    ),
+                )
+                .run()
+        ).rowsAffected;
         return changed === 1 ? { outcome: "moved" } : { outcome: "version_conflict" };
     });
 }

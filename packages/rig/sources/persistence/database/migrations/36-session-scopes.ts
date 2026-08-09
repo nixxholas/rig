@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * Makes a chat's project, workspace, folder, or Unsorted membership exclusive.
@@ -8,15 +8,17 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * Existing folder membership wins over Unsorted, which wins over workspace and project. This is
  * the order users already see when an older row carries more than one of the legacy columns.
  */
-export function sessionScopes(database: SessionDatabase): void {
-    const sessions = database.get<{ name: string }>(
-        sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
-    );
+export async function sessionScopes(database: SessionDatabase): Promise<void> {
+    const sessions = (
+        await database.all<{ name: string }>(
+            sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
+        )
+    )[0];
     if (sessions === undefined) {
-        createFolderCatalog(database);
+        await createFolderCatalog(database);
         return;
     }
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE sessions_scoped (
             id TEXT NOT NULL PRIMARY KEY,
@@ -111,7 +113,7 @@ export function sessionScopes(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         INSERT INTO sessions_scoped (
             id, agent_id, scope_kind, project_id, workspace_id, folder_id, order_key,
@@ -166,15 +168,15 @@ export function sessionScopes(database: SessionDatabase): void {
         FROM sessions
     `),
     );
-    database.run(sql.raw("DROP TABLE sessions"));
-    database.run(sql.raw("ALTER TABLE sessions_scoped RENAME TO sessions"));
-    for (const statement of sessionIndexes) database.run(sql.raw(statement));
+    await database.run(sql.raw("DROP TABLE sessions"));
+    await database.run(sql.raw("ALTER TABLE sessions_scoped RENAME TO sessions"));
+    for (const statement of sessionIndexes) await database.run(sql.raw(statement));
 
-    createFolderCatalog(database);
+    await createFolderCatalog(database);
 }
 
-function createFolderCatalog(database: SessionDatabase): void {
-    database.run(
+async function createFolderCatalog(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE folder_catalog (
             id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -182,8 +184,8 @@ function createFolderCatalog(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(sql.raw("INSERT INTO folder_catalog (id, revision) VALUES (1, 0)"));
-    database.run(
+    await database.run(sql.raw("INSERT INTO folder_catalog (id, revision) VALUES (1, 0)"));
+    await database.run(
         sql.raw(`
         CREATE TABLE folder_mutations (
             mutation_id TEXT NOT NULL PRIMARY KEY,
@@ -193,7 +195,7 @@ function createFolderCatalog(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX folder_mutations_created ON folder_mutations(created_at_ms DESC, mutation_id DESC)",
         ),

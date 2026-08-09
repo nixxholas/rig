@@ -3,16 +3,17 @@ import { sql } from "drizzle-orm";
 import { sessionMessages, sessionTurns } from "../database/schema.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function sessionSaveMessage(
-    tx: TX,
+export async function sessionSaveMessage(
+    tx: DatabaseScope,
     sessionId: string,
     message: PersistedSessionMessage,
     updatedAt: number,
-): void {
-    inTx(tx, (tx) => {
-        tx.insert(sessionMessages)
+): Promise<void> {
+    await inTx(tx, async (tx) => {
+        await tx
+            .insert(sessionMessages)
             .values({
                 isPartial: message.isPartial,
                 messageId: message.message.id,
@@ -36,7 +37,8 @@ export function sessionSaveMessage(
             })
             .run();
         if (message.isPartial || message.runId === undefined) return;
-        tx.insert(sessionTurns)
+        await tx
+            .insert(sessionTurns)
             .values({
                 firstPosition: message.position,
                 runId: message.runId,

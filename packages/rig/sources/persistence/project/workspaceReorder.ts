@@ -1,25 +1,30 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { projectWorkspaces } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { workspaceScope } from "./workspaceScope.js";
 
-export function workspaceReorder(
-    tx: TX,
+export async function workspaceReorder(
+    tx: DatabaseScope,
     projectId: string,
     id: string,
     orderKey: string,
     now: number,
     version?: number,
-): number {
-    return Number(
-        tx
-            .update(projectWorkspaces)
-            .set({
-                orderKey,
-                updatedAtMs: now,
-                version: sql`${projectWorkspaces.version} + 1`,
-            })
-            .where(workspaceScope(projectId, id, version))
-            .run().changes,
-    );
+): Promise<number> {
+    return await inDatabase(tx, async (tx) => {
+        return Number(
+            (
+                await tx
+                    .update(projectWorkspaces)
+                    .set({
+                        orderKey,
+                        updatedAtMs: now,
+                        version: sql`${projectWorkspaces.version} + 1`,
+                    })
+                    .where(workspaceScope(projectId, id, version))
+                    .run()
+            ).rowsAffected,
+        );
+    });
 }

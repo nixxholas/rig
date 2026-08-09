@@ -12,8 +12,8 @@ export interface CancelAskResult {
 
 export interface UserInputContext {
     /** Withdraws a question that is still waiting in the user's inbox. */
-    cancel?(askId: string): CancelAskResult;
-    markExecuting?(requestId: string): void;
+    cancel?(askId: string): Promise<CancelAskResult>;
+    markExecuting?(requestId: string): Promise<void>;
     request(
         request: UserInputRequest,
         options?: { durable?: DurableUserInputOptions; signal?: AbortSignal },

@@ -157,8 +157,8 @@ export const workletListTool = defineTool({
         { worklets: Type.Array(workletSchema) },
         { additionalProperties: false },
     ),
-    execute: (_args, context): { worklets: Worklet[] } => ({
-        worklets: [...requireWorklets(context).list()],
+    execute: async (_args, context): Promise<{ worklets: Worklet[] }> => ({
+        worklets: [...(await requireWorklets(context).list())],
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>

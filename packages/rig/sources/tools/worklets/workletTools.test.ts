@@ -97,7 +97,7 @@ describe("worklet tools", () => {
         const readLog = vi.fn(async () => ({ log: "watching", truncated: false }));
         const context = createContext({
             install,
-            list: () => [worklet],
+            list: async () => [worklet],
             readLog,
             revert,
             uninstall,
@@ -148,7 +148,9 @@ describe("worklet tools", () => {
         ).resolves.toEqual({ name: "github-watch" });
         expect(uninstall).toHaveBeenCalledWith("github-watch");
 
-        expect(workletListTool.execute({}, context, {})).toEqual({ worklets: [worklet] });
+        await expect(workletListTool.execute({}, context, {})).resolves.toEqual({
+            worklets: [worklet],
+        });
         await expect(
             workletLogsTool.execute({ name: "github-watch" }, context, {}),
         ).resolves.toEqual({ log: "watching", truncated: false });
@@ -157,7 +159,7 @@ describe("worklet tools", () => {
     it("says plainly when a session has no worklets", async () => {
         const context = { fs: { cwd: "/workspace" } } as AgentContext;
 
-        expect(() => workletListTool.execute({}, context, {})).toThrow(
+        await expect(workletListTool.execute({}, context, {})).rejects.toThrow(
             "Worklets are unavailable in this session.",
         );
     });

@@ -1,11 +1,12 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { createClient, type Client, type InArgs } from "@libsql/client";
+import { describe, expect, it, vi } from "vitest";
 
 import type { AgentMessage, CompactionMessage, UserMessage } from "../../agent/types.js";
 import {
@@ -36,7 +37,7 @@ describe("PersistentSessionStore", () => {
         let capturedEnvironment: Readonly<Record<string, string>> | undefined;
         let store: PersistentSessionStore | undefined;
         try {
-            store = new PersistentSessionStore({
+            store = await PersistentSessionStore.open({
                 createRuntime: (options) => {
                     capturedEnvironment = options.shellEnvironment;
                     throw new Error("Captured profile environment.");
@@ -59,15 +60,15 @@ describe("PersistentSessionStore", () => {
                 updatedAt: 1,
                 version: 1,
             } as const;
-            profiles.replicate(profile, remoteInstanceId);
-            const session = store.create(
+            await profiles.replicate(profile, remoteInstanceId);
+            const session = await store.create(
                 {
                     cwd: "/tmp/rig-profile-session",
                     identity: profile.id,
                 },
                 { ownerInstanceId: remoteInstanceId, profileId: profile.id },
             );
-            const fork = store.fork(session.id);
+            const fork = await store.fork(session.id);
 
             expect(session.snapshot().profileId).toBe(profile.id);
             expect(fork?.snapshot().profileId).toBe(profile.id);
@@ -80,8 +81,8 @@ describe("PersistentSessionStore", () => {
             });
 
             const sessionId = session.id;
-            store.close();
-            store = new PersistentSessionStore({
+            await store.close();
+            store = await PersistentSessionStore.open({
                 createRuntime: (options) => {
                     capturedEnvironment = options.shellEnvironment;
                     throw new Error("Captured restored profile environment.");
@@ -90,7 +91,7 @@ describe("PersistentSessionStore", () => {
                 localInstanceId,
                 resolveModelCatalog: () => testModelCatalog(),
             });
-            const restored = store.get(sessionId);
+            const restored = await store.get(sessionId);
             expect(restored?.snapshot().profileId).toBe(profile.id);
             await expect(restored?.compact()).rejects.toThrow(
                 "Captured restored profile environment.",
@@ -102,7 +103,7 @@ describe("PersistentSessionStore", () => {
                 GIT_COMMITTER_NAME: profile.name,
             });
         } finally {
-            store?.close();
+            await store?.close();
             await cleanup();
         }
     });
@@ -135,7 +136,7 @@ describe("PersistentSessionStore", () => {
             | undefined;
         let store: PersistentSessionStore | undefined;
         try {
-            store = new PersistentSessionStore({
+            store = await PersistentSessionStore.open({
                 createRuntime: (options) => {
                     let projectGit = {
                         environment: {},
@@ -216,9 +217,9 @@ describe("PersistentSessionStore", () => {
                 updatedAt: 3,
                 version: 1,
             } as const;
-            profiles.replicate(projectProfile, remoteInstanceId);
-            profiles.replicate(workspaceProfile, workspaceInstanceId);
-            profiles.replicate(sessionProfile, sessionInstanceId);
+            await profiles.replicate(projectProfile, remoteInstanceId);
+            await profiles.replicate(workspaceProfile, workspaceInstanceId);
+            await profiles.replicate(sessionProfile, sessionInstanceId);
             const project = await store.createRemoteProject(
                 {
                     identity: projectProfile.id,
@@ -235,7 +236,7 @@ describe("PersistentSessionStore", () => {
                 },
             );
             await expect
-                .poll(() => store?.getProject(project.id)?.initializationStatus)
+                .poll(async () => (await store?.getProject(project.id))?.initializationStatus)
                 .toBe("ready");
             const workspace = await store.createWorkspace(
                 project.id,
@@ -253,11 +254,11 @@ describe("PersistentSessionStore", () => {
                 },
             );
             await expect
-                .poll(() => store?.getWorkspace(project.id, workspace!.id)?.status)
+                .poll(async () => (await store?.getWorkspace(project.id, workspace!.id))?.status)
                 .toBe("ready");
             expect(workspaceGitTokens.length).toBeGreaterThan(0);
             expect(new Set(workspaceGitTokens)).toEqual(new Set(["workspace-creator-token"]));
-            const session = store.create(
+            const session = await store.create(
                 {
                     cwd: workspace!.path,
                     identity: sessionProfile.id,
@@ -331,7 +332,7 @@ describe("PersistentSessionStore", () => {
                 },
             ]);
         } finally {
-            store?.close();
+            await store?.close();
             await Promise.all([
                 cleanup(),
                 rm(home, {
@@ -353,16 +354,16 @@ describe("PersistentSessionStore", () => {
         };
         let store: PersistentSessionStore | undefined;
         try {
-            store = new PersistentSessionStore({
+            store = await PersistentSessionStore.open({
                 databasePath,
                 localInstanceId,
                 resolveModelCatalog,
             });
-            const session = store.create(
+            const session = await store.create(
                 { cwd: "/tmp/rig-session-owner" },
                 { ownerInstanceId: remoteInstanceId },
             );
-            const fork = store.fork(session.id);
+            const fork = await store.fork(session.id);
 
             expect(session.snapshot().ownerInstanceId).toBe(remoteInstanceId);
             expect(fork?.snapshot().ownerInstanceId).toBe(remoteInstanceId);
@@ -370,21 +371,21 @@ describe("PersistentSessionStore", () => {
             expect(resolvedOwners).toEqual([localInstanceId, remoteInstanceId, remoteInstanceId]);
 
             const sessionId = session.id;
-            store.saveSession({ ...session.state(), ownerInstanceId: localInstanceId });
-            store.close();
-            store = new PersistentSessionStore({
+            await store.saveSession({ ...session.state(), ownerInstanceId: localInstanceId });
+            await store.close();
+            store = await PersistentSessionStore.open({
                 databasePath,
                 localInstanceId,
                 resolveModelCatalog,
             });
 
-            expect(store.get(sessionId)?.state().ownerInstanceId).toBe(remoteInstanceId);
-            expect(store.get(sessionId)?.state().credentialBindingId).toBe(
+            expect((await store.get(sessionId))?.state().ownerInstanceId).toBe(remoteInstanceId);
+            expect((await store.get(sessionId))?.state().credentialBindingId).toBe(
                 `${remoteInstanceId}:codex`,
             );
-            expect(store.list()[0]?.ownerInstanceId).toBe(remoteInstanceId);
+            expect((await store.list())[0]?.ownerInstanceId).toBe(remoteInstanceId);
         } finally {
-            store?.close();
+            await store?.close();
             await cleanup();
         }
     });
@@ -405,7 +406,7 @@ describe("PersistentSessionStore", () => {
                 const result = await execFile("git", ["-C", cwd, ...args], { encoding: "utf8" });
                 return result.stdout.trim();
             };
-            store = new PersistentSessionStore({
+            store = await PersistentSessionStore.open({
                 createRuntime: () => {
                     runtimes += 1;
                     throw new Error("An initializing workspace must not create a runtime.");
@@ -415,7 +416,7 @@ describe("PersistentSessionStore", () => {
                 stateDirectory: join(root, "state"),
                 workspacesDirectory: join(root, "workspaces"),
             });
-            const owner = store.create({ cwd: repository });
+            const owner = await store.create({ cwd: repository });
             const workspace = await store.createWorkspace(owner.snapshot().projectId!, {
                 baseRef: "HEAD",
                 id: "w6q0tc4rmq9f4a6adczq9eis",
@@ -424,32 +425,32 @@ describe("PersistentSessionStore", () => {
             if (workspace === undefined) throw new Error("Expected a workspace reservation.");
 
             expect(workspace.status).toBe("initializing");
-            const first = store.createWithId("d044lyyqklbc850un07gpm9v", {
+            const first = await store.createWithId("d044lyyqklbc850un07gpm9v", {
                 cwd: workspace.path,
                 projectId: workspace.projectId,
                 workspaceId: workspace.id,
             });
-            const second = store.createWithId("l4c1r61a2hedg6f2zrzfwz4w", {
+            const second = await store.createWithId("l4c1r61a2hedg6f2zrzfwz4w", {
                 cwd: workspace.path,
                 projectId: workspace.projectId,
                 workspaceId: workspace.id,
             });
-            const firstRun = first.submit({
+            const firstRun = await first.submit({
                 clientSubmissionId: "m7ymgv1cqfbjd0pxukc8403w",
                 text: "First queued message.",
             });
-            const repeatedRun = first.submit({
+            const repeatedRun = await first.submit({
                 clientSubmissionId: "m7ymgv1cqfbjd0pxukc8403w",
                 text: "First queued message.",
             });
-            const secondRun = second.submit({
+            const secondRun = await second.submit({
                 clientSubmissionId: "n3tfnng0rkcw4mxc3nfq4ntc",
                 debug: true,
                 text: "Second queued message.",
             });
 
             expect(
-                store.createWithId(first.id, {
+                await store.createWithId(first.id, {
                     cwd: workspace.path,
                     projectId: workspace.projectId,
                     workspaceId: workspace.id,
@@ -469,7 +470,70 @@ describe("PersistentSessionStore", () => {
             expect(runtimes).toBe(0);
         } finally {
             materialize.resolve();
-            store?.close();
+            await store?.close();
+            await Promise.all([cleanup(), rm(root, { force: true, recursive: true })]);
+        }
+    });
+
+    it("rolls back every session when one workspace archive write fails", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const root = await mkdtemp(join(tmpdir(), "rig-workspace-archive-rollback-"));
+        const repository = join(root, "project");
+        let store: PersistentSessionStore | undefined;
+        try {
+            await createGitRepository(repository);
+            const projectGit: GitCommandRunner = async (cwd, args) => {
+                const result = await execFile("git", ["-C", cwd, ...args], { encoding: "utf8" });
+                return result.stdout.trim();
+            };
+            store = await PersistentSessionStore.open({
+                databasePath,
+                projectGit,
+                stateDirectory: join(root, "state"),
+                workspacesDirectory: join(root, "workspaces"),
+            });
+            const owner = await store.create({ cwd: repository });
+            const projectId = owner.snapshot().projectId;
+            if (projectId === undefined) throw new Error("Expected a registered project.");
+            const workspace = await store.createWorkspace(projectId, {
+                baseRef: "HEAD",
+                name: "Rollback",
+            });
+            if (workspace === undefined) throw new Error("Expected a workspace.");
+            await expect
+                .poll(async () => (await store?.getWorkspace(projectId, workspace.id))?.status)
+                .toBe("ready");
+            const first = await store.create({
+                cwd: workspace.path,
+                projectId,
+                workspaceId: workspace.id,
+            });
+            const second = await store.create({
+                cwd: workspace.path,
+                projectId,
+                workspaceId: workspace.id,
+            });
+            const originalSaveSession = store.saveSession.bind(store);
+            const failure = Object.assign(new Error("second session archive failed"), {
+                code: "SQLITE_IOERR",
+            });
+            const saveSession = vi.spyOn(store, "saveSession").mockImplementation(async (state) => {
+                if (state.id === second.id && state.archived) throw failure;
+                await originalSaveSession(state);
+            });
+
+            await expect(store.archiveWorkspace(projectId, workspace.id)).rejects.toBe(failure);
+
+            expect(first.snapshot()).toMatchObject({ archived: false, status: "idle" });
+            expect(second.snapshot()).toMatchObject({ archived: false, status: "idle" });
+            expect(
+                first.events
+                    .since(undefined)
+                    ?.some((event) => event.type === "session_workspace_archived"),
+            ).toBe(false);
+            saveSession.mockRestore();
+        } finally {
+            await store?.close();
             await Promise.all([cleanup(), rm(root, { force: true, recursive: true })]);
         }
     });
@@ -477,65 +541,70 @@ describe("PersistentSessionStore", () => {
     it("restores pending context and rewinds or resets it atomically", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            let store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-pending-context-restore" });
+            let store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-pending-context-restore" });
             const sessionId = session.id;
-            session.submitContext({ clientSubmissionId: "note-1", text: "First note." });
-            session.submitContext({ clientSubmissionId: "note-2", text: "Second note." });
-            session.rewind("note-2");
-            store.close();
+            await session.submitContext({ clientSubmissionId: "note-1", text: "First note." });
+            await session.submitContext({ clientSubmissionId: "note-2", text: "Second note." });
+            await session.rewind("note-2");
+            await store.close();
 
-            store = new PersistentSessionStore({ databasePath });
-            const restored = store.get(sessionId);
+            store = await PersistentSessionStore.open({ databasePath });
+            const restored = await store.get(sessionId);
             expect(restored?.state().pendingContextMessages).toMatchObject([
                 { message: { id: "note-1" } },
             ]);
             expect(restored?.state().contextMessages).toEqual([]);
             await restored?.reset();
-            store.close();
+            await store.close();
 
-            store = new PersistentSessionStore({ databasePath });
-            expect(store.get(sessionId)?.state().pendingContextMessages).toEqual([]);
-            expect(store.get(sessionId)?.state().messages).toEqual([]);
-            store.close();
+            store = await PersistentSessionStore.open({ databasePath });
+            expect((await store.get(sessionId))?.state().pendingContextMessages).toEqual([]);
+            expect((await store.get(sessionId))?.state().messages).toEqual([]);
+            await store.close();
         } finally {
             await cleanup();
         }
     });
 
-    it("does not swallow database failures from post-commit observers", () => {
+    it("does not swallow database failures from post-commit observers", async () => {
         const failure = Object.assign(new Error("observer database failed"), {
             code: "SQLITE_IOERR",
         });
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             onSessionEvent: () => {
                 throw failure;
             },
         });
         try {
-            expect(() => store.create({ cwd: "/tmp/rig-observer-database-failure" })).toThrow(
-                failure,
-            );
+            await expect(
+                store.create({ cwd: "/tmp/rig-observer-database-failure" }),
+            ).rejects.toMatchObject({
+                cause: failure,
+                name: "SessionTransactionPostCommitError",
+            });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("replays durable usage written after the persisted summary cursor", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-usage-crash-boundary" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-usage-crash-boundary" });
             const sessionId = session.id;
-            store.close();
+            await store.close();
 
-            const database = new DatabaseSync(databasePath);
-            const previous = database
-                .prepare("SELECT last_event_id FROM sessions WHERE id = ?")
-                .get(sessionId) as { last_event_id: string };
+            const database = openTestDatabase(databasePath);
+            const previous = (await queryTestRow<{ last_event_id: string }>(
+                database,
+                "SELECT last_event_id FROM sessions WHERE id = ?",
+                [sessionId],
+            ))!;
             const eventId = createEventIdFactory({ after: previous.last_event_id })();
-            insertSessionEvent(database, sessionId, eventId, "agent_message", {
+            await insertSessionEvent(database, sessionId, eventId, "agent_message", {
                 message: {
                     blocks: [{ text: "Recovered usage", type: "text" }],
                     id: "agent-after-summary",
@@ -559,20 +628,21 @@ describe("PersistentSessionStore", () => {
                 },
                 runId: "run-after-summary",
             });
-            database
-                .prepare("UPDATE sessions SET last_event_id = ? WHERE id = ?")
-                .run(eventId, sessionId);
-            database.close();
+            await database.execute({
+                args: [eventId, sessionId],
+                sql: "UPDATE sessions SET last_event_id = ? WHERE id = ?",
+            });
+            await database.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(sessionId)?.usage().groups).toEqual([
+                expect((await restoredStore.get(sessionId))?.usage().groups).toEqual([
                     expect.objectContaining({
                         usage: expect.objectContaining({ totalTokens: 19 }),
                     }),
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -582,36 +652,39 @@ describe("PersistentSessionStore", () => {
     it("rolls back a message when its turn projection cannot be written", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const initial = new PersistentSessionStore({ databasePath });
+            const initial = await PersistentSessionStore.open({ databasePath });
             const state = sessionState();
-            initial.saveSession(state);
-            initial.close();
-            const database = new DatabaseSync(databasePath);
-            database.exec(`
+            await initial.saveSession(state);
+            await initial.close();
+            const database = openTestDatabase(databasePath);
+            await database.execute(`
                 CREATE TRIGGER reject_turn_projection
                 BEFORE INSERT ON session_turns
                 BEGIN
                     SELECT RAISE(ABORT, 'projection failed');
                 END
             `);
-            database.close();
+            await database.close();
 
-            const store = new PersistentSessionStore({ databasePath });
-            expect(() =>
+            const store = await PersistentSessionStore.open({ databasePath });
+            await expectErrorChainToContain(
                 store.upsertMessage(state.id, {
                     isPartial: false,
                     message: textUserMessage("message-1", "Do it"),
                     position: 0,
                     runId: "run-1",
                 }),
-            ).toThrow("projection failed");
-            store.close();
+                "projection failed",
+            );
+            await store.close();
 
-            const check = new DatabaseSync(databasePath);
+            const check = openTestDatabase(databasePath);
             expect(
-                check.prepare("SELECT 1 FROM session_messages WHERE session_id = ?").get(state.id),
+                await queryTestRow(check, "SELECT 1 FROM session_messages WHERE session_id = ?", [
+                    state.id,
+                ]),
             ).toBeUndefined();
-            check.close();
+            await check.close();
         } finally {
             await cleanup();
         }
@@ -621,129 +694,142 @@ describe("PersistentSessionStore", () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-bounded-events-"));
         const databasePath = join(directory, "sessions.sqlite");
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-bounded-events" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-bounded-events" });
             const sessionId = session.id;
-            store.close();
+            await store.close();
 
-            const database = new DatabaseSync(databasePath);
-            const previous = database
-                .prepare("SELECT last_event_id FROM sessions WHERE id = ?")
-                .get(sessionId) as { last_event_id: string };
+            const database = openTestDatabase(databasePath);
+            const previous = (await queryTestRow<{ last_event_id: string }>(
+                database,
+                "SELECT last_event_id FROM sessions WHERE id = ?",
+                [sessionId],
+            ))!;
             const createId = createEventIdFactory({ after: previous.last_event_id });
             const oldMessage = textUserMessage("old-message", "Old history");
             const oldSteering = textUserMessage("old-steering", "Steer old history");
-            database
-                .prepare(
-                    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 0, ?, 'user', 0, 'run-old', ?, ?)",
-                )
-                .run(sessionId, oldMessage.id, JSON.stringify(oldMessage), 1_700_000_000_000);
-            database
-                .prepare(
-                    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 1, ?, 'user', 0, 'run-old', ?, ?)",
-                )
-                .run(sessionId, oldSteering.id, JSON.stringify(oldSteering), 1_700_000_000_000);
-            database
-                .prepare(
-                    "INSERT INTO session_turns (session_id, run_id, first_position) VALUES (?, 'run-old', 0)",
-                )
-                .run(sessionId);
-            insertSessionEvent(database, sessionId, createId(), "message_submitted", {
+            await database.execute({
+                args: [sessionId, oldMessage.id, JSON.stringify(oldMessage), 1_700_000_000_000],
+                sql: "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 0, ?, 'user', 0, 'run-old', ?, ?)",
+            });
+            await database.execute({
+                args: [sessionId, oldSteering.id, JSON.stringify(oldSteering), 1_700_000_000_000],
+                sql: "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 1, ?, 'user', 0, 'run-old', ?, ?)",
+            });
+            await database.execute({
+                args: [sessionId],
+                sql: "INSERT INTO session_turns (session_id, run_id, first_position) VALUES (?, 'run-old', 0)",
+            });
+            await insertSessionEvent(database, sessionId, createId(), "message_submitted", {
                 delivery: "run",
                 displayText: "Old history",
                 message: oldMessage,
                 runId: "run-old",
             });
-            insertSessionEvent(database, sessionId, createId(), "message_submitted", {
+            await insertSessionEvent(database, sessionId, createId(), "message_submitted", {
                 delivery: "steer",
                 displayText: "Steer old history",
                 message: oldSteering,
                 runId: "run-old",
             });
-            insertSessionEvent(database, sessionId, createId(), "steering_applied", {
+            await insertSessionEvent(database, sessionId, createId(), "steering_applied", {
                 messageIds: [oldSteering.id],
                 runId: "run-old",
             });
-            insertSessionEvent(database, sessionId, createId(), "run_finished", {
+            await insertSessionEvent(database, sessionId, createId(), "run_finished", {
                 modelLocked: false,
                 runId: "run-old",
                 stopReason: "stop",
             });
-            const insert = database.prepare(
-                "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, 'session_updated', ?, ?)",
-            );
+            const transaction = await database.transaction("write");
             let lastEventId = previous.last_event_id;
-            database.exec("BEGIN");
-            for (let index = 0; index < 5_000; index += 1) {
-                lastEventId = createId();
-                insert.run(sessionId, lastEventId, 1_700_000_000_000 + index, "{}");
-            }
-            database
-                .prepare("UPDATE sessions SET last_event_id = ? WHERE id = ?")
-                .run(lastEventId, sessionId);
-            database.exec("COMMIT");
-            database.close();
-
-            const restoredStore = new PersistentSessionStore({ databasePath });
             try {
-                const restored = restoredStore.get(sessionId);
+                for (let index = 0; index < 5_000; index += 1) {
+                    lastEventId = createId();
+                    await transaction.execute({
+                        args: [sessionId, lastEventId, 1_700_000_000_000 + index, "{}"],
+                        sql: "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, 'session_updated', ?, ?)",
+                    });
+                }
+                await transaction.execute({
+                    args: [lastEventId, sessionId],
+                    sql: "UPDATE sessions SET last_event_id = ? WHERE id = ?",
+                });
+                await transaction.commit();
+            } catch (error) {
+                await transaction.rollback();
+                throw error;
+            } finally {
+                await transaction.close();
+            }
+            await database.close();
+
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
+            try {
+                const restored = await restoredStore.get(sessionId);
                 expect(restored?.events.all()).toHaveLength(4_096);
                 expect(restored?.events.lastEventId()).toBe(lastEventId);
-                expect(restored?.transcriptWindow().turns).toEqual([
+                expect((await restored?.transcriptWindow())?.turns).toEqual([
                     expect.objectContaining({
                         outcome: "success",
                         runId: "run-old",
                         startedAt: 1_700_000_000_000,
                     }),
                 ]);
-                expect(restored?.transcriptWindow().messageSteeredAt).toEqual({
+                expect((await restored?.transcriptWindow())?.messageSteeredAt).toEqual({
                     [oldSteering.id]: 1_700_000_000_000,
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
         }
     });
 
-    it("lists every active session without materializing archived history", () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("lists every active session without materializing archived history", async () => {
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
             for (let index = 0; index < 501; index += 1) {
-                store.createWithId(`session-${String(index)}`, {
+                await store.createWithId(`session-${String(index)}`, {
                     cwd: "/tmp/rig-complete-session-list",
                 });
             }
-            const archived = store.createWithId("archived-session", {
+            const archived = await store.createWithId("archived-session", {
                 cwd: "/tmp/rig-complete-session-list",
             });
-            archived.setArchived(true);
+            await archived.setArchived(true);
 
-            expect(store.listActive()).toHaveLength(501);
-            expect(store.list({ limit: 500 })).toHaveLength(500);
-            expect(store.listActive().map((session) => session.id)).not.toContain(archived.id);
+            expect(await store.listActive()).toHaveLength(501);
+            expect(await store.list({ limit: 500 })).toHaveLength(500);
+            expect((await store.listActive()).map((session) => session.id)).not.toContain(
+                archived.id,
+            );
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
-    it("creates an idempotent persistent session with an integrating client ID", () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("creates an idempotent persistent session with an integrating client ID", async () => {
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
-            const first = store.createWithId("happy-rig-request-1", { cwd: "/tmp/rig-happy" });
-            const second = store.createWithId("happy-rig-request-1", { cwd: "/tmp/rig-happy" });
+            const first = await store.createWithId("happy-rig-request-1", {
+                cwd: "/tmp/rig-happy",
+            });
+            const second = await store.createWithId("happy-rig-request-1", {
+                cwd: "/tmp/rig-happy",
+            });
 
             expect(first.id).toBe("happy-rig-request-1");
             expect(second).toBe(first);
             expect(second.snapshot().cwd).toBe("/tmp/rig-happy");
             // The same identity describing a different session is a mistake, not
             // a retry, so it is refused rather than quietly answered.
-            expect(() =>
+            await expect(
                 store.createWithId("happy-rig-request-1", { cwd: "/tmp/rig-elsewhere" }),
-            ).toThrow("another directory");
+            ).rejects.toThrow("another directory");
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
@@ -792,14 +878,14 @@ describe("PersistentSessionStore", () => {
                 );
             };
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const session = store.create({
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const session = await store.create({
                 cwd: "/tmp/rig-durable-external-tool",
                 modelId: model.id,
                 permissionMode: "full_access",
                 providerId: "gym",
             });
-            const submitted = session.submit({
+            const submitted = await session.submit({
                 externalTools: [
                     {
                         description: "Looks up a ticket in the integrating system.",
@@ -829,11 +915,11 @@ describe("PersistentSessionStore", () => {
             });
 
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
             store = undefined;
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const restored = store.get(session.id);
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const restored = await store.get(session.id);
             if (restored === undefined) throw new Error("Expected restored session.");
             expect(restored.snapshot()).toMatchObject({
                 pendingExternalToolCalls: [{ id: pending.id, status: "pending" }],
@@ -842,7 +928,7 @@ describe("PersistentSessionStore", () => {
             });
 
             expect(
-                restored.resolveExternalToolCall(pending.id, {
+                await restored.resolveExternalToolCall(pending.id, {
                     output: { state: "resolved" },
                     status: "completed",
                 }),
@@ -868,13 +954,13 @@ describe("PersistentSessionStore", () => {
                 },
             ]);
             expect(
-                restored.resolveExternalToolCall(pending.id, {
+                await restored.resolveExternalToolCall(pending.id, {
                     output: { state: "resolved" },
                     status: "completed",
                 }),
             ).toMatchObject({ accepted: false });
         } finally {
-            store?.close();
+            await store?.close();
             globalThis.fetch = originalFetch;
             if (originalInferenceUrl === undefined) delete process.env.RIG_GYM_INFERENCE_URL;
             else process.env.RIG_GYM_INFERENCE_URL = originalInferenceUrl;
@@ -969,22 +1055,22 @@ describe("PersistentSessionStore", () => {
                 );
             };
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const session = store.create({
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const session = await store.create({
                 cwd: "/tmp/rig-durable-user-input",
                 modelId: model.id,
                 permissionMode: "full_access",
                 providerId: "gym",
             });
-            const submitted = session.submit({ text: "Choose a database." });
+            const submitted = await session.submit({ text: "Choose a database." });
             await waitForPendingUserInputs(session, 2);
 
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
             store = undefined;
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const restored = store.get(session.id);
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const restored = await store.get(session.id);
             if (restored === undefined) throw new Error("Expected restored session.");
             const pendingUserInputs = restored.snapshot().pendingUserInputs;
             const databaseRequestId = pendingUserInputs[0]?.requestId;
@@ -1003,8 +1089,12 @@ describe("PersistentSessionStore", () => {
 
             const databaseAnswer = { answers: { database: ["PostgreSQL"] } };
             const cacheAnswer = { answers: { cache: ["Redis"] } };
-            expect(restored.answerUserInput(cacheRequestId, cacheAnswer)).toBeDefined();
-            expect(restored.answerUserInput(databaseRequestId, databaseAnswer)).toBeDefined();
+            await expect(
+                restored.answerUserInput(cacheRequestId, cacheAnswer),
+            ).resolves.toBeDefined();
+            await expect(
+                restored.answerUserInput(databaseRequestId, databaseAnswer),
+            ).resolves.toBeDefined();
             await expect(restored.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
             });
@@ -1033,14 +1123,16 @@ describe("PersistentSessionStore", () => {
                     toolCallId: cacheRequestId,
                 },
             ]);
-            expect(restored.answerUserInput(databaseRequestId, databaseAnswer)).toBeDefined();
-            expect(() =>
+            await expect(
+                restored.answerUserInput(databaseRequestId, databaseAnswer),
+            ).resolves.toBeDefined();
+            await expect(
                 restored.answerUserInput(databaseRequestId, {
                     answers: { database: ["SQLite"] },
                 }),
-            ).toThrow("already has a different answer");
+            ).rejects.toThrow("already has a different answer");
         } finally {
-            store?.close();
+            await store?.close();
             globalThis.fetch = originalFetch;
             if (originalInferenceUrl === undefined) delete process.env.RIG_GYM_INFERENCE_URL;
             else process.env.RIG_GYM_INFERENCE_URL = originalInferenceUrl;
@@ -1093,14 +1185,14 @@ describe("PersistentSessionStore", () => {
                 );
             };
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const session = store.create({
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const session = await store.create({
                 cwd: "/tmp/rig-durable-skill",
                 modelId: model.id,
                 permissionMode: "full_access",
                 providerId: "gym",
             });
-            const submitted = session.submit({
+            const submitted = await session.submit({
                 skills: [
                     {
                         description: "Check a release using integration-owned instructions.",
@@ -1123,11 +1215,11 @@ describe("PersistentSessionStore", () => {
             ).toMatchObject({ parameters: { required: ["name"], type: "object" } });
 
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
             store = undefined;
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const restored = store.get(session.id);
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const restored = await store.get(session.id);
             if (restored === undefined) throw new Error("Expected restored session.");
             expect(restored.snapshot()).toMatchObject({
                 pendingExternalToolCalls: [
@@ -1142,7 +1234,7 @@ describe("PersistentSessionStore", () => {
             });
 
             expect(
-                restored.resolveExternalToolCall(pending.id, {
+                await restored.resolveExternalToolCall(pending.id, {
                     output: "# Release check\nDURABLE_SKILL_BODY_SENTINEL",
                     status: "completed",
                 }),
@@ -1170,7 +1262,7 @@ describe("PersistentSessionStore", () => {
                 },
             ]);
         } finally {
-            store?.close();
+            await store?.close();
             globalThis.fetch = originalFetch;
             if (originalInferenceUrl === undefined) delete process.env.RIG_GYM_INFERENCE_URL;
             else process.env.RIG_GYM_INFERENCE_URL = originalInferenceUrl;
@@ -1178,13 +1270,13 @@ describe("PersistentSessionStore", () => {
         }
     });
 
-    it("retains a bounded external call history without pruning pending work", () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+    it("retains a bounded external call history without pruning pending work", async () => {
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const state = sessionState();
-        store.saveSession(state);
+        await store.saveSession(state);
         try {
             for (let index = 0; index < 1_002; index += 1) {
-                store.upsertExternalToolCall({
+                await store.upsertExternalToolCall({
                     arguments: { index },
                     batchId: `batch-${index}`,
                     consumed: true,
@@ -1204,7 +1296,7 @@ describe("PersistentSessionStore", () => {
                     toolCallIndex: 0,
                 });
             }
-            store.upsertExternalToolCall({
+            await store.upsertExternalToolCall({
                 arguments: {},
                 batchId: "pending-batch",
                 consumed: false,
@@ -1222,32 +1314,32 @@ describe("PersistentSessionStore", () => {
                 toolCallIndex: 0,
             });
 
-            store.pruneExternalToolCalls(state.id, 1_000);
+            await store.pruneExternalToolCalls(state.id, 1_000);
 
-            const calls = store.listExternalToolCalls({ limit: 2_000 });
+            const calls = await store.listExternalToolCalls({ limit: 2_000 });
             expect(calls).toHaveLength(1_001);
             expect(calls.some((call) => call.id === "pending-call")).toBe(true);
             expect(calls.some((call) => call.id === "completed-0")).toBe(false);
             expect(calls.some((call) => call.id === "completed-1001")).toBe(true);
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("restores appended system prompts after reopening SQLite", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({
                 appendSystemPrompt: "Persisted API instructions.",
                 cwd: "/tmp/rig-persistent-prompt-test",
             });
-            session.update({ appendSystemPrompt: "Updated persisted instructions." });
-            store.close();
+            await session.update({ appendSystemPrompt: "Updated persisted instructions." });
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(session.id);
+                const restored = await restoredStore.get(session.id);
                 expect(restored?.snapshot().appendSystemPrompt).toBe(
                     "Updated persisted instructions.",
                 );
@@ -1255,7 +1347,7 @@ describe("PersistentSessionStore", () => {
                     "Updated persisted instructions.",
                 );
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1265,8 +1357,8 @@ describe("PersistentSessionStore", () => {
     it("delivers transient inference events live without writing session event rows", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-persistent-session-test" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-persistent-session-test" });
             const transient = sessionEvent(session.id, "transient-text", "agent_event", {
                 event: { contentIndex: 0, delta: "token", partial: {}, type: "text_delta" },
                 runId: "run-1",
@@ -1288,11 +1380,13 @@ describe("PersistentSessionStore", () => {
                 runId: "run-1",
             });
             const delivered: SessionEvent[] = [];
-            session.events.subscribe((event) => delivered.push(event));
+            session.events.subscribe((event) => {
+                delivered.push(event);
+            });
 
-            session.events.append(transient);
-            session.events.append(processChanged);
-            session.events.append(compacted);
+            await session.events.append(transient);
+            await session.events.append(processChanged);
+            await session.events.append(compacted);
 
             expect(session.events.since(undefined)?.map((event) => event.id)).toEqual([
                 expect.any(String),
@@ -1304,22 +1398,22 @@ describe("PersistentSessionStore", () => {
                 processChanged.id,
                 compacted.id,
             ]);
-            const database = new DatabaseSync(databasePath, { readOnly: true });
+            const database = openTestDatabase(databasePath);
             try {
-                const rows = database
-                    .prepare(
-                        "SELECT event_id FROM session_events WHERE session_id = ? ORDER BY seq",
-                    )
-                    .all(session.id) as Array<{ event_id: string }>;
+                const rows = await queryTestRows<{ event_id: string }>(
+                    database,
+                    "SELECT event_id FROM session_events WHERE session_id = ? ORDER BY seq",
+                    [session.id],
+                );
                 expect(rows.map((row) => row.event_id)).toEqual([
                     expect.any(String),
                     processChanged.id,
                     compacted.id,
                 ]);
             } finally {
-                database.close();
+                await database.close();
             }
-            store.close();
+            await store.close();
         } finally {
             await cleanup();
         }
@@ -1328,8 +1422,8 @@ describe("PersistentSessionStore", () => {
     it("restores secret registrations and source-scoped attachments after reopening SQLite", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.registerSecret({
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.registerSecret({
                 description: "Service API credentials",
                 environment: {
                     SERVICE_REGION: "persisted-region",
@@ -1337,43 +1431,48 @@ describe("PersistentSessionStore", () => {
                 },
                 id: "service",
             });
-            store.registerSecret({
+            await store.registerSecret({
                 description: "Project service credentials",
                 environment: { PROJECT_TOKEN: "persisted-project-token" },
                 id: "project-service",
             });
-            const session = store.create({
+            const session = await store.create({
                 cwd: "/tmp/rig-secret-session",
                 secretIds: ["service"],
             });
-            store.attachSecret(session.id, "project-service", "project");
+            await store.attachSecret(session.id, "project-service", "project");
             expect(session.snapshot()).toMatchObject({
                 projectSecretIds: ["project-service"],
                 secretIds: ["project-service", "service"],
                 sessionSecretIds: ["service"],
             });
             expect(session.requestForSubagent()).not.toHaveProperty("secretIds");
-            store.close();
+            await store.close();
 
-            const database = new DatabaseSync(databasePath);
-            const sessionRow = database
-                .prepare("SELECT secret_ids_json FROM sessions WHERE id = ?")
-                .get(session.id) as { secret_ids_json: string };
-            const registrationRow = database
-                .prepare(
-                    "SELECT description, environment_json FROM secret_registrations WHERE id = ?",
-                )
-                .get("service") as { description: string; environment_json: string };
+            const database = openTestDatabase(databasePath);
+            const sessionRow = (await queryTestRow<{ secret_ids_json: string }>(
+                database,
+                "SELECT secret_ids_json FROM sessions WHERE id = ?",
+                [session.id],
+            ))!;
+            const registrationRow = (await queryTestRow<{
+                description: string;
+                environment_json: string;
+            }>(
+                database,
+                "SELECT description, environment_json FROM secret_registrations WHERE id = ?",
+                ["service"],
+            ))!;
             expect(sessionRow.secret_ids_json).toBe('["service"]');
             expect(registrationRow.description).toBe("Service API credentials");
             expect(JSON.parse(registrationRow.environment_json)).toEqual({
                 SERVICE_REGION: "persisted-region",
                 SERVICE_TOKEN: "persisted-token",
             });
-            database.close();
+            await database.close();
 
             let restoredEnvironment: NodeJS.ProcessEnv | undefined;
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 createRuntime: (options) => {
                     restoredEnvironment = options.secrets?.resolve(["project-service", "service"]);
@@ -1381,7 +1480,7 @@ describe("PersistentSessionStore", () => {
                 },
             });
             try {
-                expect(restoredStore.listSecrets()).toEqual([
+                expect(await restoredStore.listSecrets()).toEqual([
                     {
                         description: "Project service credentials",
                         environmentVariables: ["PROJECT_TOKEN"],
@@ -1393,7 +1492,7 @@ describe("PersistentSessionStore", () => {
                         id: "service",
                     },
                 ]);
-                const restoredSession = restoredStore.get(session.id);
+                const restoredSession = await restoredStore.get(session.id);
                 if (restoredSession === undefined) throw new Error("Expected restored session.");
                 await expect(restoredSession.compact()).rejects.toThrow(
                     "Captured restored secret environment.",
@@ -1409,14 +1508,14 @@ describe("PersistentSessionStore", () => {
                     sessionSecretIds: ["service"],
                 });
 
-                const fork = restoredStore.fork(session.id);
+                const fork = await restoredStore.fork(session.id);
                 expect(fork?.snapshot()).toMatchObject({
                     projectSecretIds: ["project-service"],
                     secretIds: ["project-service"],
                     sessionSecretIds: [],
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1426,19 +1525,19 @@ describe("PersistentSessionStore", () => {
     it("keeps system-managed GitHub credentials out of durable secret registrations and attachments", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.registerSpecialSecret({ kind: "github", token: "runtime-only-token" });
-            expect(() =>
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.registerSpecialSecret({ kind: "github", token: "runtime-only-token" });
+            await expect(
                 store.create({
                     cwd: "/tmp/rig-github-secret-rejected-session",
                     secretIds: ["github"],
                 }),
-            ).toThrow("managed by Rig and cannot be attached to agent commands");
-            const session = store.create({ cwd: "/tmp/rig-github-secret-session" });
-            expect(() => store.attachSecret(session.id, "github", "session")).toThrow(
+            ).rejects.toThrow("managed by Rig and cannot be attached to agent commands");
+            const session = await store.create({ cwd: "/tmp/rig-github-secret-session" });
+            await expect(store.attachSecret(session.id, "github", "session")).rejects.toThrow(
                 "managed by Rig and cannot be attached to agent commands",
             );
-            expect(store.listSecrets()).toEqual([
+            expect(await store.listSecrets()).toEqual([
                 {
                     availableToModel: false,
                     description: "GitHub CLI credentials",
@@ -1452,27 +1551,32 @@ describe("PersistentSessionStore", () => {
                 secretIds: [],
                 sessionSecretIds: [],
             });
-            store.close();
+            await store.close();
 
-            const database = new DatabaseSync(databasePath, { readOnly: true });
+            const database = openTestDatabase(databasePath);
             try {
                 expect(
-                    database.prepare("SELECT COUNT(*) AS count FROM secret_registrations").get(),
+                    await queryTestRow(
+                        database,
+                        "SELECT COUNT(*) AS count FROM secret_registrations",
+                    ),
                 ).toEqual({ count: 0 });
                 expect(
-                    database
-                        .prepare("SELECT secret_ids_json FROM sessions WHERE id = ?")
-                        .get(session.id),
+                    await queryTestRow(
+                        database,
+                        "SELECT secret_ids_json FROM sessions WHERE id = ?",
+                        [session.id],
+                    ),
                 ).toEqual({ secret_ids_json: "[]" });
             } finally {
-                database.close();
+                await database.close();
             }
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.listSecrets()).toEqual([]);
+                expect(await restoredStore.listSecrets()).toEqual([]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1482,14 +1586,14 @@ describe("PersistentSessionStore", () => {
     it("persists targeted secret field updates without replacing omitted values", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.registerSecret({
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.registerSecret({
                 description: "Original credentials",
                 environment: { KEEP: "unchanged", REMOVE: "old", ROTATE: "old" },
                 id: "service",
             });
             expect(
-                store.updateSecret("service", {
+                await store.updateSecret("service", {
                     description: "Updated credentials",
                     environment: { ADDED: "new", REMOVE: null, ROTATE: "rotated" },
                 }),
@@ -1498,15 +1602,18 @@ describe("PersistentSessionStore", () => {
                 environmentVariables: ["ADDED", "KEEP", "ROTATE"],
                 id: "service",
             });
-            store.close();
+            await store.close();
 
-            const database = new DatabaseSync(databasePath, { readOnly: true });
+            const database = openTestDatabase(databasePath);
             try {
-                const row = database
-                    .prepare(
-                        "SELECT description, environment_json FROM secret_registrations WHERE id = ?",
-                    )
-                    .get("service") as { description: string; environment_json: string };
+                const row = (await queryTestRow<{
+                    description: string;
+                    environment_json: string;
+                }>(
+                    database,
+                    "SELECT description, environment_json FROM secret_registrations WHERE id = ?",
+                    ["service"],
+                ))!;
                 expect(row.description).toBe("Updated credentials");
                 expect(JSON.parse(row.environment_json)).toEqual({
                     ADDED: "new",
@@ -1514,12 +1621,12 @@ describe("PersistentSessionStore", () => {
                     ROTATE: "rotated",
                 });
             } finally {
-                database.close();
+                await database.close();
             }
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.listSecrets()).toEqual([
+                expect(await restoredStore.listSecrets()).toEqual([
                     {
                         description: "Updated credentials",
                         environmentVariables: ["ADDED", "KEEP", "ROTATE"],
@@ -1527,7 +1634,7 @@ describe("PersistentSessionStore", () => {
                     },
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1537,31 +1644,30 @@ describe("PersistentSessionStore", () => {
     it("conservatively restores null, missing, and unknown agent event subtypes", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const sessionId = store.create({ cwd: "/tmp/rig-persistent-session-test" }).id;
-            store.close();
+            const store = await PersistentSessionStore.open({ databasePath });
+            const sessionId = (await store.create({ cwd: "/tmp/rig-persistent-session-test" })).id;
+            await store.close();
 
-            const database = new DatabaseSync(databasePath);
-            insertSessionEvent(database, sessionId, "null-subtype", "agent_event", {
+            const database = openTestDatabase(databasePath);
+            await insertSessionEvent(database, sessionId, "null-subtype", "agent_event", {
                 event: { type: null },
                 runId: "run-1",
             });
-            insertSessionEvent(database, sessionId, "missing-subtype", "agent_event", {
+            await insertSessionEvent(database, sessionId, "missing-subtype", "agent_event", {
                 event: {},
                 runId: "run-1",
             });
-            insertSessionEvent(database, sessionId, "unknown-subtype", "agent_event", {
+            await insertSessionEvent(database, sessionId, "unknown-subtype", "agent_event", {
                 event: { type: "future_provider_event" },
                 runId: "run-1",
             });
-            database.close();
+            await database.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
                 expect(
-                    restoredStore
-                        .get(sessionId)
-                        ?.events.since(undefined)
+                    (await restoredStore.get(sessionId))?.events
+                        .since(undefined)
                         ?.map((event) => event.id),
                 ).toEqual([
                     expect.any(String),
@@ -1570,7 +1676,7 @@ describe("PersistentSessionStore", () => {
                     "unknown-subtype",
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1580,25 +1686,25 @@ describe("PersistentSessionStore", () => {
     it("restores historical masking destinations after rotating a registration", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.registerSecret({
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.registerSecret({
                 description: "Initial service credentials",
                 environment: { OLD_SERVICE_TOKEN: "old" },
                 id: "service",
             });
-            const session = store.create({
+            const session = await store.create({
                 cwd: "/tmp/rotated-secret-session",
                 secretIds: ["service"],
             });
-            store.registerSecret({
+            await store.registerSecret({
                 description: "Rotated service credentials",
                 environment: { NEW_SERVICE_TOKEN: "new" },
                 id: "service",
             });
-            store.close();
+            await store.close();
 
             let restoredDestinations: readonly string[] | undefined;
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 createRuntime: (options) => {
                     restoredDestinations = options.secrets?.environmentVariables();
@@ -1606,7 +1712,7 @@ describe("PersistentSessionStore", () => {
                 },
             });
             try {
-                const restoredSession = restoredStore.get(session.id);
+                const restoredSession = await restoredStore.get(session.id);
                 if (restoredSession === undefined) throw new Error("Expected restored session.");
                 await expect(restoredSession.compact()).rejects.toThrow(
                     "Captured restored masking destinations.",
@@ -1615,7 +1721,7 @@ describe("PersistentSessionStore", () => {
                 expect(restoredDestinations).toEqual(
                     expect.arrayContaining(["OLD_SERVICE_TOKEN", "NEW_SERVICE_TOKEN"]),
                 );
-                expect(restoredStore.listSecrets()).toEqual([
+                expect(await restoredStore.listSecrets()).toEqual([
                     {
                         description: "Rotated service credentials",
                         environmentVariables: ["NEW_SERVICE_TOKEN"],
@@ -1623,7 +1729,7 @@ describe("PersistentSessionStore", () => {
                     },
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1633,9 +1739,9 @@ describe("PersistentSessionStore", () => {
     it("recovers a transient event cursor across restart without replaying durable history", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-persistent-session-test" });
-            const otherSession = store.create({ cwd: "/tmp/rig-other-session-test" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-persistent-session-test" });
+            const otherSession = await store.create({ cwd: "/tmp/rig-other-session-test" });
             const otherSessionCursor = otherSession.snapshot().lastEventId;
             if (otherSessionCursor === undefined) throw new Error("Expected another cursor.");
             const currentCursor = session.snapshot().lastEventId;
@@ -1648,12 +1754,12 @@ describe("PersistentSessionStore", () => {
                 event: { contentIndex: 0, delta: "live", partial: {}, type: "text_delta" },
                 runId: "run-1",
             });
-            session.events.append(transient);
-            store.close();
+            await session.events.append(transient);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(session.id);
+                const restored = await restoredStore.get(session.id);
                 expect(restored?.snapshot().lastEventId).toBe(transient.id);
                 expect(restored?.events.since(transient.id)).toEqual([]);
                 expect(restored?.events.since(otherSessionCursor)).toBeUndefined();
@@ -1666,7 +1772,7 @@ describe("PersistentSessionStore", () => {
                 expect(restored?.events.since(transient.id)).toEqual(catchup);
                 expect(restored?.events.since(otherSessionCursor)).toBeUndefined();
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1676,30 +1782,30 @@ describe("PersistentSessionStore", () => {
     it("persists registration removal and clears session and project attachments", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.registerSecret({
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.registerSecret({
                 description: "Disposable credentials",
                 environment: { DISPOSABLE_TOKEN: "removed-value" },
                 id: "disposable",
             });
-            const session = store.create({
+            const session = await store.create({
                 cwd: "/tmp/removed-secret-project",
                 secretIds: ["disposable"],
             });
-            store.attachSecret(session.id, "disposable", "project");
-            expect(store.unregisterSecret("disposable")).toBe(true);
-            store.close();
+            await store.attachSecret(session.id, "disposable", "project");
+            await expect(store.unregisterSecret("disposable")).resolves.toBe(true);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.listSecrets()).toEqual([]);
-                expect(restoredStore.get(session.id)?.snapshot()).toMatchObject({
+                expect(await restoredStore.listSecrets()).toEqual([]);
+                expect((await restoredStore.get(session.id))?.snapshot()).toMatchObject({
                     projectSecretIds: [],
                     secretIds: [],
                     sessionSecretIds: [],
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1709,8 +1815,8 @@ describe("PersistentSessionStore", () => {
     it("keeps Docker execution settings across daemon restarts", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({
                 cwd: "/host/project",
                 docker: {
                     environment: { PROJECT_MODE: "test" },
@@ -1719,14 +1825,14 @@ describe("PersistentSessionStore", () => {
                     workingDirectory: "/workspace",
                 },
             });
-            expect(store.fork(session.id)?.requestForSubagent().docker?.name).toBe(
+            expect((await store.fork(session.id))?.requestForSubagent().docker?.name).toBe(
                 `rig-${session.id}`,
             );
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(session.id)?.requestForSubagent().docker).toEqual({
+                expect((await restoredStore.get(session.id))?.requestForSubagent().docker).toEqual({
                     environment: { PROJECT_MODE: "test" },
                     image: "local/image:tag",
                     mounts: [{ source: "/host/project", target: "/workspace" }],
@@ -1734,7 +1840,7 @@ describe("PersistentSessionStore", () => {
                     workingDirectory: "/workspace",
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1744,32 +1850,32 @@ describe("PersistentSessionStore", () => {
     it("uses in-memory global events unless durable retention is explicitly enabled", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.create({ cwd: "/tmp/rig-persistent-session-test" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.create({ cwd: "/tmp/rig-persistent-session-test" });
             expect(store.globalEventQueue.durable).toBe(false);
-            expect(store.globalEventQueue.list()).toHaveLength(3);
-            store.close();
+            expect(await store.globalEventQueue.list()).toHaveLength(3);
+            await store.close();
 
-            const enabledStore = new PersistentSessionStore({
+            const enabledStore = await PersistentSessionStore.open({
                 databasePath,
                 durableGlobalEventQueue: true,
             });
-            expect(enabledStore.globalEventQueue?.list()).toEqual([]);
-            const queuedSession = enabledStore.create({
+            expect(await enabledStore.globalEventQueue?.list()).toEqual([]);
+            const queuedSession = await enabledStore.create({
                 cwd: "/tmp/rig-persistent-session-test-enabled",
             });
-            enabledStore.close();
+            await enabledStore.close();
 
-            const disabledStore = new PersistentSessionStore({ databasePath });
-            disabledStore.create({ cwd: "/tmp/rig-persistent-session-test-disabled" });
-            disabledStore.close();
+            const disabledStore = await PersistentSessionStore.open({ databasePath });
+            await disabledStore.create({ cwd: "/tmp/rig-persistent-session-test-disabled" });
+            await disabledStore.close();
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 durableGlobalEventQueue: true,
             });
             try {
-                expect(restoredStore.globalEventQueue.list()).toEqual(
+                expect(await restoredStore.globalEventQueue.list()).toEqual(
                     expect.arrayContaining([
                         expect.objectContaining({
                             event: expect.objectContaining({ sessionId: queuedSession.id }),
@@ -1777,7 +1883,7 @@ describe("PersistentSessionStore", () => {
                     ]),
                 );
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1787,13 +1893,13 @@ describe("PersistentSessionStore", () => {
     it("persists and trims global events independently from session history", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({
+            const store = await PersistentSessionStore.open({
                 databasePath,
                 durableGlobalEventQueue: true,
             });
-            const firstSession = store.create({ cwd: "/tmp/rig-persistent-session-test-a" });
-            const secondSession = store.create({ cwd: "/tmp/rig-persistent-session-test-b" });
-            const initial = store.globalEventQueue?.list() ?? [];
+            const firstSession = await store.create({ cwd: "/tmp/rig-persistent-session-test-a" });
+            const secondSession = await store.create({ cwd: "/tmp/rig-persistent-session-test-b" });
+            const initial = (await store.globalEventQueue?.list()) ?? [];
             const sessionEntries = initial.filter(
                 (entry): entry is typeof entry & { event: SessionEvent } =>
                     "sessionId" in entry.event,
@@ -1815,26 +1921,28 @@ describe("PersistentSessionStore", () => {
             ) {
                 throw new Error("Expected two global event cursors.");
             }
-            expect(store.globalEventQueue?.trim(firstCursor)).toEqual({
+            expect(await store.globalEventQueue?.trim(firstCursor)).toEqual({
                 trimmed: 3,
                 through: firstCursor,
             });
-            expect(store.globalEventQueue?.trim(firstCursor)).toEqual({
+            expect(await store.globalEventQueue?.trim(firstCursor)).toEqual({
                 trimmed: 0,
                 through: firstCursor,
             });
-            expect(store.globalEventQueue?.list({ after: staleCursor })).toBeUndefined();
-            expect(store.globalEventQueue?.list({ after: "missing.0" })).toBeUndefined();
+            expect(await store.globalEventQueue?.list({ after: staleCursor })).toBeUndefined();
+            expect(await store.globalEventQueue?.list({ after: "missing.0" })).toBeUndefined();
             expect(firstSession.events.since(undefined)).toHaveLength(1);
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 durableGlobalEventQueue: true,
             });
             try {
-                expect(restoredStore.globalEventQueue.list({ after: staleCursor })).toBeUndefined();
-                expect(restoredStore.globalEventQueue.list()).toEqual(
+                expect(
+                    await restoredStore.globalEventQueue.list({ after: staleCursor }),
+                ).toBeUndefined();
+                expect(await restoredStore.globalEventQueue.list()).toEqual(
                     expect.arrayContaining([
                         expect.objectContaining({
                             cursor: secondCursor,
@@ -1842,10 +1950,12 @@ describe("PersistentSessionStore", () => {
                         }),
                     ]),
                 );
-                const thirdSession = restoredStore.create({
+                const thirdSession = await restoredStore.create({
                     cwd: "/tmp/rig-persistent-session-test-c",
                 });
-                const appended = restoredStore.globalEventQueue?.list({ after: secondCursor });
+                const appended = await restoredStore.globalEventQueue?.list({
+                    after: secondCursor,
+                });
                 expect(appended).toEqual(
                     expect.arrayContaining([
                         expect.objectContaining({
@@ -1855,7 +1965,7 @@ describe("PersistentSessionStore", () => {
                 );
                 expect(appended?.[0]?.cursor).not.toBe(secondCursor);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -1864,13 +1974,13 @@ describe("PersistentSessionStore", () => {
 
     it("rolls back a new project and session when its durable global event cannot commit", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath,
             durableGlobalEventQueue: true,
         });
-        const breaker = new DatabaseSync(databasePath);
+        const breaker = openTestDatabase(databasePath);
         try {
-            breaker.exec(`
+            await breaker.execute(`
                 CREATE TRIGGER reject_project_global_event
                 BEFORE INSERT ON durable_global_events
                 WHEN NEW.aggregate_kind = 'project'
@@ -1879,25 +1989,26 @@ describe("PersistentSessionStore", () => {
                 END;
             `);
 
-            expect(() => store.create({ cwd: "/tmp/rig-atomic-project-session" })).toThrow(
+            await expectErrorChainToContain(
+                store.create({ cwd: "/tmp/rig-atomic-project-session" }),
                 "rejected project event",
             );
-            expect(store.listProjects()).toEqual([]);
-            expect(store.list()).toEqual([]);
-            expect(store.globalEventQueue.list()).toEqual([]);
+            expect(await store.listProjects()).toEqual([]);
+            expect(await store.list()).toEqual([]);
+            expect(await store.globalEventQueue.list()).toEqual([]);
         } finally {
-            breaker.close();
-            store.close();
+            await breaker.close();
+            await store.close();
             await cleanup();
         }
     });
 
     it("does not publish in-memory global events from a rolled-back transaction", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
-        const store = new PersistentSessionStore({ databasePath });
-        const breaker = new DatabaseSync(databasePath);
+        const store = await PersistentSessionStore.open({ databasePath });
+        const breaker = openTestDatabase(databasePath);
         try {
-            breaker.exec(`
+            await breaker.execute(`
                 CREATE TRIGGER reject_session_insert
                 BEFORE INSERT ON sessions
                 BEGIN
@@ -1905,29 +2016,32 @@ describe("PersistentSessionStore", () => {
                 END;
             `);
 
-            expect(() =>
+            await expectErrorChainToContain(
                 store.create({ cwd: "/tmp/rig-atomic-in-memory-project-session" }),
-            ).toThrow("rejected session insert");
-            expect(store.listProjects()).toEqual([]);
-            expect(store.list()).toEqual([]);
-            expect(store.globalEventQueue.list()).toEqual([]);
+                "rejected session insert",
+            );
+            expect(await store.listProjects()).toEqual([]);
+            expect(await store.list()).toEqual([]);
+            expect(await store.globalEventQueue.list()).toEqual([]);
         } finally {
-            breaker.close();
-            store.close();
+            await breaker.close();
+            await store.close();
             await cleanup();
         }
     });
 
     it("rolls back an appended event when its session snapshot cannot be saved", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
-        const store = new PersistentSessionStore({ databasePath });
-        const session = store.create({ cwd: "/tmp/rig-atomic-event-snapshot" });
-        const breaker = new DatabaseSync(databasePath);
+        const store = await PersistentSessionStore.open({ databasePath });
+        const session = await store.create({ cwd: "/tmp/rig-atomic-event-snapshot" });
+        const breaker = openTestDatabase(databasePath);
         try {
-            const before = breaker
-                .prepare("SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?")
-                .get(session.id) as { count: number };
-            breaker.exec(`
+            const before = (await queryTestRow<{ count: number }>(
+                breaker,
+                "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?",
+                [session.id],
+            ))!;
+            await breaker.execute(`
                 CREATE TRIGGER reject_session_snapshot
                 BEFORE UPDATE ON sessions
                 WHEN NEW.append_system_prompt = 'reject snapshot'
@@ -1936,20 +2050,25 @@ describe("PersistentSessionStore", () => {
                 END;
             `);
 
-            expect(() => session.update({ appendSystemPrompt: "reject snapshot" })).toThrow(
+            await expectErrorChainToContain(
+                session.update({ appendSystemPrompt: "reject snapshot" }),
                 "rejected session snapshot",
             );
-            const after = breaker
-                .prepare("SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?")
-                .get(session.id) as { count: number };
-            const row = breaker
-                .prepare("SELECT append_system_prompt FROM sessions WHERE id = ?")
-                .get(session.id) as { append_system_prompt: string | null };
+            const after = (await queryTestRow<{ count: number }>(
+                breaker,
+                "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?",
+                [session.id],
+            ))!;
+            const row = (await queryTestRow<{ append_system_prompt: string | null }>(
+                breaker,
+                "SELECT append_system_prompt FROM sessions WHERE id = ?",
+                [session.id],
+            ))!;
             expect(after.count).toBe(before.count);
             expect(row.append_system_prompt).toBeNull();
         } finally {
-            breaker.close();
-            store.close();
+            await breaker.close();
+            await store.close();
             await cleanup();
         }
     });
@@ -1957,7 +2076,7 @@ describe("PersistentSessionStore", () => {
     it("restores persisted session state and messages without creating a runtime", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({
                 status: "completed",
             });
@@ -1986,24 +2105,24 @@ describe("PersistentSessionStore", () => {
                     },
                 ],
             };
-            store.saveSession(state);
-            store.upsertMessage(state.id, {
+            await store.saveSession(state);
+            await store.upsertMessage(state.id, {
                 isPartial: false,
                 message: userMessage,
                 position: 0,
                 runId: "run-1",
             });
-            store.upsertMessage(state.id, {
+            await store.upsertMessage(state.id, {
                 isPartial: false,
                 message: toolCallMessage,
                 position: 1,
                 runId: "run-1",
             });
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(state.id);
+                const restored = await restoredStore.get(state.id);
 
                 expect(restored?.snapshot().status).toBe("completed");
                 expect(restored?.snapshot().snapshot.messages).toEqual([
@@ -2011,7 +2130,7 @@ describe("PersistentSessionStore", () => {
                     toolCallMessage,
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2021,27 +2140,26 @@ describe("PersistentSessionStore", () => {
     it("does not parse persisted event payloads while opening the database", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-startup-event-scan-test" });
-            store.close();
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-startup-event-scan-test" });
+            await store.close();
 
-            const database = new DatabaseSync(databasePath);
-            database
-                .prepare(
-                    `
+            const database = openTestDatabase(databasePath);
+            await database.execute({
+                args: [session.id, "unreadable-event", "run_started", 1, "{"],
+                sql: `
                     INSERT INTO session_events (
                         session_id, event_id, type, created_at_ms, data_json
                     ) VALUES (?, ?, ?, ?, ?)
                     `,
-                )
-                .run(session.id, "unreadable-event", "run_started", 1, "{");
-            database.close();
+            });
+            await database.close();
 
-            const reopened = new PersistentSessionStore({ databasePath });
+            const reopened = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(reopened.list().map((entry) => entry.id)).toContain(session.id);
+                expect((await reopened.list()).map((entry) => entry.id)).toContain(session.id);
             } finally {
-                reopened.close();
+                await reopened.close();
             }
         } finally {
             await cleanup();
@@ -2055,37 +2173,39 @@ describe("PersistentSessionStore", () => {
                 activeRunId: "completed-before-crash",
                 status: "running",
             });
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(state);
-            store.close();
-            const database = new DatabaseSync(databasePath);
-            insertEvent(database, state.id, "durable-finish", "run_finished", 10, {
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(state);
+            await store.close();
+            const database = openTestDatabase(databasePath);
+            await insertEvent(database, state.id, "durable-finish", "run_finished", 10, {
                 agentRunId: "agent-run",
                 modelLocked: false,
                 runId: "completed-before-crash",
                 stopReason: "stop",
             });
-            database.close();
+            await database.close();
 
-            const reopened = new PersistentSessionStore({ databasePath });
-            reopened.close();
+            const reopened = await PersistentSessionStore.open({ databasePath });
+            await reopened.close();
 
-            const verify = new DatabaseSync(databasePath);
+            const verify = openTestDatabase(databasePath);
             try {
                 expect(
-                    verify
-                        .prepare("SELECT status, active_run_id FROM sessions WHERE id = ?")
-                        .get(state.id),
+                    await queryTestRow(
+                        verify,
+                        "SELECT status, active_run_id FROM sessions WHERE id = ?",
+                        [state.id],
+                    ),
                 ).toEqual({ active_run_id: null, status: "completed" });
                 expect(
-                    verify
-                        .prepare(
-                            "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'run_error'",
-                        )
-                        .get(state.id),
+                    await queryTestRow(
+                        verify,
+                        "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'run_error'",
+                        [state.id],
+                    ),
                 ).toEqual({ count: 0 });
             } finally {
-                verify.close();
+                await verify.close();
             }
         } finally {
             await cleanup();
@@ -2103,52 +2223,52 @@ describe("PersistentSessionStore", () => {
                 providerId: "codex",
                 status: "running",
             });
-            const store = new PersistentSessionStore({
+            const store = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: testModelCatalog(),
             });
-            store.saveSession(state);
-            store.close();
-            const database = new DatabaseSync(databasePath);
-            insertEvent(database, state.id, "active-start", "run_started", 1, {
+            await store.saveSession(state);
+            await store.close();
+            const database = openTestDatabase(databasePath);
+            await insertEvent(database, state.id, "active-start", "run_started", 1, {
                 runId: "active-run",
             });
-            insertEvent(database, state.id, "active-submit", "message_submitted", 2, {
+            await insertEvent(database, state.id, "active-submit", "message_submitted", 2, {
                 delivery: "steer",
                 displayText: "still active at restart",
                 message: active,
                 runId: "active-run",
             });
-            database.close();
+            await database.close();
 
             for (let open = 0; open < 2; open += 1) {
-                const restored = new PersistentSessionStore({
+                const restored = await PersistentSessionStore.open({
                     databasePath,
                     modelCatalog: testModelCatalog(),
                     now: () => 100 + open,
                 });
-                restored.close();
-                const verify = new DatabaseSync(databasePath);
+                await restored.close();
+                const verify = openTestDatabase(databasePath);
                 try {
                     expect(
-                        verify
-                            .prepare(
-                                "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
-                            )
-                            .get(state.id, active.id),
+                        await queryTestRow(
+                            verify,
+                            "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
+                            [state.id, active.id],
+                        ),
                     ).toEqual({ count: 0 });
                     expect(
-                        verify
-                            .prepare(
-                                "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'steering_applied'",
-                            )
-                            .get(state.id),
+                        await queryTestRow(
+                            verify,
+                            "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'steering_applied'",
+                            [state.id],
+                        ),
                     ).toEqual({ count: 0 });
-                    const restartErrors = verify
-                        .prepare(
-                            "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'run_error'",
-                        )
-                        .all(state.id) as { data_json: string }[];
+                    const restartErrors = await queryTestRows<{ data_json: string }>(
+                        verify,
+                        "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'run_error'",
+                        [state.id],
+                    );
                     expect(restartErrors.map((row) => JSON.parse(row.data_json))).toEqual([
                         expect.objectContaining({
                             runId: "active-run",
@@ -2156,7 +2276,7 @@ describe("PersistentSessionStore", () => {
                         }),
                     ]);
                 } finally {
-                    verify.close();
+                    await verify.close();
                 }
             }
         } finally {
@@ -2176,82 +2296,81 @@ describe("PersistentSessionStore", () => {
                 providerId: "codex",
                 status: "running",
             });
-            const store = new PersistentSessionStore({
+            const store = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: testModelCatalog(),
             });
-            store.saveSession(state);
-            store.close();
-            const database = new DatabaseSync(databasePath);
-            insertEvent(database, state.id, "crashed-start", "run_started", 1, {
+            await store.saveSession(state);
+            await store.close();
+            const database = openTestDatabase(databasePath);
+            await insertEvent(database, state.id, "crashed-start", "run_started", 1, {
                 runId: "crashed-run",
             });
-            insertEvent(database, state.id, "crashed-steer", "message_submitted", 2, {
+            await insertEvent(database, state.id, "crashed-steer", "message_submitted", 2, {
                 delivery: "steer",
                 displayText: "never reached inference",
                 message: active,
                 runId: "crashed-run",
             });
-            database.close();
+            await database.close();
 
-            const firstReopen = new PersistentSessionStore({
+            const firstReopen = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: testModelCatalog(),
                 now: () => 100,
             });
-            firstReopen.close();
+            await firstReopen.close();
 
-            const laterDatabase = new DatabaseSync(databasePath);
-            insertEvent(laterDatabase, state.id, "later-start", "run_started", 4, {
+            const laterDatabase = openTestDatabase(databasePath);
+            await insertEvent(laterDatabase, state.id, "later-start", "run_started", 4, {
                 runId: "later-run",
             });
-            insertEvent(laterDatabase, state.id, "later-submit", "message_submitted", 5, {
+            await insertEvent(laterDatabase, state.id, "later-submit", "message_submitted", 5, {
                 delivery: "run",
                 displayText: "completed after restart",
                 message: later,
                 runId: "later-run",
             });
-            insertEvent(laterDatabase, state.id, "later-finished", "run_finished", 6, {
+            await insertEvent(laterDatabase, state.id, "later-finished", "run_finished", 6, {
                 agentRunId: "later-agent-run",
                 modelLocked: true,
                 runId: "later-run",
                 stopReason: "stop",
             });
-            laterDatabase
-                .prepare(
-                    "UPDATE sessions SET status = 'completed', active_run_id = NULL, interrupted = 0, interruption_json = NULL WHERE id = ?",
-                )
-                .run(state.id);
-            laterDatabase.close();
+            await laterDatabase.execute({
+                args: [state.id],
+                sql: "UPDATE sessions SET status = 'completed', active_run_id = NULL, interrupted = 0, interruption_json = NULL WHERE id = ?",
+            });
+            await laterDatabase.close();
 
-            const secondReopen = new PersistentSessionStore({
+            const secondReopen = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: testModelCatalog(),
                 now: () => 200,
             });
-            secondReopen.close();
+            await secondReopen.close();
 
-            const verify = new DatabaseSync(databasePath);
+            const verify = openTestDatabase(databasePath);
             try {
                 expect(
-                    verify
-                        .prepare(
-                            "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
-                        )
-                        .get(state.id, active.id),
+                    await queryTestRow(
+                        verify,
+                        "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
+                        [state.id, active.id],
+                    ),
                 ).toEqual({ count: 0 });
                 expect(
-                    verify
-                        .prepare(
-                            "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'steering_applied'",
-                        )
-                        .get(state.id),
+                    await queryTestRow(
+                        verify,
+                        "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'steering_applied'",
+                        [state.id],
+                    ),
                 ).toEqual({ count: 0 });
-                const crashError = verify
-                    .prepare(
-                        "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'run_error'",
-                    )
-                    .get(state.id) as { data_json: string };
+                const crashError = (await queryTestRow<{ data_json: string }>(
+                    verify,
+                    "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'run_error'",
+                    [state.id],
+                ))!;
                 expect(JSON.parse(crashError.data_json)).toEqual(
                     expect.objectContaining({
                         runId: "crashed-run",
@@ -2259,7 +2378,7 @@ describe("PersistentSessionStore", () => {
                     }),
                 );
             } finally {
-                verify.close();
+                await verify.close();
             }
         } finally {
             await cleanup();
@@ -2270,11 +2389,11 @@ describe("PersistentSessionStore", () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
             const active = textUserMessage("suspended-orphan", "not applied before suspension");
-            const store = new PersistentSessionStore({
+            const store = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: testModelCatalog(),
             });
-            store.saveSession(sessionState());
+            await store.saveSession(sessionState());
             const state = sessionState({
                 activeRunId: "suspended-run",
                 agent: {
@@ -2288,28 +2407,27 @@ describe("PersistentSessionStore", () => {
                 id: "subagent-1",
                 status: "suspended",
             });
-            store.saveSession(state);
-            store.close();
-            const database = new DatabaseSync(databasePath);
-            insertEvent(database, state.id, "suspended-start", "run_started", 1, {
+            await store.saveSession(state);
+            await store.close();
+            const database = openTestDatabase(databasePath);
+            await insertEvent(database, state.id, "suspended-start", "run_started", 1, {
                 runId: "suspended-run",
             });
-            insertEvent(database, state.id, "suspended-submit", "message_submitted", 2, {
+            await insertEvent(database, state.id, "suspended-submit", "message_submitted", 2, {
                 delivery: "steer",
                 displayText: "not applied before suspension",
                 message: active,
                 runId: "suspended-run",
             });
-            database.close();
+            await database.close();
 
             let restartNotification: string | undefined;
             for (let open = 0; open < 2; open += 1) {
-                const restored = new PersistentSessionStore({
+                const restored = await PersistentSessionStore.open({
                     databasePath,
                     modelCatalog: testModelCatalog(),
                 });
-                restartNotification ??= restored
-                    .get("session-1")
+                restartNotification ??= (await restored.get("session-1"))
                     ?.snapshot()
                     .snapshot.messages.flatMap((message) =>
                         message.blocks.flatMap((block) =>
@@ -2317,34 +2435,34 @@ describe("PersistentSessionStore", () => {
                         ),
                     )
                     .find((text) => text.includes("<subagent-notification>"));
-                restored.close();
+                await restored.close();
             }
             expect(restartNotification).toContain("Agent ID: subagent-agent");
             expect(restartNotification).toContain("Path: /root/subagent-agent");
             expect(restartNotification).not.toContain("Task:");
             expect(restartNotification).not.toContain("subagent-1");
 
-            const verify = new DatabaseSync(databasePath);
+            const verify = openTestDatabase(databasePath);
             try {
                 expect(
-                    verify
-                        .prepare(
-                            "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
-                        )
-                        .get(state.id, active.id),
+                    await queryTestRow(
+                        verify,
+                        "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
+                        [state.id, active.id],
+                    ),
                 ).toEqual({ count: 0 });
                 expect(
-                    verify
-                        .prepare(
-                            "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'steering_applied'",
-                        )
-                        .get(state.id),
+                    await queryTestRow(
+                        verify,
+                        "SELECT COUNT(*) AS count FROM session_events WHERE session_id = ? AND type = 'steering_applied'",
+                        [state.id],
+                    ),
                 ).toEqual({ count: 0 });
-                const restartError = verify
-                    .prepare(
-                        "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'run_error'",
-                    )
-                    .get(state.id) as { data_json: string };
+                const restartError = (await queryTestRow<{ data_json: string }>(
+                    verify,
+                    "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'run_error'",
+                    [state.id],
+                ))!;
                 expect(JSON.parse(restartError.data_json)).toEqual(
                     expect.objectContaining({
                         runId: "suspended-run",
@@ -2352,7 +2470,7 @@ describe("PersistentSessionStore", () => {
                     }),
                 );
             } finally {
-                verify.close();
+                await verify.close();
             }
         } finally {
             await cleanup();
@@ -2362,16 +2480,18 @@ describe("PersistentSessionStore", () => {
     it("keeps workflows disabled across daemon restarts", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const sessionId = store.create({
-                cwd: "/tmp/rig-persistent-session-test",
-                workflowsEnabled: false,
-            }).id;
-            store.close();
+            const store = await PersistentSessionStore.open({ databasePath });
+            const sessionId = (
+                await store.create({
+                    cwd: "/tmp/rig-persistent-session-test",
+                    workflowsEnabled: false,
+                })
+            ).id;
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(sessionId);
+                const restored = await restoredStore.get(sessionId);
                 expect(restored?.snapshot().workflowsEnabled).toBe(false);
                 expect(() =>
                     restored?.launchWorkflow({
@@ -2382,7 +2502,7 @@ describe("PersistentSessionStore", () => {
                     }),
                 ).toThrow("Workflows are disabled for this session.");
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2392,7 +2512,7 @@ describe("PersistentSessionStore", () => {
     it("persists a Monty checkpoint and completed workflow calls across daemon restarts", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({
                 workflows: [
                     {
@@ -2416,12 +2536,12 @@ describe("PersistentSessionStore", () => {
                     },
                 ],
             });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(state.id);
+                const restored = await restoredStore.get(state.id);
                 expect(restored?.getWorkflow("workflow-before-restart")).toMatchObject({
                     error: "The workflow was interrupted when the local server stopped.",
                     status: "stopped",
@@ -2459,7 +2579,7 @@ describe("PersistentSessionStore", () => {
                 await restored?.waitForRun(notificationRun.data.runId);
                 await new Promise((resolve) => setImmediate(resolve));
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2474,30 +2594,32 @@ describe("PersistentSessionStore", () => {
                 textUserMessage("message-2", "Rewind this"),
                 textUserMessage("message-3", "Remove this too"),
             ];
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ contextMessages: messages, status: "completed" });
-            store.saveSession(state);
-            messages.forEach((message, position) => {
-                store.upsertMessage(state.id, {
-                    isPartial: false,
-                    message,
-                    position,
-                    runId: `run-${position + 1}`,
-                });
-            });
-            store.close();
+            await store.saveSession(state);
+            await Promise.all(
+                messages.map(async (message, position) => {
+                    await store.upsertMessage(state.id, {
+                        isPartial: false,
+                        message,
+                        position,
+                        runId: `run-${position + 1}`,
+                    });
+                }),
+            );
+            await store.close();
 
-            const rewindStore = new PersistentSessionStore({ databasePath });
-            rewindStore.get(state.id)?.rewind("message-2");
-            rewindStore.close();
+            const rewindStore = await PersistentSessionStore.open({ databasePath });
+            await (await rewindStore.get(state.id))?.rewind("message-2");
+            await rewindStore.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(state.id)?.snapshot().snapshot;
+                const restored = (await restoredStore.get(state.id))?.snapshot().snapshot;
                 expect(restored?.messages).toEqual([messages[0]]);
                 expect(restored?.contextMessages).toBeUndefined();
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2520,42 +2642,48 @@ describe("PersistentSessionStore", () => {
         };
         const visibleMessage = textUserMessage("visible-1", "The original full transcript.");
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ contextMessages: [summaryMessage] });
-            store.saveSession(state);
-            store.upsertMessage(state.id, {
+            await store.saveSession(state);
+            await store.upsertMessage(state.id, {
                 isPartial: false,
                 message: visibleMessage,
                 position: 0,
                 runId: "run-1",
             });
-            store.upsertMessage(state.id, {
+            await store.upsertMessage(state.id, {
                 isPartial: false,
                 message: summaryMessage,
                 position: 1,
                 runId: "run-1",
             });
-            store.close();
+            await store.close();
 
             let restoredRuntimeOptions:
-                | { contextMessages?: readonly unknown[]; messages?: readonly unknown[] }
+                | {
+                      contextMessages: readonly unknown[] | undefined;
+                      messages: readonly unknown[] | undefined;
+                  }
                 | undefined;
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 createRuntime: (options) => {
-                    restoredRuntimeOptions = options;
+                    restoredRuntimeOptions = {
+                        contextMessages: structuredClone(options.contextMessages),
+                        messages: structuredClone(options.messages),
+                    };
                     throw new Error("Captured resumed runtime options.");
                 },
                 databasePath,
             });
             try {
-                const restored = restoredStore.get(state.id);
+                const restored = await restoredStore.get(state.id);
 
                 expect(restored?.snapshot().snapshot.messages).toEqual([
                     visibleMessage,
                     summaryMessage,
                 ]);
                 expect(restored?.snapshot().snapshot.contextMessages).toEqual([summaryMessage]);
-                expect(() => restored?.externalControlContext()).toThrow(
+                await expect(restored?.compact()).rejects.toThrow(
                     "Captured resumed runtime options.",
                 );
                 expect(restoredRuntimeOptions).toMatchObject({
@@ -2563,7 +2691,7 @@ describe("PersistentSessionStore", () => {
                     messages: [summaryMessage],
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2575,31 +2703,33 @@ describe("PersistentSessionStore", () => {
         const first = textUserMessage("context-1", "First inference message.");
         const second = textUserMessage("context-2", "Second inference message.");
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ contextMessages: [first, second] });
-            store.saveSession(state);
-            store.saveSession({ ...state, contextMessages: [second] });
-            store.close();
+            await store.saveSession(state);
+            await store.saveSession({ ...state, contextMessages: [second] });
+            await store.close();
 
-            const database = new DatabaseSync(databasePath);
+            const database = openTestDatabase(databasePath);
             try {
                 expect(
-                    database
-                        .prepare("PRAGMA table_info(sessions)")
-                        .all()
-                        .map((column) => String(column.name)),
+                    (
+                        await queryTestRows<{ name: string }>(
+                            database,
+                            "PRAGMA table_info(sessions)",
+                        )
+                    ).map((column) => String(column.name)),
                 ).not.toContain("context_messages_json");
                 expect(
-                    database
-                        .prepare(
-                            `
+                    await queryTestRows(
+                        database,
+                        `
                             SELECT position, message_id, role, message_json
                             FROM session_context_messages
                             WHERE session_id = ?
                             ORDER BY position
                             `,
-                        )
-                        .all(state.id),
+                        [state.id],
+                    ),
                 ).toEqual([
                     {
                         message_id: second.id,
@@ -2609,14 +2739,16 @@ describe("PersistentSessionStore", () => {
                     },
                 ]);
             } finally {
-                database.close();
+                await database.close();
             }
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(state.id)?.state().contextMessages).toEqual([second]);
+                expect((await restoredStore.get(state.id))?.state().contextMessages).toEqual([
+                    second,
+                ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2632,14 +2764,14 @@ describe("PersistentSessionStore", () => {
             role: "user",
         };
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ contextMessages: [internalContinuation] });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(state.id);
+                const restored = await restoredStore.get(state.id);
 
                 expect(restored?.state().contextMessages).toEqual([internalContinuation]);
                 expect(restored?.snapshot().snapshot.messages).toEqual([]);
@@ -2648,7 +2780,7 @@ describe("PersistentSessionStore", () => {
                     "Continue after the inference crash.",
                 );
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2701,14 +2833,14 @@ describe("PersistentSessionStore", () => {
                 );
             };
 
-            store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const session = store.create({
+            store = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const session = await store.create({
                 cwd: "/tmp/rig-internal-crash-continuation",
                 modelId: model.id,
                 permissionMode: "full_access",
                 providerId: "claude",
             });
-            const submitted = session.submit({ text: "Recover this response." });
+            const submitted = await session.submit({ text: "Recover this response." });
             await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
                 errorMessage: "WebSocket error",
                 status: "error",
@@ -2730,15 +2862,15 @@ describe("PersistentSessionStore", () => {
                 "Continue after the inference crash.",
             );
 
-            store.close();
+            await store.close();
             store = undefined;
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: catalog,
             });
             try {
-                const restored = restoredStore.get(session.id);
+                const restored = await restoredStore.get(session.id);
                 expect(restored).toBeDefined();
                 await expect(restored?.waitForRun(submitted.runId)).resolves.toEqual({
                     errorMessage: "WebSocket error",
@@ -2764,10 +2896,10 @@ describe("PersistentSessionStore", () => {
                     "Continue after the inference crash.",
                 );
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
-            store?.close();
+            await store?.close();
             globalThis.fetch = originalFetch;
             if (originalInferenceUrl === undefined) delete process.env.RIG_GYM_INFERENCE_URL;
             else process.env.RIG_GYM_INFERENCE_URL = originalInferenceUrl;
@@ -2780,17 +2912,19 @@ describe("PersistentSessionStore", () => {
     it("persists the permission mode in session details and summaries", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ permissionMode: "read_only" });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(state.id)?.snapshot().permissionMode).toBe("read_only");
-                expect(restoredStore.list().at(0)?.permissionMode).toBe("read_only");
+                expect((await restoredStore.get(state.id))?.snapshot().permissionMode).toBe(
+                    "read_only",
+                );
+                expect((await restoredStore.list()).at(0)?.permissionMode).toBe("read_only");
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2800,21 +2934,21 @@ describe("PersistentSessionStore", () => {
     it("reports the stored context size in session summaries", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({
                 sessionTokenCount: { lastContextTokens: 34_500, totalTokens: 120_000 },
             });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.list().at(0)?.sessionTokenCount).toEqual({
+                expect((await restoredStore.list()).at(0)?.sessionTokenCount).toEqual({
                     lastContextTokens: 34_500,
                     totalTokens: 120_000,
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2824,20 +2958,20 @@ describe("PersistentSessionStore", () => {
     it("persists the selected service tier in session details and summaries", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ serviceTier: "fast" });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(state.id)?.snapshot()).toMatchObject({
+                expect((await restoredStore.get(state.id))?.snapshot()).toMatchObject({
                     serviceTier: "fast",
                     snapshot: { serviceTier: "fast" },
                 });
-                expect(restoredStore.list().at(0)?.serviceTier).toBe("fast");
+                expect((await restoredStore.list()).at(0)?.serviceTier).toBe("fast");
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2881,29 +3015,32 @@ describe("PersistentSessionStore", () => {
                 );
             };
 
-            openStore = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const created = openStore.create({
+            openStore = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const created = await openStore.create({
                 cwd: "/tmp/rig-fast-persistence-test",
                 modelId: model.id,
                 providerId: "gym",
                 serviceTier: "fast",
             });
-            openStore.saveSession({
+            await openStore.saveSession({
                 ...created.state(),
                 title: "Fast persistence",
                 titleStatus: "ready",
             });
             const sessionId = created.id;
-            openStore.close();
+            await openStore.close();
             openStore = undefined;
 
-            openStore = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const fastSession = openStore.get(sessionId);
+            openStore = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const fastSession = await openStore.get(sessionId);
             expect(fastSession?.snapshot()).toMatchObject({
                 serviceTier: "fast",
                 snapshot: { serviceTier: "fast" },
             });
-            const fastRun = fastSession?.submit({ text: "Use fast inference." });
+            const fastRun =
+                fastSession === undefined
+                    ? undefined
+                    : await fastSession.submit({ text: "Use fast inference." });
             expect(fastRun).toBeDefined();
             if (fastRun === undefined || fastSession === undefined) {
                 throw new Error("Expected the restored fast session.");
@@ -2915,26 +3052,31 @@ describe("PersistentSessionStore", () => {
             expect(inferenceRequests).toHaveLength(1);
             expect(inferenceRequests[0]?.options.serviceTier).toBe("fast");
 
-            fastSession.changeServiceTier({});
+            await fastSession.changeServiceTier({});
             expect(fastSession.snapshot().serviceTier).toBeUndefined();
-            openStore.close();
+            await openStore.close();
             openStore = undefined;
 
-            const disabledDatabase = new DatabaseSync(databasePath);
+            const disabledDatabase = openTestDatabase(databasePath);
             try {
                 expect(
-                    disabledDatabase
-                        .prepare("SELECT service_tier FROM sessions WHERE id = ?")
-                        .get(sessionId),
+                    await queryTestRow(
+                        disabledDatabase,
+                        "SELECT service_tier FROM sessions WHERE id = ?",
+                        [sessionId],
+                    ),
                 ).toEqual({ service_tier: null });
             } finally {
-                disabledDatabase.close();
+                await disabledDatabase.close();
             }
 
-            openStore = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            const normalSession = openStore.get(sessionId);
+            openStore = await PersistentSessionStore.open({ databasePath, modelCatalog: catalog });
+            const normalSession = await openStore.get(sessionId);
             expect(normalSession?.snapshot().serviceTier).toBeUndefined();
-            const normalRun = normalSession?.submit({ text: "Use normal inference." });
+            const normalRun =
+                normalSession === undefined
+                    ? undefined
+                    : await normalSession.submit({ text: "Use normal inference." });
             expect(normalRun).toBeDefined();
             if (normalRun === undefined || normalSession === undefined) {
                 throw new Error("Expected the restored normal session.");
@@ -2946,7 +3088,7 @@ describe("PersistentSessionStore", () => {
             expect(inferenceRequests).toHaveLength(2);
             expect(inferenceRequests[1]?.options.serviceTier).toBeUndefined();
         } finally {
-            openStore?.close();
+            await openStore?.close();
             globalThis.fetch = originalFetch;
             if (originalInferenceUrl === undefined) {
                 delete process.env.RIG_GYM_INFERENCE_URL;
@@ -2960,7 +3102,7 @@ describe("PersistentSessionStore", () => {
     it("persists goal state across daemon restarts", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({
                 goal: {
                     createdAt: 1_700_000_000_000,
@@ -2969,14 +3111,14 @@ describe("PersistentSessionStore", () => {
                     updatedAt: 1_700_000_001_000,
                 },
             });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(state.id)?.snapshot().goal).toEqual(state.goal);
+                expect((await restoredStore.get(state.id))?.snapshot().goal).toEqual(state.goal);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -2986,23 +3128,22 @@ describe("PersistentSessionStore", () => {
     it("persists lifecycle and unread session behavior across daemon restarts", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({
                 archived: true,
                 trackUnread: true,
                 unread: { reason: "turn_finished", since: 1_700_000_000_000 },
             });
-            store.saveSession(state);
-            store.close();
+            await store.saveSession(state);
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get(state.id)?.snapshot()).toMatchObject({
+                expect((await restoredStore.get(state.id))?.snapshot()).toMatchObject({
                     archived: true,
                     trackUnread: true,
                     unread: state.unread,
                 });
-                expect(restoredStore.list()).toMatchObject([
+                expect(await restoredStore.list()).toMatchObject([
                     {
                         archived: true,
                         id: state.id,
@@ -3011,7 +3152,7 @@ describe("PersistentSessionStore", () => {
                     },
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3021,8 +3162,8 @@ describe("PersistentSessionStore", () => {
     it("persists completed structured question events without reviving the prompt", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-persistent-session-test" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-persistent-session-test" });
             const pending = session.requestUserInput({
                 requestId: "question-1",
                 questions: [
@@ -3038,14 +3179,19 @@ describe("PersistentSessionStore", () => {
                     },
                 ],
             });
-            session.answerUserInput("question-1", { answers: { database: ["SQLite"] } });
+            await vi.waitFor(() =>
+                expect(session.snapshot().pendingUserInputs).toEqual([
+                    expect.objectContaining({ requestId: "question-1" }),
+                ]),
+            );
+            await session.answerUserInput("question-1", { answers: { database: ["SQLite"] } });
             await pending;
             const sessionId = session.id;
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(sessionId);
+                const restored = await restoredStore.get(sessionId);
                 expect(restored?.snapshot().pendingUserInputs).toEqual([]);
                 expect(restored?.events.since(undefined)?.map((event) => event.type)).toEqual([
                     "session_created",
@@ -3053,7 +3199,7 @@ describe("PersistentSessionStore", () => {
                     "user_input_resolved",
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3063,17 +3209,17 @@ describe("PersistentSessionStore", () => {
     it("persists task state and does not reuse deleted task identifiers", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const session = store.create({ cwd: "/tmp/rig-persistent-session-test" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const session = await store.create({ cwd: "/tmp/rig-persistent-session-test" });
             session.createTask({ subject: "First", description: "Do the first task." });
             session.createTask({ subject: "Second", description: "Do the second task." });
             session.updateTask("2", { status: "deleted" });
             const sessionId = session.id;
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(sessionId);
+                const restored = await restoredStore.get(sessionId);
                 expect(restored?.listTasks()).toEqual([
                     expect.objectContaining({ id: "1", subject: "First" }),
                 ]);
@@ -3084,7 +3230,7 @@ describe("PersistentSessionStore", () => {
                     }).id,
                 ).toBe("3");
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3112,7 +3258,7 @@ describe("PersistentSessionStore", () => {
             providers: [{ providerId: "codex", models: [availableModel] }],
         };
         try {
-            const store = new PersistentSessionStore({
+            const store = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: {
                     defaultModelId: availableModel.id,
@@ -3124,33 +3270,35 @@ describe("PersistentSessionStore", () => {
                     ],
                 },
             });
-            const sessionId = store.create({
-                cwd: "/tmp/rig-persistent-session-test",
-                effort: "max",
-                modelId: removedModel.id,
-                providerId: "bedrock",
-            }).id;
-            store.close();
+            const sessionId = (
+                await store.create({
+                    cwd: "/tmp/rig-persistent-session-test",
+                    effort: "max",
+                    modelId: removedModel.id,
+                    providerId: "bedrock",
+                })
+            ).id;
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: availableCatalog,
             });
             try {
-                expect(restoredStore.get(sessionId)?.snapshot()).toMatchObject({
+                expect((await restoredStore.get(sessionId))?.snapshot()).toMatchObject({
                     effort: "medium",
                     modelId: availableModel.id,
                     providerId: "codex",
                 });
                 expect(
-                    restoredStore.list().find((session) => session.id === sessionId),
+                    (await restoredStore.list()).find((session) => session.id === sessionId),
                 ).toMatchObject({
                     effort: "medium",
                     modelId: availableModel.id,
                     providerId: "codex",
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3160,7 +3308,7 @@ describe("PersistentSessionStore", () => {
     it("marks running sessions as interrupted after a restart", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({
+            const store = await PersistentSessionStore.open({
                 databasePath,
                 now: () => 1_700_000_000_000,
             });
@@ -3171,22 +3319,22 @@ describe("PersistentSessionStore", () => {
                 text: "queued prompt",
                 userMessage: textUserMessage("message-2", "queued prompt"),
             };
-            store.saveSession(
+            await store.saveSession(
                 sessionState({
                     activeRunId: "run-1",
                     queuedRuns: [queuedRun],
                     status: "running",
                 }),
             );
-            store.insertQueuedRun("session-1", queuedRun);
-            store.close();
+            await store.insertQueuedRun("session-1", queuedRun);
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 now: () => 1_700_000_000_100,
             });
             try {
-                const restored = restoredStore.get("session-1");
+                const restored = await restoredStore.get("session-1");
                 const events = restored?.events.since(undefined) ?? [];
 
                 expect(restored?.snapshot().status).toBe("error");
@@ -3204,7 +3352,7 @@ describe("PersistentSessionStore", () => {
                     "run_error",
                 ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3214,9 +3362,9 @@ describe("PersistentSessionStore", () => {
     it("publishes a repaired child status to its parent after a restart", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(sessionState());
-            store.saveSession(
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(sessionState());
+            await store.saveSession(
                 sessionState({
                     activeRunId: "child-run-1",
                     agent: {
@@ -3231,24 +3379,27 @@ describe("PersistentSessionStore", () => {
                     status: "running",
                 }),
             );
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const parentEvents = restoredStore.get("session-1")?.events.since(undefined) ?? [];
-                const changed = parentEvents.find((event) => event.type === "subagent_changed");
-
-                expect(changed).toMatchObject({
-                    data: {
-                        subagent: {
-                            id: "subagent-1",
-                            status: "error",
+                const parent = await restoredStore.get("session-1");
+                await vi.waitFor(() => {
+                    const changed = parent?.events
+                        .since(undefined)
+                        ?.find((event) => event.type === "subagent_changed");
+                    expect(changed).toMatchObject({
+                        data: {
+                            subagent: {
+                                id: "subagent-1",
+                                status: "error",
+                            },
                         },
-                    },
-                    type: "subagent_changed",
+                        type: "subagent_changed",
+                    });
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3258,9 +3409,9 @@ describe("PersistentSessionStore", () => {
     it("restores a parent metadata boundary with a persisted child without recursion", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(sessionState());
-            store.saveSession(
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(sessionState());
+            await store.saveSession(
                 sessionState({
                     agent: {
                         depth: 1,
@@ -3274,25 +3425,27 @@ describe("PersistentSessionStore", () => {
                     status: "completed",
                 }),
             );
-            store.get("session-1")?.markInterrupted({
+            await (
+                await store.get("session-1")
+            )?.markInterrupted({
                 interruptedAt: 1_700_000_000_000,
                 message: "The parent was interrupted before restart.",
                 reason: "shutdown",
                 runId: "parent-run-1",
             });
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.get("session-1")?.snapshot()).toMatchObject({
+                expect((await restoredStore.get("session-1"))?.snapshot()).toMatchObject({
                     id: "session-1",
                     interruption: { runId: "parent-run-1" },
                 });
-                expect(restoredStore.get("subagent-1")?.agentMetadata()).toMatchObject({
+                expect((await restoredStore.get("subagent-1"))?.agentMetadata()).toMatchObject({
                     parentSessionId: "session-1",
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3324,8 +3477,11 @@ describe("PersistentSessionStore", () => {
                 id: "old-response",
                 role: "agent",
             } as const;
-            const store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
-            store.saveSession(
+            const store = await PersistentSessionStore.open({
+                databasePath,
+                modelCatalog: catalog,
+            });
+            await store.saveSession(
                 sessionState({
                     modelId: model.id,
                     models: [model],
@@ -3334,7 +3490,7 @@ describe("PersistentSessionStore", () => {
                     titleStatus: "ready",
                 }),
             );
-            store.saveSession(
+            await store.saveSession(
                 sessionState({
                     agent: {
                         depth: 1,
@@ -3355,19 +3511,19 @@ describe("PersistentSessionStore", () => {
                     titleStatus: "ready",
                 }),
             );
-            store.upsertMessage("subagent-1", {
+            await store.upsertMessage("subagent-1", {
                 isPartial: false,
                 message: oldTask,
                 position: 0,
                 runId: "old-run",
             });
-            store.upsertMessage("subagent-1", {
+            await store.upsertMessage("subagent-1", {
                 isPartial: false,
                 message: oldResponse,
                 position: 1,
                 runId: "old-run",
             });
-            store.close();
+            await store.close();
 
             process.env.RIG_GYM_INFERENCE_URL = "http://gym.test/inference";
             globalThis.fetch = async (_input, init) => {
@@ -3409,27 +3565,31 @@ describe("PersistentSessionStore", () => {
             };
 
             const taskDrain = new TrackedTaskDrain();
-            restoredStore = new PersistentSessionStore({
+            restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: catalog,
                 taskDrain,
             });
-            const parent = restoredStore.get("session-1");
+            const parent = await restoredStore.get("session-1");
             if (parent === undefined) throw new Error("Expected the restored parent session.");
-            const submitted = parent.submit({ text: "Ask the old worker to continue." });
+            const submitted = await parent.submit({ text: "Ask the old worker to continue." });
             await expect(parent.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
             });
 
-            const child = restoredStore.get("subagent-1");
+            const child = await restoredStore.get("subagent-1");
             if (child === undefined) throw new Error("Expected the restored child session.");
-            const followUpEvent = child.events
-                .since(undefined)
-                ?.find(
-                    (event): event is Extract<SessionEvent, { type: "message_submitted" }> =>
-                        event.type === "message_submitted" &&
-                        event.data.displayText === "Continue the persisted investigation.",
-                );
+            let followUpEvent: Extract<SessionEvent, { type: "message_submitted" }> | undefined;
+            await vi.waitFor(() => {
+                followUpEvent = child.events
+                    .since(undefined)
+                    ?.find(
+                        (event): event is Extract<SessionEvent, { type: "message_submitted" }> =>
+                            event.type === "message_submitted" &&
+                            event.data.displayText === "Continue the persisted investigation.",
+                    );
+                expect(followUpEvent).toBeDefined();
+            });
             const followUpRunId = followUpEvent?.data.runId;
             if (followUpRunId === undefined) throw new Error("Expected the child follow-up run.");
             await expect(child.waitForRun(followUpRunId)).resolves.toEqual({
@@ -3446,14 +3606,21 @@ describe("PersistentSessionStore", () => {
                     );
                 }),
             ).toBe(true);
+            await vi.waitFor(() =>
+                expect(
+                    parent.events
+                        .since(undefined)
+                        ?.filter((event) => event.type === "run_finished"),
+                ).toHaveLength(2),
+            );
             await restoredStore.prepareForShutdown("shutdown");
-            restoredStore.close();
+            await restoredStore.close();
             restoredStore = undefined;
         } finally {
             globalThis.fetch = originalFetch;
             if (originalInferenceUrl === undefined) delete process.env.RIG_GYM_INFERENCE_URL;
             else process.env.RIG_GYM_INFERENCE_URL = originalInferenceUrl;
-            restoredStore?.close();
+            await restoredStore?.close();
             await cleanup();
         }
     });
@@ -3461,10 +3628,10 @@ describe("PersistentSessionStore", () => {
     it("updates partial messages in place while streaming", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ status: "running" });
-            store.saveSession(state);
-            store.upsertMessage(state.id, {
+            await store.saveSession(state);
+            await store.upsertMessage(state.id, {
                 isPartial: true,
                 message: {
                     blocks: [{ text: "hel", type: "text" }],
@@ -3474,7 +3641,7 @@ describe("PersistentSessionStore", () => {
                 position: 0,
                 runId: "run-1",
             });
-            store.upsertMessage(state.id, {
+            await store.upsertMessage(state.id, {
                 isPartial: true,
                 message: {
                     blocks: [{ text: "hello", type: "text" }],
@@ -3484,11 +3651,11 @@ describe("PersistentSessionStore", () => {
                 position: 0,
                 runId: "run-1",
             });
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(state.id);
+                const restored = await restoredStore.get(state.id);
 
                 expect(restored?.state().messages).toEqual([
                     {
@@ -3504,7 +3671,7 @@ describe("PersistentSessionStore", () => {
                 ]);
                 expect(restored?.snapshot().snapshot.messages).toEqual([]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3514,18 +3681,18 @@ describe("PersistentSessionStore", () => {
     it("keeps older transcript paging reachable when a partial message is restored", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const state = sessionState({ status: "running" });
-            store.saveSession(state);
+            await store.saveSession(state);
             for (let position = 0; position < 81; position += 1) {
-                store.upsertMessage(state.id, {
+                await store.upsertMessage(state.id, {
                     isPartial: false,
                     message: textUserMessage(`message-${String(position)}`, String(position)),
                     position,
                     runId: `run-${String(position)}`,
                 });
             }
-            store.upsertMessage(state.id, {
+            await store.upsertMessage(state.id, {
                 isPartial: true,
                 message: {
                     blocks: [{ text: "Still writing", type: "text" }],
@@ -3535,18 +3702,20 @@ describe("PersistentSessionStore", () => {
                 position: 81,
                 runId: "run-80",
             });
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get(state.id);
-                expect(restored?.transcriptWindow().complete).toBe(false);
+                const restored = await restoredStore.get(state.id);
+                expect((await restored?.transcriptWindow())?.complete).toBe(false);
                 expect(
                     new Set(restored?.state().messages.map((entry) => entry.position)).size,
                 ).toBe(restored?.state().messages.length);
-                expect(restored?.transcriptPage(10, "run-1")?.turns[0]?.runId).toBe("run-0");
+                expect((await restored?.transcriptPage(10, "run-1"))?.turns[0]?.runId).toBe(
+                    "run-0",
+                );
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3556,28 +3725,28 @@ describe("PersistentSessionStore", () => {
     it("pages forward from a persisted message event without skipping turns", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             try {
-                const session = store.create({ cwd: "/tmp/rig-persisted-forward" });
+                const session = await store.create({ cwd: "/tmp/rig-persisted-forward" });
                 for (const text of ["One.", "Two.", "Three."]) {
-                    session.submitContext({ text });
+                    await session.submitContext({ text });
                 }
                 const anchors = (session.events.since(undefined) ?? [])
                     .filter((event) => event.type === "message_submitted")
                     .map((event) => event.id);
 
-                const first = store.loadTranscriptSince(session.id, 2, anchors[0]!);
+                const first = await store.loadTranscriptSince(session.id, 2, anchors[0]!);
                 expect(JSON.stringify(first?.messages)).toContain("One.");
                 expect(JSON.stringify(first?.messages)).toContain("Two.");
                 expect(JSON.stringify(first?.messages)).not.toContain("Three.");
                 expect(first?.complete).toBe(false);
 
-                const second = store.loadTranscriptSince(session.id, 2, anchors[1]!);
+                const second = await store.loadTranscriptSince(session.id, 2, anchors[1]!);
                 expect(JSON.stringify(second?.messages)).toContain("Two.");
                 expect(JSON.stringify(second?.messages)).toContain("Three.");
                 expect(second?.complete).toBe(true);
             } finally {
-                store.close();
+                await store.close();
             }
         } finally {
             await cleanup();
@@ -3587,7 +3756,7 @@ describe("PersistentSessionStore", () => {
     it("stores the model, provider, and fast mode a queued run carries", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const queuedRun: PersistedQueuedRun = {
                 displayText: "queued prompt",
                 effort: "high",
@@ -3599,19 +3768,19 @@ describe("PersistentSessionStore", () => {
                 text: "queued prompt",
                 userMessage: textUserMessage("message-1", "queued prompt"),
             };
-            store.saveSession(sessionState({ queuedRuns: [queuedRun], status: "queued" }));
-            store.insertQueuedRun("session-1", queuedRun);
+            await store.saveSession(sessionState({ queuedRuns: [queuedRun], status: "queued" }));
+            await store.insertQueuedRun("session-1", queuedRun);
 
             // Reading the session back parses the stored row. Dropping any of these would run the
             // message on a different model than the one it asked for, wherever a stored queue is
             // resumed rather than discarded.
-            expect(store.get("session-1")?.state().queuedRuns[0]).toMatchObject({
+            expect((await store.get("session-1"))?.state().queuedRuns[0]).toMatchObject({
                 effort: "high",
                 modelId: "openai/queued",
                 providerId: "codex",
                 serviceTier: "fast",
             });
-            store.close();
+            await store.close();
         } finally {
             await cleanup();
         }
@@ -3620,7 +3789,7 @@ describe("PersistentSessionStore", () => {
     it("emits terminal events for accepted queued runs that are aborted before start", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
+            const store = await PersistentSessionStore.open({ databasePath });
             const queuedRun: PersistedQueuedRun = {
                 displayText: "queued prompt",
                 kind: "user",
@@ -3628,15 +3797,15 @@ describe("PersistentSessionStore", () => {
                 text: "queued prompt",
                 userMessage: textUserMessage("message-1", "queued prompt"),
             };
-            store.saveSession(
+            await store.saveSession(
                 sessionState({
                     queuedRuns: [queuedRun],
                     status: "queued",
                 }),
             );
-            store.insertQueuedRun("session-1", queuedRun);
+            await store.insertQueuedRun("session-1", queuedRun);
 
-            const session = store.get("session-1");
+            const session = await store.get("session-1");
             const response = await session?.abort();
             const events = session?.events.since(undefined) ?? [];
 
@@ -3646,7 +3815,7 @@ describe("PersistentSessionStore", () => {
                 data: { runId: "run-1" },
                 type: "run_error",
             });
-            store.close();
+            await store.close();
         } finally {
             await cleanup();
         }
@@ -3655,8 +3824,8 @@ describe("PersistentSessionStore", () => {
     it("lists sessions by most recent submitted message", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(
                 sessionState({
                     id: "older-session",
                     lastMessageAt: 1_700_000_000_000,
@@ -3664,7 +3833,7 @@ describe("PersistentSessionStore", () => {
                     titleStatus: "ready",
                 }),
             );
-            store.saveSession(
+            await store.saveSession(
                 sessionState({
                     id: "newer-session",
                     lastMessageAt: 1_700_000_001_000,
@@ -3673,7 +3842,7 @@ describe("PersistentSessionStore", () => {
                 }),
             );
 
-            const sessions = store.list({ limit: 1 });
+            const sessions = await store.list({ limit: 1 });
 
             expect(sessions).toEqual([
                 expect.objectContaining({
@@ -3681,7 +3850,7 @@ describe("PersistentSessionStore", () => {
                     title: "Newer Work",
                 }),
             ]);
-            store.close();
+            await store.close();
         } finally {
             await cleanup();
         }
@@ -3690,8 +3859,8 @@ describe("PersistentSessionStore", () => {
     it("persists settled session metadata", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(
                 sessionState({
                     title: "Persisted Title",
                     titleStatus: "ready",
@@ -3700,12 +3869,12 @@ describe("PersistentSessionStore", () => {
                     metadataUpdatedAt: 1_700_000_002_000,
                 }),
             );
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const restored = restoredStore.get("session-1");
-                const summary = restoredStore.list({ limit: 1 }).at(0);
+                const restored = await restoredStore.get("session-1");
+                const summary = (await restoredStore.list({ limit: 1 })).at(0);
 
                 expect(restored?.snapshot()).toMatchObject({
                     title: "Persisted Title",
@@ -3722,7 +3891,7 @@ describe("PersistentSessionStore", () => {
                     metadataUpdatedAt: 1_700_000_002_000,
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3733,7 +3902,10 @@ describe("PersistentSessionStore", () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const catalog = testModelCatalog();
         try {
-            const store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
+            const store = await PersistentSessionStore.open({
+                databasePath,
+                modelCatalog: catalog,
+            });
             const userMessage = textUserMessage("message-1", "started");
             const state = sessionState({
                 effort: "low",
@@ -3748,23 +3920,23 @@ describe("PersistentSessionStore", () => {
                 modelId: "openai/test",
                 models: catalog.models,
             });
-            store.saveSession(state);
+            await store.saveSession(state);
             const entry = state.messages[0];
             expect(entry).toBeDefined();
             if (entry !== undefined) {
-                store.upsertMessage(state.id, entry);
+                await store.upsertMessage(state.id, entry);
             }
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 databasePath,
                 modelCatalog: catalog,
             });
             try {
-                const restored = restoredStore.get(state.id);
+                const restored = await restoredStore.get(state.id);
 
                 expect(restored?.snapshot().modelLocked).toBe(false);
-                restored?.changeModel({ effort: "high", modelId: "anthropic/test" });
+                await restored?.changeModel({ effort: "high", modelId: "anthropic/test" });
 
                 const snapshot = restored?.snapshot();
                 const events = restored?.events.since(undefined) ?? [];
@@ -3782,7 +3954,7 @@ describe("PersistentSessionStore", () => {
                     type: "session_configuration_changed",
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3792,33 +3964,33 @@ describe("PersistentSessionStore", () => {
     it("persists a forked conversation under a new session", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            const source = store.create({ cwd: "/tmp/rig-persistent-session-test" });
+            const store = await PersistentSessionStore.open({ databasePath });
+            const source = await store.create({ cwd: "/tmp/rig-persistent-session-test" });
             const state = source.state();
             const message = textUserMessage("message-1", "Preserve this conversation.");
-            store.upsertMessage(source.id, {
+            await store.upsertMessage(source.id, {
                 isPartial: false,
                 message,
                 position: 0,
                 runId: "run-1",
             });
-            store.close();
+            await store.close();
 
-            const forkStore = new PersistentSessionStore({ databasePath });
-            const forked = forkStore.fork(state.id);
+            const forkStore = await PersistentSessionStore.open({ databasePath });
+            const forked = await forkStore.fork(state.id);
             expect(forked?.id).not.toBe(state.id);
             expect(forked?.snapshot().snapshot.messages).toEqual([message]);
             const forkedId = forked?.id;
-            forkStore.close();
+            await forkStore.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
                 expect(forkedId).toBeDefined();
-                expect(restoredStore.get(forkedId ?? "")?.snapshot().snapshot.messages).toEqual([
-                    message,
-                ]);
+                expect(
+                    (await restoredStore.get(forkedId ?? ""))?.snapshot().snapshot.messages,
+                ).toEqual([message]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3828,24 +4000,24 @@ describe("PersistentSessionStore", () => {
     it("repairs interrupted title generation on restart", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(
                 sessionState({
                     titleStatus: "generating",
                 }),
             );
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const summary = restoredStore.list({ limit: 1 }).at(0);
+                const summary = (await restoredStore.list({ limit: 1 })).at(0);
 
                 expect(summary).toMatchObject({
                     titleStatus: "error",
                 });
                 expect(summary?.titleError).toContain("interrupted");
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3855,9 +4027,9 @@ describe("PersistentSessionStore", () => {
     it("persists subagent lineage while keeping child histories out of the main list", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(sessionState());
-            store.saveSession(
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(sessionState());
+            await store.saveSession(
                 sessionState({
                     agent: {
                         depth: 1,
@@ -3896,7 +4068,7 @@ describe("PersistentSessionStore", () => {
                     },
                 }),
             );
-            store.saveSession(
+            await store.saveSession(
                 sessionState({
                     agent: {
                         depth: 2,
@@ -3913,12 +4085,14 @@ describe("PersistentSessionStore", () => {
                     totalTokens: 600,
                 }),
             );
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                expect(restoredStore.list().map((session) => session.id)).toEqual(["session-1"]);
-                expect(restoredStore.listSubagents("session-1")).toEqual([
+                expect((await restoredStore.list()).map((session) => session.id)).toEqual([
+                    "session-1",
+                ]);
+                expect(await restoredStore.listSubagents("session-1")).toEqual([
                     expect.objectContaining({
                         activeSince: 1_500,
                         depth: 1,
@@ -3950,10 +4124,10 @@ describe("PersistentSessionStore", () => {
                         totalTokens: 600,
                     }),
                 ]);
-                expect(restoredStore.listSubagents("subagent-1")).toEqual([
+                expect(await restoredStore.listSubagents("subagent-1")).toEqual([
                     expect.objectContaining({ id: "subagent-2" }),
                 ]);
-                expect(restoredStore.get("subagent-1")?.snapshot().agent).toEqual({
+                expect((await restoredStore.get("subagent-1"))?.snapshot().agent).toEqual({
                     depth: 1,
                     description: "Inspect the persistence layer",
                     parentSessionId: "session-1",
@@ -3962,14 +4136,14 @@ describe("PersistentSessionStore", () => {
                     taskName: "inspect_persistence",
                     type: "subagent",
                 });
-                expect(() =>
-                    restoredStore.get("subagent-1")?.requestUserInput({
+                await expect(
+                    (await restoredStore.get("subagent-1"))?.requestUserInput({
                         requestId: "question-1",
                         questions: [],
                     }),
-                ).toThrow("Only the primary session");
+                ).rejects.toThrow("Only the primary session");
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -3979,11 +4153,11 @@ describe("PersistentSessionStore", () => {
     it("drops a stored position from a subagent instead of listing it as a chat", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
-            const store = new PersistentSessionStore({ databasePath });
-            store.saveSession(sessionState());
+            const store = await PersistentSessionStore.open({ databasePath });
+            await store.saveSession(sessionState());
             // A position written by an older build, when a subagent was given a
             // key of its own. It is still not a chat in any list.
-            store.saveSession(
+            await store.saveSession(
                 sessionState({
                     agent: {
                         depth: 1,
@@ -3998,17 +4172,19 @@ describe("PersistentSessionStore", () => {
                     status: "completed",
                 }),
             );
-            store.close();
+            await store.close();
 
-            const restoredStore = new PersistentSessionStore({ databasePath });
+            const restoredStore = await PersistentSessionStore.open({ databasePath });
             try {
-                const subagent = restoredStore.get("subagent-1");
+                const subagent = await restoredStore.get("subagent-1");
 
                 expect(subagent?.snapshot().orderKey).toBeUndefined();
                 expect(subagent?.summary().orderKey).toBeUndefined();
-                expect(restoredStore.list().map((session) => session.id)).toEqual(["session-1"]);
+                expect((await restoredStore.list()).map((session) => session.id)).toEqual([
+                    "session-1",
+                ]);
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await cleanup();
@@ -4183,27 +4359,18 @@ function sessionEvent(
     } as SessionEvent;
 }
 
-function insertSessionEvent(
-    database: DatabaseSync,
+async function insertSessionEvent(
+    database: Client,
     sessionId: string,
     id: string,
     type: SessionEvent["type"],
     data: unknown,
-): void {
+): Promise<void> {
     const record = data as Record<string, unknown>;
     const message = record.message as { id?: unknown } | undefined;
     const inner = record.event as { toolCallId?: unknown } | undefined;
-    database
-        .prepare(
-            `
-            INSERT INTO session_events (
-                session_id, event_id, type, created_at_ms, data_json,
-                run_id, message_id, tool_call_id
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-        )
-        .run(
+    await database.execute({
+        args: [
             sessionId,
             id,
             type,
@@ -4212,20 +4379,72 @@ function insertSessionEvent(
             typeof record.runId === "string" ? record.runId : null,
             typeof message?.id === "string" ? message.id : null,
             typeof inner?.toolCallId === "string" ? inner.toolCallId : null,
-        );
+        ],
+        sql: `
+            INSERT INTO session_events (
+                session_id, event_id, type, created_at_ms, data_json,
+                run_id, message_id, tool_call_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+    });
 }
 
-function insertEvent<TType extends import("../../protocol/index.js").SessionEvent["type"]>(
-    database: DatabaseSync,
+async function insertEvent<TType extends import("../../protocol/index.js").SessionEvent["type"]>(
+    database: Client,
     sessionId: string,
     eventId: string,
     type: TType,
     createdAt: number,
     data: Extract<import("../../protocol/index.js").SessionEvent, { type: TType }>["data"],
-): void {
-    database
-        .prepare(
-            "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, ?, ?, ?)",
-        )
-        .run(sessionId, eventId, type, createdAt, JSON.stringify(data));
+): Promise<void> {
+    await database.execute({
+        args: [sessionId, eventId, type, createdAt, JSON.stringify(data)],
+        sql: "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, ?, ?, ?)",
+    });
+}
+
+function openTestDatabase(databasePath: string): Client {
+    return createClient({ url: pathToFileURL(databasePath).href });
+}
+
+async function expectErrorChainToContain(
+    operation: Promise<unknown>,
+    expectedMessage: string,
+): Promise<void> {
+    let rejection: unknown;
+    try {
+        await operation;
+    } catch (error) {
+        rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    const messages: string[] = [];
+    const seen = new Set<unknown>();
+    let current = rejection;
+    while (current instanceof Error && !seen.has(current)) {
+        seen.add(current);
+        messages.push(current.message);
+        current = current.cause;
+    }
+    expect(messages.join("\n")).toContain(expectedMessage);
+}
+
+async function queryTestRow<T>(
+    database: Client,
+    statement: string,
+    args: InArgs = [],
+): Promise<T | undefined> {
+    const result = await database.execute({ args, sql: statement });
+    return result.rows[0] as unknown as T | undefined;
+}
+
+async function queryTestRows<T>(
+    database: Client,
+    statement: string,
+    args: InArgs = [],
+): Promise<T[]> {
+    const result = await database.execute({ args, sql: statement });
+    return result.rows as unknown as T[];
 }

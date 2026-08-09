@@ -16,7 +16,7 @@ import { InMemorySession } from "../InMemorySession.js";
  * visible as pending rather than already applied.
  */
 describe("InMemorySession queued configuration", () => {
-    it("discards a cached inference runtime when its credential scope refreshes", () => {
+    it("discards a cached inference runtime when its credential scope refreshes", async () => {
         const { capableModel, catalog } = testModels();
         const events: unknown[] = [];
         const runtimes: CodingAssistantRuntime[] = [];
@@ -45,10 +45,10 @@ describe("InMemorySession queued configuration", () => {
             request: { cwd: "/tmp/rig-inference-scope-refresh" },
         });
 
-        const firstContext = session.externalControlContext();
+        const firstContext = await runtimeContext(session);
         const close = vi.spyOn(runtimes[0]!.agent, "close");
 
-        session.refreshInferenceScope({
+        await session.refreshInferenceScope({
             defaultModelId: capableModel.id,
             defaultProviderId: "test",
             models: [capableModel, catalog.models[1]!],
@@ -58,25 +58,28 @@ describe("InMemorySession queued configuration", () => {
             ],
         });
 
-        expect(close).toHaveBeenCalledOnce();
-        expect(session.externalControlContext()).not.toBe(firstContext);
+        await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+        expect(await runtimeContext(session)).not.toBe(firstContext);
         expect(runtimes).toHaveLength(2);
         expect(runtimes[1]).not.toBe(runtimes[0]);
-        expect(events).toContainEqual(
-            expect.objectContaining({
-                data: expect.objectContaining({
-                    session: expect.objectContaining({
-                        modelCatalog: expect.objectContaining({
-                            providers: [
-                                expect.objectContaining({ providerId: "test" }),
-                                expect.objectContaining({ providerId: "extra" }),
-                            ],
+        await vi.waitFor(() =>
+            expect(events).toContainEqual(
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        session: expect.objectContaining({
+                            modelCatalog: expect.objectContaining({
+                                providers: [
+                                    expect.objectContaining({ providerId: "test" }),
+                                    expect.objectContaining({ providerId: "extra" }),
+                                ],
+                            }),
                         }),
                     }),
+                    type: "session_updated",
                 }),
-                type: "session_updated",
-            }),
+            ),
         );
+        await session.beginShutdown();
     });
 
     it("aborts active inference before retiring a rotated credential runtime", async () => {
@@ -87,7 +90,7 @@ describe("InMemorySession queued configuration", () => {
                 runtimes.push(runtime);
             },
         });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
         const close = vi.spyOn(runtimes[0]!.agent, "close");
         expect(session.snapshot().status).toBe("running");
@@ -111,7 +114,7 @@ describe("InMemorySession queued configuration", () => {
         await session.beginShutdown();
     });
 
-    it("falls back durably when a credential refresh removes the selected provider", () => {
+    it("falls back durably when a credential refresh removes the selected provider", async () => {
         const { capableModel, limitedModel } = testModels();
         const events: unknown[] = [];
         const session = new InMemorySession({
@@ -135,7 +138,7 @@ describe("InMemorySession queued configuration", () => {
             },
         });
 
-        session.refreshInferenceScope({
+        await session.refreshInferenceScope({
             defaultModelId: capableModel.id,
             defaultProviderId: "capable",
             models: [capableModel],
@@ -146,19 +149,22 @@ describe("InMemorySession queued configuration", () => {
             modelId: capableModel.id,
             providerId: "capable",
         });
-        expect(events).toContainEqual(
-            expect.objectContaining({
-                data: expect.objectContaining({
-                    changed: ["model"],
-                    modelId: capableModel.id,
-                    providerId: "capable",
+        await vi.waitFor(() =>
+            expect(events).toContainEqual(
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        changed: ["model"],
+                        modelId: capableModel.id,
+                        providerId: "capable",
+                    }),
+                    type: "session_configuration_changed",
                 }),
-                type: "session_configuration_changed",
-            }),
+            ),
         );
+        await session.beginShutdown();
     });
 
-    it("keeps the persisted credential binding when an owner ID collides with an extra", () => {
+    it("keeps the persisted credential binding when an owner ID collides with an extra", async () => {
         const { capableModel } = testModels();
         const ownerInstanceId = "aownerinstance00000000001";
         const extraOwnerInstanceId = "aextrainstance00000000001";
@@ -259,7 +265,7 @@ describe("InMemorySession queued configuration", () => {
             },
             processManager,
         });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         await session.changePermissionMode({ permissionMode: "read_only" });
@@ -286,7 +292,7 @@ describe("InMemorySession queued configuration", () => {
             } as unknown as AgentSessionManager,
             processManager,
         });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         const changing = session.changePermissionMode({ permissionMode: "read_only" });
@@ -334,7 +340,7 @@ describe("InMemorySession queued configuration", () => {
             } as unknown as AgentSessionManager,
             processManager,
         });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         const changing = session.changePermissionMode({ permissionMode: "read_only" });
@@ -364,7 +370,7 @@ describe("InMemorySession queued configuration", () => {
             new Error("could not stop process"),
         );
         const { session, started, release } = runningSession({ processManager });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         await expect(session.changePermissionMode({ permissionMode: "read_only" })).rejects.toThrow(
@@ -406,7 +412,7 @@ describe("InMemorySession queued configuration", () => {
             },
             processManager,
         });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         await expect(session.changePermissionMode({ permissionMode: "read_only" })).rejects.toThrow(
@@ -435,7 +441,7 @@ describe("InMemorySession queued configuration", () => {
             },
             processManager,
         });
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         const changing = session.changePermissionMode({ permissionMode: "read_only" });
@@ -451,16 +457,16 @@ describe("InMemorySession queued configuration", () => {
     it("validates reasoning against a model an earlier queued message has not applied yet", async () => {
         const { session, started, release } = runningSession();
 
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         // This one cannot start yet, so its model is still only a pending intent.
-        session.submit({ modelId: "test/limited", text: "Switch models." });
+        await session.submit({ modelId: "test/limited", text: "Switch models." });
         expect(session.state().queuedRuns).toHaveLength(1);
 
         // "high" suits the model selected right now, so validating against that model instead of
         // the one already queued would wrongly accept this.
-        expect(() => session.submit({ effort: "high", text: "Think hard." })).toThrow(
+        await expect(session.submit({ effort: "high", text: "Think hard." })).rejects.toThrow(
             "Model 'test/limited' does not support 'high' reasoning.",
         );
 
@@ -471,7 +477,7 @@ describe("InMemorySession queued configuration", () => {
     it("refuses to change the configuration by steering a running response", async () => {
         const { session, started, release } = runningSession();
 
-        session.submit({ text: "Start a long run." });
+        await session.submit({ text: "Start a long run." });
         await started.promise;
 
         // Steering reaches the model mid-run, which is exactly where a configuration change must
@@ -483,7 +489,7 @@ describe("InMemorySession queued configuration", () => {
             // Even a value the session already holds, so the rule cannot depend on current state.
             { modelId: "test/capable" },
         ]) {
-            expect(() => session.steer({ ...change, text: "Change it." })).toThrow(
+            await expect(session.steer({ ...change, text: "Change it." })).rejects.toThrow(
                 "can only be changed by submitting a message",
             );
         }
@@ -492,7 +498,7 @@ describe("InMemorySession queued configuration", () => {
         await session.beginShutdown();
     });
 
-    it("does not resend a message that a cross-provider switch already excluded from history", () => {
+    it("does not resend a message that a cross-provider switch already excluded from history", async () => {
         const codexModel = defineModel({
             defaultThinkingLevel: "off",
             id: "openai/codex",
@@ -519,7 +525,11 @@ describe("InMemorySession queued configuration", () => {
             request: { cwd: "/tmp/rig-queued-configuration", modelId: codexModel.id },
         });
 
-        session.submit({ modelId: claudeModel.id, providerId: "claude", text: "Only message." });
+        await session.submit({
+            modelId: claudeModel.id,
+            providerId: "claude",
+            text: "Only message.",
+        });
 
         // The switch summarized an empty history, so the context is empty rather than absent.
         // Absent would mean "the context is the visible transcript", which still holds this
@@ -527,7 +537,7 @@ describe("InMemorySession queued configuration", () => {
         expect(session.snapshot().snapshot.contextMessages).toEqual([]);
     });
 
-    it("keeps compatible fork checkpoints and normalizes incompatible ones", () => {
+    it("keeps compatible fork checkpoints and normalizes incompatible ones", async () => {
         const codexModel = defineModel({
             defaultThinkingLevel: "off",
             id: "openai/codex",
@@ -763,4 +773,10 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
         resolvePromise = resolve;
     });
     return { promise, resolve: (value) => resolvePromise(value as T) };
+}
+
+async function runtimeContext(
+    session: InMemorySession,
+): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
+    return await session.externalControlContext();
 }

@@ -3,23 +3,24 @@ import { count, eq } from "drizzle-orm";
 import { happyOutbox } from "../database/schema.js";
 import type { HappySessionProtocolMessage } from "../../happy/types.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export class HappySyncOutboxFullError extends Error {}
 
-export function happyOutboxEnqueue(
-    tx: TX,
+export async function happyOutboxEnqueue(
+    tx: DatabaseScope,
     input: {
         maxPendingMessages: number;
         messages: readonly HappySessionProtocolMessage[];
         now: () => number;
         sessionId: string;
     },
-): void {
+): Promise<void> {
     if (input.messages.length === 0) return;
-    inTx(tx, (tx) => {
+    await inTx(tx, async (tx) => {
         for (const message of input.messages) {
-            tx.insert(happyOutbox)
+            await tx
+                .insert(happyOutbox)
                 .values({
                     createdAtMs: input.now(),
                     localId: message.localId,
@@ -30,11 +31,13 @@ export function happyOutboxEnqueue(
                 .run();
         }
         const pendingCount =
-            tx
-                .select({ value: count() })
-                .from(happyOutbox)
-                .where(eq(happyOutbox.sessionId, input.sessionId))
-                .get()?.value ?? 0;
+            (
+                await tx
+                    .select({ value: count() })
+                    .from(happyOutbox)
+                    .where(eq(happyOutbox.sessionId, input.sessionId))
+                    .get()
+            )?.value ?? 0;
         if (pendingCount > input.maxPendingMessages) {
             throw new HappySyncOutboxFullError(
                 `Happy sync outbox is full for session ${input.sessionId}; reconnect before sending more messages.`,

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, waitForFile, type Gym } from "@slopus/rig-gym";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -87,28 +88,36 @@ function agentRequests(gym: Gym) {
 async function readSubmissions(
     gym: Gym,
 ): Promise<Array<{ delivery: string; displayText: string; runId: string }>> {
-    const script = String.raw`
+    const script = libsqlCommonJsScript(String.raw`
 const { existsSync } = require("node:fs");
-const { DatabaseSync } = require("node:sqlite");
 const databasePath = [
   "/home/rig/.server/sessions.sqlite",
   "/home/rig/.local/state/rig/sessions.sqlite",
   "/home/rig/.happy/rig/sessions.sqlite",
 ].find(existsSync);
 if (databasePath === undefined) throw new Error("Session database was not found.");
-const database = new DatabaseSync(databasePath, { readOnly: true });
-const session = database.prepare(
-  "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1"
-).get();
-const submissions = database.prepare(
-  "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'message_submitted' ORDER BY seq"
-).all(session.id).map(({ data_json }) => {
+const database = await openDatabase(databasePath, true);
+let submissions;
+try {
+const session = (
+    await database.execute(
+        "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
+    )
+).rows[0];
+submissions = (
+    await database.execute({
+        sql: "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'message_submitted' ORDER BY seq",
+        args: [session.id],
+    })
+).rows.map(({ data_json }) => {
   const data = JSON.parse(data_json);
   return { delivery: data.delivery, displayText: data.displayText, runId: data.runId };
 });
-database.close();
+} finally {
+    await database.close();
+}
 process.stdout.write(JSON.stringify(submissions));
-`;
+`);
     const result = await gym.runInContainer("node", ["-e", script]);
     expect(result.stderr).toBe("");
     return JSON.parse(result.stdout) as Array<{

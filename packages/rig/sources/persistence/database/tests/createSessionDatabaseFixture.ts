@@ -2,10 +2,13 @@ import { migrateSessionDatabase } from "../migrateSessionDatabase.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import { projects, sessions } from "../schema.js";
 
-export function createSessionDatabaseFixture(path: string, sessionId = "session-1"): void {
-    const opened = openSessionDatabase(path);
-    migrateSessionDatabase(opened.database);
-    opened.database
+export async function createSessionDatabaseFixture(
+    path: string,
+    sessionId = "session-1",
+): Promise<void> {
+    const opened = await openSessionDatabase(path);
+    await migrateSessionDatabase(opened.database);
+    await opened.database
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -28,7 +31,7 @@ export function createSessionDatabaseFixture(path: string, sessionId = "session-
             worktreeSupport: "unknown",
         })
         .run();
-    opened.database
+    await opened.database
         .insert(sessions)
         .values({
             agentId: "agent-1",
@@ -63,5 +66,5 @@ export function createSessionDatabaseFixture(path: string, sessionId = "session-
             workflowsJson: "[]",
         })
         .run();
-    opened.client.close();
+    await opened.database.close();
 }

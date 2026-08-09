@@ -267,7 +267,8 @@ export class PluginComputeRegistry {
     readonly #consumerGenerations = new Set<string>();
     readonly #idleTimeoutMs: number;
     readonly #instances = new Map<string, ComputeInstance>();
-    readonly #listeners = new Set<(event: PluginComputeRegistryEvent) => void>();
+    readonly #listeners = new Set<(event: PluginComputeRegistryEvent) => unknown>();
+    readonly #presentationOverrides = new Map<string, ComputeInstance | ComputeTombstone>();
     readonly #log: NonNullable<PluginComputeRegistryOptions["log"]>;
     readonly #maxInstances: number;
     readonly #maxLifetimeMs: number;
@@ -572,17 +573,25 @@ export class PluginComputeRegistry {
         return [
             ...[...this.#instances.values()]
                 .filter((instance) => instance.consumerGeneration === consumerGeneration)
-                .map((instance) => this.#toHappyComputeInstance(instance)),
+                .map((instance) =>
+                    this.#toHappyComputeInstance(
+                        this.#presentationOverrides.get(instance.id) ?? instance,
+                    ),
+                ),
             ...[...this.#tombstones.values()]
                 .filter((tombstone) => tombstone.consumerGeneration === consumerGeneration)
-                .map((tombstone) => this.#toHappyComputeInstance(tombstone)),
+                .map((tombstone) =>
+                    this.#toHappyComputeInstance(
+                        this.#presentationOverrides.get(tombstone.id) ?? tombstone,
+                    ),
+                ),
         ].sort(
             (left, right) =>
                 left.createdAt - right.createdAt || left.instanceId.localeCompare(right.instanceId),
         );
     }
 
-    subscribe(listener: (event: PluginComputeRegistryEvent) => void): () => void {
+    subscribe(listener: (event: PluginComputeRegistryEvent) => unknown): () => void {
         this.#listeners.add(listener);
         return () => this.#listeners.delete(listener);
     }
@@ -913,14 +922,24 @@ export class PluginComputeRegistry {
             workspaceSource: instance.workspaceSource,
         };
         this.#instances.set(instance.id, provisioning);
-        this.#emitPreparation(provisioning, "preparing_compute", message, "provisioning");
+        const published = this.#emitPreparation(
+            provisioning,
+            "preparing_compute",
+            message,
+            "provisioning",
+        );
         queueMicrotask(() => {
-            void this.#provisionInstance(provisioning.id, provisioning.attemptId);
+            void this.#provisionInstance(provisioning.id, provisioning.attemptId, published);
         });
         return provisioning;
     }
 
-    async #provisionInstance(instanceId: string, attemptId: string): Promise<void> {
+    async #provisionInstance(
+        instanceId: string,
+        attemptId: string,
+        initialPublication: Promise<void>,
+    ): Promise<void> {
+        await initialPublication;
         let registration: ComputeRegistration | undefined;
         try {
             let current = this.#currentProvisioning(instanceId, attemptId);
@@ -1127,6 +1146,7 @@ export class PluginComputeRegistry {
             state: "unprovisioned",
             workspaceSource: instance.workspaceSource,
         };
+        this.#presentationOverrides.set(instance.id, instance);
         this.#instances.set(instance.id, unprovisioned);
         this.#emitPreparation(instance, "failed", reason, "unprovisioned", {
             code: "preparing_compute",
@@ -1480,6 +1500,7 @@ export class PluginComputeRegistry {
             state: "ready",
             workspaceSource: current.workspaceSource,
         };
+        this.#presentationOverrides.set(current.id, current);
         this.#instances.set(current.id, ready);
         return ready;
     }
@@ -1546,6 +1567,7 @@ export class PluginComputeRegistry {
             state,
             workspaceSource: instance.workspaceSource,
         };
+        this.#presentationOverrides.set(instance.id, instance);
         this.#tombstones.set(instance.id, tombstone);
         while (this.#tombstones.size > this.#maxTombstones) {
             const oldest = this.#tombstones.keys().next().value;
@@ -1641,7 +1663,7 @@ export class PluginComputeRegistry {
         message: string,
         state: "failed" | "provisioning" | "ready" | "stopped" | "unavailable" | "unprovisioned",
         error?: HappyComputeError,
-    ): void {
+    ): Promise<void> {
         const telemetry =
             instance.state === "provisioning"
                 ? {
@@ -1673,7 +1695,7 @@ export class PluginComputeRegistry {
                       phase: telemetry.phase,
                   }
                 : error;
-        this.#emit({
+        return this.#emit({
             consumerGeneration: instance.consumerGeneration,
             createdAt: this.#now(),
             ...preparation,
@@ -1688,14 +1710,32 @@ export class PluginComputeRegistry {
         });
     }
 
-    #emit(event: PluginComputeRegistryEvent): void {
+    #emit(event: PluginComputeRegistryEvent): Promise<void> {
+        const deliveries: Promise<void>[] = [];
         for (const listener of this.#listeners) {
             try {
-                listener(event);
+                const delivery = listener(event);
+                deliveries.push(Promise.resolve(delivery).then(() => undefined));
             } catch {
                 // One event consumer cannot interrupt compute lifecycle transitions.
             }
         }
+        if (event.type !== "preparation") {
+            return Promise.resolve();
+        }
+        const override = this.#presentationOverrides.get(event.instanceId);
+        if (deliveries.length === 0) {
+            if (override !== undefined) {
+                this.#presentationOverrides.delete(event.instanceId);
+            }
+            return Promise.resolve();
+        }
+        return Promise.allSettled(deliveries).then(() => {
+            if (override === undefined) return;
+            if (this.#presentationOverrides.get(event.instanceId) === override) {
+                this.#presentationOverrides.delete(event.instanceId);
+            }
+        });
     }
 }
 

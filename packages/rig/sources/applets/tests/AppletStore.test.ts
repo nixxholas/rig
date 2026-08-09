@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import sharp from "sharp";
-import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { migrateSessionDatabase } from "../../persistence/database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { AppletInvalidError } from "../AppletInvalidError.js";
 import { AppletStore } from "../AppletStore.js";
+import { isDatabaseFailure } from "../../persistence/isDatabaseFailure.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 
@@ -25,7 +25,7 @@ describe("AppletStore", () => {
         await writeFile(join(source, "index.html"), "<h1>one</h1>");
         await writeFile(join(source, "icon.png"), icon);
 
-        const store = createStore(root);
+        const store = await createStore(root);
         const created = await store.applets.create({
             authorSessionId: "agent-1",
             description: "A dashboard",
@@ -59,7 +59,7 @@ describe("AppletStore", () => {
         await writeFile(join(source, "icon.png"), await iconPng());
         const databasePath = join(data, "sessions.db");
 
-        const first = createStore(data, databasePath);
+        const first = await createStore(data, databasePath);
         await expect(
             first.applets.create({
                 allowedScopes: ["session", "workspace"],
@@ -76,8 +76,8 @@ describe("AppletStore", () => {
             changeDescription: "Project-only lifetime",
             path: source,
         });
-        const restored = createStore(data, databasePath);
-        expect(restored.applets.get("dashboard")).toMatchObject({
+        const restored = await createStore(data, databasePath);
+        expect(await restored.applets.get("dashboard")).toMatchObject({
             allowedScopes: ["project"],
             currentVersion: 2,
         });
@@ -91,7 +91,7 @@ describe("AppletStore", () => {
         await writeFile(join(source, "outside.txt"), "outside");
         await symlink(join(source, "outside.txt"), join(source, "linked.txt"));
 
-        const store = createStore(root);
+        const store = await createStore(root);
         await expect(
             store.applets.create({
                 authorSessionId: "agent-1",
@@ -102,7 +102,7 @@ describe("AppletStore", () => {
                 purpose: "Track work",
             }),
         ).rejects.toBeInstanceOf(AppletInvalidError);
-        expect(store.applets.get("dashboard")).toBeUndefined();
+        expect(await store.applets.get("dashboard")).toBeUndefined();
     });
 
     it("rejects a symbolic link used as the required icon", async () => {
@@ -115,7 +115,7 @@ describe("AppletStore", () => {
         await writeFile(iconTarget, icon);
         await symlink(iconTarget, iconLink);
 
-        const store = createStore(root);
+        const store = await createStore(root);
         await expect(
             store.applets.create({
                 authorSessionId: "agent-1",
@@ -126,7 +126,7 @@ describe("AppletStore", () => {
                 purpose: "Track work",
             }),
         ).rejects.toBeInstanceOf(AppletInvalidError);
-        expect(store.applets.get("dashboard")).toBeUndefined();
+        expect(await store.applets.get("dashboard")).toBeUndefined();
     });
 
     it("reclaims a stranded pre-icon data directory without deleting it", async () => {
@@ -138,7 +138,7 @@ describe("AppletStore", () => {
         await writeFile(join(source, "index.html"), "<h1>new</h1>");
         await writeFile(join(source, "icon.png"), icon);
 
-        const store = createStore(root);
+        const store = await createStore(root);
         await expect(
             store.applets.create({
                 authorSessionId: "agent-1",
@@ -165,7 +165,7 @@ describe("AppletStore", () => {
         const icon = await iconPng();
         await writeFile(join(source, "index.html"), "<h1>one</h1>");
         await writeFile(join(source, "icon.png"), icon);
-        const store = createStore(root);
+        const store = await createStore(root);
         const request = {
             authorSessionId: "agent-1",
             description: "A dashboard",
@@ -196,27 +196,29 @@ describe("AppletStore", () => {
         await writeFile(join(root, "dashboard", "legacy.txt"), "legacy");
         await writeFile(join(source, "index.html"), "<h1>new</h1>");
         await writeFile(join(source, "icon.png"), icon);
-        const store = createStore(root);
-        store.database.run(
-            sql.raw(`
+        const store = await createStore(root);
+        await store.client.execute(`
             CREATE TRIGGER reject_applet_create
             BEFORE INSERT ON applets
             BEGIN
                 SELECT RAISE(ABORT, 'rejected applet');
             END
-        `),
-        );
+        `);
 
-        await expect(
-            store.applets.create({
+        const failure = await store.applets
+            .create({
                 authorSessionId: "agent-1",
                 description: "A dashboard",
                 iconPath: join(source, "icon.png"),
                 name: "dashboard",
                 path: source,
                 purpose: "Track work",
-            }),
-        ).rejects.toThrow("rejected applet");
+            })
+            .then(
+                () => undefined,
+                (error: unknown) => error,
+            );
+        expect(isDatabaseFailure(failure)).toBe(true);
         await expect(readFile(join(root, "dashboard", "legacy.txt"), "utf8")).resolves.toBe(
             "legacy",
         );
@@ -224,24 +226,25 @@ describe("AppletStore", () => {
     });
 });
 
-function createStore(
+async function createStore(
     root: string,
     databasePath = ":memory:",
-): {
-    database: ReturnType<typeof openSessionDatabase>["database"];
+): Promise<{
+    database: Awaited<ReturnType<typeof openSessionDatabase>>["database"];
+    client: Awaited<ReturnType<typeof openSessionDatabase>>["client"];
     applets: AppletStore;
-} {
-    const opened = openSessionDatabase(databasePath);
-    migrateSessionDatabase(opened.database);
+}> {
+    const opened = await openSessionDatabase(databasePath);
+    await migrateSessionDatabase(opened.database);
     const store = new AppletStore({
         environment: { HAPPY_APPLETS_DIRECTORY: root },
         publish: () => {},
         tx: () => opened.database,
     });
     cleanups.push(() => {
-        opened.client.close();
+        return opened.client.close();
     });
-    return { database: opened.database, applets: store };
+    return { client: opened.client, database: opened.database, applets: store };
 }
 
 async function iconPng(): Promise<Buffer> {

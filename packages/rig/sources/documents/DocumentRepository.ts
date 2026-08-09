@@ -43,8 +43,8 @@ export class DocumentError extends Error {
 export interface DocumentRepositoryOptions {
     database: SessionDatabase;
     now?: () => number;
-    onEvent?: (event: DocumentEvent) => void;
-    transaction?: <T>(body: (tx: TX) => T) => T;
+    onEvent?: (event: DocumentEvent) => void | Promise<void>;
+    transaction?: <T>(body: (tx: TX) => Promise<T>) => Promise<T>;
 }
 
 /** Opaque live documents whose only post-create mutation is one atomic CAS write. */
@@ -52,8 +52,8 @@ export class DocumentRepository {
     readonly #createEventId: () => string;
     readonly #database: SessionDatabase;
     readonly #now: () => number;
-    readonly #onEvent: ((event: DocumentEvent) => void) | undefined;
-    readonly #transaction: <T>(body: (tx: TX) => T) => T;
+    readonly #onEvent: ((event: DocumentEvent) => void | Promise<void>) | undefined;
+    readonly #transaction: <T>(body: (tx: TX) => Promise<T>) => Promise<T>;
 
     constructor(options: DocumentRepositoryOptions) {
         this.#database = options.database;
@@ -63,11 +63,14 @@ export class DocumentRepository {
         this.#transaction = options.transaction ?? ((body) => inTx(this.#database, body));
     }
 
-    getDocument(documentId: string): Document | undefined {
-        return queryDocument(this.#database, documentId);
+    async getDocument(documentId: string): Promise<Document | undefined> {
+        return queryDocument(this.#database.database, documentId);
     }
 
-    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document {
+    async createDocument(
+        request: CreateDocumentRequest,
+        createdBy: DocumentCreatedBy,
+    ): Promise<Document> {
         if (!Value.Check(createDocumentRequestSchema, request)) {
             throw new DocumentError("invalid_request", "The document request is invalid.");
         }
@@ -106,8 +109,8 @@ export class DocumentRepository {
             state: JSON.parse(stateJson) as unknown,
             unreadCursor: request.unreadCursor ?? null,
         });
-        return this.#transaction((tx) => {
-            const outcome = documentCreate(tx, {
+        return await this.#transaction(async (tx) => {
+            const outcome = await documentCreate(tx, {
                 createdBy,
                 fingerprint,
                 id,
@@ -125,17 +128,19 @@ export class DocumentRepository {
                     "That document or mutation identity was already used differently.",
                 );
             }
-            const document = queryDocument(tx, id)!;
-            if (outcome.outcome === "created") this.#publish(document, request.mutationId);
+            const document = (await queryDocument(tx, id))!;
+            if (outcome.outcome === "created") {
+                await this.#publish(document, request.mutationId);
+            }
             return document;
         });
     }
 
-    writeDocument(
+    async writeDocument(
         documentId: string,
         request: WriteDocumentRequest,
         expectedVersion: number,
-    ): Document | undefined {
+    ): Promise<Document | undefined> {
         if (!Value.Check(writeDocumentRequestSchema, request)) {
             throw new DocumentError("invalid_request", "The document write is invalid.");
         }
@@ -167,8 +172,8 @@ export class DocumentRepository {
             unreadCursor: request.unreadCursor === undefined ? "omitted" : request.unreadCursor,
             update: JSON.parse(updateJson) as unknown,
         });
-        return this.#transaction((tx) => {
-            const outcome = documentWrite(tx, {
+        return await this.#transaction(async (tx) => {
+            const outcome = await documentWrite(tx, {
                 expectedVersion,
                 fingerprint,
                 id: documentId,
@@ -196,31 +201,31 @@ export class DocumentRepository {
                     "That mutation ID was already used for a different document write.",
                 );
             }
-            const document = queryDocument(tx, documentId);
+            const document = await queryDocument(tx, documentId);
             if (outcome.outcome === "written" && document !== undefined) {
-                this.#publish(document, request.mutationId);
+                await this.#publish(document, request.mutationId);
             }
             return document;
         });
     }
 
-    documentUpdates(
+    async documentUpdates(
         documentId: string,
         request: ListDocumentUpdatesRequest,
-    ): DocumentUpdatePage | undefined {
+    ): Promise<DocumentUpdatePage | undefined> {
         if (!Value.Check(listDocumentUpdatesRequestSchema, request)) {
             throw new DocumentError("invalid_request", "The document update page is invalid.");
         }
         return queryDocumentUpdates(
-            this.#database,
+            this.#database.database,
             documentId,
             request.afterVersion,
             request.limit ?? 100,
         );
     }
 
-    #publish(document: Document, mutationId: string | undefined): void {
-        this.#onEvent?.({
+    async #publish(document: Document, mutationId: string | undefined): Promise<void> {
+        await this.#onEvent?.({
             createdAt: this.#now(),
             data: {
                 documentId: document.id,

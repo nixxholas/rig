@@ -2,7 +2,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { folderItems, folders, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { queryFolderChildren } from "./queryFolderChildren.js";
 
@@ -14,14 +14,14 @@ export type FolderMarkSharedResult =
     | { outcome: "not_root" };
 
 /** Marks an empty root as one Murmur group and moves it before every other root. */
-export function folderMarkShared(
-    tx: TX,
+export async function folderMarkShared(
+    tx: DatabaseScope,
     folderId: string,
     groupId: string,
     now: number,
-): FolderMarkSharedResult {
-    return inTx(tx, (tx) => {
-        const folder = tx
+): Promise<FolderMarkSharedResult> {
+    return await inTx(tx, async (tx) => {
+        const folder = await tx
             .select({
                 archivedAtMs: folders.archivedAtMs,
                 parentId: folders.parentId,
@@ -37,12 +37,12 @@ export function folderMarkShared(
         if (folder.sharedGroupId !== null) return { outcome: "group_conflict" };
         if (folder.parentId !== null) return { outcome: "not_root" };
         if (
-            tx
+            (await tx
                 .select({ id: folderItems.id })
                 .from(folderItems)
                 .where(and(eq(folderItems.folderId, folderId), isNull(folderItems.archivedAtMs)))
-                .get() !== undefined ||
-            tx
+                .get()) !== undefined ||
+            (await tx
                 .select({ id: sessions.id })
                 .from(sessions)
                 .where(
@@ -52,13 +52,16 @@ export function folderMarkShared(
                         eq(sessions.archived, false),
                     ),
                 )
-                .get() !== undefined
+                .get()) !== undefined
         ) {
             return { outcome: "contents_forbidden" };
         }
-        const first = queryFolderChildren(tx, null).find((candidate) => candidate.id !== folderId);
+        const first = (await queryFolderChildren(tx, null)).find(
+            (candidate) => candidate.id !== folderId,
+        );
         const orderKey = generateKeyBetween(null, first?.orderKey ?? null);
-        tx.update(folders)
+        await tx
+            .update(folders)
             .set({
                 orderKey,
                 sharedGroupId: groupId,

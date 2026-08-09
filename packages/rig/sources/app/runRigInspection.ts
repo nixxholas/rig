@@ -11,13 +11,13 @@ export interface RunRigInspectionOptions {
     rigVersion?: string;
 }
 
-export function runRigInspection(
+export async function runRigInspection(
     options: RunRigInspectionOptions = {},
-): RigCliInstallationInspection {
+): Promise<RigCliInstallationInspection> {
     const inspection: RigCliInstallationInspection = {
         cliProtocolVersion: RIG_PROTOCOL_VERSION,
         cliVersion: options.rigVersion ?? readPackageVersion(),
-        data: queryRigInstallationData(
+        data: await queryRigInstallationData(
             options.databasePath ?? getEnvironmentLocalServerPaths().databasePath,
         ),
         formatVersion: 1,

@@ -31,7 +31,9 @@ describe("GitStateTracker watching", () => {
             const repository = await createRepository();
             const published: GitChangeSnapshot[] = [];
             const tracker = new GitStateTracker({
-                onSnapshot: (_entity, snapshot) => published.push(snapshot),
+                onSnapshot: (_entity, snapshot) => {
+                    published.push(snapshot);
+                },
                 // A reconciliation poll this slow cannot be what delivers the change.
                 tuning: { debounceMs: 20, maximumDebounceMs: 50, reconcileIntervalMs: 600_000 },
             });
@@ -57,7 +59,9 @@ describe("GitStateTracker watching", () => {
         const repository = await createRepository();
         const published: GitChangeSnapshot[] = [];
         const tracker = new GitStateTracker({
-            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            onSnapshot: (_entity, snapshot) => {
+                published.push(snapshot);
+            },
             // External Git changes must eventually arrive even when the platform drops a watch
             // event. Production uses a 30-second reconciliation poll; shorten it for this test.
             tuning: { debounceMs: 20, maximumDebounceMs: 50, reconcileIntervalMs: 100 },

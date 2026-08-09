@@ -13,8 +13,8 @@ import type { RigProfileStore } from "../profiles/index.js";
 import type { SharingServiceContract } from "./SharingService.js";
 
 interface SharingLifecycleDatabase {
-    query<Result>(operation: (tx: TX) => Result): Result;
-    transaction<Result>(operation: (tx: TX) => Result): Result;
+    query<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
+    transaction<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
 }
 
 export interface SharingLifecycleServiceOptions {
@@ -26,7 +26,7 @@ export interface SharingLifecycleServiceOptions {
 }
 
 export interface ManagedSharingService extends SharingServiceContract {
-    bindProfile(profileId: string): void;
+    bindProfile(profileId: string): Promise<void>;
     close(): Promise<void>;
     start(): void;
 }
@@ -54,18 +54,22 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
         this.#resetState = options.resetState;
     }
 
-    configured(): boolean {
-        return this.#database.query(querySharingSettings) !== undefined;
+    async configured(): Promise<boolean> {
+        return (await this.#database.query(async (tx) => querySharingSettings(tx))) !== undefined;
     }
 
-    enabled(): boolean {
-        return this.#database.query(querySharingSettings)?.enabled === true;
+    async enabled(): Promise<boolean> {
+        return (
+            (await this.#database.query(async (tx) => querySharingSettings(tx)))?.enabled === true
+        );
     }
 
     start(): Promise<void> {
         return this.#transition(async () => {
-            if (this.#closing || !this.enabled() || this.#service !== undefined) return;
-            if (this.#database.query(querySharingProfileId) === undefined) {
+            if (this.#closing || !(await this.enabled()) || this.#service !== undefined) return;
+            if (
+                (await this.#database.query(async (tx) => querySharingProfileId(tx))) === undefined
+            ) {
                 throw new Error("Enabled Sharing is missing its bound human profile.");
             }
             const service = await this.#open();
@@ -113,8 +117,8 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
     reset(): Promise<SharingSnapshot> {
         if (this.#closing) return Promise.reject(new Error("Sharing is closing."));
         return this.#transition(async () => {
-            if (!this.enabled()) throw new Error("Sharing is disabled.");
-            const profileId = this.#database.query(querySharingProfileId);
+            if (!(await this.enabled())) throw new Error("Sharing is disabled.");
+            const profileId = await this.#database.query(querySharingProfileId);
             if (profileId === undefined) {
                 throw new Error("Enabled Sharing is missing its bound human profile.");
             }
@@ -125,7 +129,7 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
 
             const service = await this.#open();
             try {
-                service.bindProfile(profileId);
+                await service.bindProfile(profileId);
                 service.start();
                 const snapshot = await service.snapshot();
                 this.#service = service;
@@ -156,25 +160,25 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
     }
 
     async #enable(profileId: string): Promise<OnboardMurmurResponse> {
-        const profile = this.#profiles.get(profileId);
-        if (profile === undefined || !this.#profiles.isLocal(profileId)) {
+        const profile = await this.#profiles.get(profileId);
+        if (profile === undefined || !(await this.#profiles.isLocal(profileId))) {
             throw new Error("Murmur requires a profile owned by this Rig.");
         }
 
         const existing = this.#service;
         if (existing !== undefined) {
-            existing.bindProfile(profileId);
+            await existing.bindProfile(profileId);
             const snapshot = await existing.snapshot();
-            this.#persistEnabled(true);
+            await this.#persistEnabled(true);
             return { enabled: true, profile, publicKey: snapshot.identity };
         }
 
         const service = await this.#open();
         try {
-            service.bindProfile(profileId);
+            await service.bindProfile(profileId);
             service.start();
             const snapshot = await service.snapshot();
-            this.#persistEnabled(true);
+            await this.#persistEnabled(true);
             this.#service = service;
             return { enabled: true, profile, publicKey: snapshot.identity };
         } catch (error) {
@@ -187,7 +191,7 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
         const service = this.#service;
         this.#service = undefined;
         try {
-            this.#persistEnabled(false);
+            await this.#persistEnabled(false);
         } catch (error) {
             this.#service = service;
             throw error;
@@ -196,8 +200,10 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
         return { enabled: false };
     }
 
-    #persistEnabled(enabled: boolean): void {
-        this.#database.transaction((tx) => sharingSettingsSet(tx, enabled, this.#now()));
+    async #persistEnabled(enabled: boolean): Promise<void> {
+        await this.#database.transaction(async (tx) =>
+            sharingSettingsSet(tx, enabled, this.#now()),
+        );
     }
 
     #requireService(): SharingServiceContract {

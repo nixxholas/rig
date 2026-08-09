@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { happyOutbox, happySessions } from "../database/schema.js";
 import type { HappyEncryptionVariant } from "../../happy/types.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export interface HappySessionState {
     credentialFingerprint: string;
@@ -17,8 +17,8 @@ export interface HappySessionState {
     tag: string;
 }
 
-export function happySessionEnsure(
-    tx: TX,
+export async function happySessionEnsure(
+    tx: DatabaseScope,
     input: {
         credentialFingerprint: string;
         encryptionKey?: Uint8Array;
@@ -26,9 +26,9 @@ export function happySessionEnsure(
         now: number;
         sessionId: string;
     },
-): HappySessionState {
-    return inTx(tx, (tx) => {
-        const current = tx
+): Promise<HappySessionState> {
+    return await inTx(tx, async (tx) => {
+        const current = await tx
             .select()
             .from(happySessions)
             .where(eq(happySessions.sessionId, input.sessionId))
@@ -48,7 +48,8 @@ export function happySessionEnsure(
             throw new Error("Happy session encryption keys must contain 32 bytes.");
         }
         const tag = `rig:${input.sessionId}`;
-        tx.insert(happySessions)
+        await tx
+            .insert(happySessions)
             .values({
                 createdAtMs: input.now,
                 credentialFingerprint: input.credentialFingerprint,
@@ -74,7 +75,7 @@ export function happySessionEnsure(
             })
             .run();
         if (current !== undefined) {
-            tx.delete(happyOutbox).where(eq(happyOutbox.sessionId, input.sessionId)).run();
+            await tx.delete(happyOutbox).where(eq(happyOutbox.sessionId, input.sessionId)).run();
         }
         return {
             credentialFingerprint: input.credentialFingerprint,

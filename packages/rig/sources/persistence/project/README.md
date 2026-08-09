@@ -1,7 +1,7 @@
 # Project persistence
 
-This directory owns synchronous SQLite operations for projects, managed workspaces, and project
-avatar metadata. Every operation accepts the shared `TX` facade first. Public reads use the
+This directory owns asynchronous SQLite operations for projects, managed workspaces, and project
+avatar metadata. Every operation accepts the shared `DatabaseScope` first. Public reads use the
 `query` prefix; mutations retain any reads needed inside their complete consistency boundary.
 
 ```text

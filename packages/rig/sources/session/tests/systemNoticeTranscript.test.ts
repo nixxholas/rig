@@ -42,24 +42,24 @@ function computeNotice(phase: "preparing_compute" | "ready"): SystemNoticePayloa
 }
 
 describe("standalone system notice transcript rows", () => {
-    it("keeps an idle notice before the first turn in the oldest in-memory window", () => {
-        const store = new InMemorySessionStore();
+    it("keeps an idle notice before the first turn in the oldest in-memory window", async () => {
+        const store = await InMemorySessionStore.open();
         stores.push(store);
-        const session = store.create({ cwd: "/tmp/rig-system-notice-oldest" });
-        session.recordSystemNotice(computeNotice("preparing_compute"));
+        const session = await store.create({ cwd: "/tmp/rig-system-notice-oldest" });
+        await session.recordSystemNotice(computeNotice("preparing_compute"));
 
-        session.submit({ text: "Start the first real turn." });
+        await session.submit({ text: "Start the first real turn." });
 
-        expect(session.transcriptWindow().notices?.map((entry) => entry.message.blocks[0])).toEqual(
-            [{ text: "Preparing compute.", type: "text" }],
-        );
+        expect(
+            (await session.transcriptWindow()).notices?.map((entry) => entry.message.blocks[0]),
+        ).toEqual([{ text: "Preparing compute.", type: "text" }]);
     });
 
     it("leaves a mid-tool run's activity, pending input, and unread state untouched", async () => {
         const toolStarted = deferred<void>();
         const releaseTool = deferred<void>();
-        const session = createToolSession(toolStarted, releaseTool);
-        session.submit({ text: "Run the tool." });
+        const session = await createToolSession(toolStarted, releaseTool);
+        await session.submit({ text: "Run the tool." });
         await toolStarted.promise;
 
         const question = {
@@ -78,7 +78,7 @@ describe("standalone system notice transcript rows", () => {
             ],
         };
         const pendingAnswer = session.requestUserInput(question);
-        expect(session.markRead()).toBe(true);
+        await expect(session.markRead()).resolves.toBe(true);
         const activityBefore = session.activity();
         expect(activityBefore).toMatchObject({
             kind: "awaiting_input",
@@ -91,7 +91,7 @@ describe("standalone system notice transcript rows", () => {
             .all()
             .filter((event) => event.type === "run_finished").length;
 
-        session.recordSystemNotice(computeNotice("preparing_compute"));
+        await session.recordSystemNotice(computeNotice("preparing_compute"));
 
         expect(session.activity()).toEqual(activityBefore);
         expect(session.snapshot().pendingUserInputs).toEqual(pendingBefore);
@@ -110,7 +110,7 @@ describe("standalone system notice transcript rows", () => {
             );
         expect(session.events.all().indexOf(notice!)).toBeGreaterThan(toolStartIndex);
 
-        const transcript = session.transcriptWindow(20);
+        const transcript = await session.transcriptWindow(20);
         expect(transcript.notices).toEqual([
             {
                 createdAt: notice!.createdAt,
@@ -122,25 +122,25 @@ describe("standalone system notice transcript rows", () => {
             transcript.turns.some((turn) => turn.messageIds.includes(notice!.data.message.id)),
         ).toBe(false);
 
-        session.answerUserInput(question.requestId, { answers: { choice: ["One"] } });
+        await session.answerUserInput(question.requestId, { answers: { choice: ["One"] } });
         await pendingAnswer;
         releaseTool.resolve();
         await session.beginShutdown();
     });
 
-    it("bounds notices separately without evicting real conversation turns", () => {
-        const store = new InMemorySessionStore();
+    it("bounds notices separately without evicting real conversation turns", async () => {
+        const store = await InMemorySessionStore.open();
         stores.push(store);
-        const session = store.create({ cwd: "/tmp/rig-system-notice-budget" });
+        const session = await store.create({ cwd: "/tmp/rig-system-notice-budget" });
 
         for (let turn = 0; turn < 25; turn += 1) {
-            session.submit({ text: `Real turn ${String(turn)}.` });
+            await session.submit({ text: `Real turn ${String(turn)}.` });
             for (let notice = 0; notice < 5; notice += 1) {
-                session.recordSystemNotice(computeNotice("preparing_compute"));
+                await session.recordSystemNotice(computeNotice("preparing_compute"));
             }
         }
 
-        const bootstrap = session.transcriptWindow(20);
+        const bootstrap = await session.transcriptWindow(20);
         expect(bootstrap.turns).toHaveLength(20);
         expect(bootstrap.messages).toHaveLength(20);
         expect(bootstrap.notices).toHaveLength(50);
@@ -149,10 +149,10 @@ describe("standalone system notice transcript rows", () => {
     });
 });
 
-function createToolSession(
+async function createToolSession(
     toolStarted: ReturnType<typeof deferred<void>>,
     releaseTool: ReturnType<typeof deferred<void>>,
-): InMemorySession {
+): Promise<InMemorySession> {
     const model = defineModel({
         defaultThinkingLevel: "off",
         id: "test/system-notice",

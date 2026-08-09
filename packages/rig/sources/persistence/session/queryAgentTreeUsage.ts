@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type {
@@ -6,7 +7,7 @@ import type {
     AgentTreeUsageSession,
 } from "../../agent/context/AgentTreeUsageContext.js";
 import { MAX_AGENT_TREE_USAGE_SESSIONS } from "../../agent/context/AgentTreeUsageContext.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 
 /**
@@ -14,8 +15,12 @@ import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js"
  *
  * The extra row makes the size bound explicit without ever returning a partial, misleading total.
  */
-export function queryAgentTreeUsage(tx: TX, rootSessionId: string): AgentTreeUsage | undefined {
-    const rows = tx.all<Record<string, unknown>>(sql`
+export async function queryAgentTreeUsage(
+    tx: DatabaseScope,
+    rootSessionId: string,
+): Promise<AgentTreeUsage | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const rows = await tx.all<Record<string, unknown>>(sql`
         WITH RECURSIVE descendants(id) AS (
             SELECT id
             FROM sessions
@@ -42,19 +47,20 @@ export function queryAgentTreeUsage(tx: TX, rootSessionId: string): AgentTreeUsa
             created_at_ms ASC,
             id ASC
     `);
-    if (rows.length === 0) return undefined;
-    if (rows.length > MAX_AGENT_TREE_USAGE_SESSIONS) {
-        throw new Error(
-            `Agent tree usage is limited to ${MAX_AGENT_TREE_USAGE_SESSIONS.toLocaleString("en-US")} sessions.`,
-        );
-    }
+        if (rows.length === 0) return undefined;
+        if (rows.length > MAX_AGENT_TREE_USAGE_SESSIONS) {
+            throw new Error(
+                `Agent tree usage is limited to ${MAX_AGENT_TREE_USAGE_SESSIONS.toLocaleString("en-US")} sessions.`,
+            );
+        }
 
-    const returnedIds = new Set(rows.map((row) => readString(row, "id")));
-    const sessions = rows.map((row) => readUsageSession(row, rootSessionId, returnedIds));
-    return {
-        sessions,
-        totalTokens: sessions.reduce((total, session) => total + session.totalTokens, 0),
-    };
+        const returnedIds = new Set(rows.map((row) => readString(row, "id")));
+        const sessions = rows.map((row) => readUsageSession(row, rootSessionId, returnedIds));
+        return {
+            sessions,
+            totalTokens: sessions.reduce((total, session) => total + session.totalTokens, 0),
+        };
+    });
 }
 
 function readUsageSession(

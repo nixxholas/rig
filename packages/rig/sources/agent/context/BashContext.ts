@@ -88,7 +88,9 @@ export interface BashContext {
     sessionUsesSecrets?(sessionId: number): boolean;
     setActiveSessionCountListener?(listener: ((count: number) => void) | undefined): void;
     /** Reports commands that ended without anyone waiting to hear about it. */
-    setSessionExitListener?(listener: ((exit: BashSessionExit) => void) | undefined): void;
+    setSessionExitListener?(
+        listener: ((exit: BashSessionExit) => void | Promise<void>) | undefined,
+    ): void;
     startSession(options: Omit<BashRunOptions, "signal">): Promise<number>;
     supportsSessionInput: boolean;
     writeSession(sessionId: number, data: string | Uint8Array): Promise<boolean>;

@@ -5,7 +5,7 @@ import { SessionTerminalTracker } from "../SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "../sessionSummaryWithTerminalPresence.js";
 
 describe("sessionSummaryWithTerminalPresence", () => {
-    it("presents settled sessions as idle without changing their archive state", () => {
+    it("presents settled sessions as idle without changing their archive state", async () => {
         const tracker = new SessionTerminalTracker({
             isTargetAlive: () => true,
             sweepIntervalMs: 60_000,
@@ -26,7 +26,7 @@ describe("sessionSummaryWithTerminalPresence", () => {
         }
     });
 
-    it("retains intrinsic status while connected or actively running", () => {
+    it("retains intrinsic status while connected or actively running", async () => {
         const tracker = new SessionTerminalTracker({
             isTargetAlive: () => true,
             sweepIntervalMs: 60_000,
@@ -48,7 +48,7 @@ describe("sessionSummaryWithTerminalPresence", () => {
         }
     });
 
-    it("suppresses unread state while any live client is focused", () => {
+    it("suppresses unread state while any live client is focused", async () => {
         const tracker = new SessionTerminalTracker({
             isTargetAlive: () => true,
             sweepIntervalMs: 60_000,

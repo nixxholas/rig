@@ -447,9 +447,9 @@ function recordingTrustStore(options: { failMarkReady?: boolean; failPrepare?: b
                     },
                 };
             },
-            peerForBinding: () => undefined,
-            peers: () => [],
-            readyPairings: () => [],
+            peerForBinding: async () => undefined,
+            peers: async () => [],
+            readyPairings: async () => [],
             validate: async () => undefined,
             verifyOrPin: async () => undefined,
         },

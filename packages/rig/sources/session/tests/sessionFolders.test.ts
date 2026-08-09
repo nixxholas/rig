@@ -34,16 +34,16 @@ describe("chats and folders", () => {
         const first = agentSession(folders, (context) => filed.resolve(context));
         const second = agentSession(folders, () => {});
 
-        first.session.submit({ text: "Work out where this belongs." });
+        await first.session.submit({ text: "Work out where this belongs." });
         const context = await filed.promise;
         if (context === undefined) throw new Error("Expected the agent to reach the folder tree.");
-        const folder = context.create({ name: "Media" });
+        const folder = await context.create({ name: "Media" });
 
-        expect(context.setCurrentChatFolder(folder.id)).toMatchObject({ id: folder.id });
+        expect(await context.setCurrentChatFolder(folder.id)).toMatchObject({ id: folder.id });
         expect(first.session.snapshot().folderId).toBe(folder.id);
         expect(second.session.snapshot().folderId).toBeUndefined();
-        expect(context.list().map((entry) => entry.name)).toEqual(["Media"]);
-        expect(context.setCurrentChatFolder(null)).toBeUndefined();
+        expect((await context.list()).map((entry) => entry.name)).toEqual(["Media"]);
+        expect(await context.setCurrentChatFolder(null)).toBeUndefined();
         expect(first.session.snapshot().folderId).toBeUndefined();
 
         first.release.resolve();
@@ -53,22 +53,22 @@ describe("chats and folders", () => {
 
     it("files a chat into a folder and takes it back out to Unsorted", async () => {
         const { databasePath, root } = await createFixture();
-        const store = openStore({ databasePath, root });
-        const folder = store.createFolder({ name: "Trip planning" });
-        const session = store.create({ cwd: root });
+        const store = await openStore({ databasePath, root });
+        const folder = await store.createFolder({ name: "Trip planning" });
+        const session = await store.create({ cwd: root });
 
         expect(session.snapshot().folderId).toBeUndefined();
 
-        const filed = store.setSessionFolder(session.id, folder.id);
+        const filed = await store.setSessionFolder(session.id, folder.id);
 
         expect(filed?.snapshot().folderId).toBe(folder.id);
         expect(filed?.summary().folderId).toBe(folder.id);
-        expect(summaryOf(store, session.id)?.folderId).toBe(folder.id);
+        expect((await summaryOf(store, session.id))?.folderId).toBe(folder.id);
 
-        const unsorted = store.setSessionFolder(session.id, null);
+        const unsorted = await store.setSessionFolder(session.id, null);
 
         expect(unsorted?.snapshot().folderId).toBeUndefined();
-        expect(summaryOf(store, session.id)?.folderId).toBeUndefined();
+        expect((await summaryOf(store, session.id))?.folderId).toBeUndefined();
     });
 
     it("stops every retained subagent when a primary chat changes execution scope", async () => {
@@ -84,13 +84,13 @@ describe("chats and folders", () => {
             request: { cwd: tmpdir() },
         });
 
-        session.applyScopeMove({
+        await session.applyScopeMove({
             cwd: tmpdir(),
             orderKey: "a0",
             scope: { kind: "unsorted" },
             unsortedSince: 1,
         });
-        session.applyScopeMove({
+        await session.applyScopeMove({
             cwd: tmpdir(),
             orderKey: "a1",
             scope: { kind: "unsorted" },
@@ -104,44 +104,48 @@ describe("chats and folders", () => {
     it("files a chat into a folder in a store that keeps its sessions in memory", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-unsorted-memory-"));
         cleanups.push(() => rm(root, { force: true, recursive: true }));
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             homeDirectory: root,
             workspacesDirectory: join(root, "workspaces"),
         });
-        const folder = store.createFolder({ name: "Recipes" });
-        const session = store.create({ cwd: root });
+        const folder = await store.createFolder({ name: "Recipes" });
+        const session = await store.create({ cwd: root });
 
-        expect(store.setSessionFolder(session.id, folder.id)?.snapshot().folderId).toBe(folder.id);
+        expect((await store.setSessionFolder(session.id, folder.id))?.snapshot().folderId).toBe(
+            folder.id,
+        );
         expect(session.snapshot().folderId).toBe(folder.id);
-        expect(store.setSessionFolder(session.id, null)?.snapshot().folderId).toBeUndefined();
+        expect(
+            (await store.setSessionFolder(session.id, null))?.snapshot().folderId,
+        ).toBeUndefined();
         expect(session.snapshot().folderId).toBeUndefined();
     });
 
     it("revalidates folder storage when the in-memory store files an existing chat", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-folder-memory-boundary-"));
         cleanups.push(() => rm(root, { force: true, recursive: true }));
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             homeDirectory: root,
             workspacesDirectory: join(root, "workspaces"),
         });
-        const folder = store.createFolder({ name: "Private work" });
-        const session = store.create({ cwd: root });
+        const folder = await store.createFolder({ name: "Private work" });
+        const session = await store.create({ cwd: root });
         const outside = join(root, "outside");
         await mkdir(outside);
         await rm(folder.path, { recursive: true });
         await symlink(outside, folder.path, "dir");
 
-        expect(() => store.setSessionFolder(session.id, folder.id)).toThrow("storage");
+        await expect(store.setSessionFolder(session.id, folder.id)).rejects.toThrow("storage");
         expect(session.snapshot().scope.kind).toBe("project");
     });
 
     it("retries an Unsorted create by identity after Rig derives its private cwd", async () => {
         const { databasePath, root } = await createFixture();
-        const store = openStore({ databasePath, root });
+        const store = await openStore({ databasePath, root });
         const request = { cwd: root, scope: { kind: "unsorted" as const } };
 
-        const first = store.createWithId("retry-unsorted", request);
-        const retried = store.createWithId("retry-unsorted", request);
+        const first = await store.createWithId("retry-unsorted", request);
+        const retried = await store.createWithId("retry-unsorted", request);
 
         expect(retried.id).toBe(first.id);
         expect(retried.snapshot().cwd).toBe(first.snapshot().cwd);
@@ -151,21 +155,21 @@ describe("chats and folders", () => {
     it("retires folder runtimes when their own metadata or virtual ancestry changes", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-folder-context-refresh-"));
         cleanups.push(() => rm(root, { force: true, recursive: true }));
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             homeDirectory: root,
             workspacesDirectory: join(root, "workspaces"),
         });
-        const parent = store.createFolder({ name: "Media" });
-        const child = store.createFolder({ name: "Cuts", parentId: parent.id });
-        const session = store.create({
+        const parent = await store.createFolder({ name: "Media" });
+        const child = await store.createFolder({ name: "Cuts", parentId: parent.id });
+        const session = await store.create({
             cwd: root,
             scope: { folderId: child.id, kind: "folder" },
         });
-        const first = session.externalControlContext();
+        const first = await runtimeContext(session);
 
-        store.updateFolder(parent.id, { name: "Films" });
+        await store.updateFolder(parent.id, { name: "Films" });
         const second = await changedContext(session, first);
-        store.updateFolder(child.id, { rules: "Keep the source files." });
+        await store.updateFolder(child.id, { rules: "Keep the source files." });
         const third = await changedContext(session, second);
 
         expect(second).not.toBe(first);
@@ -175,8 +179,8 @@ describe("chats and folders", () => {
 
     it("rebuilds trusted folder instructions without retaining their stale predecessor", async () => {
         const folders = await createFolderRepository();
-        const parent = folders.createFolder({ name: "Media" });
-        const child = folders.createFolder({
+        const parent = await folders.createFolder({ name: "Media" });
+        const child = await folders.createFolder({
             name: "Cuts",
             parentId: parent.id,
             rules: "Use the old rule.",
@@ -187,15 +191,15 @@ describe("chats and folders", () => {
             () => {},
             (prompt) => prompts.push(prompt ?? ""),
         );
-        fixture.session.applyScopeMove({
+        await fixture.session.applyScopeMove({
             cwd: child.path,
             orderKey: "a0",
             scope: { folderId: child.id, kind: "folder" },
         });
-        const first = fixture.session.externalControlContext();
+        const first = await runtimeContext(fixture.session);
 
-        folders.updateFolder(parent.id, { name: "Films" });
-        folders.updateFolder(child.id, { rules: "Use the new rule." });
+        await folders.updateFolder(parent.id, { name: "Films" });
+        await folders.updateFolder(child.id, { rules: "Use the new rule." });
         fixture.session.folderContextChanged();
         await changedContext(fixture.session, first);
 
@@ -210,38 +214,38 @@ describe("chats and folders", () => {
 
     it("keeps a chat in its folder when the store is opened again", async () => {
         const { databasePath, root } = await createFixture();
-        const store = openStore({ databasePath, root });
-        const folder = store.createFolder({ name: "Season one" });
-        const session = store.create({ cwd: root });
-        store.setSessionFolder(session.id, folder.id);
-        store.close();
+        const store = await openStore({ databasePath, root });
+        const folder = await store.createFolder({ name: "Season one" });
+        const session = await store.create({ cwd: root });
+        await store.setSessionFolder(session.id, folder.id);
+        await store.close();
 
-        const reopened = openStore({ databasePath, root });
+        const reopened = await openStore({ databasePath, root });
 
-        expect(reopened.get(session.id)?.snapshot().folderId).toBe(folder.id);
-        expect(summaryOf(reopened, session.id)?.folderId).toBe(folder.id);
+        expect((await reopened.get(session.id))?.snapshot().folderId).toBe(folder.id);
+        expect((await summaryOf(reopened, session.id))?.folderId).toBe(folder.id);
     });
 
     it("keeps a scope-mutation receipt across restart after later moves", async () => {
         const { databasePath, root } = await createFixture();
-        const store = openStore({ databasePath, root });
-        const folder = store.createFolder({ name: "Season one" });
-        const session = store.create({ cwd: root });
-        store.setSessionFolder(session.id, folder.id, null, "file-once");
-        store.setSessionFolder(session.id, null, null, "move-later");
-        store.close();
+        const store = await openStore({ databasePath, root });
+        const folder = await store.createFolder({ name: "Season one" });
+        const session = await store.create({ cwd: root });
+        await store.setSessionFolder(session.id, folder.id, null, "file-once");
+        await store.setSessionFolder(session.id, null, null, "move-later");
+        await store.close();
 
-        const reopened = openStore({ databasePath, root });
+        const reopened = await openStore({ databasePath, root });
 
-        expect(reopened.sessionScopeMutationApplied(session.id, "file-once")).toBe(true);
-        expect(reopened.get(session.id)?.snapshot().scope).toEqual({ kind: "unsorted" });
+        expect(await reopened.sessionScopeMutationApplied(session.id, "file-once")).toBe(true);
+        expect((await reopened.get(session.id))?.snapshot().scope).toEqual({ kind: "unsorted" });
     });
 
     it("revalidates a folder's physical directory for creation and restoration", async () => {
         const { databasePath, root } = await createFixture();
-        const store = openStore({ databasePath, root });
-        const folder = store.createFolder({ name: "Private work" });
-        const existing = store.create({
+        const store = await openStore({ databasePath, root });
+        const folder = await store.createFolder({ name: "Private work" });
+        const existing = await store.create({
             cwd: root,
             scope: { folderId: folder.id, kind: "folder" },
         });
@@ -251,33 +255,35 @@ describe("chats and folders", () => {
         await rm(folder.path, { recursive: true });
         await symlink(outside, folder.path, "dir");
 
-        expect(() =>
+        await expect(
             store.create({
                 cwd: root,
                 scope: { folderId: folder.id, kind: "folder" },
             }),
-        ).toThrow("storage");
-        expect(() => store.fork(existingId)).toThrow("storage");
-        store.close();
+        ).rejects.toThrow("storage");
+        await expect(store.fork(existingId)).rejects.toThrow("storage");
+        await store.close();
 
-        const reopened = openStore({ databasePath, root });
+        const reopened = await openStore({ databasePath, root });
 
-        expect(() => reopened.get(existingId)).toThrow("storage");
+        await expect(reopened.get(existingId)).rejects.toThrow("storage");
     });
 
     it("archives an unloaded folder chat as a terminal execution state with a durable event", async () => {
         const { databasePath, root } = await createFixture();
-        const store = openStore({ databasePath, root });
-        const folder = store.createFolder({ name: "Finished work" });
-        const sessionId = store.create({
-            cwd: root,
-            scope: { folderId: folder.id, kind: "folder" },
-        }).id;
-        store.close();
+        const store = await openStore({ databasePath, root });
+        const folder = await store.createFolder({ name: "Finished work" });
+        const sessionId = (
+            await store.create({
+                cwd: root,
+                scope: { folderId: folder.id, kind: "folder" },
+            })
+        ).id;
+        await store.close();
 
-        const reopened = openStore({ databasePath, root });
-        reopened.archiveFolder(folder.id);
-        const archived = reopened.get(sessionId);
+        const reopened = await openStore({ databasePath, root });
+        await reopened.archiveFolder(folder.id);
+        const archived = await reopened.get(sessionId);
 
         expect(archived?.snapshot()).toMatchObject({ archived: true, status: "archived" });
         expect(
@@ -285,45 +291,45 @@ describe("chats and folders", () => {
                 .all()
                 .some((event) => event.type === "session_archived" && event.data.archived === true),
         ).toBe(true);
-        expect(() => archived?.submit({ text: "Keep working." })).toThrow("archived");
+        await expect(archived?.submit({ text: "Keep working." })).rejects.toThrow("archived");
     });
 
     it("starts the Unsorted expiry clock when a chat leaves a folder", async () => {
         const { databasePath, root } = await createFixture();
         let now = 1_700_000_000_000;
-        const store = openStore({ databasePath, now: () => now, root });
-        const folder = store.createFolder({ name: "Filed" });
-        const session = store.create({ cwd: root });
-        store.setSessionFolder(session.id, folder.id);
-        store.setSessionFolder(session.id, null);
+        const store = await openStore({ databasePath, now: () => now, root });
+        const folder = await store.createFolder({ name: "Filed" });
+        const session = await store.create({ cwd: root });
+        await store.setSessionFolder(session.id, folder.id);
+        await store.setSessionFolder(session.id, null);
 
         now += UNSORTED_SESSION_ARCHIVE_AFTER_MS * 30;
-        store.archiveExpiredUnsortedSessions();
+        await store.archiveExpiredUnsortedSessions();
 
-        expect(store.get(session.id)?.snapshot().archived).toBe(true);
+        expect((await store.get(session.id))?.snapshot().archived).toBe(true);
     });
 
     it("never sweeps a chat that was created outside the folder tree", async () => {
         const { databasePath, root } = await createFixture();
         let now = 1_700_000_000_000;
-        const store = openStore({ databasePath, now: () => now, root });
-        const ordinary = store.create({ cwd: root });
+        const store = await openStore({ databasePath, now: () => now, root });
+        const ordinary = await store.create({ cwd: root });
 
         now += UNSORTED_SESSION_ARCHIVE_AFTER_MS * 30;
-        store.archiveExpiredUnsortedSessions();
+        await store.archiveExpiredUnsortedSessions();
 
-        expect(store.get(ordinary.id)?.snapshot().archived).toBe(false);
+        expect((await store.get(ordinary.id))?.snapshot().archived).toBe(false);
     });
 
     it("retires an expired Unsorted chat with its running descendants", async () => {
         const { databasePath, root } = await createFixture();
         let now = 1_700_000_000_000;
-        const store = openStore({ databasePath, now: () => now, root });
-        const folder = store.createFolder({ name: "Filed" });
-        const sorted = store.create({ cwd: root });
-        store.setSessionFolder(sorted.id, folder.id);
-        const stale = store.create({ cwd: root, scope: { kind: "unsorted" } });
-        store.saveSession(
+        const store = await openStore({ databasePath, now: () => now, root });
+        const folder = await store.createFolder({ name: "Filed" });
+        const sorted = await store.create({ cwd: root });
+        await store.setSessionFolder(sorted.id, folder.id);
+        const stale = await store.create({ cwd: root, scope: { kind: "unsorted" } });
+        await store.saveSession(
             storedSession({
                 agent: {
                     depth: 1,
@@ -340,7 +346,7 @@ describe("chats and folders", () => {
                 unsortedSince: now,
             }),
         );
-        store.saveSession(
+        await store.saveSession(
             storedSession({
                 agent: {
                     delegatedBySessionId: stale.id,
@@ -356,45 +362,53 @@ describe("chats and folders", () => {
         );
 
         now += UNSORTED_SESSION_ARCHIVE_AFTER_MS + 1;
-        const fresh = store.create({ cwd: root, scope: { kind: "unsorted" } });
-        store.archiveExpiredUnsortedSessions();
+        const fresh = await store.create({ cwd: root, scope: { kind: "unsorted" } });
+        await store.archiveExpiredUnsortedSessions();
 
-        expect(store.get(stale.id)?.snapshot().archived).toBe(true);
-        expect(store.get(sorted.id)?.snapshot().archived).toBe(false);
-        expect(store.get(fresh.id)?.snapshot().archived).toBe(false);
-        expect(store.get("subagent-of-a-stale-chat")?.snapshot()).toMatchObject({
+        expect((await store.get(stale.id))?.snapshot().archived).toBe(true);
+        expect((await store.get(sorted.id))?.snapshot().archived).toBe(false);
+        expect((await store.get(fresh.id))?.snapshot().archived).toBe(false);
+        expect((await store.get("subagent-of-a-stale-chat"))?.snapshot()).toMatchObject({
             archived: true,
             status: "archived",
         });
-        expect(store.get("delegated-chat")?.snapshot().archived).toBe(false);
+        expect((await store.get("delegated-chat"))?.snapshot().archived).toBe(false);
     });
 
     it("drains more than one bounded Unsorted query batch across follow-up sweeps", async () => {
         const { databasePath, root } = await createFixture();
         let now = 1_700_000_000_000;
-        const store = openStore({ databasePath, now: () => now, root });
-        const stale = Array.from({ length: 105 }, () =>
-            store.create({ cwd: root, scope: { kind: "unsorted" } }),
+        const store = await openStore({ databasePath, now: () => now, root });
+        const stale = await Promise.all(
+            Array.from({ length: 105 }, () =>
+                store.create({ cwd: root, scope: { kind: "unsorted" } }),
+            ),
         );
 
         now += UNSORTED_SESSION_ARCHIVE_AFTER_MS + 1;
-        while (store.archiveExpiredUnsortedSessions()) {
+        while (await store.archiveExpiredUnsortedSessions()) {
             await new Promise<void>((resolve) => setImmediate(resolve));
         }
 
-        expect(stale.every((session) => store.get(session.id)?.snapshot().archived === true)).toBe(
-            true,
-        );
+        expect(
+            (
+                await Promise.all(
+                    stale.map(
+                        async (session) => (await store.get(session.id))?.snapshot().archived,
+                    ),
+                )
+            ).every((archived) => archived === true),
+        ).toBe(true);
     });
 });
 
 /** A folder tree of its own, so a session test never depends on a whole store. */
 async function createFolderRepository(): Promise<FolderRepository> {
     const root = await mkdtemp(join(tmpdir(), "rig-session-folders-"));
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
     cleanups.push(async () => {
-        opened.client.close();
+        await opened.database.close();
         await rm(root, { force: true, recursive: true });
     });
     return new FolderRepository({
@@ -483,14 +497,19 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
 
 async function changedContext(
     session: InMemorySession,
-    previous: ReturnType<InMemorySession["externalControlContext"]>,
-): Promise<ReturnType<InMemorySession["externalControlContext"]>> {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        const current = session.externalControlContext();
-        if (current !== previous) return current;
-    }
-    throw new Error("The folder runtime was not replaced.");
+    previous: Awaited<ReturnType<InMemorySession["externalControlContext"]>>,
+): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
+    return await vi.waitFor(async () => {
+        const current = await session.externalControlContext();
+        expect(current).not.toBe(previous);
+        return current;
+    });
+}
+
+async function runtimeContext(
+    session: InMemorySession,
+): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
+    return await session.externalControlContext();
 }
 
 async function createFixture(): Promise<{ databasePath: string; root: string }> {
@@ -499,27 +518,29 @@ async function createFixture(): Promise<{ databasePath: string; root: string }> 
     return { databasePath: join(root, "sessions.sqlite"), root };
 }
 
-function openStore(options: {
+async function openStore(options: {
     databasePath: string;
     now?: () => number;
     root: string;
-}): PersistentSessionStore {
-    const store = new PersistentSessionStore({
+}): Promise<PersistentSessionStore> {
+    const store = await PersistentSessionStore.open({
         databasePath: options.databasePath,
         homeDirectory: options.root,
         ...(options.now === undefined ? {} : { now: options.now }),
         stateDirectory: join(options.root, "state"),
         workspacesDirectory: join(options.root, "workspaces"),
     });
-    cleanups.push(async () => store.close());
+    cleanups.push(async () => {
+        await store.close();
+    });
     return store;
 }
 
-function summaryOf(
+async function summaryOf(
     store: InMemorySessionStore | PersistentSessionStore,
     sessionId: string,
-): { folderId?: string } | undefined {
-    return store.list().find((summary) => summary.id === sessionId);
+): Promise<{ folderId?: string } | undefined> {
+    return (await store.list()).find((summary) => summary.id === sessionId);
 }
 
 /** A chat written straight to storage, for the kinds a store never creates on its own. */

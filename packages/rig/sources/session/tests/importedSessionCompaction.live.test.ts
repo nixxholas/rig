@@ -17,7 +17,7 @@ const hasFixture =
 
 describe.skipIf(!LIVE || !hasFixture)("imported session compaction", () => {
     it("compacts the restored production session", async () => {
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             createRuntime: (options) =>
                 createCodingAssistantAgent({
                     ...options,
@@ -33,7 +33,7 @@ describe.skipIf(!LIVE || !hasFixture)("imported session compaction", () => {
         });
 
         try {
-            const session = store.get(sessionId!);
+            const session = await store.get(sessionId!);
             expect(session).toBeDefined();
 
             const result = await session!.compact();
@@ -41,7 +41,7 @@ describe.skipIf(!LIVE || !hasFixture)("imported session compaction", () => {
             expect(result.compacted).toBe(true);
             expect(result.estimatedTokensAfter).toBeLessThan(result.estimatedTokensBefore);
         } finally {
-            store.close();
+            await store.close();
         }
     }, 300_000);
 });

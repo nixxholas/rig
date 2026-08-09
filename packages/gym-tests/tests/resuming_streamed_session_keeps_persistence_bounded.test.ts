@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const artifacts = resolve(
     import.meta.dirname,
@@ -156,10 +157,8 @@ function submit(gym: Gym, text: string): void {
     gym.terminal.press("enter");
 }
 
-const inspectStreamedSessionScript = `
-import { writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
+const inspectStreamedSessionScript = libsqlEsmScript(
+    `
 const transientTypes = new Set([
     "start",
     "text_start",
@@ -174,22 +173,34 @@ const transientTypes = new Set([
     "done",
     "error",
 ]);
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite", { readOnly: true });
-const sessionId = database
-    .prepare("SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1")
-    .get().id;
-const rows = database
-    .prepare("SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq")
-    .all(sessionId);
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite", true);
+let result;
+try {
+const sessionId = (
+    await database.execute(
+        "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
+    )
+).rows[0].id;
+const rows = (
+    await database.execute({
+        sql: "SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq",
+        args: [sessionId],
+    })
+).rows;
 let transientInferenceEvents = 0;
 for (const row of rows) {
     if (row.type !== "agent_event") continue;
     const event = JSON.parse(row.data_json).event;
     if (transientTypes.has(event?.type)) transientInferenceEvents += 1;
 }
-database.close();
+result = { persistedEventRows: rows.length, transientInferenceEvents };
+} finally {
+    await database.close();
+}
 writeFileSync(
     "/workspace/streamed-session-persistence.json",
-    JSON.stringify({ persistedEventRows: rows.length, transientInferenceEvents }),
+    JSON.stringify(result),
 );
-`;
+`,
+    'import { writeFileSync } from "node:fs";',
+);

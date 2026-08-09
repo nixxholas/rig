@@ -65,7 +65,7 @@ describe("Happy Cloud HTTP API", () => {
                 },
             );
             expect(malformed.status).toBe(400);
-            expect(fixture.service.status().version).toBe(3);
+            expect((await fixture.service.status()).version).toBe(3);
             const futureContract = await rawRequest(
                 fixture.socketPath,
                 "secret",
@@ -186,7 +186,9 @@ describe("Happy Cloud HTTP API", () => {
                     }),
                 ),
             ).rejects.toMatchObject({ statusCode: 409 });
-            expect(fixture.service.status().capabilities.remote_control.consent).toBe("denied");
+            expect((await fixture.service.status()).capabilities.remote_control.consent).toBe(
+                "denied",
+            );
         } finally {
             await fixture.close();
         }
@@ -260,11 +262,11 @@ async function startServer() {
     const directory = await createTestSocketDirectory();
     directories.push(directory);
     const socketPath = join(directory, "rig.sock");
-    const store = new PersistentSessionStore({
+    const store = await PersistentSessionStore.open({
         databasePath: join(directory, "sessions.sqlite"),
     });
     const service = store.happyCloud;
-    const server = createProtocolHttpServer({ happyCloud: service, store, token: "secret" });
+    const server = await createProtocolHttpServer({ happyCloud: service, store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
     return {
         client: new ProtocolHttpClient({ socketPath, token: "secret" }),
@@ -272,7 +274,7 @@ async function startServer() {
             await new Promise<void>((resolve, reject) =>
                 server.close((error) => (error === undefined ? resolve() : reject(error))),
             );
-            store.close();
+            await store.close();
         },
         service,
         socketPath,

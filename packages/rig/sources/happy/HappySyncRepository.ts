@@ -26,33 +26,42 @@ export { HappySyncOutboxFullError };
 export type { HappySessionState };
 
 export class HappySyncRepository {
-    readonly #client: ReturnType<typeof openSessionDatabase>["client"];
     readonly #database: SessionDatabase;
     readonly #maxPendingMessagesPerSession: number;
     readonly #now: () => number;
 
-    constructor(
-        databasePath: string,
-        now: () => number = Date.now,
-        maxPendingMessagesPerSession = MAX_PENDING_MESSAGES_PER_SESSION,
+    private constructor(
+        database: SessionDatabase,
+        now: () => number,
+        maxPendingMessagesPerSession: number,
     ) {
-        const opened = openSessionDatabase(databasePath);
-        this.#client = opened.client;
-        this.#database = opened.database;
+        this.#database = database;
         this.#maxPendingMessagesPerSession = maxPendingMessagesPerSession;
         this.#now = now;
     }
 
-    acknowledge(sessionId: string, localIds: readonly string[]): void {
-        happyOutboxAcknowledge(this.#database, sessionId, localIds);
+    static async open(
+        databasePath: string,
+        now: () => number = Date.now,
+        maxPendingMessagesPerSession = MAX_PENDING_MESSAGES_PER_SESSION,
+    ): Promise<HappySyncRepository> {
+        const opened = await openSessionDatabase(databasePath);
+        return new HappySyncRepository(opened.database, now, maxPendingMessagesPerSession);
     }
 
-    close(): void {
-        this.#client.close();
+    async acknowledge(sessionId: string, localIds: readonly string[]): Promise<void> {
+        await happyOutboxAcknowledge(this.#database.database, sessionId, localIds);
     }
 
-    enqueue(sessionId: string, messages: readonly HappySessionProtocolMessage[]): void {
-        happyOutboxEnqueue(this.#database, {
+    async close(): Promise<void> {
+        await this.#database.close();
+    }
+
+    async enqueue(
+        sessionId: string,
+        messages: readonly HappySessionProtocolMessage[],
+    ): Promise<void> {
+        await happyOutboxEnqueue(this.#database.database, {
             maxPendingMessages: this.#maxPendingMessagesPerSession,
             messages,
             now: this.#now,
@@ -65,23 +74,23 @@ export class HappySyncRepository {
         encryptionKey?: Uint8Array;
         encryptionVariant: HappyEncryptionVariant;
         sessionId: string;
-    }): HappySessionState {
-        return happySessionEnsure(this.#database, {
+    }): Promise<HappySessionState> {
+        return happySessionEnsure(this.#database.database, {
             ...options,
             now: this.#now(),
         });
     }
 
-    getSession(sessionId: string): HappySessionState | undefined {
-        return queryHappySession(this.#database, sessionId);
+    async getSession(sessionId: string): Promise<HappySessionState | undefined> {
+        return queryHappySession(this.#database.database, sessionId);
     }
 
     /** Sessions worth reconnecting after a restart, most recently active first. */
     sessionIds(
         credentialFingerprint: string,
         options: { activeSinceMs?: number; limit?: number } = {},
-    ): readonly string[] {
-        return queryHappySessionIds(this.#database, {
+    ): Promise<readonly string[]> {
+        return queryHappySessionIds(this.#database.database, {
             activeSinceMs:
                 options.activeSinceMs ?? this.#now() - RESTORED_SESSION_ACTIVITY_WINDOW_MS,
             credentialFingerprint,
@@ -89,20 +98,20 @@ export class HappySyncRepository {
         });
     }
 
-    pending(sessionId: string, limit = 50): readonly HappySessionProtocolMessage[] {
-        return queryHappyOutbox(this.#database, sessionId, limit);
+    async pending(sessionId: string, limit = 50): Promise<readonly HappySessionProtocolMessage[]> {
+        return queryHappyOutbox(this.#database.database, sessionId, limit);
     }
 
-    setRemoteSession(sessionId: string, remoteSessionId: string): void {
-        happySessionSetRemote(this.#database, {
+    async setRemoteSession(sessionId: string, remoteSessionId: string): Promise<void> {
+        await happySessionSetRemote(this.#database.database, {
             now: this.#now(),
             remoteSessionId,
             sessionId,
         });
     }
 
-    updateLastRemoteSeq(sessionId: string, sequence: number): void {
-        happySessionAdvanceRemoteSequence(this.#database, {
+    async updateLastRemoteSeq(sessionId: string, sequence: number): Promise<void> {
+        await happySessionAdvanceRemoteSequence(this.#database.database, {
             now: this.#now(),
             sequence,
             sessionId,

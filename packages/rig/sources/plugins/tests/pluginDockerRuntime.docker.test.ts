@@ -87,7 +87,7 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
                 .catch(() => undefined),
         );
 
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",

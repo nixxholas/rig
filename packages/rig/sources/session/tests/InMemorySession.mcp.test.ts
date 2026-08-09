@@ -106,7 +106,7 @@ describe("InMemorySession MCP permissions", () => {
             },
         });
 
-        const restrictedRun = session.submit({ text: "Restricted turn." });
+        const restrictedRun = await session.submit({ text: "Restricted turn." });
         await expect(session.waitForRun(restrictedRun.runId)).resolves.toEqual({
             status: "completed",
         });
@@ -117,7 +117,7 @@ describe("InMemorySession MCP permissions", () => {
 
         await session.changePermissionMode({ permissionMode: "auto" });
         expect(runtime?.agent.tools.map((tool) => tool.name)).not.toContain(mcpTool.name);
-        const autoRun = session.submit({ text: "Auto turn." });
+        const autoRun = await session.submit({ text: "Auto turn." });
         await expect(session.waitForRun(autoRun.runId)).resolves.toEqual({
             status: "completed",
         });
@@ -127,7 +127,7 @@ describe("InMemorySession MCP permissions", () => {
         ]);
 
         activeMcpTools = [refreshedMcpTool];
-        const refreshedRun = session.submit({ text: "Refresh this active session." });
+        const refreshedRun = await session.submit({ text: "Refresh this active session." });
         await expect(session.waitForRun(refreshedRun.runId)).resolves.toEqual({
             status: "completed",
         });
@@ -141,7 +141,7 @@ describe("InMemorySession MCP permissions", () => {
         expect(session.snapshot().mcpServers).toEqual([
             expect.objectContaining({ name: "trusted", status: "blocked" }),
         ]);
-        const downgradedRun = session.submit({ text: "Downgraded turn." });
+        const downgradedRun = await session.submit({ text: "Downgraded turn." });
         await expect(session.waitForRun(downgradedRun.runId)).resolves.toEqual({
             status: "completed",
         });
@@ -251,7 +251,7 @@ describe("InMemorySession MCP permissions", () => {
             },
         });
 
-        const run = session.submit({ text: "Install the clock and call it." });
+        const run = await session.submit({ text: "Install the clock and call it." });
         await expect(session.waitForRun(run.runId)).resolves.toEqual({ status: "completed" });
 
         expect(toolCatalogs).toHaveLength(2);

@@ -16,25 +16,25 @@ import {
 } from "../queryFolderItemTargetExists.js";
 
 describe("folder item persistence", () => {
-    it("allows duplicate links and orders each folder independently", () => {
-        const opened = fixture();
-        createProject(opened.database, "project");
-        createFolder(opened.database, "left");
-        createFolder(opened.database, "right");
+    it("allows duplicate links and orders each folder independently", async () => {
+        const opened = await fixture();
+        await createProject(opened.database, "project");
+        await createFolder(opened.database, "left");
+        await createFolder(opened.database, "right");
 
-        folderItemCreate(opened.database, {
+        await folderItemCreate(opened.database, {
             folderId: "left",
             id: "item-a",
             now: 3,
             target: { kind: "project", projectId: "project" },
         });
-        folderItemCreate(opened.database, {
+        await folderItemCreate(opened.database, {
             folderId: "left",
             id: "item-b",
             now: 4,
             target: { kind: "project", projectId: "project" },
         });
-        folderItemCreate(opened.database, {
+        await folderItemCreate(opened.database, {
             folderId: "right",
             id: "item-c",
             now: 5,
@@ -42,7 +42,7 @@ describe("folder item persistence", () => {
         });
 
         expect(
-            queryFolderItems(opened.database).map((item) => [
+            (await queryFolderItems(opened.database)).map((item) => [
                 item.id,
                 item.folderId,
                 item.orderKey,
@@ -55,34 +55,34 @@ describe("folder item persistence", () => {
         opened.client.close();
     });
 
-    it("moves only the item and leaves project ordering and version unchanged", () => {
-        const opened = fixture();
-        createProject(opened.database, "project");
-        createFolder(opened.database, "left");
-        createFolder(opened.database, "right");
-        folderItemCreate(opened.database, {
+    it("moves only the item and leaves project ordering and version unchanged", async () => {
+        const opened = await fixture();
+        await createProject(opened.database, "project");
+        await createFolder(opened.database, "left");
+        await createFolder(opened.database, "right");
+        await folderItemCreate(opened.database, {
             folderId: "left",
             id: "item",
             now: 2,
             target: { kind: "project", projectId: "project" },
         });
-        const before = opened.database
+        const before = await opened.database
             .select({ orderKey: projects.orderKey, version: projects.version })
             .from(projects)
             .where(eq(projects.id, "project"))
             .get();
 
-        expect(folderItemMove(opened.database, "item", "right", "a0", 3, 1)).toEqual({
+        expect(await folderItemMove(opened.database, "item", "right", "a0", 3, 1)).toEqual({
             outcome: "moved",
         });
 
-        expect(queryFolderItems(opened.database)[0]).toMatchObject({
+        expect((await queryFolderItems(opened.database))[0]).toMatchObject({
             folderId: "right",
             orderKey: "a0",
             version: 2,
         });
         expect(
-            opened.database
+            await opened.database
                 .select({ orderKey: projects.orderKey, version: projects.version })
                 .from(projects)
                 .where(eq(projects.id, "project"))
@@ -91,80 +91,83 @@ describe("folder item persistence", () => {
         opened.client.close();
     });
 
-    it("rejects archived targets and omits their live links from the active projection", () => {
-        const opened = fixture();
-        createProject(opened.database, "project");
-        createFolder(opened.database, "folder");
-        folderItemCreate(opened.database, {
+    it("rejects archived targets and omits their live links from the active projection", async () => {
+        const opened = await fixture();
+        await createProject(opened.database, "project");
+        await createFolder(opened.database, "folder");
+        await folderItemCreate(opened.database, {
             folderId: "folder",
             id: "item",
             now: 2,
             target: { kind: "project", projectId: "project" },
         });
         expect(
-            queryFolderItemTargetExists(opened.database, {
+            await queryFolderItemTargetExists(opened.database, {
                 kind: "project",
                 projectId: "project",
             }),
         ).toBe(true);
 
-        opened.database
+        await opened.database
             .update(projects)
             .set({ archivedAtMs: 3 })
             .where(eq(projects.id, "project"))
             .run();
 
         expect(
-            queryFolderItemTargetExists(opened.database, {
+            await queryFolderItemTargetExists(opened.database, {
                 kind: "project",
                 projectId: "project",
             }),
         ).toBe(false);
         expect(
-            folderItemsWithActiveTargets(opened.database, queryFolderItems(opened.database)),
+            await folderItemsWithActiveTargets(
+                opened.database,
+                await queryFolderItems(opened.database),
+            ),
         ).toEqual([]);
         opened.client.close();
     });
 
-    it("archives subtree items without archiving their targets", () => {
-        const opened = fixture();
-        createProject(opened.database, "project");
-        createFolder(opened.database, "parent");
-        createFolder(opened.database, "child", "parent");
-        folderItemCreate(opened.database, {
+    it("archives subtree items without archiving their targets", async () => {
+        const opened = await fixture();
+        await createProject(opened.database, "project");
+        await createFolder(opened.database, "parent");
+        await createFolder(opened.database, "child", "parent");
+        await folderItemCreate(opened.database, {
             folderId: "child",
             id: "item",
             now: 2,
             target: { kind: "project", projectId: "project" },
         });
 
-        folderArchive(opened.database, "parent", 9);
+        await folderArchive(opened.database, "parent", 9);
 
         expect(
-            opened.database
+            await opened.database
                 .select({ archivedAtMs: folderItems.archivedAtMs })
                 .from(folderItems)
                 .where(eq(folderItems.id, "item"))
                 .get(),
         ).toEqual({ archivedAtMs: 9 });
         expect(
-            opened.database
+            await opened.database
                 .select({ archivedAtMs: projects.archivedAtMs })
                 .from(projects)
                 .where(eq(projects.id, "project"))
                 .get(),
         ).toEqual({ archivedAtMs: null });
 
-        expect(folderItemArchive(opened.database, "item", 10)).toBe(0);
+        expect(await folderItemArchive(opened.database, "item", 10)).toBe(0);
         opened.client.close();
     });
 
-    it("enforces exactly one target in SQLite", () => {
-        const opened = fixture();
-        createProject(opened.database, "project");
-        createFolder(opened.database, "folder");
+    it("enforces exactly one target in SQLite", async () => {
+        const opened = await fixture();
+        await createProject(opened.database, "project");
+        await createFolder(opened.database, "folder");
 
-        expect(() =>
+        await expect(
             opened.database.run(
                 sql.raw(`
                     INSERT INTO folder_items
@@ -172,8 +175,8 @@ describe("folder item persistence", () => {
                     VALUES ('none', 'folder', 'a0', 1, 1, 1)
                 `),
             ),
-        ).toThrow();
-        expect(() =>
+        ).rejects.toThrow();
+        await expect(
             opened.database.run(
                 sql.raw(`
                     INSERT INTO folder_items
@@ -181,23 +184,23 @@ describe("folder item persistence", () => {
                     VALUES ('two', 'folder', 'project', 'missing', 'a0', 1, 1, 1)
                 `),
             ),
-        ).toThrow();
+        ).rejects.toThrow();
         opened.client.close();
     });
 });
 
-function fixture() {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
+async function fixture() {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
     return opened;
 }
 
-function createFolder(
-    database: ReturnType<typeof openSessionDatabase>["database"],
+async function createFolder(
+    database: Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>["database"],
     id: string,
     parentId?: string,
-): void {
-    folderCreate(database, {
+): Promise<void> {
+    await folderCreate(database, {
         id,
         name: id,
         now: 1,
@@ -206,11 +209,11 @@ function createFolder(
     });
 }
 
-function createProject(
-    database: ReturnType<typeof openSessionDatabase>["database"],
+async function createProject(
+    database: Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>["database"],
     id: string,
-): void {
-    database
+): Promise<void> {
+    await database
         .insert(projects)
         .values({
             archivedAtMs: null,

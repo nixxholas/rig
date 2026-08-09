@@ -18,11 +18,11 @@ Do not infer a goal from an ordinary task. A new goal cannot replace an unfinish
     ),
     returnType: Type.Object({ goal: sessionGoalSchema }),
     shouldReviewInAutoMode: () => false,
-    execute({ objective }, context) {
+    async execute({ objective }, context) {
         if (context.goals === undefined) {
             throw new Error("Goal tracking is unavailable in this session.");
         }
-        return { goal: context.goals.create({ objective }) };
+        return { goal: await context.goals.create({ objective }) };
     },
     toLLM: ({ goal }) => [
         {

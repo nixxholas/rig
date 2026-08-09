@@ -161,15 +161,15 @@ describe("P2pCredentialReplicator", () => {
             "aremoteinstance0000000001",
             new Uint8Array(32).fill(2),
         );
-        const ownerDatabase = new PersistentSessionStore({ databasePath: ":memory:" });
-        const receiverDatabase = new PersistentSessionStore({ databasePath: ":memory:" });
+        const ownerDatabase = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const receiverDatabase = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const ownerStore = new P2pCredentialStore({ database: ownerDatabase, identity: owner });
         const receiverStore = new P2pCredentialStore({
             database: receiverDatabase,
             identity: receiver,
         });
         const oldSnapshot = snapshot(owner, "revoked-key", 7);
-        receiverStore.replace(owner.instanceId, oldSnapshot);
+        await receiverStore.replace(owner.instanceId, oldSnapshot);
         const sentVersions: number[] = [];
         const fetch = vi.fn(async (_peerId: string, request: unknown) => {
             const envelope = JSON.parse(
@@ -185,7 +185,7 @@ describe("P2pCredentialReplicator", () => {
             ) as { version: number };
             sentVersions.push(decoded.version);
             try {
-                const result = receiverStore.replaceEncrypted(
+                const result = await receiverStore.replaceEncrypted(
                     owner.instanceId,
                     owner.publicKey,
                     envelope,
@@ -213,17 +213,17 @@ describe("P2pCredentialReplicator", () => {
             await replicator.ensure(receiver.instanceId);
 
             expect(sentVersions).toEqual([1, 8]);
-            expect(ownerStore.prepareOwnSnapshot(resetSnapshot).version).toBe(8);
-            expect(receiverStore.list(owner.instanceId)).toMatchObject([
+            expect((await ownerStore.prepareOwnSnapshot(resetSnapshot)).version).toBe(8);
+            expect(await receiverStore.list(owner.instanceId)).toMatchObject([
                 { material: { apiKey: "current-key" } },
             ]);
-            expect(() => receiverStore.replace(owner.instanceId, oldSnapshot)).toThrow(
+            await expect(receiverStore.replace(owner.instanceId, oldSnapshot)).rejects.toThrow(
                 "older than saved state",
             );
         } finally {
             await replicator.close();
-            ownerDatabase.close();
-            receiverDatabase.close();
+            await ownerDatabase.close();
+            await receiverDatabase.close();
         }
     });
 });

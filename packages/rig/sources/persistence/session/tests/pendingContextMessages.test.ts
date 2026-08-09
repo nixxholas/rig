@@ -10,30 +10,33 @@ import { sessionDrainPendingContextMessages } from "../sessionDrainPendingContex
 import { sessionSavePendingContextMessage } from "../sessionSavePendingContextMessage.js";
 
 describe("pending context messages", () => {
-    it("stores visible anchors atomically and drains FIFO into model context", () => {
-        const opened = createDatabase();
+    it("stores visible anchors atomically and drains FIFO into model context", async () => {
+        const opened = await createDatabase();
         const first = pending("note-1", 0);
         const second = pending("note-2", 1);
 
-        opened.database.transaction((tx) => {
-            sessionSavePendingContextMessage(tx, "session-1", first, 10);
-            sessionSavePendingContextMessage(tx, "session-1", second, 11);
+        await opened.database.transaction(async (tx) => {
+            await sessionSavePendingContextMessage(tx, "session-1", first, 10);
+            await sessionSavePendingContextMessage(tx, "session-1", second, 11);
         });
 
-        expect(queryPendingContextMessages(opened.database, "session-1")).toEqual([first, second]);
+        expect(await queryPendingContextMessages(opened.database, "session-1")).toEqual([
+            first,
+            second,
+        ]);
         expect(
-            querySessionTranscriptPage(opened.database, "session-1", 10)?.messages,
+            (await querySessionTranscriptPage(opened.database, "session-1", 10))?.messages,
         ).toMatchObject([
             { message: { id: "note-1" }, runId: "context:note-1" },
             { message: { id: "note-2" }, runId: "context:note-2" },
         ]);
-        expect(sessionDrainPendingContextMessages(opened.database, "session-1")).toEqual([
+        expect(await sessionDrainPendingContextMessages(opened.database, "session-1")).toEqual([
             first,
             second,
         ]);
-        expect(queryPendingContextMessages(opened.database, "session-1")).toEqual([]);
+        expect(await queryPendingContextMessages(opened.database, "session-1")).toEqual([]);
         expect(
-            opened.database.all<{ messageId: string }>(sql`
+            await opened.database.all<{ messageId: string }>(sql`
                 SELECT message_id AS messageId
                 FROM session_context_messages
                 WHERE session_id = 'session-1'
@@ -43,25 +46,28 @@ describe("pending context messages", () => {
         opened.client.close();
     });
 
-    it("keeps the queue intact when a surrounding actionable-boundary transaction fails", () => {
-        const opened = createDatabase();
+    it("keeps the queue intact when a surrounding actionable-boundary transaction fails", async () => {
+        const opened = await createDatabase();
         const first = pending("note-1", 0);
         const second = pending("note-2", 1);
-        opened.database.transaction((tx) => {
-            sessionSavePendingContextMessage(tx, "session-1", first, 10);
-            sessionSavePendingContextMessage(tx, "session-1", second, 11);
+        await opened.database.transaction(async (tx) => {
+            await sessionSavePendingContextMessage(tx, "session-1", first, 10);
+            await sessionSavePendingContextMessage(tx, "session-1", second, 11);
         });
 
-        expect(() =>
-            opened.database.transaction((tx) => {
-                sessionDrainPendingContextMessages(tx, "session-1");
+        await expect(
+            opened.database.transaction(async (tx) => {
+                await sessionDrainPendingContextMessages(tx, "session-1");
                 throw new Error("actionable message could not be committed");
             }),
-        ).toThrow("actionable message could not be committed");
+        ).rejects.toThrow("actionable message could not be committed");
 
-        expect(queryPendingContextMessages(opened.database, "session-1")).toEqual([first, second]);
+        expect(await queryPendingContextMessages(opened.database, "session-1")).toEqual([
+            first,
+            second,
+        ]);
         expect(
-            opened.database.all<{ count: number }>(sql`
+            await opened.database.all<{ count: number }>(sql`
                 SELECT COUNT(*) AS count
                 FROM session_context_messages
                 WHERE session_id = 'session-1'
@@ -85,10 +91,10 @@ function pending(id: string, position: number) {
     };
 }
 
-function createDatabase() {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
-    opened.database
+async function createDatabase() {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
+    await opened.database
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -111,7 +117,7 @@ function createDatabase() {
             worktreeSupport: "unknown",
         })
         .run();
-    opened.database
+    await opened.database
         .insert(sessions)
         .values({
             agentId: "agent-1",

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -39,17 +40,27 @@ describe("Happy mobile synchronization", () => {
         await gym.terminal.waitForText("Local work continued while Happy was offline.", 30_000);
         const inspection = await gym.runInContainer("node", [
             "-e",
-            [
-                'const fs=require("node:fs")',
-                'const {DatabaseSync}=require("node:sqlite")',
-                'const copied=JSON.parse(fs.readFileSync("/home/rig/.happy/rig/happy/access.key","utf8"))',
-                'const mode=fs.statSync("/home/rig/.happy/rig/happy/access.key").mode & 0o777',
-                'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
-                'const sessions=db.prepare("select count(*) as count from happy_sessions").get().count',
-                'const outbox=db.prepare("select count(*) as count from happy_outbox").get().count',
-                "db.close()",
-                "process.stdout.write(JSON.stringify({copied,mode,sessions,outbox}))",
-            ].join(";"),
+            libsqlCommonJsScript(`
+const fs = require("node:fs");
+const copied = JSON.parse(
+    fs.readFileSync("/home/rig/.happy/rig/happy/access.key", "utf8"),
+);
+const mode = fs.statSync("/home/rig/.happy/rig/happy/access.key").mode & 0o777;
+const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
+let sessions;
+let outbox;
+try {
+    sessions = (
+        await database.execute("select count(*) as count from happy_sessions")
+    ).rows[0].count;
+    outbox = (
+        await database.execute("select count(*) as count from happy_outbox")
+    ).rows[0].count;
+} finally {
+    await database.close();
+}
+process.stdout.write(JSON.stringify({ copied, mode, sessions, outbox }));
+`),
         ]);
         const state = JSON.parse(inspection.stdout) as {
             copied: typeof credentials;

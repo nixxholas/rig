@@ -326,7 +326,7 @@ describe("WorkletManager", () => {
         await uninstalling;
 
         expect(installed.name).toBe("slow");
-        expect(harness.manager.get("slow")).toBeUndefined();
+        expect(await harness.manager.get("slow")).toBeUndefined();
         await expect(
             readdir(getWorkletRuntimeDirectory("slow", harness.environment)),
         ).rejects.toThrow();
@@ -381,7 +381,7 @@ describe("WorkletManager", () => {
         releaseUpdate();
         await updating;
         await uninstalling;
-        expect(harness.manager.get("serialized")).toBeUndefined();
+        expect(await harness.manager.get("serialized")).toBeUndefined();
         await expect(harness.registry.load(source.path, "auto")).resolves.toMatchObject({
             tools: [],
         });
@@ -446,12 +446,14 @@ describe("WorkletManager", () => {
             path: source.path,
         });
         await entered;
-        await vi.waitFor(() => expect(harness.manager.get("retiring")?.state).toBe("stopped"));
+        await vi.waitFor(async () =>
+            expect((await harness.manager.get("retiring"))?.state).toBe("stopped"),
+        );
         releaseUpdate();
 
         await expect(updating).resolves.toMatchObject({ state: "running" });
         await new Promise<void>((resolve) => setImmediate(resolve));
-        expect(harness.manager.get("retiring")).toMatchObject({
+        expect(await harness.manager.get("retiring")).toMatchObject({
             state: "running",
             tools: [{ name: "replacement" }],
         });
@@ -526,6 +528,75 @@ describe("WorkletManager", () => {
         });
     });
 
+    it("drains an admitted status publication before closing its database owner", async () => {
+        const source = await workletSource(
+            {
+                description: "Reports ready status",
+                name: "status-drain",
+            },
+            `
+            import { defineWorkletTool, Type, worklet } from "happy-worklets";
+
+            await worklet.tools([
+                defineWorkletTool({
+                    description: "Reports a new status.",
+                    inputSchema: Type.Object({}),
+                    name: "report",
+                    execute: async () => {
+                        await worklet.status("Draining.");
+                        return { content: [{ text: "reported", type: "text" }] };
+                    },
+                }),
+            ]);
+            await worklet.ready();
+        `,
+        );
+        const harness = await createHarness();
+        await harness.manager.install({
+            authorSessionId: "agent-1",
+            iconPath: source.iconPath,
+            path: source.path,
+        });
+        const originalList = harness.store.list.bind(harness.store);
+        let reportPublicationStarted: () => void = () => undefined;
+        const publicationStarted = new Promise<void>((resolve) => {
+            reportPublicationStarted = resolve;
+        });
+        let releasePublication: () => void = () => undefined;
+        const publicationGate = new Promise<void>((resolve) => {
+            releasePublication = resolve;
+        });
+        let listCalls = 0;
+        harness.store.list = async () => {
+            listCalls += 1;
+            if (listCalls === 1) {
+                reportPublicationStarted();
+                await publicationGate;
+            }
+            return await originalList();
+        };
+
+        const loaded = await harness.registry.load(source.path, "auto");
+        const report = loaded.tools.find(
+            (entry) => entry.name === workletToolName("status-drain", "report"),
+        );
+        const reporting = report!.execute({} as never, {} as never, {});
+        await publicationStarted;
+        await expect(reporting).resolves.toMatchObject({
+            content: [{ text: "reported", type: "text" }],
+        });
+
+        let closed = false;
+        const closing = harness.manager.close().then(() => {
+            closed = true;
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(closed).toBe(false);
+        releasePublication();
+        await closing;
+        expect(closed).toBe(true);
+    });
+
     it("announces the whole current set on every change, with a version that moves forward", async () => {
         const source = await workletSource(
             {
@@ -554,7 +625,7 @@ describe("WorkletManager", () => {
         const versions = harness.published.map((event) => event.data.version);
         expect([...versions].sort()).toEqual(versions);
         expect(new Set(versions).size).toBe(versions.length);
-        expect(harness.manager.catalog().version).toBe(versions.at(-1));
+        expect((await harness.manager.catalog()).version).toBe(versions.at(-1));
     });
 });
 
@@ -572,8 +643,8 @@ async function createHarness(): Promise<Harness> {
     const root = await temporaryDirectory("rig-worklet-root-");
     // Sockets live under RIG_HOME now, so the test gets its own rather than writing to the real one.
     const rigHome = await scratchDirectory();
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
     const registry = new WorkletToolRegistry();
     const published: WorkletsChangedEvent[] = [];
     const environment = { ...process.env, HAPPY_WORKLETS_DIRECTORY: root, RIG_HOME: rigHome };
@@ -589,7 +660,7 @@ async function createHarness(): Promise<Harness> {
     });
     cleanups.push(async () => {
         await manager.close();
-        opened.client.close();
+        await opened.client.close();
     });
     return {
         environment,

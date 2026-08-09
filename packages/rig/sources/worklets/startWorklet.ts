@@ -114,7 +114,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
         });
         await secureSocket(socketPath, options.runtimeDirectory);
     } catch (error) {
-        tools.close();
+        await tools.close();
         await closeServer(server);
         await Promise.all([
             rm(socketPath, { force: true }),
@@ -181,7 +181,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
         });
         processState = "running";
     } catch (error) {
-        tools.close();
+        await tools.close();
         await Promise.allSettled([
             closeServer(server),
             log.close(),
@@ -210,9 +210,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
             network?.close(),
             rm(socketPath, { force: true }),
             rm(temporaryDirectory, { force: true, recursive: true }),
-        ]).then(() => {
-            tools.close();
-        }));
+        ]).then(() => tools.close()));
     const settled = completion.then(
         (result) => {
             processState = "exited";

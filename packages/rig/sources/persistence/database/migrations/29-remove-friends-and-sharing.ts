@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const sharingTables = [
     "session_share_peer_actions",
@@ -25,12 +25,12 @@ const sharingTables = [
     "scope_shares",
 ] as const;
 
-export function removeFriendsAndSharing(database: SessionDatabase): void {
+export async function removeFriendsAndSharing(database: SessionDatabase): Promise<void> {
     for (const table of sharingTables) {
-        database.run(sql.raw(`DROP TABLE ${table}`));
+        await database.run(sql.raw(`DROP TABLE ${table}`));
     }
 
-    database.run(
+    await database.run(
         sql.raw(`CREATE TABLE happy_cloud_enrollment_next (
             singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
             contract_version INTEGER NOT NULL,
@@ -51,7 +51,7 @@ export function removeFriendsAndSharing(database: SessionDatabase): void {
             updated_at_ms INTEGER NOT NULL
         )`),
     );
-    database.run(
+    await database.run(
         sql.raw(`INSERT INTO happy_cloud_enrollment_next (
             singleton_id,
             contract_version,
@@ -91,8 +91,8 @@ export function removeFriendsAndSharing(database: SessionDatabase): void {
             updated_at_ms
         FROM happy_cloud_enrollment`),
     );
-    database.run(sql.raw("DROP TABLE happy_cloud_enrollment"));
-    database.run(
+    await database.run(sql.raw("DROP TABLE happy_cloud_enrollment"));
+    await database.run(
         sql.raw("ALTER TABLE happy_cloud_enrollment_next RENAME TO happy_cloud_enrollment"),
     );
 }

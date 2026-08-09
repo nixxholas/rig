@@ -168,6 +168,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #unsubscribeCompute: () => void;
     #statusPublication: StatusPublicationState = { status: "idle" };
     #closed = false;
+    #computePublication = Promise.resolve();
     #publication = Promise.resolve();
     #started = false;
 
@@ -184,11 +185,15 @@ export class PluginManager implements ManagedNetworkInterceptor {
                     this.#daemonLog.record(level, event, message, details),
             });
         this.#unsubscribeCompute = this.#computeRegistry.subscribe((event) => {
-            if (!this.#started) return;
+            if (!this.#started) return undefined;
             if (event.type === "catalog_changed") {
                 void this.#publishChanged();
+                return undefined;
             } else {
-                this.#publishComputePreparation(event);
+                const publish = () => this.#publishComputePreparation(event);
+                const next = this.#computePublication.then(publish, publish);
+                this.#computePublication = next.catch(() => undefined);
+                return next;
             }
         });
         this.#defaultDocker = options.defaultDocker;
@@ -1206,9 +1211,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
         await next;
     }
 
-    #publishComputePreparation(
+    async #publishComputePreparation(
         progress: Extract<PluginComputeRegistryEvent, { type: "preparation" }>,
-    ): void {
+    ): Promise<void> {
         const event: ComputePreparationEvent = {
             computeInstanceId: progress.instanceId,
             createdAt: progress.createdAt,
@@ -1229,7 +1234,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             type: "compute_preparation",
         };
         try {
-            const entry = this.#store.globalEventQueue.append(event);
+            const entry = await this.#store.globalEventQueue.append(event);
             if (entry === undefined) {
                 this.#daemonLog.record(
                     "warning",
@@ -1262,7 +1267,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#store.liveEvents.publish(event);
         const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
         try {
-            this.#publishComputePreparationToSessions(progress, event);
+            await this.#publishComputePreparationToSessions(progress, event);
         } catch (error) {
             if (previous === undefined) {
                 this.#computeSessionPreparation.delete(event.computeInstanceId);
@@ -1283,10 +1288,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
     }
 
-    #publishComputePreparationToSessions(
+    async #publishComputePreparationToSessions(
         progress: Extract<PluginComputeRegistryEvent, { type: "preparation" }>,
         event: ComputePreparationEvent,
-    ): void {
+    ): Promise<void> {
         if (progress.workspaceSource.type !== "local_directory") return;
         const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
         const samePhase =
@@ -1341,7 +1346,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
          */
         for (const { session, settleArchived } of recipients) {
             try {
-                session.recordSystemNotice(payload, settleArchived ? { settleArchived: true } : {});
+                await session.recordSystemNotice(
+                    payload,
+                    settleArchived ? { settleArchived: true } : {},
+                );
                 current.delivered.add(session);
                 if (!settleArchived) current.sessions.add(session);
             } catch (error) {

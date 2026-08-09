@@ -60,9 +60,11 @@ describe("InMemorySession assistant message identity", () => {
             },
         });
         const observed: SessionEvent[] = [];
-        const unsubscribe = session.events.subscribe((event) => observed.push(event));
+        const unsubscribe = session.events.subscribe((event) => {
+            observed.push(event);
+        });
 
-        const submitted = session.submit({ text: "Say hello." });
+        const submitted = await session.submit({ text: "Say hello." });
         await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
             status: "completed",
         });

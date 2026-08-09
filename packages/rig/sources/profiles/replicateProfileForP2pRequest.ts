@@ -24,8 +24,8 @@ export async function replicateProfileForP2pRequest(options: {
 }): Promise<void> {
     const profileId = messageProfileId(options.path, options.body);
     if (profileId === undefined) return;
-    const profile = options.profiles.get(profileId);
-    if (profile === undefined || !options.profiles.isLocal(profileId)) {
+    const profile = await options.profiles.get(profileId);
+    if (profile === undefined || !(await options.profiles.isLocal(profileId))) {
         throw new P2pProfileReplicationError(403, "That human profile is not owned by this Rig.");
     }
     let candidate = profile;
@@ -41,10 +41,10 @@ export async function replicateProfileForP2pRequest(options: {
             return;
         } catch (error) {
             if (!(error instanceof NewerP2pProfileError)) throw error;
-            const latest = options.profiles.get(profileId);
+            const latest = await options.profiles.get(profileId);
             if (
                 latest === undefined ||
-                !options.profiles.isLocal(profileId) ||
+                !(await options.profiles.isLocal(profileId)) ||
                 latest.version < error.profile.version
             ) {
                 throw new P2pProfileReplicationError(

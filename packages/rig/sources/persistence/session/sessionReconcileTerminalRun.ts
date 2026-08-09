@@ -2,10 +2,10 @@ import { and, eq } from "drizzle-orm";
 
 import { queuedRuns, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function sessionReconcileTerminalRun(
-    tx: TX,
+export async function sessionReconcileTerminalRun(
+    tx: DatabaseScope,
     input: {
         lastEventId: string | null;
         runId: string;
@@ -13,9 +13,10 @@ export function sessionReconcileTerminalRun(
         status: string;
         updatedAt: number;
     },
-): void {
-    inTx(tx, (tx) => {
-        tx.update(sessions)
+): Promise<void> {
+    await inTx(tx, async (tx) => {
+        await tx
+            .update(sessions)
             .set({
                 activeRunId: null,
                 activeSinceMs: null,
@@ -27,7 +28,8 @@ export function sessionReconcileTerminalRun(
             })
             .where(eq(sessions.id, input.sessionId))
             .run();
-        tx.delete(queuedRuns)
+        await tx
+            .delete(queuedRuns)
             .where(
                 and(eq(queuedRuns.sessionId, input.sessionId), eq(queuedRuns.runId, input.runId)),
             )

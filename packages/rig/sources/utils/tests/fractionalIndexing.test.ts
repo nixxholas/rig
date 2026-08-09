@@ -1,5 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
-
+import { createClient } from "@libsql/client";
 import { describe, expect, it } from "vitest";
 
 import { BASE_52_DIGITS, generateKeyBetween, generateNKeysBetween } from "../fractionalIndexing.js";
@@ -181,7 +180,7 @@ describe("generateNKeysBetween", () => {
         }
     });
 
-    it("sorts identically in JavaScript and SQLite BINARY collation", () => {
+    it("sorts identically in JavaScript and SQLite BINARY collation", async () => {
         let seed = 7;
         const random = (): number =>
             (seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff) / 0x7fffffff;
@@ -195,18 +194,26 @@ describe("generateNKeysBetween", () => {
             keys.splice(position, 0, key);
         }
 
-        const database = new DatabaseSync(":memory:");
+        const database = createClient({ intMode: "number", url: "file::memory:" });
         try {
-            database.exec("CREATE TABLE ordered_keys (order_key TEXT NOT NULL COLLATE BINARY)");
-            const insert = database.prepare("INSERT INTO ordered_keys (order_key) VALUES (?)");
-            for (const key of [...keys].reverse()) insert.run(key);
-            const sqliteKeys = database
-                .prepare("SELECT order_key FROM ordered_keys ORDER BY order_key COLLATE BINARY")
-                .all()
-                .map((row) => row.order_key);
+            await database.execute(
+                "CREATE TABLE ordered_keys (order_key TEXT NOT NULL COLLATE BINARY)",
+            );
+            await database.batch(
+                [...keys].reverse().map((key) => ({
+                    args: [key],
+                    sql: "INSERT INTO ordered_keys (order_key) VALUES (?)",
+                })),
+                "write",
+            );
+            const sqliteKeys = (
+                await database.execute(
+                    "SELECT order_key FROM ordered_keys ORDER BY order_key COLLATE BINARY",
+                )
+            ).rows.map((row) => row.order_key);
             expect(sqliteKeys).toEqual([...keys].sort());
         } finally {
-            database.close();
+            await database.close();
         }
     });
 });

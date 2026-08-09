@@ -1,8 +1,8 @@
 # Session persistence
 
-This directory contains synchronous, semantic database operations for sessions. Each top-level
+This directory contains asynchronous, semantic database operations for sessions. Each top-level
 TypeScript file exposes one complete mutation or one `query` operation. Every operation receives
-the shared `TX` facade first so it can run directly or compose inside a transaction.
+the shared `DatabaseScope` first so it can acquire the owner lock or compose inside a transaction.
 
 ```text
 session model / store
@@ -10,7 +10,7 @@ session model / store
         v
 one persistence operation
         |
-        +--> TX --> SQLite
+        +--> inDatabase / inTx --> SQLite
         |
         +--> impl/ decoders
 ```

@@ -54,7 +54,9 @@ describe("Sharing HTTP API", () => {
             ),
             snapshot: vi.fn(async () => snapshot),
         };
-        const started = await startServer(createProtocolHttpServer({ sharing, token: "secret" }));
+        const started = await startServer(
+            await createProtocolHttpServer({ sharing, token: "secret" }),
+        );
         close.push(started.close);
 
         expect(await send(started.socketPath, "GET", "/sharing")).toEqual({
@@ -153,7 +155,9 @@ describe("Sharing HTTP API", () => {
             })),
             snapshot: vi.fn(async () => snapshot),
         };
-        const started = await startServer(createProtocolHttpServer({ sharing, token: "secret" }));
+        const started = await startServer(
+            await createProtocolHttpServer({ sharing, token: "secret" }),
+        );
         close.push(started.close);
 
         expect(

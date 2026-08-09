@@ -60,8 +60,8 @@ describe("Codex collaboration tools", () => {
             path: agent.path,
             status: "running" as const,
         }));
-        const followUp = vi.fn(() => agent);
-        const interrupt = vi.fn(() => agent);
+        const followUp = vi.fn(async () => agent);
+        const interrupt = vi.fn(async () => agent);
         const list = vi.fn(() => [agent]);
         const wait = vi.fn(async () => ({ agents: [agent], timedOut: false }));
         harness.context.subagents = {
@@ -148,9 +148,9 @@ describe("Codex collaboration tools", () => {
                 },
             ],
         });
-        expect(
+        await expect(
             codexInterruptAgentTool.execute({ target: "unguessable-agent-1" }, harness.context, {}),
-        ).toEqual({
+        ).resolves.toEqual({
             agent_id: "unguessable-agent-1",
             path: "/root/inspect_code",
             previous_status: "running",
@@ -197,7 +197,7 @@ describe("Codex collaboration tools", () => {
         expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 60_000 })).toBe(true);
     });
 
-    it("targets a stable Agent ID without consulting legacy aliases", () => {
+    it("targets a stable Agent ID without consulting legacy aliases", async () => {
         const harness = createJustBashToolHarness();
         const alias: ManagedSubagent = {
             agentId: "alias-agent",
@@ -215,16 +215,16 @@ describe("Codex collaboration tools", () => {
             canSpawn: true,
             depth: 0,
             followUp: vi.fn(),
-            interrupt: vi.fn(() => identified),
+            interrupt: vi.fn(async () => identified),
             list: vi.fn(() => [alias, identified]),
             maxDepth: 3,
             spawn: vi.fn(),
             wait: vi.fn(),
         };
 
-        expect(
+        await expect(
             codexInterruptAgentTool.execute({ target: "stable-target" }, harness.context, {}),
-        ).toEqual({
+        ).resolves.toEqual({
             agent_id: "stable-target",
             path: "/root/identified",
             previous_status: "running",
@@ -276,7 +276,7 @@ describe("Codex collaboration tools", () => {
             path: "/root/review_claude",
             status: "completed",
         };
-        const followUp = vi.fn(() => managed);
+        const followUp = vi.fn(async () => managed);
         harness.context.subagents = {
             availableModels: [
                 {
@@ -383,7 +383,7 @@ describe("Codex collaboration tools", () => {
             path: agent.path,
             status: "running" as const,
         }));
-        const followUp = vi.fn(() => agent);
+        const followUp = vi.fn(async () => agent);
         const sendMessage = vi.fn(() => agent);
         const setReadOnly = vi.fn(async () => agent);
         harness.context.subagents = {

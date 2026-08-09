@@ -1,19 +1,19 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * Lifetime usage starts from the exact committed total already stored for each session. Future
  * resets preserve this column even while resetting the conversation-scoped usage envelope.
  */
-export function agentTreeUsage(database: SessionDatabase): void {
-    database.run(
+export async function agentTreeUsage(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         ALTER TABLE sessions
         ADD COLUMN lifetime_total_tokens INTEGER NOT NULL DEFAULT 0
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         UPDATE sessions
         SET lifetime_total_tokens = CASE
@@ -32,7 +32,7 @@ export function agentTreeUsage(database: SessionDatabase): void {
         END
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE INDEX sessions_delegated_created
         ON sessions(delegated_by_session_id, created_at_ms, id)

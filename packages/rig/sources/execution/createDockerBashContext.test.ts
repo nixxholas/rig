@@ -219,7 +219,9 @@ describe("createDockerBashContext", () => {
             createPermissionContext("full_access"),
         );
         const exits: BashSessionExit[] = [];
-        context.setSessionExitListener?.((exit) => exits.push(exit));
+        context.setSessionExitListener?.((exit) => {
+            exits.push(exit);
+        });
 
         await context.startSession({ command: "background command" });
         fake.foregroundStreams[0]?.end();
@@ -243,7 +245,9 @@ describe("createDockerBashContext", () => {
             createPermissionContext("full_access"),
         );
         const exits: BashSessionExit[] = [];
-        context.setSessionExitListener?.((exit) => exits.push(exit));
+        context.setSessionExitListener?.((exit) => {
+            exits.push(exit);
+        });
 
         await context.startSession({ command: "observed command" });
         const reading = context.readSession(1, { waitMs: 1_000 });

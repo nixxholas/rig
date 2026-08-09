@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * One Murmur MLS group per shared folder root.
@@ -8,19 +8,19 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * Application snapshots and deliveries remain in Rig's main database. Murmur's separate store is
  * reserved for cryptographic/session state.
  */
-export function folderSharing(database: SessionDatabase): void {
-    const folderColumns = database
-        .all<{ name: string }>(sql.raw("PRAGMA table_info(folders)"))
-        .map((column) => column.name);
+export async function folderSharing(database: SessionDatabase): Promise<void> {
+    const folderColumns = (
+        await database.all<{ name: string }>(sql.raw("PRAGMA table_info(folders)"))
+    ).map((column) => column.name);
     if (!folderColumns.includes("shared_group_id")) {
-        database.run(sql.raw("ALTER TABLE folders ADD COLUMN shared_group_id TEXT"));
+        await database.run(sql.raw("ALTER TABLE folders ADD COLUMN shared_group_id TEXT"));
     }
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE UNIQUE INDEX IF NOT EXISTS folders_shared_group ON folders(shared_group_id) WHERE shared_group_id IS NOT NULL",
         ),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS folder_shares (
                 group_id TEXT NOT NULL PRIMARY KEY,
@@ -36,7 +36,7 @@ export function folderSharing(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS folder_share_intents (
                 share_id TEXT NOT NULL PRIMARY KEY,
@@ -46,7 +46,7 @@ export function folderSharing(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS folder_share_nodes (
                 group_id TEXT NOT NULL REFERENCES folder_shares(group_id) ON DELETE CASCADE,
@@ -59,7 +59,7 @@ export function folderSharing(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS folder_share_updates (
                 delivery_id TEXT NOT NULL PRIMARY KEY,
@@ -72,7 +72,7 @@ export function folderSharing(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS folder_share_outbox (
                 operation_id TEXT NOT NULL PRIMARY KEY,
@@ -82,13 +82,13 @@ export function folderSharing(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX IF NOT EXISTS folder_share_outbox_pending ON folder_share_outbox(created_at_ms, operation_id)",
         ),
     );
 
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TRIGGER IF NOT EXISTS folders_shared_root_insert
             BEFORE INSERT ON folders
@@ -98,7 +98,7 @@ export function folderSharing(database: SessionDatabase): void {
             END
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TRIGGER IF NOT EXISTS folders_shared_root_update
             BEFORE UPDATE OF parent_id, shared_group_id ON folders
@@ -108,7 +108,7 @@ export function folderSharing(database: SessionDatabase): void {
             END
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TRIGGER IF NOT EXISTS folders_shared_subtree_contents_update
             BEFORE UPDATE OF parent_id ON folders
@@ -152,7 +152,7 @@ export function folderSharing(database: SessionDatabase): void {
             END
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TRIGGER IF NOT EXISTS folder_items_shared_root_insert
             BEFORE INSERT ON folder_items
@@ -173,7 +173,7 @@ export function folderSharing(database: SessionDatabase): void {
             END
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
             CREATE TRIGGER IF NOT EXISTS folder_items_shared_root_update
             BEFORE UPDATE OF folder_id ON folder_items
@@ -194,11 +194,11 @@ export function folderSharing(database: SessionDatabase): void {
             END
         `),
     );
-    const sessions = database.get<{ name: string }>(
+    const sessions = await database.get<{ name: string }>(
         sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
     );
     if (sessions !== undefined) {
-        database.run(
+        await database.run(
             sql.raw(`
             CREATE TRIGGER IF NOT EXISTS sessions_shared_root_insert
             BEFORE INSERT ON sessions
@@ -219,7 +219,7 @@ export function folderSharing(database: SessionDatabase): void {
             END
             `),
         );
-        database.run(
+        await database.run(
             sql.raw(`
             CREATE TRIGGER IF NOT EXISTS sessions_shared_root_update
             BEFORE UPDATE OF scope_kind, folder_id ON sessions

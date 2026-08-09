@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const RESUME_MARKER = "PENDING_STEERING_RESUME_BOUNDARY";
@@ -213,18 +214,22 @@ async function screenshot(gym: Gym, name: string): Promise<void> {
     await gym.terminal.screenshot(resolve(directory, name));
 }
 
-const inspectPendingSteeringRecoveryScript = `
-import { writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
-const sessionId = database
-    .prepare("SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1")
-    .get().id;
-const events = database
-    .prepare("SELECT seq, event_id, type, data_json FROM session_events WHERE session_id = ? ORDER BY seq")
-    .all(sessionId)
-    .map((event) => ({ ...event, data: JSON.parse(event.data_json) }));
+const inspectPendingSteeringRecoveryScript = libsqlEsmScript(
+    `
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite");
+let result;
+try {
+const sessionId = (
+    await database.execute(
+        "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
+    )
+).rows[0].id;
+const events = (
+    await database.execute({
+        sql: "SELECT seq, event_id, type, data_json FROM session_events WHERE session_id = ? ORDER BY seq",
+        args: [sessionId],
+    })
+).rows.map((event) => ({ ...event, data: JSON.parse(event.data_json) }));
 const submitted = events.filter(
     (event) =>
         event.type === "message_submitted" &&
@@ -254,26 +259,34 @@ if (finished.length !== 1) {
     throw new Error("Expected one terminal run event, found " + finished.length);
 }
 const finishedEvent = finished[0];
-const storedCount = database
-    .prepare("SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?")
-    .get(sessionId, messageId).count;
-database.close();
+const storedCount = (
+    await database.execute({
+        sql: "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
+        args: [sessionId, messageId],
+    })
+).rows[0].count;
+result = {
+    appliedEventId: appliedEvent.event_id,
+    appliedMessageIds: appliedEvent.data.messageIds,
+    appliedRunId: appliedEvent.data.runId,
+    appliedSeq: appliedEvent.seq,
+    finishedEventId: finishedEvent.event_id,
+    finishedRunId: finishedEvent.data.runId,
+    finishedSeq: finishedEvent.seq,
+    finishedStopReason: finishedEvent.data.stopReason,
+    storedCount,
+    submittedEventId: submittedEvent.event_id,
+    submittedMessageId: messageId,
+    submittedRunId: submittedEvent.data.runId,
+    submittedSeq: submittedEvent.seq,
+};
+} finally {
+    await database.close();
+}
 writeFileSync(
     "/workspace/pending-steering-recovery.json",
-    JSON.stringify({
-        appliedEventId: appliedEvent.event_id,
-        appliedMessageIds: appliedEvent.data.messageIds,
-        appliedRunId: appliedEvent.data.runId,
-        appliedSeq: appliedEvent.seq,
-        finishedEventId: finishedEvent.event_id,
-        finishedRunId: finishedEvent.data.runId,
-        finishedSeq: finishedEvent.seq,
-        finishedStopReason: finishedEvent.data.stopReason,
-        storedCount,
-        submittedEventId: submittedEvent.event_id,
-        submittedMessageId: messageId,
-        submittedRunId: submittedEvent.data.runId,
-        submittedSeq: submittedEvent.seq,
-    }),
+    JSON.stringify(result),
 );
-`;
+`,
+    'import { writeFileSync } from "node:fs";',
+);

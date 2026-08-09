@@ -1,131 +1,19 @@
-import { and, count, eq, isNull, ne, sql } from "drizzle-orm";
-
-import { openSessionDatabase } from "../../packages/rig/sources/persistence/database/openSessionDatabase.js";
 import {
-    projectWorkspaces,
-    projects,
-    sessionEvents,
-    sessionMessages,
-    sessions,
-} from "../../packages/rig/sources/persistence/database/schema.js";
+    inspectSessionDatabase,
+    type SessionDatabaseInspection,
+} from "../../packages/rig/sources/persistence/database/inspectSessionDatabase.js";
+import { openSessionDatabase } from "../../packages/rig/sources/persistence/database/openSessionDatabase.js";
 
-export interface RigDatabaseInspection {
-    counts: {
-        activeProjects: number;
-        activeRootSessions: number;
-        activeWorkspaces: number;
-        projects: number;
-        rootSessions: number;
-        sessionEvents: number;
-        sessionMessages: number;
-        sessions: number;
-        workspaces: number;
-    };
-    foreignKeyViolations: number;
-    integrity: string;
-    invalidJsonRows: number;
-    schemaVersion: number;
-}
+export type RigDatabaseInspection = SessionDatabaseInspection;
 
-export function inspectRigDatabase(
+export async function inspectRigDatabase(
     databasePath: string,
     options: { fullIntegrityCheck?: boolean } = {},
-): RigDatabaseInspection {
-    const opened = openSessionDatabase(databasePath, { readOnly: true });
-    const { database } = opened;
+): Promise<RigDatabaseInspection> {
+    const opened = await openSessionDatabase(databasePath, { readOnly: true });
     try {
-        database.run(sql.raw("PRAGMA query_only = ON"));
-        database.run(sql.raw("PRAGMA foreign_keys = ON"));
-        const integrityPragma =
-            options.fullIntegrityCheck === true ? "integrity_check" : "quick_check";
-        const integrityRow = database.get<Record<string, unknown>>(
-            sql.raw(`PRAGMA ${integrityPragma}(1)`),
-        );
-        const foreignKeyViolations =
-            database.get<{ count: number }>(
-                sql.raw("SELECT COUNT(*) AS count FROM pragma_foreign_key_check"),
-            )?.count ?? 0;
-        const invalidJsonRows =
-            database.get<{ count: number }>(
-                sql.raw(`
-                    SELECT
-                        (SELECT COUNT(*) FROM session_events WHERE NOT json_valid(data_json)) +
-                        (SELECT COUNT(*) FROM session_messages WHERE NOT json_valid(message_json)) +
-                        (SELECT COUNT(*) FROM sessions WHERE NOT json_valid(models_json)) +
-                        (SELECT COUNT(*) FROM sessions WHERE NOT json_valid(tools_json))
-                        AS count
-                `),
-            )?.count ?? 0;
-
-        return {
-            counts: {
-                activeProjects: selectCount(
-                    database
-                        .select({ value: count() })
-                        .from(projects)
-                        .where(isNull(projects.archivedAtMs))
-                        .get(),
-                ),
-                activeRootSessions: selectCount(
-                    database
-                        .select({ value: count() })
-                        .from(sessions)
-                        .where(and(isNull(sessions.parentSessionId), eq(sessions.archived, false)))
-                        .get(),
-                ),
-                activeWorkspaces: selectCount(
-                    database
-                        .select({ value: count() })
-                        .from(projectWorkspaces)
-                        .innerJoin(projects, eq(projects.id, projectWorkspaces.projectId))
-                        .where(
-                            and(
-                                isNull(projects.archivedAtMs),
-                                isNull(projectWorkspaces.archivedAtMs),
-                                ne(projectWorkspaces.status, "archived"),
-                            ),
-                        )
-                        .get(),
-                ),
-                projects: selectCount(database.select({ value: count() }).from(projects).get()),
-                rootSessions: selectCount(
-                    database
-                        .select({ value: count() })
-                        .from(sessions)
-                        .where(isNull(sessions.parentSessionId))
-                        .get(),
-                ),
-                sessionEvents: selectCount(
-                    database.select({ value: count() }).from(sessionEvents).get(),
-                ),
-                sessionMessages: selectCount(
-                    database.select({ value: count() }).from(sessionMessages).get(),
-                ),
-                sessions: selectCount(database.select({ value: count() }).from(sessions).get()),
-                workspaces: selectCount(
-                    database.select({ value: count() }).from(projectWorkspaces).get(),
-                ),
-            },
-            foreignKeyViolations,
-            integrity: readString(integrityRow, integrityPragma),
-            invalidJsonRows,
-            schemaVersion:
-                database.get<{ user_version: number }>(sql.raw("PRAGMA user_version"))
-                    ?.user_version ?? 0,
-        };
+        return await inspectSessionDatabase(opened.database, options);
     } finally {
-        opened.client.close();
+        await opened.database.close();
     }
-}
-
-function selectCount(row: { value: number } | undefined): number {
-    return row?.value ?? 0;
-}
-
-function readString(row: Record<string, unknown> | undefined, key: string): string {
-    const value = row?.[key];
-    if (typeof value !== "string") {
-        throw new Error(`The database did not return a text ${key}.`);
-    }
-    return value;
 }

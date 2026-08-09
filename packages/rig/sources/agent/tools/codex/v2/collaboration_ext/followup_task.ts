@@ -45,7 +45,9 @@ Send plaintext follow-up work to an existing subagent and trigger another turn w
         const { message, read_only, reasoning_effort, target } = args;
         const subagents = requireSubagentContext(context);
         await applySubagentReadOnlyOverride(subagents, target, read_only);
-        return toCodexManagedSubagentResult(subagents.followUp(target, message, reasoning_effort));
+        return toCodexManagedSubagentResult(
+            await subagents.followUp(target, message, reasoning_effort),
+        );
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Sent follow-up work to ${result.path}.`,

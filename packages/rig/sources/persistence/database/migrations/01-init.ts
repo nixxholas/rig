@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     `CREATE TABLE project_avatar_assets (
@@ -284,6 +284,6 @@ const statements = [
     "CREATE INDEX happy_outbox_session_seq ON happy_outbox(session_id, seq)",
 ] as const;
 
-export function init(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function init(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

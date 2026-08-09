@@ -172,6 +172,7 @@ export class ProjectRegistrationError extends Error {
 }
 
 export interface ProjectRepositoryOptions {
+    afterTransactionCommit?: (callback: () => void | Promise<void>) => Promise<void>;
     cloneRemote?: typeof cloneRemoteRepository;
     database: SessionDatabase;
     /** Replaces both Git execution surfaces at once, so a test can drive lifecycle without Git. */
@@ -182,21 +183,26 @@ export interface ProjectRepositoryOptions {
     managedProjectsDirectory?: string;
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
-    onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void;
+    onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void | Promise<void>;
     /** Moving the branch is best-effort after the new name has already committed. */
     onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     /** Cleanup is best-effort after logical archival has already committed. */
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     stateDirectory?: string;
     taskDrain?: TaskDrain;
-    transaction?: <T>(body: (tx: TX) => T) => T;
+    transaction?: <T>(body: (tx: TX) => T | Promise<T>) => Promise<T>;
     workspacesDirectory?: string;
     resolveGitSecret?: (kind: "github") => string | undefined;
-    resolveProfile?: (profileId: string) => RigProfile | undefined;
+    resolveProfile?: (
+        profileId: string,
+    ) => RigProfile | undefined | Promise<RigProfile | undefined>;
 }
 
 export class ProjectRepository {
     readonly #assetRoot: string;
+    readonly #afterTransactionCommit:
+        | ((callback: () => void | Promise<void>) => Promise<void>)
+        | undefined;
     readonly #avatarLifecycle = new Map<string, Promise<void>>();
     readonly #createEventId = createEventIdFactory();
     readonly #database: SessionDatabase;
@@ -216,7 +222,9 @@ export class ProjectRepository {
     readonly #projectInitializationLocks = new Map<string, AsyncLock>();
     readonly #cloneRemote: typeof cloneRemoteRepository;
     readonly #now: () => number;
-    readonly #onEvent: ((event: ProjectEvent | ProjectWorkspaceEvent) => void) | undefined;
+    readonly #onEvent:
+        | ((event: ProjectEvent | ProjectWorkspaceEvent) => void | Promise<void>)
+        | undefined;
     readonly #onWorkspaceBranchError:
         | ((error: unknown, projectId: string, workspaceId: string) => void)
         | undefined;
@@ -225,10 +233,12 @@ export class ProjectRepository {
         | undefined;
     readonly #stateDirectory: string;
     readonly #taskDrain: TaskDrain | undefined;
-    readonly #transactionRunner: (<T>(body: (tx: TX) => T) => T) | undefined;
+    readonly #transactionRunner: (<T>(body: (tx: TX) => T | Promise<T>) => Promise<T>) | undefined;
     readonly #workspacesDirectory: string;
     readonly #resolveGitSecret: ((kind: "github") => string | undefined) | undefined;
-    readonly #resolveProfile: ((profileId: string) => RigProfile | undefined) | undefined;
+    readonly #resolveProfile:
+        | ((profileId: string) => RigProfile | undefined | Promise<RigProfile | undefined>)
+        | undefined;
     readonly #workspaceLifecycle = new Map<string, Promise<void>>();
     readonly #workspaceSetupControllers = new Map<string, AbortController>();
     readonly #workspaceSyncChain = new Map<string, Promise<void>>();
@@ -237,7 +247,14 @@ export class ProjectRepository {
     #activeInitializations = 0;
     #closed = false;
 
+    static async open(options: ProjectRepositoryOptions): Promise<ProjectRepository> {
+        const repository = new ProjectRepository(options);
+        await repository.#initializeOnOpen();
+        return repository;
+    }
+
     constructor(options: ProjectRepositoryOptions) {
+        this.#afterTransactionCommit = options.afterTransactionCommit;
         this.#database = options.database;
         this.#cloneRemote = options.cloneRemote ?? cloneRemoteRepository;
         this.#gitCredentialBroker = options.gitCredentialBroker ?? new GitCredentialBroker();
@@ -266,28 +283,31 @@ export class ProjectRepository {
             options.workspacesDirectory ?? join(this.#stateDirectory, "workspaces"),
         );
         this.#assetRoot = join(this.#stateDirectory, "assets", "project-avatars");
-        setImmediate(() => {
-            this.#runBackgroundTask(() => this.#collectAvatarGarbage());
-        });
-        for (const workspace of this.listWorkspaces()) {
+    }
+
+    async #initializeOnOpen(): Promise<void> {
+        const workspaces = await this.listWorkspaces();
+        for (const workspace of workspaces) {
             if (workspace.status === "ready") this.#scheduleWorkspaceSync(workspace.projectId);
         }
-        for (const project of this.listProjects()) {
+        for (const project of await this.listProjects()) {
             if (project.kind === "regular" && project.initializationStatus === "initializing") {
-                this.scheduleInitialization(project.id);
+                await this.scheduleInitialization(project.id);
             } else if (
                 project.kind === "regular" &&
                 project.initializationStatus === "failed" &&
                 project.initializationAttempt < 3 &&
                 existsSync(project.path)
             ) {
-                this.#mutate((tx) => {
-                    const changed = projectRetryInitialization(tx, project.id, this.#now());
-                    if (changed > 0) this.#publishedProject(project.id);
-                });
-                this.scheduleInitialization(project.id);
+                await this.#mutateAndPublishProject(project.id, (tx) =>
+                    projectRetryInitialization(tx, project.id, this.#now()),
+                );
+                await this.scheduleInitialization(project.id);
             }
         }
+        setImmediate(() => {
+            this.#runBackgroundTask(() => this.#collectAvatarGarbage());
+        });
     }
 
     /**
@@ -298,11 +318,11 @@ export class ProjectRepository {
      * simply answered with it; the identity only takes effect for a folder that
      * becomes a project now.
      */
-    resolve(
+    async resolve(
         cwd: string,
         assertedWorkspaceId?: string,
         requestedProjectId?: string,
-    ): ResolvedProjectOwnership {
+    ): Promise<ResolvedProjectOwnership> {
         const path = normalizeProjectCwd(cwd);
         return this.#resolvePath(path, assertedWorkspaceId, requestedProjectId);
     }
@@ -314,13 +334,13 @@ export class ProjectRepository {
      * does not exist yet. The caller has to name both its reserved identity and exact future path;
      * every operation that needs that path immediately continues through the ready-only resolver.
      */
-    resolveSessionOwnership(
+    async resolveSessionOwnership(
         cwd: string,
         workspaceId: string,
         assertedProjectId?: string,
-    ): ResolvedProjectOwnership {
+    ): Promise<ResolvedProjectOwnership> {
         const path = normalizeProjectCwd(cwd);
-        const workspace = queryWorkspaceById(this.#database, workspaceId);
+        const workspace = await queryWorkspaceById(this.#database.database, workspaceId);
         if (workspace === undefined || workspace.path !== path) {
             throw new Error("The workspace ID does not match the session directory.");
         }
@@ -342,14 +362,14 @@ export class ProjectRepository {
                 `The managed workspace '${workspace.name}' is unavailable.`,
             );
         }
-        const project = this.getProject(workspace.projectId);
+        const project = await this.getProject(workspace.projectId);
         if (project === undefined) {
             throw new ProjectRegistrationError(
                 "managed_workspace_unavailable",
                 "The managed workspace's project was not found.",
             );
         }
-        return { project: this.unarchiveProject(project.id) ?? project, workspace };
+        return { project: (await this.unarchiveProject(project.id)) ?? project, workspace };
     }
 
     /**
@@ -377,7 +397,7 @@ export class ProjectRepository {
             }
         }
         const path = await this.#validateRegistrationPath(request.path);
-        return this.#resolvePath(path, undefined, request.projectId).project;
+        return (await this.#resolvePath(path, undefined, request.projectId)).project;
     }
 
     async createRemoteProject(
@@ -426,7 +446,7 @@ export class ProjectRepository {
                 token: githubToken,
             });
         };
-        const retried = this.#retriedRemoteProject(id, path, request, creator);
+        const retried = await this.#retriedRemoteProject(id, path, request, creator);
         if (retried !== undefined) {
             await registerCredential();
             const canRetry =
@@ -434,17 +454,18 @@ export class ProjectRepository {
                 this.gitAuthentication(retried.id, creator) !== undefined;
             if (retried.initializationStatus === "failed" && !canRetry) return retried;
             if (retried.initializationStatus === "failed") {
-                this.#mutate((tx) => {
-                    const changed = projectRetryInitialization(tx, id, this.#now());
-                    if (changed > 0) this.#publishedProject(id, options.mutationId);
-                });
+                await this.#mutateAndPublishProject(
+                    id,
+                    (tx) => projectRetryInitialization(tx, id, this.#now()),
+                    options.mutationId,
+                );
             }
             if (retried.initializationStatus !== "ready" && canRetry) {
-                this.scheduleInitialization(id);
+                await this.scheduleInitialization(id);
             }
-            return this.getProject(id) ?? retried;
+            return (await this.getProject(id)) ?? retried;
         }
-        const projectAtPath = queryProjectByPath(this.#database, path);
+        const projectAtPath = await queryProjectByPath(this.#database.database, path);
         if (projectAtPath !== undefined) {
             throw new ProjectRegistrationError(
                 "project_path_conflict",
@@ -460,8 +481,8 @@ export class ProjectRepository {
         await mkdir(this.#managedProjectsDirectory, { recursive: true });
         await registerCredential();
         try {
-            const project = this.#mutate((tx) => {
-                projectCreate(tx, {
+            const project = await this.#mutate(async (tx) => {
+                await projectCreate(tx, {
                     createdBy: creator,
                     baseName: name,
                     id,
@@ -473,24 +494,25 @@ export class ProjectRepository {
                         ? {}
                         : { requiredSecretKind: request.secret.kind }),
                 });
-                const created = this.getProject(id);
-                if (created === undefined)
+                const created = await queryProject(tx, id);
+                if (created === undefined) {
                     throw new Error("The remote project could not be created.");
-                this.#publishProject("project_created", created, options.mutationId);
+                }
+                await this.#publishProject("project_created", created, options.mutationId);
                 return created;
             });
-            this.scheduleInitialization(id);
+            await this.scheduleInitialization(id);
             return project;
         } catch (error) {
-            const racedRetry = this.#retriedRemoteProject(id, path, request, creator);
+            const racedRetry = await this.#retriedRemoteProject(id, path, request, creator);
             if (racedRetry !== undefined) {
                 if (racedRetry.initializationStatus !== "ready") {
-                    this.scheduleInitialization(id);
+                    await this.scheduleInitialization(id);
                 }
                 return racedRetry;
             }
             this.#gitCredentialBroker.revoke(id);
-            if (queryProjectByPath(this.#database, path) !== undefined) {
+            if ((await queryProjectByPath(this.#database.database, path)) !== undefined) {
                 throw new ProjectRegistrationError(
                     "project_path_conflict",
                     "That managed project folder already belongs to another project.",
@@ -500,12 +522,12 @@ export class ProjectRepository {
         }
     }
 
-    #resolvePath(
+    async #resolvePath(
         path: string,
         assertedWorkspaceId?: string,
         requestedProjectId?: string,
-    ): ResolvedProjectOwnership {
-        const workspace = queryWorkspaceByPath(this.#database, path);
+    ): Promise<ResolvedProjectOwnership> {
+        const workspace = await queryWorkspaceByPath(this.#database.database, path);
         if (workspace !== undefined) {
             if (workspace.status !== "ready") {
                 throw new ProjectRegistrationError(
@@ -516,14 +538,14 @@ export class ProjectRepository {
             if (assertedWorkspaceId !== undefined && assertedWorkspaceId !== workspace.id) {
                 throw new Error("The workspace ID does not match the session directory.");
             }
-            const project = this.getProject(workspace.projectId);
+            const project = await this.getProject(workspace.projectId);
             if (project === undefined) {
                 throw new ProjectRegistrationError(
                     "managed_workspace_unavailable",
                     "The managed workspace's project was not found.",
                 );
             }
-            return { project: this.unarchiveProject(project.id) ?? project, workspace };
+            return { project: (await this.unarchiveProject(project.id)) ?? project, workspace };
         }
         if (assertedWorkspaceId !== undefined) {
             throw new Error("The workspace ID does not match the session directory.");
@@ -533,31 +555,31 @@ export class ProjectRepository {
             requestedProjectId === undefined
                 ? undefined
                 : clientChosenId(requestedProjectId, "project");
-        const existing = queryProjectByPath(this.#database, path);
+        const existing = await queryProjectByPath(this.#database.database, path);
         if (existing !== undefined) {
             /*
              * A project is only a folder, so working in it again is what brings it back: starting a
              * session restores an archived project instead of asking the user to unarchive it.
              */
             if (importedId !== undefined && importedId !== existing.id) {
-                this.#assertUnusedProjectId(importedId, path);
+                await this.#assertUnusedProjectId(importedId, path);
             }
-            return { project: this.unarchiveProject(existing.id) ?? existing };
+            return { project: (await this.unarchiveProject(existing.id)) ?? existing };
         }
-        if (importedId !== undefined) this.#assertUnusedProjectId(importedId, path);
+        if (importedId !== undefined) await this.#assertUnusedProjectId(importedId, path);
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
         const baseName = kind === "home" ? "Home" : folderProjectName(path);
         const now = this.#now();
         const id = importedId ?? createId();
-        const project = this.#mutate((tx) => {
-            projectCreate(tx, { baseName, id, kind, now, path });
-            const created = this.getProject(id);
+        const project = await this.#mutate(async (tx) => {
+            await projectCreate(tx, { baseName, id, kind, now, path });
+            const created = await queryProject(tx, id);
             if (created === undefined) throw new Error("The project could not be created.");
-            this.#publishProject("project_created", created);
+            await this.#publishProject("project_created", created);
             return created;
         });
-        if (kind === "regular") this.scheduleInitialization(id);
+        if (kind === "regular") await this.scheduleInitialization(id);
         return { project };
     }
 
@@ -631,7 +653,7 @@ export class ProjectRepository {
         return path;
     }
 
-    close(): void {
+    async close(): Promise<void> {
         this.#closed = true;
         this.#gitCredentialBroker.close();
         this.#pendingInitializations.length = 0;
@@ -646,20 +668,23 @@ export class ProjectRepository {
         this.#workspaceSyncChain.clear();
     }
 
-    getProject(projectId: string): Project | undefined {
-        return queryProject(this.#database, projectId);
+    async getProject(projectId: string): Promise<Project | undefined> {
+        return queryProject(this.#database.database, projectId);
     }
 
-    listProjects(): readonly Project[] {
-        return queryProjects(this.#database);
+    async listProjects(): Promise<readonly Project[]> {
+        return queryProjects(this.#database.database);
     }
 
-    listWorkspaces(projectId?: string): readonly ProjectWorkspace[] {
-        return queryWorkspaces(this.#database, projectId);
+    async listWorkspaces(projectId?: string): Promise<readonly ProjectWorkspace[]> {
+        return queryWorkspaces(this.#database.database, projectId);
     }
 
-    getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
-        return queryWorkspace(this.#database, projectId, workspaceId);
+    async getWorkspace(
+        projectId: string,
+        workspaceId: string,
+    ): Promise<ProjectWorkspace | undefined> {
+        return queryWorkspace(this.#database.database, projectId, workspaceId);
     }
 
     async prepareSessionTransfer(
@@ -668,7 +693,7 @@ export class ProjectRepository {
         targetWorkspaceId: string,
         beforeApply?: () => void | Promise<void>,
     ): Promise<{ prepared: PreparedWorkspaceTransfer; target: ProjectWorkspace }> {
-        const { source, target } = this.validateSessionTransfer(
+        const { source, target } = await this.validateSessionTransfer(
             projectId,
             sourceWorkspaceId,
             targetWorkspaceId,
@@ -685,44 +710,43 @@ export class ProjectRepository {
             };
         } catch (error) {
             if (!(error instanceof WorkspaceTransferTargetRestoreError)) throw error;
-            throw this.markSessionTransferTargetFailed(projectId, targetWorkspaceId, error);
+            throw await this.markSessionTransferTargetFailed(projectId, targetWorkspaceId, error);
         }
     }
 
-    markSessionTransferTargetFailed(
+    async markSessionTransferTargetFailed(
         projectId: string,
         targetWorkspaceId: string,
         error: WorkspaceTransferTargetRestoreError,
-    ): WorkspaceTransferTargetRestoreError {
-        const target = this.getWorkspace(projectId, targetWorkspaceId);
+    ): Promise<WorkspaceTransferTargetRestoreError> {
+        const target = await this.getWorkspace(projectId, targetWorkspaceId);
         if (target === undefined) return error;
         const failure = new WorkspaceTransferTargetRestoreError(
             error.originalError,
             error.restoreError,
             target.name,
         );
-        this.#mutate((tx) => {
-            const changed = workspaceMarkFailed(
+        await this.#mutateAndPublishWorkspace(projectId, targetWorkspaceId, (tx) =>
+            workspaceMarkFailed(
                 tx,
                 projectId,
                 targetWorkspaceId,
                 failure.message.slice(0, PROJECT_ERROR_MAX_LENGTH),
                 this.#now(),
-            );
-            if (changed > 0) this.#publishedWorkspace(projectId, targetWorkspaceId);
-        });
+            ),
+        );
         return failure;
     }
 
-    validateSessionTransfer(
+    async validateSessionTransfer(
         projectId: string,
         sourceWorkspaceId: string,
         targetWorkspaceId: string,
-    ): { source: ProjectWorkspace; target: ProjectWorkspace } {
+    ): Promise<{ source: ProjectWorkspace; target: ProjectWorkspace }> {
         if (sourceWorkspaceId === targetWorkspaceId) {
             throw new Error("Choose a different workspace for the session transfer.");
         }
-        const source = this.getWorkspace(projectId, sourceWorkspaceId);
+        const source = await this.getWorkspace(projectId, sourceWorkspaceId);
         if (source === undefined) {
             throw new Error("The session's current workspace was not found.");
         }
@@ -733,7 +757,7 @@ export class ProjectRepository {
         ) {
             throw new Error("The session's current workspace is not ready and available.");
         }
-        const target = this.getWorkspace(projectId, targetWorkspaceId);
+        const target = await this.getWorkspace(projectId, targetWorkspaceId);
         if (target === undefined) {
             throw new Error("The target workspace was not found in this project.");
         }
@@ -744,7 +768,7 @@ export class ProjectRepository {
     }
 
     async reconcileInitializingWorkspaces(): Promise<void> {
-        const workspaces = this.listWorkspaces().filter(
+        const workspaces = (await this.listWorkspaces()).filter(
             (workspace) => workspace.status === "initializing",
         );
         let next = 0;
@@ -774,11 +798,11 @@ export class ProjectRepository {
             | { kind: "project"; value: Project }
             | { kind: "workspace"; value: ProjectWorkspace }
         )[] = [
-            ...this.listProjects()
+            ...(await this.listProjects())
                 // An archived project is hidden, so re-deriving its Git facts is wasted work.
                 .filter((project) => project.archivedAt === undefined)
                 .map((value) => ({ kind: "project" as const, value })),
-            ...this.listWorkspaces()
+            ...(await this.listWorkspaces())
                 .filter((workspace) => workspace.status === "ready")
                 .map((value) => ({ kind: "workspace" as const, value })),
         ];
@@ -810,25 +834,20 @@ export class ProjectRepository {
      * that are not watching the live stream. The change snapshot itself stays live-only; only these
      * few slow-moving fields are written, and only when one actually differs.
      */
-    applyGitFacts(
+    async applyGitFacts(
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
-    ): void {
-        this.#mutate((tx) => {
-            const changed =
-                target.workspaceId === undefined
-                    ? projectApplyGitFacts(tx, target.projectId, facts, this.#now())
-                    : workspaceApplyGitFacts(
-                          tx,
-                          target.projectId,
-                          target.workspaceId,
-                          facts,
-                          this.#now(),
-                      );
-            if (changed === 0) return;
-            if (target.workspaceId === undefined) this.#publishedProject(target.projectId);
-            else this.#publishedWorkspace(target.projectId, target.workspaceId);
-        });
+    ): Promise<void> {
+        if (target.workspaceId === undefined) {
+            await this.#mutateAndPublishProject(target.projectId, (tx) =>
+                projectApplyGitFacts(tx, target.projectId, facts, this.#now()),
+            );
+        } else {
+            const workspaceId = target.workspaceId;
+            await this.#mutateAndPublishWorkspace(target.projectId, workspaceId, (tx) =>
+                workspaceApplyGitFacts(tx, target.projectId, workspaceId, facts, this.#now()),
+            );
+        }
     }
 
     async #reconcileProjectGitFacts(project: Project): Promise<void> {
@@ -838,15 +857,9 @@ export class ProjectRepository {
             path: project.path,
         });
         if (this.#closed) return;
-        this.#mutate((tx) => {
-            const changed = projectApplyProbe(
-                tx,
-                project.id,
-                projectGitFactValues(probe),
-                this.#now(),
-            );
-            if (changed > 0) this.#publishedProject(project.id);
-        });
+        await this.#mutateAndPublishProject(project.id, (tx) =>
+            projectApplyProbe(tx, project.id, projectGitFactValues(probe), this.#now()),
+        );
     }
 
     async #reconcileWorkspaceGitFacts(workspace: ProjectWorkspace): Promise<void> {
@@ -855,59 +868,61 @@ export class ProjectRepository {
             path: workspace.path,
         });
         if (this.#closed) return;
-        this.#mutate((tx) => {
-            const changed = workspaceApplyProbe(
+        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
+            workspaceApplyProbe(
                 tx,
                 workspace.projectId,
                 workspace.id,
                 workspaceGitFactValues(probe),
                 this.#now(),
-            );
-            if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
-        });
+            ),
+        );
     }
 
-    renameProject(
+    async renameProject(
         projectId: string,
         requestedName: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): Project | undefined {
-        const current = this.getProject(projectId);
+    ): Promise<Project | undefined> {
+        const current = await this.getProject(projectId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined) {
-            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            const userMutationVersion = await queryProjectUserMutationVersion(
+                this.#database.database,
+                projectId,
+            );
             if (userMutationVersion === undefined) return undefined;
             if (expectedVersion > current.version || userMutationVersion > expectedVersion) {
                 throw new Error("The project changed before it could be renamed.");
             }
         }
         const name = validateProjectName(requestedName);
-        return this.#mutate((tx) => {
-            const changed = projectRename(tx, projectId, name, this.#now(), expectedVersion);
+        return await this.#mutate(async (tx) => {
+            const changed = await projectRename(tx, projectId, name, this.#now(), expectedVersion);
             if (changed === 0) {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before it could be renamed.");
                 }
-                return this.getProject(projectId);
+                return queryProject(tx, projectId);
             }
             return this.#publishedProject(projectId, mutationId);
         });
     }
 
-    setProjectSettings(
+    async setProjectSettings(
         projectId: string,
         settings: ProjectSettingsUpdate,
         expectedVersion?: number,
         mutationId?: string,
-    ): Project | undefined {
-        const current = this.getProject(projectId);
+    ): Promise<Project | undefined> {
+        const current = await this.getProject(projectId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion > current.version) {
             throw new Error("The project changed before its settings could be saved.");
         }
-        return this.#mutate((tx) => {
-            const changed = projectSetSettings(
+        return await this.#mutate(async (tx) => {
+            const changed = await projectSetSettings(
                 tx,
                 projectId,
                 settings,
@@ -918,17 +933,17 @@ export class ProjectRepository {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before its settings could be saved.");
                 }
-                return this.getProject(projectId);
+                return queryProject(tx, projectId);
             }
             return this.#publishedProject(projectId, mutationId);
         });
     }
 
-    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined {
+    async queryProjectSettings(cwd: string): Promise<ProjectSessionSettings | undefined> {
         const path = normalizeProjectCwd(cwd);
-        const workspace = queryWorkspaceByPath(this.#database, path);
+        const workspace = await queryWorkspaceByPath(this.#database.database, path);
         if (workspace !== undefined) {
-            const project = queryProject(this.#database, workspace.projectId);
+            const project = await queryProject(this.#database.database, workspace.projectId);
             return project === undefined
                 ? undefined
                 : {
@@ -937,77 +952,92 @@ export class ProjectRepository {
                       workspaceId: workspace.id,
                   };
         }
-        const project = queryProjectByPath(this.#database, path);
+        const project = await queryProjectByPath(this.#database.database, path);
         return project === undefined
             ? undefined
             : { projectId: project.id, settings: project.settings };
     }
 
-    reorderProject(
+    async reorderProject(
         projectId: string,
         request: ReorderRequest,
         expectedVersion?: number,
-    ): Project | undefined {
-        const current = this.getProject(projectId);
+    ): Promise<Project | undefined> {
+        const current = await this.getProject(projectId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined) {
-            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            const userMutationVersion = await queryProjectUserMutationVersion(
+                this.#database.database,
+                projectId,
+            );
             if (userMutationVersion === undefined) return undefined;
             if (expectedVersion > current.version || userMutationVersion > expectedVersion) {
                 throw new Error("The project changed before it could be reordered.");
             }
         }
-        const orderKey = orderKeyAfter(this.listProjects(), projectId, request.afterId);
+        const orderKey = orderKeyAfter(await this.listProjects(), projectId, request.afterId);
         if (orderKey === current.orderKey) return current;
-        return this.#mutate((tx) => {
-            const changed = projectReorder(tx, projectId, orderKey, this.#now(), expectedVersion);
+        return await this.#mutate(async (tx) => {
+            const changed = await projectReorder(
+                tx,
+                projectId,
+                orderKey,
+                this.#now(),
+                expectedVersion,
+            );
             if (changed === 0) {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before it could be reordered.");
                 }
-                return this.getProject(projectId);
+                return queryProject(tx, projectId);
             }
             return this.#publishedProject(projectId);
         });
     }
 
-    refreshProject(projectId: string): Project | undefined {
-        const project = this.getProject(projectId);
+    async refreshProject(projectId: string): Promise<Project | undefined> {
+        const project = await this.getProject(projectId);
         if (project === undefined) return undefined;
         if (project.kind === "home") {
             throw new Error("The Home project does not need initialization.");
         }
-        const updated = this.#mutate((tx) => {
-            const changed = projectRefresh(tx, projectId, this.#now());
-            return changed === 0 ? this.getProject(projectId) : this.#publishedProject(projectId);
+        const updated = await this.#mutate(async (tx) => {
+            const changed = await projectRefresh(tx, projectId, this.#now());
+            return changed === 0 ? queryProject(tx, projectId) : this.#publishedProject(projectId);
         });
-        this.scheduleInitialization(projectId);
+        await this.scheduleInitialization(projectId);
         return updated;
     }
 
-    scheduleInitialization(projectId: string): void {
+    async scheduleInitialization(projectId: string): Promise<void> {
         if (this.#closed || this.#initializing.has(projectId)) return;
-        const project = this.getProject(projectId);
+        const project = await this.getProject(projectId);
         if (project === undefined) return;
         if (!existsSync(project.path) && project.remoteSource === undefined) {
-            this.#mutate((tx) => {
-                const changed = projectMarkInitializationFailed(
+            await this.#mutateAndPublishProject(projectId, (tx) =>
+                projectMarkInitializationFailed(
                     tx,
                     projectId,
                     "Project directory is unavailable.",
                     this.#now(),
-                );
-                if (changed > 0) this.#publishedProject(projectId);
-            });
+                ),
+            );
             return;
         }
         this.#initializing.add(projectId);
         this.#pendingInitializations.push(projectId);
-        setImmediate(() => this.#drainInitializations());
+        const schedule = () => {
+            setImmediate(() => this.#drainInitializations());
+        };
+        if (this.#afterTransactionCommit === undefined) {
+            schedule();
+        } else {
+            await this.#afterTransactionCommit(schedule);
+        }
     }
 
-    retryRemoteProjects(kind: "github"): void {
-        for (const project of this.listProjects()) {
+    async retryRemoteProjects(kind: "github"): Promise<void> {
+        for (const project of await this.listProjects()) {
             if (project.requiredSecretKind !== kind) continue;
             if (
                 project.createdBy !== undefined &&
@@ -1030,16 +1060,15 @@ export class ProjectRepository {
                     repository: project.remoteSource.repository,
                     token,
                 })
-                .then(() => {
+                .then(async () => {
                     if (this.#closed) return;
-                    const current = this.getProject(project.id);
+                    const current = await this.getProject(project.id);
                     if (current?.initializationStatus === "failed") {
-                        this.#mutate((tx) => {
-                            const changed = projectRetryInitialization(tx, project.id, this.#now());
-                            if (changed > 0) this.#publishedProject(project.id);
-                        });
+                        await this.#mutateAndPublishProject(project.id, (tx) =>
+                            projectRetryInitialization(tx, project.id, this.#now()),
+                        );
                     }
-                    this.scheduleInitialization(project.id);
+                    await this.scheduleInitialization(project.id);
                 })
                 .catch(() => undefined);
         }
@@ -1051,10 +1080,13 @@ export class ProjectRepository {
         bytes: Buffer,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        const project = this.getProject(projectId);
+        const project = await this.getProject(projectId);
         if (project === undefined) return undefined;
         if (expectedVersion !== undefined) {
-            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            const userMutationVersion = await queryProjectUserMutationVersion(
+                this.#database.database,
+                projectId,
+            );
             if (userMutationVersion === undefined) return undefined;
             if (expectedVersion > project.version || userMutationVersion > expectedVersion) {
                 throw new Error("The project changed before the avatar could be saved.");
@@ -1069,8 +1101,8 @@ export class ProjectRepository {
             if (this.#closed) return project;
             const now = this.#now();
             try {
-                return this.#mutate((tx) => {
-                    const result = projectSetAvatar(tx, {
+                return await this.#mutate(async (tx) => {
+                    const result = await projectSetAvatar(tx, {
                         asset: {
                             byteLength: normalized.bytes.byteLength,
                             hash: normalized.hash,
@@ -1082,12 +1114,16 @@ export class ProjectRepository {
                         projectId,
                         source,
                     });
-                    if (result === "missing") return undefined;
-                    if (result === "preserved") return this.getProject(projectId);
+                    if (result === "missing" || result === "preserved") {
+                        return queryProject(tx, projectId);
+                    }
                     return this.#publishedProject(projectId);
                 });
             } catch (error) {
-                const asset = queryProjectAvatarAsset(this.#database, normalized.hash);
+                const asset = await queryProjectAvatarAsset(
+                    this.#database.database,
+                    normalized.hash,
+                );
                 if (asset === undefined) {
                     await rm(this.#avatarPath(normalized.hash), { force: true });
                 }
@@ -1096,21 +1132,21 @@ export class ProjectRepository {
         });
     }
 
-    clearAvatar(projectId: string): Project | undefined {
-        const project = this.getProject(projectId);
+    async clearAvatar(projectId: string): Promise<Project | undefined> {
+        const project = await this.getProject(projectId);
         if (project === undefined) return undefined;
         const now = this.#now();
-        const updated = this.#mutate((tx) => {
-            const changed = projectClearAvatar(tx, projectId, now);
-            return changed === 0 ? this.getProject(projectId) : this.#publishedProject(projectId);
+        const updated = await this.#mutate(async (tx) => {
+            const changed = await projectClearAvatar(tx, projectId, now);
+            return changed === 0 ? queryProject(tx, projectId) : this.#publishedProject(projectId);
         });
-        if (updated?.kind === "regular") this.scheduleInitialization(projectId);
+        if (updated?.kind === "regular") await this.scheduleInitialization(projectId);
         return updated;
     }
 
     async avatarAsset(hash: string): Promise<ProjectAvatarAsset | undefined> {
         if (!/^[a-f0-9]{64}$/u.test(hash)) return undefined;
-        const asset = queryProjectAvatarAsset(this.#database, hash);
+        const asset = await queryProjectAvatarAsset(this.#database.database, hash);
         if (asset === undefined) return undefined;
         try {
             return {
@@ -1129,7 +1165,7 @@ export class ProjectRepository {
         creatorSessionId?: string,
         options: { createdBy?: ProjectCreator; githubToken?: string } = {},
     ): Promise<ProjectWorkspace | undefined> {
-        const project = this.getProject(projectId);
+        const project = await this.getProject(projectId);
         if (project === undefined) return undefined;
         if (
             request.identity === undefined
@@ -1146,7 +1182,7 @@ export class ProjectRepository {
         const requestedId =
             request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
         const requestedRef = requestedBaseRef(request.baseRef);
-        const retry = this.#retriedWorkspace(
+        const retry = await this.#retriedWorkspace(
             projectId,
             requestedId,
             requestedRef,
@@ -1168,8 +1204,8 @@ export class ProjectRepository {
         const gitRefs = workspaceGitRefSnapshot(project.path);
         const fallbackStorageKey = `${projectStorageKey(name).slice(0, 20)}-${workspaceId}`;
 
-        const reservation = this.#mutate((tx) => {
-            const result = workspaceReserve(tx, {
+        const reserved = await this.#mutate(async (tx) => {
+            const result = await workspaceReserve(tx, {
                 ...(requestedRef === undefined ? {} : { baseRef: requestedRef }),
                 ...(options.createdBy === undefined ? {} : { createdBy: options.createdBy }),
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
@@ -1186,15 +1222,15 @@ export class ProjectRepository {
                 projectId,
                 ...(gitRefs.complete ? {} : { storageKeySeed: fallbackStorageKey }),
             });
-            const workspace = this.getWorkspace(projectId, result.workspaceId);
+            const workspace = await queryWorkspace(tx, projectId, result.workspaceId);
             if (workspace === undefined) throw new Error("The workspace could not be reserved.");
             if (result.created) {
-                this.#publishWorkspace("workspace_created", workspace, requestedId);
+                await this.#publishWorkspace("workspace_created", workspace, requestedId);
             }
             return { created: result.created, workspace };
         });
-        const { workspace } = reservation;
-        if (reservation.created) {
+        const { created, workspace } = reserved;
+        if (created) {
             setImmediate(() => {
                 this.#runBackgroundTask(() => this.#initializeWorkspace(workspace));
             });
@@ -1207,7 +1243,7 @@ export class ProjectRepository {
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<GitAuthentication> {
-        const project = this.getProject(projectId);
+        const project = await this.getProject(projectId);
         if (
             project?.remoteSource?.kind !== "github" ||
             project.createdBy?.instanceId !== creator.instanceId ||
@@ -1217,11 +1253,10 @@ export class ProjectRepository {
         }
         const authentication = await this.registerGitCredential(projectId, creator, githubToken);
         if (project.initializationStatus === "failed") {
-            this.#mutate((tx) => {
-                const changed = projectRetryInitialization(tx, project.id, this.#now());
-                if (changed > 0) this.#publishedProject(project.id);
-            });
-            this.scheduleInitialization(project.id);
+            await this.#mutateAndPublishProject(project.id, (tx) =>
+                projectRetryInitialization(tx, project.id, this.#now()),
+            );
+            await this.scheduleInitialization(project.id);
         }
         return authentication;
     }
@@ -1231,7 +1266,7 @@ export class ProjectRepository {
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<GitAuthentication> {
-        const project = this.getProject(projectId);
+        const project = await this.getProject(projectId);
         if (project?.remoteSource?.kind !== "github") {
             throw new Error("GitHub credentials can only be used with a GitHub project.");
         }
@@ -1254,13 +1289,18 @@ export class ProjectRepository {
         creatorSessionId: string,
         projectId: string,
         workspaceId: string,
-    ): ProjectWorkspace | undefined {
-        return queryOwnedWorkspace(this.#database, creatorSessionId, projectId, workspaceId);
+    ): Promise<ProjectWorkspace | undefined> {
+        return queryOwnedWorkspace(
+            this.#database.database,
+            creatorSessionId,
+            projectId,
+            workspaceId,
+        );
     }
 
     /** Refuses a client-chosen project identity that already names another folder. */
-    #assertUnusedProjectId(id: string, path: string): void {
-        const known = queryProject(this.#database, id);
+    async #assertUnusedProjectId(id: string, path: string): Promise<void> {
+        const known = await queryProject(this.#database.database, id);
         if (known !== undefined && known.path !== path) {
             throw new ProjectRegistrationError(
                 "project_id_conflict",
@@ -1278,14 +1318,14 @@ export class ProjectRepository {
      * different workspace wearing this one's name, and that is an error rather
      * than something to reconcile.
      */
-    #retriedWorkspace(
+    async #retriedWorkspace(
         projectId: string,
         requestedId: string | undefined,
         baseRef: string | undefined,
         creator: ProjectCreator | undefined,
-    ): ProjectWorkspace | undefined {
+    ): Promise<ProjectWorkspace | undefined> {
         if (requestedId === undefined) return undefined;
-        const workspace = queryWorkspaceById(this.#database, requestedId);
+        const workspace = await queryWorkspaceById(this.#database.database, requestedId);
         if (workspace === undefined) return undefined;
         if (workspace.projectId !== projectId) {
             throw new Error("That workspace ID already names a workspace in another project.");
@@ -1334,22 +1374,22 @@ export class ProjectRepository {
         return existsSync(join(commonDirectory, ...ref.split("/"))) || gitRefs.packedRefs.has(ref);
     }
 
-    renameWorkspace(
+    async renameWorkspace(
         projectId: string,
         workspaceId: string,
         requestedName: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): ProjectWorkspace | undefined {
-        const current = this.getWorkspace(projectId, workspaceId);
+    ): Promise<ProjectWorkspace | undefined> {
+        const current = await this.getWorkspace(projectId, workspaceId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new Error("The workspace changed before it could be renamed.");
         }
         const name = validateProjectName(requestedName);
-        const branchTaken = this.#workspaceBranchProbe(projectId);
-        const renamed = this.#mutate((tx) => {
-            const result = workspaceRename(tx, {
+        const branchTaken = await this.#workspaceBranchProbe(projectId);
+        const updated = await this.#mutate(async (tx) => {
+            const result = await workspaceRename(tx, {
                 id: workspaceId,
                 isBranchUnavailable: branchTaken,
                 name,
@@ -1357,19 +1397,17 @@ export class ProjectRepository {
                 projectId,
                 ...(expectedVersion === undefined ? {} : { version: expectedVersion }),
             });
-            if (result.changed === 0) {
-                if (expectedVersion !== undefined) {
-                    throw new Error("The workspace changed before it could be renamed.");
-                }
-                return { branch: undefined, workspace: this.getWorkspace(projectId, workspaceId) };
+            if (result.changed === 0 && expectedVersion !== undefined) {
+                throw new Error("The workspace changed before it could be renamed.");
             }
-            return {
-                branch: result.branch,
-                workspace: this.#publishedWorkspace(projectId, workspaceId, mutationId),
-            };
+            const workspace = await queryWorkspace(tx, projectId, workspaceId);
+            if (result.changed > 0) {
+                await this.#publishedWorkspace(projectId, workspaceId, mutationId);
+            }
+            return { branch: result.branch, workspace };
         });
-        this.#moveWorkspaceBranch(current, renamed.branch);
-        return renamed.workspace;
+        this.#moveWorkspaceBranch(current, updated.branch);
+        return updated.workspace;
     }
 
     /**
@@ -1378,38 +1416,36 @@ export class ProjectRepository {
      * A workspace has one name, so the inherited name replaces the placeholder it was created with
      * instead of sitting beside it. A workspace someone has already named keeps that name.
      */
-    inheritWorkspaceName(
+    async inheritWorkspaceName(
         projectId: string,
         workspaceId: string,
         requestedName: string,
-    ): ProjectWorkspace | undefined {
-        const current = this.getWorkspace(projectId, workspaceId);
+    ): Promise<ProjectWorkspace | undefined> {
+        const current = await this.getWorkspace(projectId, workspaceId);
         if (current === undefined) return undefined;
         const name = validateProjectName(requestedName);
-        const branchTaken = this.#workspaceBranchProbe(projectId);
-        const inherited = this.#mutate((tx) => {
-            const result = workspaceInheritName(tx, {
+        const branchTaken = await this.#workspaceBranchProbe(projectId);
+        const updated = await this.#mutate(async (tx) => {
+            const result = await workspaceInheritName(tx, {
                 id: workspaceId,
                 isBranchUnavailable: branchTaken,
                 name,
                 now: this.#now(),
                 projectId,
             });
-            return {
-                branch: result.branch,
-                workspace:
-                    result.changed === 0
-                        ? this.getWorkspace(projectId, workspaceId)
-                        : this.#publishedWorkspace(projectId, workspaceId),
-            };
+            const workspace = await queryWorkspace(tx, projectId, workspaceId);
+            if (result.changed > 0) {
+                await this.#publishedWorkspace(projectId, workspaceId);
+            }
+            return { branch: result.branch, workspace };
         });
-        this.#moveWorkspaceBranch(current, inherited.branch);
-        return inherited.workspace;
+        this.#moveWorkspaceBranch(current, updated.branch);
+        return updated.workspace;
     }
 
     /** Reads the project's branches once so every candidate check is only set membership. */
-    #workspaceBranchProbe(projectId: string): (branch: string) => boolean {
-        const project = this.getProject(projectId);
+    async #workspaceBranchProbe(projectId: string): Promise<(branch: string) => boolean> {
+        const project = await this.getProject(projectId);
         if (project === undefined) return () => false;
         const gitRefs = workspaceGitRefSnapshot(project.path);
         return (branch) => this.#gitBranchExists(gitRefs, branch);
@@ -1429,7 +1465,7 @@ export class ProjectRepository {
         this.#runBackgroundTask(async () => {
             await this.#withWorkspaceLifecycleLock(previous.id, async () => {
                 if (this.#closed) return;
-                const workspace = this.getWorkspace(previous.projectId, previous.id);
+                const workspace = await this.getWorkspace(previous.projectId, previous.id);
                 // A later rename may already have moved the recorded branch past this one, and
                 // this hop still runs: that rename starts from this branch, so skipping it would
                 // leave Git a step behind with nothing able to catch it up again.
@@ -1452,44 +1488,46 @@ export class ProjectRepository {
                     if (this.#closed) return;
                     // A later rename may already have replaced this one, and it owns the recorded
                     // branch from then on. Reverting it here would strand that rename instead.
-                    if (this.getWorkspace(previous.projectId, previous.id)?.branch !== branch) {
+                    if (
+                        (await this.getWorkspace(previous.projectId, previous.id))?.branch !==
+                        branch
+                    ) {
                         return;
                     }
                     this.#onWorkspaceBranchError?.(error, previous.projectId, previous.id);
-                    this.#mutate((tx) => {
-                        const changed = workspaceSetBranch(
+                    await this.#mutateAndPublishWorkspace(previous.projectId, previous.id, (tx) =>
+                        workspaceSetBranch(
                             tx,
                             previous.projectId,
                             previous.id,
                             previous.branch,
                             this.#now(),
-                        );
-                        if (changed > 0) this.#publishedWorkspace(previous.projectId, previous.id);
-                    });
+                        ),
+                    );
                 }
             });
         });
     }
 
-    reorderWorkspace(
+    async reorderWorkspace(
         projectId: string,
         workspaceId: string,
         request: ReorderRequest,
         expectedVersion?: number,
-    ): ProjectWorkspace | undefined {
-        const current = this.getWorkspace(projectId, workspaceId);
+    ): Promise<ProjectWorkspace | undefined> {
+        const current = await this.getWorkspace(projectId, workspaceId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new Error("The workspace changed before it could be reordered.");
         }
         const orderKey = orderKeyAfter(
-            this.listWorkspaces(projectId),
+            await this.listWorkspaces(projectId),
             workspaceId,
             request.afterId,
         );
         if (orderKey === current.orderKey) return current;
-        return this.#mutate((tx) => {
-            const changed = workspaceReorder(
+        return await this.#mutate(async (tx) => {
+            const changed = await workspaceReorder(
                 tx,
                 projectId,
                 workspaceId,
@@ -1501,31 +1539,37 @@ export class ProjectRepository {
                 if (expectedVersion !== undefined) {
                     throw new Error("The workspace changed before it could be reordered.");
                 }
-                return this.getWorkspace(projectId, workspaceId);
+                return queryWorkspace(tx, projectId, workspaceId);
             }
             return this.#publishedWorkspace(projectId, workspaceId);
         });
     }
 
-    archiveProject(projectId: string, expectedVersion?: number): Project | undefined {
-        const project = this.getProject(projectId);
+    async archiveProject(
+        projectId: string,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        const project = await this.getProject(projectId);
         if (project === undefined) return undefined;
         if (project.archivedAt !== undefined) return project;
         if (expectedVersion !== undefined) {
-            const userMutationVersion = queryProjectUserMutationVersion(this.#database, projectId);
+            const userMutationVersion = await queryProjectUserMutationVersion(
+                this.#database.database,
+                projectId,
+            );
             if (userMutationVersion === undefined) return undefined;
             if (expectedVersion > project.version || userMutationVersion > expectedVersion) {
                 throw new Error("The project changed before it could be archived.");
             }
         }
         const now = this.#now();
-        const archived = this.#mutate((tx) => {
-            const changed = projectArchive(tx, projectId, now, expectedVersion);
+        const archived = await this.#mutate(async (tx) => {
+            const changed = await projectArchive(tx, projectId, now, expectedVersion);
             if (changed === 0) {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before it could be archived.");
                 }
-                return this.getProject(projectId);
+                return queryProject(tx, projectId);
             }
             return this.#publishedProject(projectId);
         });
@@ -1533,21 +1577,21 @@ export class ProjectRepository {
         return archived;
     }
 
-    unarchiveProject(projectId: string): Project | undefined {
-        const project = this.getProject(projectId);
+    async unarchiveProject(projectId: string): Promise<Project | undefined> {
+        const project = await this.getProject(projectId);
         if (project === undefined || project.archivedAt === undefined) return project;
-        return this.#mutate((tx) => {
-            const changed = projectRestore(tx, projectId, this.#now());
-            return changed === 0 ? this.getProject(projectId) : this.#publishedProject(projectId);
+        return await this.#mutate(async (tx) => {
+            const changed = await projectRestore(tx, projectId, this.#now());
+            return changed === 0 ? queryProject(tx, projectId) : this.#publishedProject(projectId);
         });
     }
 
-    beginWorkspaceArchive(
+    async beginWorkspaceArchive(
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
-    ): ProjectWorkspace | undefined {
-        const workspace = this.getWorkspace(projectId, workspaceId);
+    ): Promise<ProjectWorkspace | undefined> {
+        const workspace = await this.getWorkspace(projectId, workspaceId);
         if (workspace === undefined) return undefined;
         if (workspace.status === "archived" || workspace.status === "archiving") {
             this.#stopWorkspaceSetup(workspaceId);
@@ -1556,21 +1600,17 @@ export class ProjectRepository {
         if (expectedVersion !== undefined && expectedVersion !== workspace.version) {
             throw new Error("The workspace changed before it could be archived.");
         }
-        const archived = this.#mutate((tx) => {
-            const changed = workspaceBeginArchive(
+        const archived = await this.#mutate(async (tx) => {
+            const changed = await workspaceBeginArchive(
                 tx,
                 projectId,
                 workspaceId,
                 this.#now(),
                 expectedVersion,
             );
-            if (changed === 0) {
-                if (expectedVersion !== undefined) {
-                    throw new Error("The workspace changed before it could be archived.");
-                }
-                return this.getWorkspace(projectId, workspaceId);
-            }
-            return this.#publishedWorkspace(projectId, workspaceId);
+            return changed === 0
+                ? queryWorkspace(tx, projectId, workspaceId)
+                : this.#publishedWorkspace(projectId, workspaceId);
         });
         if (archived?.status === "archiving") this.#stopWorkspaceSetup(workspaceId);
         return archived;
@@ -1581,22 +1621,22 @@ export class ProjectRepository {
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined> {
         await this.#withWorkspaceLifecycleLock(workspaceId, async () => {
-            const workspace = this.getWorkspace(projectId, workspaceId);
+            const workspace = await this.getWorkspace(projectId, workspaceId);
             if (workspace === undefined || workspace.status === "archived") return;
             if (workspace.status !== "archiving") {
                 throw new Error("The workspace is not being archived.");
             }
-            const project = this.getProject(projectId);
+            const project = await this.getProject(projectId);
             if (project === undefined) throw new Error("The workspace project was not found.");
             try {
                 await this.#removeWorkspaceDirectory(project, workspace);
                 if (this.#closed) return;
-                this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
+                await this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
                 if (!this.#closed) {
                     this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
-                    this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
+                    await this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
                 }
             }
         });
@@ -1611,18 +1651,17 @@ export class ProjectRepository {
         if (project.defaultBranch !== undefined) return project.defaultBranch;
         const detected = await detectGitDefaultBranch(this.#git, project.path);
         if (detected === undefined || this.#closed) return detected;
-        this.#mutate((tx) => {
-            const changed = projectSetDefaultBranch(tx, project.id, detected, this.#now());
-            if (changed > 0) this.#publishedProject(project.id);
-        });
+        const updated = await this.#mutateAndPublishProject(project.id, (tx) =>
+            projectSetDefaultBranch(tx, project.id, detected, this.#now()),
+        );
         // Another path may have recorded a different branch first. The stored decision is the one
         // the project publishes, so it is also the one the workspace has to be cut from.
-        return this.getProject(project.id)?.defaultBranch ?? detected;
+        return updated?.defaultBranch ?? detected;
     }
 
     async #initialize(projectId: string): Promise<void> {
         if (this.#closed) return;
-        const project = this.getProject(projectId);
+        const project = await this.getProject(projectId);
         if (
             project === undefined ||
             project.kind === "home" ||
@@ -1659,21 +1698,15 @@ export class ProjectRepository {
             if (this.#closed) return;
 
             const detectedName = remote === undefined ? undefined : remoteProjectName(remote);
-            const current = this.getProject(projectId);
+            const current = await this.getProject(projectId);
             if (current === undefined) return;
             if (detectedName !== undefined && current.nameSource === "folder") {
-                this.#mutate((tx) => {
-                    const changed = projectAdoptRemoteName(
-                        tx,
-                        projectId,
-                        detectedName,
-                        this.#now(),
-                    );
-                    if (changed > 0) this.#publishedProject(projectId);
-                });
+                await this.#mutateAndPublishProject(projectId, (tx) =>
+                    projectAdoptRemoteName(tx, projectId, detectedName, this.#now()),
+                );
             }
 
-            const beforeAvatar = this.getProject(projectId);
+            const beforeAvatar = await this.getProject(projectId);
             if (beforeAvatar?.avatar === undefined) {
                 const repositoryAvatar = repositoryTopLevel
                     ? await this.#findRepositoryAvatar(project.path)
@@ -1684,7 +1717,10 @@ export class ProjectRepository {
                         : undefined;
                 const candidate = repositoryAvatar ?? hostingAvatar;
                 if (this.#closed) return;
-                if (candidate !== undefined && this.getProject(projectId)?.avatar === undefined) {
+                if (
+                    candidate !== undefined &&
+                    (await this.getProject(projectId))?.avatar === undefined
+                ) {
                     await this.setAvatar(
                         projectId,
                         repositoryAvatar === undefined ? "hosting" : "repository",
@@ -1694,22 +1730,20 @@ export class ProjectRepository {
             }
             if (this.#closed) return;
 
-            this.#mutate((tx) => {
-                const changed = projectMarkInitializationReady(tx, projectId, this.#now());
-                if (changed > 0) this.#publishedProject(projectId);
-            });
+            await this.#mutateAndPublishProject(projectId, (tx) =>
+                projectMarkInitializationReady(tx, projectId, this.#now()),
+            );
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (this.#closed) return;
-            this.#mutate((tx) => {
-                const changed = projectMarkInitializationFailed(
+            await this.#mutateAndPublishProject(projectId, (tx) =>
+                projectMarkInitializationFailed(
                     tx,
                     projectId,
                     errorToMessage(error).slice(0, PROJECT_ERROR_MAX_LENGTH),
                     this.#now(),
-                );
-                if (changed > 0) this.#publishedProject(projectId);
-            });
+                ),
+            );
         }
     }
 
@@ -1726,13 +1760,13 @@ export class ProjectRepository {
             if (!remoteSourceUrlMatches(origin, project.remoteSource)) {
                 throw new Error("The managed project folder has a different origin repository.");
             }
-            this.#markCloneReady(project.id);
+            await this.#markCloneReady(project.id);
             return;
         }
         if (project.createdBy === undefined) {
             throw new Error("The managed project has no human creator profile.");
         }
-        const profile = this.#resolveProfile?.(project.createdBy.profileId);
+        const profile = await this.#resolveProfile?.(project.createdBy.profileId);
         if (profile === undefined || profile.parentInstanceId !== project.createdBy.instanceId) {
             throw new Error("The managed project's human creator profile is unavailable.");
         }
@@ -1758,7 +1792,7 @@ export class ProjectRepository {
                 throw new Error("The managed project folder appeared while cloning.");
             }
             await rename(stagingPath, project.path);
-            this.#markCloneReady(project.id);
+            await this.#markCloneReady(project.id);
         } finally {
             await rm(stagingPath, { force: true, recursive: true });
         }
@@ -1772,20 +1806,19 @@ export class ProjectRepository {
         }
     }
 
-    #markCloneReady(projectId: string): void {
-        this.#mutate((tx) => {
-            const changed = projectMarkCloneReady(tx, projectId, this.#now());
-            if (changed > 0) this.#publishedProject(projectId);
-        });
+    async #markCloneReady(projectId: string): Promise<void> {
+        await this.#mutateAndPublishProject(projectId, (tx) =>
+            projectMarkCloneReady(tx, projectId, this.#now()),
+        );
     }
 
-    #retriedRemoteProject(
+    async #retriedRemoteProject(
         id: string,
         path: string,
         request: CreateRemoteProjectRequest,
         creator: ProjectCreator,
-    ): Project | undefined {
-        const project = queryProject(this.#database, id);
+    ): Promise<Project | undefined> {
+        const project = await queryProject(this.#database.database, id);
         if (project === undefined) return undefined;
         if (
             project.path !== path ||
@@ -1814,28 +1847,28 @@ export class ProjectRepository {
             void task
                 .catch((error: unknown) => {
                     initializationRejected = true;
-                    if (!isDatabaseFailure(error)) return;
-                    setImmediate(() => {
-                        throw error;
-                    });
+                    if (isDatabaseFailure(error) && !this.#closed) {
+                        setImmediate(() => {
+                            throw error;
+                        });
+                    }
                 })
-                .finally(() => {
+                .finally(async () => {
                     this.#activeInitializations -= 1;
                     this.#initializing.delete(projectId);
                     if (this.#closed) return;
                     if (
                         !initializationRejected &&
-                        this.getProject(projectId)?.initializationStatus === "initializing"
+                        (await this.getProject(projectId))?.initializationStatus === "initializing"
                     ) {
-                        this.#mutate((tx) => {
-                            const changed = projectMarkInitializationFailed(
+                        await this.#mutateAndPublishProject(projectId, (tx) =>
+                            projectMarkInitializationFailed(
                                 tx,
                                 projectId,
                                 "Project initialization did not complete.",
                                 this.#now(),
-                            );
-                            if (changed > 0) this.#publishedProject(projectId);
-                        });
+                            ),
+                        );
                     }
                     this.#drainInitializations();
                 });
@@ -1989,12 +2022,18 @@ export class ProjectRepository {
     async #collectAvatarGarbage(): Promise<void> {
         if (this.#closed) return;
         const cutoff = this.#now() - AVATAR_GARBAGE_DELAY_MS;
-        const hashes = queryProjectAvatarGarbageCandidates(this.#database, cutoff, 100);
+        const hashes = await queryProjectAvatarGarbageCandidates(
+            this.#database.database,
+            cutoff,
+            100,
+        );
         for (const hash of hashes) {
             if (this.#closed) return;
             await this.#withAvatarLifecycleLock(hash, async () => {
                 if (this.#closed) return;
-                const removed = this.#mutate((tx) => projectAvatarCollectGarbage(tx, hash, cutoff));
+                const removed = await this.#mutate((tx) =>
+                    projectAvatarCollectGarbage(tx, hash, cutoff),
+                );
                 if (removed) {
                     await rm(this.#avatarPath(hash), { force: true });
                 }
@@ -2003,9 +2042,9 @@ export class ProjectRepository {
     }
 
     async #reconcileInitializingWorkspace(workspace: ProjectWorkspace): Promise<void> {
-        const project = this.getProject(workspace.projectId);
+        const project = await this.getProject(workspace.projectId);
         if (project === undefined) {
-            this.#markWorkspaceInitializationFailed(
+            await this.#markWorkspaceInitializationFailed(
                 workspace,
                 "The workspace project was not found.",
             );
@@ -2014,7 +2053,7 @@ export class ProjectRepository {
         try {
             const current = await this.#projectInitializationLock(workspace.projectId).runInLock(
                 async () => {
-                    let locked = this.getWorkspace(workspace.projectId, workspace.id);
+                    let locked = await this.getWorkspace(workspace.projectId, workspace.id);
                     if (locked?.status !== "initializing") return undefined;
                     locked = await this.#prepareWorkspaceInitialization(locked, project);
                     if (locked?.status !== "initializing") return undefined;
@@ -2045,11 +2084,11 @@ export class ProjectRepository {
             if (current === undefined || this.#closed) return;
             await this.#setupWorkspace(current);
             if (this.#closed) return;
-            this.#markWorkspaceReady(current);
+            await this.#markWorkspaceReady(current);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (!this.#closed) {
-                this.#markWorkspaceInitializationFailed(workspace, errorToMessage(error));
+                await this.#markWorkspaceInitializationFailed(workspace, errorToMessage(error));
             }
         }
     }
@@ -2085,21 +2124,23 @@ export class ProjectRepository {
             ...(workspace.baseRef === undefined ? {} : { requestedRef: workspace.baseRef }),
         });
         if (this.#closed) return undefined;
-        const changed = this.#mutate((tx) =>
-            workspaceRecordInitialization(
-                tx,
-                workspace.projectId,
-                workspace.id,
-                {
-                    baseCommit: base.commit,
-                    baseRef: base.ref,
-                    gitCommonDir,
-                },
-                this.#now(),
-            ),
+        const initialized = await this.#mutateAndPublishWorkspace(
+            workspace.projectId,
+            workspace.id,
+            (tx) =>
+                workspaceRecordInitialization(
+                    tx,
+                    workspace.projectId,
+                    workspace.id,
+                    {
+                        baseCommit: base.commit,
+                        baseRef: base.ref,
+                        gitCommonDir,
+                    },
+                    this.#now(),
+                ),
         );
-        if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
-        return this.getWorkspace(workspace.projectId, workspace.id);
+        return initialized;
     }
 
     #gitForProject(project: Project, creator: ProjectCreator | undefined): GitCommandRunner {
@@ -2182,7 +2223,8 @@ export class ProjectRepository {
         if (this.#closed) return;
         // The branch may already have followed a rename made while the checkout was reserved.
         const branch =
-            this.getWorkspace(workspace.projectId, workspace.id)?.branch ?? workspace.branch;
+            (await this.getWorkspace(workspace.projectId, workspace.id))?.branch ??
+            workspace.branch;
         await createGitWorktree({
             branch,
             commit,
@@ -2194,41 +2236,35 @@ export class ProjectRepository {
         // A rename landing during the checkout is not moved by the branch mover, which leaves
         // workspaces that are not ready alone. The branch Git just created is the real one.
         if (this.#closed) return;
-        this.#mutate((tx) => {
-            const stored = this.getWorkspace(workspace.projectId, workspace.id);
-            if (stored === undefined || stored.branch === branch) return;
-            const changed = workspaceSetBranch(
-                tx,
-                workspace.projectId,
-                workspace.id,
-                branch,
-                this.#now(),
-            );
-            if (changed > 0) {
-                this.#publishedWorkspace(workspace.projectId, workspace.id);
-                this.#onWorkspaceBranchError?.(
-                    new Error(
-                        `The workspace was renamed while it was being created, so its branch stayed '${branch}'.`,
-                    ),
-                    workspace.projectId,
-                    workspace.id,
-                );
-            }
-        });
+        const stored = await this.getWorkspace(workspace.projectId, workspace.id);
+        if (stored === undefined || stored.branch === branch) return;
+        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
+            workspaceSetBranch(tx, workspace.projectId, workspace.id, branch, this.#now()),
+        );
+        this.#onWorkspaceBranchError?.(
+            new Error(
+                `The workspace was renamed while it was being created, so its branch stayed '${branch}'.`,
+            ),
+            workspace.projectId,
+            workspace.id,
+        );
     }
 
     async #setupWorkspace(workspace: ProjectWorkspace): Promise<void> {
         const controller = new AbortController();
         this.#workspaceSetupControllers.set(workspace.id, controller);
         try {
-            if (this.getWorkspace(workspace.projectId, workspace.id)?.status !== "initializing") {
+            if (
+                (await this.getWorkspace(workspace.projectId, workspace.id))?.status !==
+                "initializing"
+            ) {
                 return;
             }
             const loaded = await loadConfig({
                 cwd: workspace.path,
                 homeDirectory: this.#homeDirectory,
             });
-            const project = this.getProject(workspace.projectId);
+            const project = await this.getProject(workspace.projectId);
             // The first replication runs before setup commands so they can rely on the shared
             // files being present. The sync list is read from the project root — the same source
             // every later sync pass uses — so an uncommitted root configuration change applies.
@@ -2262,11 +2298,10 @@ export class ProjectRepository {
             ?.abort(new Error("Workspace setup stopped because the workspace was archived."));
     }
 
-    #markWorkspaceReady(workspace: ProjectWorkspace): void {
-        this.#mutate((tx) => {
-            const changed = workspaceMarkReady(tx, workspace.projectId, workspace.id, this.#now());
-            if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
-        });
+    async #markWorkspaceReady(workspace: ProjectWorkspace): Promise<void> {
+        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
+            workspaceMarkReady(tx, workspace.projectId, workspace.id, this.#now()),
+        );
         this.#scheduleWorkspaceSync(workspace.projectId);
     }
 
@@ -2314,8 +2349,8 @@ export class ProjectRepository {
         this.#workspaceSyncStops.get(projectId)?.();
         this.#workspaceSyncStops.delete(projectId);
         if (this.#closed) return;
-        const project = this.getProject(projectId);
-        const workspaces = this.listWorkspaces(projectId).filter(
+        const project = await this.getProject(projectId);
+        const workspaces = (await this.listWorkspaces(projectId)).filter(
             (workspace) => workspace.status === "ready",
         );
         if (project === undefined || workspaces.length === 0) return;
@@ -2350,7 +2385,7 @@ export class ProjectRepository {
             if (this.#closed) return;
             // Re-read right before copying: a workspace archived while this pass was running
             // must not have its folder written to, much less recreated.
-            if (this.getWorkspace(projectId, workspace.id)?.status !== "ready") continue;
+            if ((await this.getWorkspace(projectId, workspace.id))?.status !== "ready") continue;
             try {
                 await syncWorkspaceFiles({
                     paths: syncPaths,
@@ -2363,41 +2398,73 @@ export class ProjectRepository {
         }
     }
 
-    #markWorkspaceInitializationFailed(workspace: ProjectWorkspace, error: string): void {
-        this.#mutate((tx) => {
-            const changed = workspaceMarkInitializationFailed(
+    async #markWorkspaceInitializationFailed(
+        workspace: ProjectWorkspace,
+        error: string,
+    ): Promise<void> {
+        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
+            workspaceMarkInitializationFailed(
                 tx,
                 workspace.projectId,
                 workspace.id,
                 error.slice(0, PROJECT_ERROR_MAX_LENGTH),
                 this.#now(),
-            );
-            if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
-        });
+            ),
+        );
     }
 
-    #finishWorkspaceArchive(projectId: string, workspaceId: string, _status: "archived"): void {
+    async #finishWorkspaceArchive(
+        projectId: string,
+        workspaceId: string,
+        _status: "archived",
+    ): Promise<void> {
         const now = this.#now();
-        this.#mutate((tx) => {
-            const changed = workspaceCompleteArchive(tx, projectId, workspaceId, now);
-            if (changed > 0) this.#publishedWorkspace(projectId, workspaceId);
-        });
+        await this.#mutateAndPublishWorkspace(projectId, workspaceId, (tx) =>
+            workspaceCompleteArchive(tx, projectId, workspaceId, now),
+        );
         // The next pass stops the watch when this was the project's last ready workspace.
         this.#scheduleWorkspaceSync(projectId);
     }
 
-    #mutate<T>(body: (tx: TX) => T): T {
+    async #mutate<T>(body: (tx: TX) => T | Promise<T>): Promise<T> {
         if (this.#transactionRunner !== undefined) {
             return this.#transactionRunner(body);
         }
         return inTx(this.#database, body);
     }
 
+    async #mutateAndPublishProject(
+        projectId: string,
+        body: (tx: TX) => number | Promise<number>,
+        mutationId?: string,
+    ): Promise<Project | undefined> {
+        return await this.#mutate(async (tx) => {
+            const changed = await body(tx);
+            return changed === 0
+                ? queryProject(tx, projectId)
+                : this.#publishedProject(projectId, mutationId);
+        });
+    }
+
+    async #mutateAndPublishWorkspace(
+        projectId: string,
+        workspaceId: string,
+        body: (tx: TX) => number | Promise<number>,
+        mutationId?: string,
+    ): Promise<ProjectWorkspace | undefined> {
+        return await this.#mutate(async (tx) => {
+            const changed = await body(tx);
+            return changed === 0
+                ? queryWorkspace(tx, projectId, workspaceId)
+                : this.#publishedWorkspace(projectId, workspaceId, mutationId);
+        });
+    }
+
     #runBackgroundTask(task: () => Promise<void>): void {
         if (this.#closed) return;
         const promise = this.#taskDrain?.run(task) ?? task();
         void promise.catch((error: unknown) => {
-            if (!isDatabaseFailure(error)) return;
+            if (!isDatabaseFailure(error) || this.#closed) return;
             setImmediate(() => {
                 throw error;
             });
@@ -2459,25 +2526,31 @@ export class ProjectRepository {
         return lock;
     }
 
-    #publishedProject(projectId: string, mutationId?: string): Project | undefined {
-        const project = this.getProject(projectId);
-        if (project !== undefined) this.#publishProject("project_updated", project, mutationId);
+    async #publishedProject(projectId: string, mutationId?: string): Promise<Project | undefined> {
+        const project = await this.getProject(projectId);
+        if (project !== undefined) {
+            await this.#publishProject("project_updated", project, mutationId);
+        }
         return project;
     }
 
-    #publishedWorkspace(
+    async #publishedWorkspace(
         projectId: string,
         workspaceId: string,
         mutationId?: string,
-    ): ProjectWorkspace | undefined {
-        const workspace = this.getWorkspace(projectId, workspaceId);
+    ): Promise<ProjectWorkspace | undefined> {
+        const workspace = await this.getWorkspace(projectId, workspaceId);
         if (workspace !== undefined) {
-            this.#publishWorkspace("workspace_updated", workspace, mutationId);
+            await this.#publishWorkspace("workspace_updated", workspace, mutationId);
         }
         return workspace;
     }
 
-    #publishProject(type: ProjectEvent["type"], project: Project, mutationId?: string): void {
+    async #publishProject(
+        type: ProjectEvent["type"],
+        project: Project,
+        mutationId?: string,
+    ): Promise<void> {
         const event = {
             createdAt: this.#now(),
             data: { project, ...(mutationId === undefined ? {} : { mutationId }) },
@@ -2485,14 +2558,14 @@ export class ProjectRepository {
             projectId: project.id,
             type,
         } as ProjectEvent;
-        this.#onEvent?.(event);
+        await this.#onEvent?.(event);
     }
 
-    #publishWorkspace(
+    async #publishWorkspace(
         type: ProjectWorkspaceEvent["type"],
         workspace: ProjectWorkspace,
         mutationId?: string,
-    ): void {
+    ): Promise<void> {
         const event = {
             createdAt: this.#now(),
             data: { workspace, ...(mutationId === undefined ? {} : { mutationId }) },
@@ -2501,7 +2574,7 @@ export class ProjectRepository {
             type,
             workspaceId: workspace.id,
         } as ProjectWorkspaceEvent;
-        this.#onEvent?.(event);
+        await this.#onEvent?.(event);
     }
 
     async #storeAvatarBytes(hash: string, bytes: Buffer): Promise<void> {

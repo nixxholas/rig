@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { createClient, type Client } from "@libsql/client";
 import { describe, expect, it } from "vitest";
 
 import { isDatabaseFailure } from "../isDatabaseFailure.js";
@@ -7,80 +7,56 @@ import { isDatabaseFailure } from "../isDatabaseFailure.js";
  * Captures the error the driver actually throws, so the classifier is tested against real driver
  * behavior rather than against a hand-written imitation of it.
  */
-function captureDriverError(act: (database: Database.Database) => void): unknown {
-    const database = new Database(":memory:");
+async function captureDriverError(act: (database: Client) => Promise<void>): Promise<unknown> {
+    const database = createClient({ intMode: "number", url: "file::memory:" });
     try {
-        act(database);
+        await act(database);
         throw new Error("Expected the driver to fail.");
     } catch (error) {
         return error;
     } finally {
-        if (database.open) database.close();
+        database.close();
     }
 }
 
 describe("isDatabaseFailure", () => {
-    it("recognizes a driver error that carries a SQLite code", () => {
-        const error = captureDriverError((database) => {
-            database.prepare("select * from missing_table").all();
+    it("recognizes a driver error that carries a SQLite code", async () => {
+        const error = await captureDriverError(async (database) => {
+            await database.execute("select * from missing_table");
         });
 
-        expect((error as Error).name).toBe("SqliteError");
+        expect((error as Error).name).toBe("LibsqlError");
         expect(isDatabaseFailure(error)).toBe(true);
     });
 
-    it("recognizes a closed connection reported as a plain TypeError", () => {
-        const error = captureDriverError((database) => {
+    it("recognizes a closed client error", async () => {
+        const error = await captureDriverError(async (database) => {
             database.close();
-            database.prepare("select 1");
+            await database.execute("select 1");
         });
 
-        expect(error).toBeInstanceOf(TypeError);
-        expect((error as Error).message).toBe("The database connection is not open");
+        expect((error as Error & { code?: string }).code).toBe("CLIENT_CLOSED");
         expect(isDatabaseFailure(error)).toBe(true);
     });
 
-    it("recognizes a busy connection reported as a plain TypeError", () => {
-        const error = captureDriverError((database) => {
-            database.exec("create table rows (value integer)");
-            database.prepare("insert into rows values (1)").run();
-            for (const _row of database.prepare("select value from rows").iterate()) {
-                database.exec("create table blocked (value integer)");
-            }
+    it("recognizes an unbindable value reported as a plain error", async () => {
+        const error = await captureDriverError(async (database) => {
+            await database.execute({
+                args: [Symbol("value") as never],
+                sql: "select ?",
+            });
         });
 
-        expect(error).toBeInstanceOf(TypeError);
-        expect((error as Error).message).toBe("This database connection is busy executing a query");
-        expect(isDatabaseFailure(error)).toBe(true);
-    });
-
-    it("recognizes a busy statement reported as a plain TypeError", () => {
-        const error = captureDriverError((database) => {
-            const statement = database.prepare("select 1 union all select 2");
-            for (const _row of statement.iterate()) statement.all();
-        });
-
-        expect(error).toBeInstanceOf(TypeError);
-        expect((error as Error).message).toBe("This statement is busy executing a query");
-        expect(isDatabaseFailure(error)).toBe(true);
-    });
-
-    it("recognizes an unbindable value reported as a plain TypeError", () => {
-        const error = captureDriverError((database) => {
-            database.exec("create table rows (value integer)");
-            database.prepare("insert into rows values (?)").run(Symbol("value"));
-        });
-
-        expect(error).toBeInstanceOf(TypeError);
+        expect(error).toBeInstanceOf(Error);
         expect((error as Error).message).toBe(
             "SQLite3 can only bind numbers, strings, bigints, buffers, and null",
         );
         expect(isDatabaseFailure(error)).toBe(true);
     });
 
-    it("finds a driver failure wrapped as a cause", () => {
-        const driverError = captureDriverError((database) => {
-            database.prepare("select * from missing_table").all();
+    it("finds a driver failure wrapped as a cause", async () => {
+        const driverError = await captureDriverError(async (database) => {
+            await database.execute("select * from missing_table");
         });
 
         expect(
@@ -88,10 +64,10 @@ describe("isDatabaseFailure", () => {
         ).toBe(true);
     });
 
-    it("finds a driver failure inside an aggregate error", () => {
-        const driverError = captureDriverError((database) => {
+    it("finds a driver failure inside an aggregate error", async () => {
+        const driverError = await captureDriverError(async (database) => {
             database.close();
-            database.prepare("select 1");
+            await database.execute("select 1");
         });
 
         expect(isDatabaseFailure(new AggregateError([new Error("Unrelated."), driverError]))).toBe(

@@ -30,12 +30,12 @@ afterEach(async () => {
 describe("timeline over HTTP", () => {
     it("charts a finished turn as waiting, working, then waiting again", async () => {
         const fixture = await startServer();
-        const session = fixture.store.create({
+        const session = await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const submitted = session.submit({ text: "Do the thing" });
+        const submitted = await session.submit({ text: "Do the thing" });
         await session.waitForRun(submitted.runId);
 
         const response = await fixture.post("/timeline", {
@@ -55,35 +55,38 @@ describe("timeline over HTTP", () => {
 
     it("states the stream position the chart reflects", async () => {
         const fixture = await startServer();
-        fixture.store.create({
+        await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
 
         const response = await fixture.post("/timeline", {
-            scope: { kind: "project", projectId: projectOf(fixture) },
+            scope: { kind: "project", projectId: await projectOf(fixture) },
         });
 
         expect(response.body.cursor).toBe(fixture.store.liveEvents.cursor());
-        expect(response.body.scope).toEqual({ kind: "project", projectId: projectOf(fixture) });
+        expect(response.body.scope).toEqual({
+            kind: "project",
+            projectId: await projectOf(fixture),
+        });
     });
 
     it("covers every chat in a project and names each row for a person", async () => {
         const fixture = await startServer();
-        const first = fixture.store.create({
+        const first = await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const second = fixture.store.create({
+        const second = await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
 
         const response = await fixture.post("/timeline", {
-            scope: { kind: "project", projectId: projectOf(fixture) },
+            scope: { kind: "project", projectId: await projectOf(fixture) },
         });
 
         const agents = response.body.agents as TimelineAgent[];
@@ -93,14 +96,14 @@ describe("timeline over HTTP", () => {
 
     it("leaves an archived chat out unless it is asked for", async () => {
         const fixture = await startServer();
-        const session = fixture.store.create({
+        const session = await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        session.setArchived(true);
+        await session.setArchived(true);
 
-        const scope = { kind: "project", projectId: projectOf(fixture) };
+        const scope = { kind: "project", projectId: await projectOf(fixture) };
         const active = await fixture.post("/timeline", { scope });
         const all = await fixture.post("/timeline", { includeArchived: true, scope });
 
@@ -110,12 +113,12 @@ describe("timeline over HTTP", () => {
 
     it("charts every chat at once for a global scope", async () => {
         const fixture = await startServer();
-        const first = fixture.store.create({
+        const first = await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const second = fixture.store.create({
+        const second = await fixture.store.create({
             cwd: "/tmp/rig-timeline-elsewhere",
             modelId: "test/timeline",
             providerId: "test",
@@ -135,12 +138,12 @@ describe("timeline over HTTP", () => {
 
     it("bounds a global chart to recent work while keeping what is still open", async () => {
         const fixture = await startServer();
-        const session = fixture.store.create({
+        const session = await fixture.store.create({
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const submitted = session.submit({ text: "Do the thing" });
+        const submitted = await session.submit({ text: "Do the thing" });
         await session.waitForRun(submitted.runId);
 
         const response = await fixture.post("/timeline", {
@@ -185,8 +188,8 @@ describe("timeline over HTTP", () => {
     });
 });
 
-function projectOf(fixture: { store: InMemorySessionStore }): string {
-    const project = fixture.store.listProjects()[0];
+async function projectOf(fixture: { store: InMemorySessionStore }): Promise<string> {
+    const project = (await fixture.store.listProjects())[0];
     if (project === undefined) throw new Error("The store has no project yet.");
     return project.id;
 }
@@ -198,11 +201,11 @@ async function startServer(): Promise<{
     const root = await createTestSocketDirectory();
     const socketPath = join(root, "server.sock");
     const provider = testProvider();
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         createRuntime: (options) => createTestRuntime(options, provider),
         modelCatalog: testCatalog(provider),
     });
-    const server: Server = createProtocolHttpServer({ store, token: "t" });
+    const server: Server = await createProtocolHttpServer({ store, token: "t" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {
@@ -212,6 +215,7 @@ async function startServer(): Promise<{
     });
     cleanups.push(async () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        await store.close();
         await rm(root, { force: true, recursive: true });
     });
 

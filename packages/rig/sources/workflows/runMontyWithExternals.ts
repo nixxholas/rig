@@ -15,7 +15,7 @@ export async function runMontyWithExternals(options: {
     inputs: Record<string, unknown>;
     limits: ResourceLimits;
     onPrint(text: string): void;
-    onSnapshot(snapshot: Uint8Array): void;
+    onSnapshot(snapshot: Uint8Array): void | Promise<void>;
     signal: AbortSignal;
     snapshot?: Uint8Array;
     scriptName: string;
@@ -51,7 +51,7 @@ export async function runMontyWithExternals(options: {
         const args = progress.args;
         const kwargs = progress.kwargs;
         const snapshot: Uint8Array = new Uint8Array(progress.dump());
-        options.onSnapshot(snapshot);
+        await options.onSnapshot(snapshot);
 
         // A serialized checkpoint is the only interpreter state allowed to cross a host await.
         // Loading it again gives every Python segment a fresh runtime budget.

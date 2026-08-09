@@ -1,10 +1,10 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /** Existing webapps keep the original behavior: they may be opened from every slot scope. */
-export function webappAllowedScopes(database: SessionDatabase): void {
-    database.run(
+export async function webappAllowedScopes(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         ALTER TABLE webapps
         ADD COLUMN allowed_scopes_json TEXT NOT NULL

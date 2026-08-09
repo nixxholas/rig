@@ -2,7 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { folders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export type FolderMoveResult =
     | { outcome: "cycle" }
@@ -13,16 +13,16 @@ export type FolderMoveResult =
     | { outcome: "version_conflict" };
 
 /** Puts one folder under a new active parent at a new order key. */
-export function folderMove(
-    tx: TX,
+export async function folderMove(
+    tx: DatabaseScope,
     id: string,
     parentId: string | null,
     orderKey: string,
     now: number,
     version?: number,
-): FolderMoveResult {
-    return inTx(tx, (tx) => {
-        const folder = tx
+): Promise<FolderMoveResult> {
+    return await inTx(tx, async (tx) => {
+        const folder = await tx
             .select({ version: folders.version })
             .from(folders)
             .where(eq(folders.id, id))
@@ -32,14 +32,14 @@ export function folderMove(
             return { outcome: "version_conflict" };
         }
         if (parentId !== null) {
-            const parent = tx
+            const parent = await tx
                 .select({ archivedAtMs: folders.archivedAtMs })
                 .from(folders)
                 .where(eq(folders.id, parentId))
                 .get();
             if (parent === undefined) return { outcome: "parent_not_found" };
             if (parent.archivedAtMs !== null) return { outcome: "parent_archived" };
-            const cycle = tx.get<Record<string, unknown>>(sql`
+            const cycle = await tx.get<Record<string, unknown>>(sql`
                 WITH RECURSIVE subtree(id) AS (
                     SELECT id FROM folders WHERE id = ${id}
                     UNION
@@ -51,21 +51,23 @@ export function folderMove(
             if (cycle !== undefined) return { outcome: "cycle" };
         }
         const changed = Number(
-            tx
-                .update(folders)
-                .set({
-                    orderKey,
-                    parentId,
-                    updatedAtMs: now,
-                    version: sql`${folders.version} + 1`,
-                })
-                .where(
-                    and(
-                        eq(folders.id, id),
-                        version === undefined ? sql`1` : eq(folders.version, version),
-                    ),
-                )
-                .run().changes,
+            (
+                await tx
+                    .update(folders)
+                    .set({
+                        orderKey,
+                        parentId,
+                        updatedAtMs: now,
+                        version: sql`${folders.version} + 1`,
+                    })
+                    .where(
+                        and(
+                            eq(folders.id, id),
+                            version === undefined ? sql`1` : eq(folders.version, version),
+                        ),
+                    )
+                    .run()
+            ).rowsAffected,
         );
         return changed === 1 ? { outcome: "moved" } : { outcome: "version_conflict" };
     });

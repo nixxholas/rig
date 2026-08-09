@@ -22,7 +22,7 @@ describe("markGitStateFromSessionEvent", () => {
     it("marks the session's project when a tool finishes", async () => {
         const fixture = await createFixture();
 
-        markGitStateFromSessionEvent(
+        await markGitStateFromSessionEvent(
             toolExecutionEnd(fixture.sessionId),
             fixture.store,
             fixture.tracker,
@@ -34,7 +34,7 @@ describe("markGitStateFromSessionEvent", () => {
     it("marks the project when a shell command finishes and when a run ends", async () => {
         const fixture = await createFixture();
 
-        markGitStateFromSessionEvent(
+        await markGitStateFromSessionEvent(
             {
                 createdAt: 1,
                 data: {} as never,
@@ -45,7 +45,7 @@ describe("markGitStateFromSessionEvent", () => {
             fixture.store,
             fixture.tracker,
         );
-        markGitStateFromSessionEvent(
+        await markGitStateFromSessionEvent(
             {
                 createdAt: 1,
                 data: {} as never,
@@ -63,7 +63,7 @@ describe("markGitStateFromSessionEvent", () => {
     it("ignores events that carry no filesystem activity", async () => {
         const fixture = await createFixture();
 
-        markGitStateFromSessionEvent(
+        await markGitStateFromSessionEvent(
             {
                 createdAt: 1,
                 data: { event: { iteration: 1, type: "inference_iteration_start" } } as never,
@@ -81,7 +81,7 @@ describe("markGitStateFromSessionEvent", () => {
     it("ignores an event for a session that no longer exists", async () => {
         const fixture = await createFixture();
 
-        markGitStateFromSessionEvent(
+        await markGitStateFromSessionEvent(
             toolExecutionEnd("missing-session"),
             fixture.store,
             fixture.tracker,
@@ -125,7 +125,7 @@ async function createFixture(): Promise<{
     await git(repository, ["commit", "--quiet", "--message", "seed"]);
 
     const marked: string[] = [];
-    const store = new InMemorySessionStore();
+    const store = await InMemorySessionStore.open();
     const tracker = new GitStateTracker({
         // A scan is irrelevant here; what matters is that the entity was told it may have changed.
         scan: (async () => {
@@ -133,7 +133,7 @@ async function createFixture(): Promise<{
         }) as never,
         tuning: { debounceMs: 10_000, maximumDebounceMs: 10_000, reconcileIntervalMs: 60_000 },
     });
-    const session = store.create({ cwd: repository });
+    const session = await store.create({ cwd: repository });
     const projectId = session.snapshot().projectId!;
     const entity: GitTrackedEntity = { path: repository, projectId };
     tracker.watch(entity);

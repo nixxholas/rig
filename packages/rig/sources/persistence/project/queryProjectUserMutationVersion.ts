@@ -1,12 +1,20 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
 
 import { projects } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function queryProjectUserMutationVersion(tx: TX, projectId: string): number | undefined {
-    return tx
-        .select({ userMutationVersion: projects.userMutationVersion })
-        .from(projects)
-        .where(eq(projects.id, projectId))
-        .get()?.userMutationVersion;
+export async function queryProjectUserMutationVersion(
+    tx: DatabaseScope,
+    projectId: string,
+): Promise<number | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx
+                .select({ userMutationVersion: projects.userMutationVersion })
+                .from(projects)
+                .where(eq(projects.id, projectId))
+                .get()
+        )?.userMutationVersion;
+    });
 }

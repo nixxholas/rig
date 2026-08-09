@@ -107,7 +107,7 @@ export async function streamGlobalEvents(
     }, close);
 
     request.on("close", close);
-    let catchup = queue.list({
+    let catchup = await queue.list({
         ...(after === undefined ? {} : { after }),
         limit: CATCHUP_PAGE_LIMIT,
     });
@@ -145,11 +145,11 @@ export async function streamGlobalEvents(
         const nextCursor = catchup.at(-1)?.cursor;
         if (nextCursor === undefined) break;
 
-        // SQLite and SSE writes are synchronous. Yielding once per page keeps a large retained log
-        // from monopolizing the daemon while preserving the ordered cursor walk.
+        // Yielding once per page keeps a large retained log from monopolizing the daemon while
+        // preserving the ordered cursor walk across asynchronous database and SSE work.
         await new Promise<void>((resolve) => setImmediate(resolve));
         if (closed) return;
-        const next = queue.list({ after: nextCursor, limit: CATCHUP_PAGE_LIMIT });
+        const next = await queue.list({ after: nextCursor, limit: CATCHUP_PAGE_LIMIT });
         if (next === undefined) {
             close();
             return;

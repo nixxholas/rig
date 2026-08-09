@@ -1,15 +1,15 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function profileGitIdentity(database: SessionDatabase): void {
-    const profileColumns = columnNames(database, "rig_profiles");
+export async function profileGitIdentity(database: SessionDatabase): Promise<void> {
+    const profileColumns = await columnNames(database, "rig_profiles");
     if (profileColumns.size > 0 && !profileColumns.has("email")) {
         // Email is now required and cannot be derived honestly from the old display name.
         // Profiles are small, user-created identities, so reset this early-stage catalog
         // explicitly instead of inventing an address or carrying a legacy optional branch.
-        database.run(sql.raw("DROP TABLE rig_profiles"));
-        database.run(
+        await database.run(sql.raw("DROP TABLE rig_profiles"));
+        await database.run(
             sql.raw(`CREATE TABLE rig_profiles (
                 id TEXT NOT NULL PRIMARY KEY,
                 parent_instance_id TEXT NOT NULL,
@@ -21,22 +21,25 @@ export function profileGitIdentity(database: SessionDatabase): void {
                 email TEXT NOT NULL
             )`),
         );
-        database.run(
+        await database.run(
             sql.raw(
                 "CREATE INDEX rig_profiles_parent_instance ON rig_profiles (parent_instance_id, id)",
             ),
         );
     }
-    const sessionColumns = columnNames(database, "sessions");
+    const sessionColumns = await columnNames(database, "sessions");
     if (sessionColumns.size > 0 && !sessionColumns.has("profile_id")) {
-        database.run(sql.raw("ALTER TABLE sessions ADD COLUMN profile_id TEXT"));
+        await database.run(sql.raw("ALTER TABLE sessions ADD COLUMN profile_id TEXT"));
     }
 }
 
-function columnNames(database: SessionDatabase, table: "rig_profiles" | "sessions"): Set<string> {
+async function columnNames(
+    database: SessionDatabase,
+    table: "rig_profiles" | "sessions",
+): Promise<Set<string>> {
     return new Set(
-        database
-            .all<{ name: string }>(sql.raw(`PRAGMA table_info(${table})`))
-            .map((column) => column.name),
+        (await database.all<{ name: string }>(sql.raw(`PRAGMA table_info(${table})`))).map(
+            (column) => column.name,
+        ),
     );
 }

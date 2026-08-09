@@ -4,9 +4,9 @@ export {
     type AgentSessionRepository,
 } from "./AgentSessionManager.js";
 export { InMemorySession } from "./InMemorySession.js";
+export type { InMemorySessionPersistence } from "./InMemorySessionPersistence.js";
 export type {
     InMemorySessionOptions,
-    InMemorySessionPersistence,
     PersistedPendingContextMessage,
     PersistedQueuedRun,
     PersistedSessionMessage,
@@ -24,7 +24,9 @@ export { SessionConfigurationError } from "./SessionConfigurationError.js";
 export {
     SessionEventLog,
     type SessionEventAppendHook,
+    type SessionEventLogCheckpoint,
     type SessionEventListener,
+    type SessionEventNotification,
     type SessionEventNotificationScheduler,
 } from "./SessionEventLog.js";
 export { SessionTerminalTracker } from "./SessionTerminalTracker.js";

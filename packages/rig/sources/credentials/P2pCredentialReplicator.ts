@@ -19,7 +19,9 @@ const MAXIMUM_VERSION_RECONCILIATIONS = 3;
 const LEASE_RENEWAL_INTERVAL_MS = 4 * 60 * 1_000;
 
 export interface P2pCredentialReplicatorOptions {
-    listPeers: () => readonly { instanceId: string; publicKey: string }[];
+    listPeers: () =>
+        | readonly { instanceId: string; publicKey: string }[]
+        | Promise<readonly { instanceId: string; publicKey: string }[]>;
     network: P2pNetwork;
     onError?: (peerId: string, error: unknown) => void;
     snapshot: () => P2pCredentialSnapshot | Promise<P2pCredentialSnapshot>;
@@ -68,8 +70,8 @@ export class P2pCredentialReplicator {
         void this.ensureForRequest(peerId);
     }
 
-    syncAll(): void {
-        for (const peer of this.#options.listPeers()) this.peerChanged(peer.instanceId);
+    async syncAll(): Promise<void> {
+        for (const peer of await this.#options.listPeers()) this.peerChanged(peer.instanceId);
     }
 
     async close(): Promise<void> {
@@ -105,7 +107,9 @@ export class P2pCredentialReplicator {
     async #renewLeases(): Promise<void> {
         try {
             await Promise.all(
-                this.#options.listPeers().map((peer) => this.ensureForRequest(peer.instanceId)),
+                (await this.#options.listPeers()).map((peer) =>
+                    this.ensureForRequest(peer.instanceId),
+                ),
             );
         } catch (error) {
             this.#report("local", error);
@@ -121,58 +125,76 @@ export class P2pCredentialReplicator {
     }
 
     async #synchronize(peerId: string, signal?: AbortSignal): Promise<void> {
-        const peer = this.#options.listPeers().find((candidate) => candidate.instanceId === peerId);
+        const peer = (await this.#options.listPeers()).find(
+            (candidate) => candidate.instanceId === peerId,
+        );
         if (peer === undefined) throw new Error("That Rig is not a trusted P2P peer.");
         let snapshot = await this.#snapshot();
+        const timeout = new AbortController();
+        const timeoutTimer = setTimeout(
+            () =>
+                timeout.abort(
+                    new DOMException("Credential synchronization timed out.", "TimeoutError"),
+                ),
+            REQUEST_TIMEOUT_MS,
+        );
+        timeoutTimer.unref?.();
         const requestSignal = AbortSignal.any([
             this.#abort.signal,
             ...(signal === undefined ? [] : [signal]),
-            AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            timeout.signal,
         ]);
-        for (
-            let reconciliation = 0;
-            reconciliation <= MAXIMUM_VERSION_RECONCILIATIONS;
-            reconciliation += 1
-        ) {
-            const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
-            if (this.#synchronizedDigests.get(peerId) === digest) return;
-            const envelope = this.#options.store.encryptForPeer(snapshot, peer.publicKey);
-            const { response } = await this.#options.network.fetch(
-                peerId,
-                {
-                    body: Buffer.from(JSON.stringify(envelope), "utf8"),
-                    headers: { accept: "application/json", "content-type": "application/json" },
-                    method: "PUT",
-                    path: "/inference-credentials",
-                },
-                requestSignal,
-            );
-            const body = await collectJson(response.body);
-            if (response.status === 200) {
-                if (
-                    !Value.Check(p2pCredentialReplaceResponseSchema, body) ||
-                    body.version !== snapshot.version
-                ) {
-                    throw new Error(
-                        "The remote Rig returned an invalid credential synchronization response.",
-                    );
-                }
-                this.#synchronizedDigests.set(peerId, digest);
-                return;
-            }
-            if (
-                response.status === 409 &&
-                Value.Check(p2pCredentialVersionConflictResponseSchema, body) &&
-                reconciliation < MAXIMUM_VERSION_RECONCILIATIONS
+        try {
+            for (
+                let reconciliation = 0;
+                reconciliation <= MAXIMUM_VERSION_RECONCILIATIONS;
+                reconciliation += 1
             ) {
-                snapshot = this.#options.store.fastForwardOwnSnapshot(snapshot, body.version);
-                continue;
+                const digest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+                if (this.#synchronizedDigests.get(peerId) === digest) return;
+                const envelope = this.#options.store.encryptForPeer(snapshot, peer.publicKey);
+                const { response } = await this.#options.network.fetch(
+                    peerId,
+                    {
+                        body: Buffer.from(JSON.stringify(envelope), "utf8"),
+                        headers: { accept: "application/json", "content-type": "application/json" },
+                        method: "PUT",
+                        path: "/inference-credentials",
+                    },
+                    requestSignal,
+                );
+                const body = await collectJson(response.body);
+                if (response.status === 200) {
+                    if (
+                        !Value.Check(p2pCredentialReplaceResponseSchema, body) ||
+                        body.version !== snapshot.version
+                    ) {
+                        throw new Error(
+                            "The remote Rig returned an invalid credential synchronization response.",
+                        );
+                    }
+                    this.#synchronizedDigests.set(peerId, digest);
+                    return;
+                }
+                if (
+                    response.status === 409 &&
+                    Value.Check(p2pCredentialVersionConflictResponseSchema, body) &&
+                    reconciliation < MAXIMUM_VERSION_RECONCILIATIONS
+                ) {
+                    snapshot = await this.#options.store.fastForwardOwnSnapshot(
+                        snapshot,
+                        body.version,
+                    );
+                    continue;
+                }
+                throw new Error(
+                    `The remote Rig rejected inference credentials with status ${String(response.status)}.`,
+                );
             }
-            throw new Error(
-                `The remote Rig rejected inference credentials with status ${String(response.status)}.`,
-            );
+            throw new Error("The remote Rig repeatedly rejected the credential snapshot version.");
+        } finally {
+            clearTimeout(timeoutTimer);
         }
-        throw new Error("The remote Rig repeatedly rejected the credential snapshot version.");
     }
 
     #snapshot(): Promise<P2pCredentialSnapshot> {

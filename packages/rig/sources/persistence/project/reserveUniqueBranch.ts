@@ -1,7 +1,8 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, ne } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Finds a branch name no other workspace in the project has taken.
@@ -15,49 +16,53 @@ import type { TX } from "../Transaction.js";
  * slugs to that same branch would otherwise be pushed onto a suffix and move the branch for
  * nothing.
  */
-export function reserveUniqueBranch(
-    tx: TX,
+export async function reserveUniqueBranch(
+    tx: DatabaseScope,
     options: {
         branch: string;
         excludeWorkspaceId?: string;
         isBranchUnavailable?: (branch: string) => boolean;
         projectId: string;
     },
-): string {
-    const own =
-        options.excludeWorkspaceId === undefined
-            ? undefined
-            : tx
-                  .select({ branch: projectWorkspaces.branch })
-                  .from(projectWorkspaces)
-                  .where(
-                      and(
-                          eq(projectWorkspaces.projectId, options.projectId),
-                          eq(projectWorkspaces.id, options.excludeWorkspaceId),
-                      ),
-                  )
-                  .get()?.branch;
-    const taken = (candidate: string): boolean => {
-        if (candidate === own) return false;
-        if (options.isBranchUnavailable?.(candidate) === true) return true;
-        const scope =
+): Promise<string> {
+    return await inDatabase(tx, async (tx) => {
+        const own =
             options.excludeWorkspaceId === undefined
-                ? eq(projectWorkspaces.projectId, options.projectId)
-                : and(
-                      eq(projectWorkspaces.projectId, options.projectId),
-                      ne(projectWorkspaces.id, options.excludeWorkspaceId),
-                  );
-        return (
-            tx
-                .select({ id: projectWorkspaces.id })
-                .from(projectWorkspaces)
-                .where(and(scope, eq(projectWorkspaces.branch, candidate)))
-                .get() !== undefined
-        );
-    };
-    if (!taken(options.branch)) return options.branch;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${options.branch}-${String(suffix)}`;
-        if (!taken(candidate)) return candidate;
-    }
+                ? undefined
+                : (
+                      await tx
+                          .select({ branch: projectWorkspaces.branch })
+                          .from(projectWorkspaces)
+                          .where(
+                              and(
+                                  eq(projectWorkspaces.projectId, options.projectId),
+                                  eq(projectWorkspaces.id, options.excludeWorkspaceId),
+                              ),
+                          )
+                          .get()
+                  )?.branch;
+        const taken = async (candidate: string): Promise<boolean> => {
+            if (candidate === own) return false;
+            if (options.isBranchUnavailable?.(candidate) === true) return true;
+            const scope =
+                options.excludeWorkspaceId === undefined
+                    ? eq(projectWorkspaces.projectId, options.projectId)
+                    : and(
+                          eq(projectWorkspaces.projectId, options.projectId),
+                          ne(projectWorkspaces.id, options.excludeWorkspaceId),
+                      );
+            return (
+                (await tx
+                    .select({ id: projectWorkspaces.id })
+                    .from(projectWorkspaces)
+                    .where(and(scope, eq(projectWorkspaces.branch, candidate)))
+                    .get()) !== undefined
+            );
+        };
+        if (!(await taken(options.branch))) return options.branch;
+        for (let suffix = 2; ; suffix += 1) {
+            const candidate = `${options.branch}-${String(suffix)}`;
+            if (!(await taken(candidate))) return candidate;
+        }
+    });
 }

@@ -27,12 +27,13 @@ describe("RemoteAgent", () => {
             session,
         });
 
-        agent.setPermissionMode("full_access");
+        const permissionChange = agent.setPermissionMode("full_access");
 
         expect(agent.permissionMode).toBe("workspace_write");
         expect(harness.context.permissions.mode).toBe("workspace_write");
         await vi.waitFor(() => expect(changePermissionMode).toHaveBeenCalledOnce());
         await vi.waitFor(() => expect(agent.permissionMode).toBe("full_access"));
+        await permissionChange;
         expect(harness.context.permissions.mode).toBe("full_access");
 
         agent.applySessionEvent(permissionEvent(session.id, "read_only"));
@@ -456,7 +457,7 @@ describe("RemoteAgent", () => {
         });
 
         expect(agent.provider.serviceTiers).toEqual(["fast"]);
-        agent.setServiceTier("fast");
+        const fastChange = agent.setServiceTier("fast");
 
         expect(agent.snapshot().serviceTier).toBe("fast");
         await vi.waitFor(() =>
@@ -465,11 +466,13 @@ describe("RemoteAgent", () => {
             }),
         );
         await vi.waitFor(() => expect(agent.snapshot().serviceTier).toBe("fast"));
+        await fastChange;
 
-        agent.setServiceTier(undefined);
+        const defaultChange = agent.setServiceTier(undefined);
         expect(agent.snapshot().serviceTier).toBeUndefined();
         await vi.waitFor(() => expect(changeServiceTier).toHaveBeenLastCalledWith(session.id, {}));
         await vi.waitFor(() => expect(agent.snapshot().serviceTier).toBeUndefined());
+        await defaultChange;
     });
 
     it("serializes rapid service-tier changes and ignores stale events", async () => {

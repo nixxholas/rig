@@ -44,8 +44,8 @@ describeLive("configured Codex provider live", () => {
             subagents: {
                 canSpawn: true,
                 depth: 0,
-                followUp: () => managed,
-                interrupt: () => managed,
+                followUp: async () => managed,
+                interrupt: async () => managed,
                 list: () => [managed],
                 maxDepth: 3,
                 spawn: async () => {
@@ -86,8 +86,8 @@ describeLive("configured Codex provider live", () => {
             subagents: {
                 canSpawn: true,
                 depth: 0,
-                followUp: () => managed,
-                interrupt: () => managed,
+                followUp: async () => managed,
+                interrupt: async () => managed,
                 list: () => [managed],
                 maxDepth: 3,
                 spawn: async () => ({ ...managed, output: "ok" }),

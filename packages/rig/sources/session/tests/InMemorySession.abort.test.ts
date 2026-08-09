@@ -46,14 +46,18 @@ describe("InMemorySession abort", () => {
                 ...seed.state(),
                 activeRunId: "restored-run",
                 status: "running",
+                workspaceQueueWaiting: true,
             },
         });
 
-        await session.archiveForWorkspace("workspace-1")();
+        await (
+            await session.archiveForWorkspace("workspace-1")
+        )();
 
         expect(session.state()).toMatchObject({
             archived: true,
             status: "archived",
+            workspaceQueueWaiting: false,
         });
         expect(session.state().activeRunId).toBeUndefined();
     });
@@ -105,11 +109,12 @@ describe("InMemorySession abort", () => {
             scope: { kind: "workspace", projectId: "project-1", workspaceId: "workspace-1" },
         });
 
-        session.submit({ text: "Keep running until archival." });
+        const submitted = session.submit({ text: "Keep running until archival." });
         await started.promise;
-        const archive = session.archiveForWorkspace("workspace-1")();
+        await submitted;
+        const archive = await session.archiveForWorkspace("workspace-1");
         release.resolve();
-        await Promise.all([archive, settled.promise]);
+        await Promise.all([archive(), settled.promise]);
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         expect(session.snapshot()).toMatchObject({
@@ -117,12 +122,123 @@ describe("InMemorySession abort", () => {
             status: "archived",
         });
         expect(session.state().activeRunId).toBeUndefined();
-        expect(() => session.setArchived(false)).toThrow("cannot be restored");
+        await expect(session.setArchived(false)).rejects.toThrow("cannot be restored");
         expect(
             session.events
                 .since(undefined)
                 ?.filter((event) => event.type === "session_workspace_archived"),
         ).toHaveLength(1);
+    });
+
+    it("keeps an active runtime alive when archiving fails to persist", async () => {
+        const started = deferred<void>();
+        const release = deferred<void>();
+        const failure = Object.assign(new Error("archive persistence failed"), {
+            code: "SQLITE_IOERR",
+        });
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/archive-persistence-rejection",
+            name: "Archive persistence rejection",
+            thinkingLevels: ["off"],
+        });
+        let runSignal: AbortSignal | undefined;
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream(_model, _context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
+                runSignal = options?.signal;
+                const message = assistantMessage("The run survived.", model.id);
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        started.resolve();
+                        await release.promise;
+                        yield { type: "start" as const, partial: message };
+                        yield { type: "done" as const, reason: "stop" as const, message };
+                        return message;
+                    },
+                    async result() {
+                        return message;
+                    },
+                };
+            },
+        });
+        const session = await InMemorySession.open({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => createRuntime(options, provider),
+            emitCreatedEvent: false,
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ models: [model], providerId: provider.id }],
+            },
+            onAppendEvent: (event) => {
+                if (event.type === "session_archived") throw failure;
+            },
+            request: { cwd: "/tmp/rig-archive-persistence-rejection", modelId: model.id },
+        });
+
+        const submitted = await session.submit({ text: "Keep this run alive." });
+        await started.promise;
+
+        await expect(session.setArchived(true)).rejects.toBe(failure);
+
+        expect(runSignal?.aborted).toBe(false);
+        expect(session.snapshot()).toMatchObject({ archived: false, status: "running" });
+        release.resolve();
+        await session.waitForRun(submitted.runId);
+    });
+
+    it("stops an active inference after project archival commits", async () => {
+        const started = deferred<void>();
+        const stopped = deferred<void>();
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/project-archive-active-run",
+            name: "Project archive active run",
+            thinkingLevels: ["off"],
+        });
+        let runSignal: AbortSignal | undefined;
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream(_model, _context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
+                runSignal = options?.signal;
+                return {
+                    // eslint-disable-next-line require-yield -- This fixture stops on archive.
+                    async *[Symbol.asyncIterator]() {
+                        started.resolve();
+                        await new Promise<void>((resolve) => {
+                            if (options?.signal?.aborted === true) {
+                                resolve();
+                                return;
+                            }
+                            options?.signal?.addEventListener("abort", () => resolve(), {
+                                once: true,
+                            });
+                        });
+                        stopped.resolve();
+                        throw new Error("archived");
+                    },
+                    async result() {
+                        throw new Error("archived");
+                    },
+                };
+            },
+        });
+        const session = createSession(provider, model, "/tmp/rig-project-archive-active-run");
+
+        await session.submit({ text: "Keep running until the project is archived." });
+        await started.promise;
+        await session.setArchived(true);
+        await stopped.promise;
+
+        expect(runSignal?.aborted).toBe(true);
+        expect(session.snapshot().archived).toBe(true);
+        await session.beginShutdown();
     });
 
     it("kills a direct shell watcher before draining daemon shutdown tasks", async () => {
@@ -274,7 +390,7 @@ describe("InMemorySession abort", () => {
             },
             request: { cwd: "/tmp/rig-immediate-abort", modelId: model.id },
         });
-        const submitted = session.submit({ text: "Run both tools." });
+        const submitted = await session.submit({ text: "Run both tools." });
         await toolsStarted.promise;
 
         const abort = session.abort();
@@ -335,7 +451,7 @@ describe("InMemorySession abort", () => {
                 request: { cwd, modelId: model.id, providerId: provider.id },
             });
 
-            const submitted = session.submit({ text: "Finish before the delayed action." });
+            const submitted = await session.submit({ text: "Finish before the delayed action." });
             await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
             });
@@ -407,7 +523,7 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        const submitted = session.submit({ text: "Keep running until I abort." });
+        const submitted = await session.submit({ text: "Keep running until I abort." });
         await started.promise;
         if (runtime === undefined) throw new Error("Runtime was not created.");
         const background = runtime.processManager.start({
@@ -467,9 +583,9 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-steering-continuation", modelId: model.id },
         });
 
-        const submitted = session.submit({ text: "Start waiting." });
+        const submitted = await session.submit({ text: "Start waiting." });
         await started.promise;
-        session.steer({
+        await session.steer({
             clientSubmissionId: "client-pending-steering",
             text: "Apply this pending direction.",
         });
@@ -538,7 +654,9 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-internal-system-steering", modelId: model.id },
         });
 
-        const submitted = session.submit({ text: "Keep working until the background task ends." });
+        const submitted = await session.submit({
+            text: "Keep working until the background task ends.",
+        });
         await started.promise;
         runtime?.agent.steerMessage({
             blocks: [{ text: "Background command 1 finished successfully.", type: "text" }],
@@ -595,9 +713,9 @@ describe("InMemorySession abort", () => {
             },
         });
         const session = createSession(provider, model, "/tmp/rig-applied-steering");
-        const submitted = session.submit({ text: "Start the applied steering run." });
+        const submitted = await session.submit({ text: "Start the applied steering run." });
         await firstInferenceStarted.promise;
-        const accepted = session.steer({
+        const accepted = await session.steer({
             clientSubmissionId: "already-applied",
             expectedRunId: submitted.runId,
             text: "Use this exactly once.",
@@ -626,7 +744,7 @@ describe("InMemorySession abort", () => {
             status: "completed",
         });
         expect(
-            session.steer({
+            await session.steer({
                 clientSubmissionId: "already-applied",
                 expectedRunId: submitted.runId,
                 text: "Use this exactly once.",
@@ -686,12 +804,12 @@ describe("InMemorySession abort", () => {
             },
         });
         const session = createSession(provider, model, "/tmp/rig-mixed-steering");
-        const submitted = session.submit({ text: "Start the mixed steering run." });
+        const submitted = await session.submit({ text: "Start the mixed steering run." });
         await firstInferenceStarted.promise;
-        session.steer({ clientSubmissionId: "applied-first", text: "Applied first." });
+        await session.steer({ clientSubmissionId: "applied-first", text: "Applied first." });
         releaseFirstInference.resolve();
         await secondInferenceStarted.promise;
-        session.steer({ clientSubmissionId: "pending-second", text: "Pending second." });
+        await session.steer({ clientSubmissionId: "pending-second", text: "Pending second." });
 
         await expect(
             session.abort({
@@ -757,9 +875,9 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-coalesced-steering", modelId: model.id },
         });
 
-        const submitted = session.submit({ text: "Start waiting." });
+        const submitted = await session.submit({ text: "Start waiting." });
         await started.promise;
-        session.steer({
+        await session.steer({
             clientSubmissionId: "first-pending-direction",
             text: "First pending direction.",
         });
@@ -771,7 +889,7 @@ describe("InMemorySession abort", () => {
         await expect(
             session.abort({ continuePendingSteering: true, stopDescendants: false }),
         ).rejects.toThrow("An abort request with different options is already in progress.");
-        session.steer({
+        await session.steer({
             clientSubmissionId: "submitted-during-interrupt",
             text: "Submitted while interrupt settles.",
         });
@@ -845,9 +963,9 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-hard-abort-override", modelId: model.id },
         });
 
-        const submitted = session.submit({ text: "Start waiting." });
+        const submitted = await session.submit({ text: "Start waiting." });
         await started.promise;
-        session.steer({ text: "Do not revive this run after a hard abort." });
+        await session.steer({ text: "Do not revive this run after a hard abort." });
 
         const continuingAbort = session.abort({
             continuePendingSteering: true,
@@ -903,12 +1021,12 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-targeted-abort", modelId: model.id },
         });
 
-        const first = session.submit({ text: "Finish first." });
+        const first = await session.submit({ text: "Finish first." });
         await expect(session.waitForRun(first.runId)).resolves.toEqual({ status: "completed" });
-        const replacement = session.submit({ text: "Keep replacement running." });
+        const replacement = await session.submit({ text: "Keep replacement running." });
         await replacementStarted.promise;
 
-        const queued = session.steer({
+        const queued = await session.steer({
             expectedRunId: first.runId,
             text: "Run this after the replacement.",
         });
@@ -966,9 +1084,11 @@ describe("InMemorySession abort", () => {
             },
         });
         const session = createSession(provider, model, "/tmp/rig-notification-continuation");
-        const submitted = session.submit({ text: "Keep running." });
+        const submitted = await session.submit({ text: "Keep running." });
         await started.promise;
-        const notification = session.deliverNotification({ text: "Background work completed." });
+        const notification = await session.deliverNotification({
+            text: "Background work completed.",
+        });
         const notificationEvent = session.events
             .since(undefined)
             ?.find((event) => event.id === notification.eventId);
@@ -1047,7 +1167,7 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        const submitted = session.submit({ text: "Earlier request" });
+        const submitted = await session.submit({ text: "Earlier request" });
         await session.waitForRun(submitted.runId);
         await session.compact();
 
@@ -1092,7 +1212,7 @@ describe("InMemorySession abort", () => {
             type: "run_finished",
         });
         expect(
-            session.transcriptWindow().turns.find((turn) => turn.runId === compactionRunId),
+            (await session.transcriptWindow()).turns.find((turn) => turn.runId === compactionRunId),
         ).toMatchObject({
             kind: "compaction",
             outcome: "success",
@@ -1137,7 +1257,7 @@ describe("InMemorySession abort", () => {
                 providerId: provider.id,
             },
         });
-        const submitted = session.submit({ text: "Earlier request" });
+        const submitted = await session.submit({ text: "Earlier request" });
         await session.waitForRun(submitted.runId);
 
         await expect(session.compact()).rejects.toThrow(failure);
@@ -1207,7 +1327,7 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        const submitted = session.submit({ text: "Earlier request" });
+        const submitted = await session.submit({ text: "Earlier request" });
         await session.waitForRun(submitted.runId);
         const compacting = session.compact();
         await compactStarted;
@@ -1216,13 +1336,14 @@ describe("InMemorySession abort", () => {
             runId: expect.any(String),
         });
         const shutdown = session.beginShutdown();
-        session.markInterrupted({
+        const interrupted = session.markInterrupted({
             interruptedAt: 1,
             message: "The local daemon shut down during compaction.",
             reason: "shutdown",
         });
 
         await expect(compacting).rejects.toThrow("compaction was stopped");
+        await interrupted;
         expect(session.snapshot().activeTurn).toBeUndefined();
         await expect(shutdown).resolves.toBeUndefined();
         const compactionEvents = session.events

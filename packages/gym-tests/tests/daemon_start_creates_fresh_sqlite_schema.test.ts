@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const SCHEMA_MARKER = "DAEMON_CREATED_FRESH_SQLITE_SCHEMA";
@@ -31,10 +32,9 @@ describe("daemon startup with no database", () => {
     }, 120_000);
 });
 
-const verifyFreshDatabaseScript = String.raw`
-import { DatabaseSync } from "node:sqlite";
-
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite", { readOnly: true });
+const verifyFreshDatabaseScript = libsqlEsmScript(String.raw`
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite", true);
+try {
 const expectedTables = [
     "durable_global_event_state",
     "durable_global_events",
@@ -57,18 +57,20 @@ const expectedTables = [
     "session_turns",
     "sessions",
 ];
-const actualTables = database
-    .prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    )
-    .all()
+const actualTables = (await database.execute(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+))
+    .rows
     .map((row) => row.name);
 if (JSON.stringify(actualTables) !== JSON.stringify(expectedTables)) {
     throw new Error("Unexpected fresh schema tables: " + JSON.stringify(actualTables));
 }
 
 const sessionColumns = new Map(
-    database.prepare("PRAGMA table_info(sessions)").all().map((column) => [column.name, column]),
+    (await database.execute("PRAGMA table_info(sessions)")).rows.map((column) => [
+        column.name,
+        column,
+    ]),
 );
 for (const name of ["project_id", "root_session_id"]) {
     if (sessionColumns.get(name)?.notnull !== 1) {
@@ -82,10 +84,12 @@ if (actualTables.includes("session_database_migrations")) {
     throw new Error("The obsolete migration progress table was recreated.");
 }
 
-const version = database.prepare("PRAGMA user_version").get().user_version;
+const version = (await database.execute("PRAGMA user_version")).rows[0].user_version;
 if (version !== 4) throw new Error("Expected schema version 4, received " + String(version));
-database.close();
-`;
+} finally {
+    await database.close();
+}
+`);
 
 const startWithFreshDatabaseScript = String.raw`#!/usr/bin/env bash
 set -euo pipefail

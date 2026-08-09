@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
@@ -9,7 +9,11 @@ import { claudeTaskUpdateTool } from "../../agent/tools/claude/TaskUpdate.js";
 
 describe("Claude task tools", () => {
     it("creates, links, updates, lists, and deletes persistent session tasks", async () => {
-        const session = new InMemorySessionStore().create({ cwd: "/tmp/rig-task-tools" });
+        const session = await (
+            await InMemorySessionStore.open()
+        ).create({
+            cwd: "/tmp/rig-task-tools",
+        });
         const harness = createJustBashToolHarness();
         harness.context.tasks = {
             create: (request) => session.createTask(request),
@@ -62,9 +66,11 @@ describe("Claude task tools", () => {
 
         expect(session.snapshot().tasks).toHaveLength(1);
         expect(session.snapshot().tasks[0]?.blockedBy).toEqual([]);
-        expect(session.events.since(undefined)?.at(-1)).toMatchObject({
-            data: { tasks: [expect.objectContaining({ id: "2" })] },
-            type: "tasks_changed",
+        await vi.waitFor(() => {
+            expect(session.events.since(undefined)?.at(-1)).toMatchObject({
+                data: { tasks: [expect.objectContaining({ id: "2" })] },
+                type: "tasks_changed",
+            });
         });
 
         await session.reset();
@@ -76,7 +82,11 @@ describe("Claude task tools", () => {
     });
 
     it("rejects missing and self-referential dependencies without mutating tasks", async () => {
-        const session = new InMemorySessionStore().create({ cwd: "/tmp/rig-task-tools" });
+        const session = await (
+            await InMemorySessionStore.open()
+        ).create({
+            cwd: "/tmp/rig-task-tools",
+        });
         session.createTask({ subject: "One", description: "First task." });
 
         expect(session.updateTask("1", { addBlockedBy: ["1"] })).toEqual({

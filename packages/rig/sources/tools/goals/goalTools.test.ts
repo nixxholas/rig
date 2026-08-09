@@ -11,12 +11,12 @@ describe("goal tools", () => {
         const harness = createJustBashToolHarness();
         let goal: SessionGoal | undefined;
         harness.context.goals = {
-            create: ({ objective }) => {
+            create: async ({ objective }) => {
                 goal = { createdAt: 1, objective, status: "active", updatedAt: 1 };
                 return { ...goal };
             },
             get: () => (goal === undefined ? undefined : { ...goal }),
-            update: (status) => {
+            update: async (status) => {
                 if (goal === undefined) throw new Error("No goal");
                 goal = { ...goal, status, updatedAt: 2 };
                 return { ...goal };

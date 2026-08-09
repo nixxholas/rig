@@ -3,11 +3,15 @@ import { sql } from "drizzle-orm";
 import type { RegisterSecretRequest } from "../../protocol/index.js";
 import { secretEnvironmentVariables, secretRegistrations } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function secretRegister(tx: TX, request: RegisterSecretRequest): void {
-    inTx(tx, (tx) => {
-        tx.insert(secretRegistrations)
+export async function secretRegister(
+    tx: DatabaseScope,
+    request: RegisterSecretRequest,
+): Promise<void> {
+    await inTx(tx, async (tx) => {
+        await tx
+            .insert(secretRegistrations)
             .values({
                 description: request.description.trim(),
                 environmentJson: JSON.stringify(request.environment),
@@ -22,7 +26,8 @@ export function secretRegister(tx: TX, request: RegisterSecretRequest): void {
             })
             .run();
         for (const name of Object.keys(request.environment)) {
-            tx.insert(secretEnvironmentVariables)
+            await tx
+                .insert(secretEnvironmentVariables)
                 .values({
                     name,
                     normalizedName: name.toUpperCase(),

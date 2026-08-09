@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function rigDataIdentityFormat(database: SessionDatabase): void {
-    database.run(
+export async function rigDataIdentityFormat(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`ALTER TABLE rig_data_identity
             ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1 CHECK (format_version = 1)`),
     );

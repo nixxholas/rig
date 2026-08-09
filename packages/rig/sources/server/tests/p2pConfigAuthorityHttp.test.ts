@@ -8,11 +8,11 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("P2P primary configuration authority", () => {
     it("allows local callers and the configured primary, but rejects every other peer", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const rename = vi.fn(async (_name: string) => undefined);
         const primaryId = "aprimaryinstance000000001";
         const started = await startServer(
-            createProtocolHttpServer({
+            await createProtocolHttpServer({
                 canP2pPeerConfigure: (peerId) => peerId === primaryId,
                 onDaemonConfigChange: async (config) => {
                     await rename(config.p2p.name);

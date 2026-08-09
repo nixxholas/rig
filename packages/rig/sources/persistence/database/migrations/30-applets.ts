@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * Webapps are now called applets.
@@ -9,12 +9,12 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * so every existing row points at files that are no longer there. This early-stage rename replaces
  * the old tables outright instead of carrying rows that resolve to nothing.
  */
-export function applets(database: SessionDatabase): void {
-    database.run(sql.raw("DROP TABLE IF EXISTS webapp_versions"));
-    database.run(sql.raw("DROP TABLE IF EXISTS webapps"));
-    database.run(sql.raw("DROP TABLE IF EXISTS applet_versions"));
-    database.run(sql.raw("DROP TABLE IF EXISTS applets"));
-    database.run(
+export async function applets(database: SessionDatabase): Promise<void> {
+    await database.run(sql.raw("DROP TABLE IF EXISTS webapp_versions"));
+    await database.run(sql.raw("DROP TABLE IF EXISTS webapps"));
+    await database.run(sql.raw("DROP TABLE IF EXISTS applet_versions"));
+    await database.run(sql.raw("DROP TABLE IF EXISTS applets"));
+    await database.run(
         sql.raw(`
         CREATE TABLE applets (
             name TEXT NOT NULL PRIMARY KEY,
@@ -30,7 +30,7 @@ export function applets(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE applet_versions (
             applet_name TEXT NOT NULL REFERENCES applets(name) ON DELETE CASCADE,

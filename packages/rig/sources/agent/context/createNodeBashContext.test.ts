@@ -347,7 +347,9 @@ describe("createNodeBashContext", () => {
                 processManager: new NativeProcessManager(),
             });
             const exits: unknown[] = [];
-            context.setSessionExitListener?.((exit) => exits.push(exit));
+            context.setSessionExitListener?.((exit) => {
+                exits.push(exit);
+            });
             await context.startSession({ command: "sleep 30", cwd });
 
             // Taking everything down is our doing, and the model is being told
@@ -371,7 +373,9 @@ describe("createNodeBashContext", () => {
                 processManager: new NativeProcessManager(),
             });
             const exits: { sessionId: number; status: string }[] = [];
-            context.setSessionExitListener?.((exit) => exits.push(exit));
+            context.setSessionExitListener?.((exit) => {
+                exits.push(exit);
+            });
             const sessionId = await context.startSession({ command: "sleep 0.2", cwd });
             await delay(1_500);
 

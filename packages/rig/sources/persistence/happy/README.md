@@ -1,8 +1,8 @@
 # Happy persistence
 
-This directory owns synchronous SQLite operations for Happy session synchronization and its
+This directory owns asynchronous SQLite operations for Happy session synchronization and its
 outbox. Queries use the `query` prefix, and mutations preserve their complete consistency
-boundaries through `TX` and `inTx`.
+boundaries through `DatabaseScope`, `inDatabase`, and `inTx`.
 
 ```text
 HappySyncRepository

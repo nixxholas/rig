@@ -207,10 +207,12 @@ export const listWorkspacesTool = defineTool({
     ),
     returnType: Type.Object({ workspaces: Type.Array(workspaceResult) }),
     shouldReviewInAutoMode: () => false,
-    execute: ({ project_id }, context) => ({
-        workspaces: requireWorkspaces(context)
-            .listWorkspaces(project_id)
-            .map((workspace) => ({ ...workspace })),
+    execute: async ({ project_id }, context) => ({
+        workspaces: (await requireWorkspaces(context).listWorkspaces(project_id)).map(
+            (workspace) => ({
+                ...workspace,
+            }),
+        ),
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
@@ -258,13 +260,13 @@ export const listWorkspaceSessionsTool = defineTool({
         ),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: ({ project_id, workspace_id }, context) => ({
-        sessions: requireWorkspaces(context)
-            .listSessions({
+    execute: async ({ project_id, workspace_id }, context) => ({
+        sessions: (
+            await requireWorkspaces(context).listSessions({
                 ...(project_id === undefined ? {} : { projectId: project_id }),
                 ...(workspace_id === undefined ? {} : { workspaceId: workspace_id }),
             })
-            .map((session) => ({ ...session })),
+        ).map((session) => ({ ...session })),
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
@@ -290,10 +292,10 @@ export const listProjectsTool = defineTool({
         ),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: (_arguments, context) => ({
-        projects: requireCrossWorkspace(context)
-            .listProjects()
-            .map((project) => ({ ...project })),
+    execute: async (_arguments, context) => ({
+        projects: (await requireCrossWorkspace(context).listProjects()).map((project) => ({
+            ...project,
+        })),
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>

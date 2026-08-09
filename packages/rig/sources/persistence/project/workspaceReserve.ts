@@ -8,7 +8,7 @@ import {
 } from "../../project/projectIdentity.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
 import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
 import type { ProjectCreator } from "../../protocol/index.js";
@@ -31,15 +31,15 @@ export interface WorkspaceReserveInput {
     storageKeySeed?: string;
 }
 
-export function workspaceReserve(
-    tx: TX,
+export async function workspaceReserve(
+    tx: DatabaseScope,
     input: WorkspaceReserveInput,
-): { created: boolean; workspaceId: string } {
-    return inTx(tx, (tx) => {
+): Promise<{ created: boolean; workspaceId: string }> {
+    return await inTx(tx, async (tx) => {
         // The identity may already name this workspace, because a create is
         // repeated until it is known to have landed. It is the same workspace
         // only if it describes the same one.
-        const retry = tx
+        const retry = await tx
             .select({
                 baseRef: projectWorkspaces.baseRef,
                 creatorInstanceId: projectWorkspaces.creatorInstanceId,
@@ -71,16 +71,16 @@ export function workspaceReserve(
             return { created: false, workspaceId: retry.id };
         }
 
-        const name = reserveUniqueWorkspaceName(tx, {
+        const name = await reserveUniqueWorkspaceName(tx, {
             name: input.name,
             projectId: input.projectId,
         });
-        const storageKey = reserveUniqueKey(
+        const storageKey = await reserveUniqueKey(
             input.storageKeySeed ?? projectStorageKey(input.name),
-            (candidate) => {
+            async (candidate) => {
                 return (
                     input.isStorageKeyUnavailable?.(candidate) === true ||
-                    tx
+                    (await tx
                         .select({ id: projectWorkspaces.id })
                         .from(projectWorkspaces)
                         .where(
@@ -89,27 +89,28 @@ export function workspaceReserve(
                                 sql`${projectWorkspaces.storageKey} = ${candidate} COLLATE NOCASE`,
                             ),
                         )
-                        .get() !== undefined
+                        .get()) !== undefined
                 );
             },
         );
         // A seed carries the workspace's own ID, so an unreadable ref store cannot hide a branch
         // this reservation would otherwise collide with when the worktree is finally created.
-        const branch = reserveUniqueBranch(tx, {
+        const branch = await reserveUniqueBranch(tx, {
             branch: workspaceBranchName(input.storageKeySeed ?? name),
             ...(input.isBranchUnavailable === undefined
                 ? {}
                 : { isBranchUnavailable: input.isBranchUnavailable }),
             projectId: input.projectId,
         });
-        const first = tx
+        const first = await tx
             .select({ orderKey: projectWorkspaces.orderKey })
             .from(projectWorkspaces)
             .where(eq(projectWorkspaces.projectId, input.projectId))
             .orderBy(asc(projectWorkspaces.orderKey))
             .limit(1)
             .get();
-        tx.insert(projectWorkspaces)
+        await tx
+            .insert(projectWorkspaces)
             .values({
                 baseCommit: input.baseCommit ?? null,
                 baseRef: input.baseRef ?? null,
@@ -143,10 +144,13 @@ export function workspaceReserve(
     });
 }
 
-function reserveUniqueKey(base: string, taken: (candidate: string) => boolean): string {
-    if (!taken(base)) return base;
+async function reserveUniqueKey(
+    base: string,
+    taken: (candidate: string) => Promise<boolean>,
+): Promise<string> {
+    if (!(await taken(base))) return base;
     for (let suffix = 2; ; suffix += 1) {
         const candidate = `${base}-${String(suffix)}`;
-        if (!taken(candidate)) return candidate;
+        if (!(await taken(candidate))) return candidate;
     }
 }

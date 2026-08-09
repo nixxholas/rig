@@ -12,10 +12,8 @@ export const listFoldersTool = defineTool({
     arguments: Type.Object({}, { additionalProperties: false }),
     returnType: Type.Object({ folders: Type.Array(folderSchema) }, { additionalProperties: false }),
     shouldReviewInAutoMode: () => false,
-    execute: (_arguments, context) => ({
-        folders: requireFolders(context)
-            .list()
-            .map((folder) => ({ ...folder })),
+    execute: async (_arguments, context) => ({
+        folders: (await requireFolders(context).list()).map((folder) => ({ ...folder })),
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>

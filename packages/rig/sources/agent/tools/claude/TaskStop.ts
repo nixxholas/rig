@@ -45,7 +45,7 @@ export const claudeTaskStopTool = defineTool({
             if (agent.status !== "running" && agent.status !== "suspended") {
                 throw new Error("The background agent is not running.");
             }
-            context.subagents.interrupt(agent.agentId);
+            await context.subagents.interrupt(agent.agentId);
             return {
                 agentId: agent.agentId,
                 message: "The background agent was stopped.",

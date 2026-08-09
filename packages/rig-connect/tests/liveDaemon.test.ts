@@ -36,25 +36,31 @@ afterEach(async () => {
 async function startDaemon(options: { inferenceGate?: Promise<void>; withModel?: boolean } = {}) {
     const store =
         options.withModel === true
-            ? new InMemorySessionStore({
+            ? await InMemorySessionStore.open({
                   createRuntime: (runtimeOptions) =>
                       createRuntime(runtimeOptions, options.inferenceGate),
                   modelCatalog: testCatalog(),
               })
-            : new InMemorySessionStore();
-    const server = createProtocolHttpServer({ store, token: "secret" });
+            : await InMemorySessionStore.open();
+    const server = await createProtocolHttpServer({ store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const { port } = server.address() as AddressInfo;
     started.push({
-        close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+        close: async () => {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await store.close();
+        },
     });
     return { endpoint: `http://127.0.0.1:${port}`, store };
 }
 
-async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+async function waitFor(
+    predicate: () => boolean | Promise<boolean>,
+    description: string,
+): Promise<void> {
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
-        if (predicate()) return;
+        if (await predicate()) return;
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error(`Timed out waiting for ${description}.`);
@@ -78,7 +84,7 @@ async function withSessionConnection(
 describe("rig-connect against a live daemon", () => {
     it("receives the whole session on the opening frame", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        const session = await store.create({ cwd: "/tmp/rig-connect-test" });
 
         let changes = 0;
         await withSessionConnection(
@@ -117,7 +123,7 @@ describe("rig-connect against a live daemon", () => {
 
     it("delivers expanded optimistic actions through the real mutation protocol", async () => {
         const { endpoint, store } = await startDaemon();
-        const source = store.create({ cwd: "/tmp/rig-connect-actions" });
+        const source = await store.create({ cwd: "/tmp/rig-connect-actions" });
         const requests: string[] = [];
         const mutationFailures: string[] = [];
         const rig = connectRig({
@@ -149,16 +155,22 @@ describe("rig-connect against a live daemon", () => {
             );
 
             const createdId = rig.createSession({ cwd: "/tmp/rig-created-through-connect" });
-            await waitFor(() => store.get(createdId) !== undefined, "the new session to exist");
-            expect(store.get(createdId)?.snapshot().cwd).toBe("/tmp/rig-created-through-connect");
+            await waitFor(
+                async () => (await store.get(createdId)) !== undefined,
+                "the new session to exist",
+            );
+            expect((await store.get(createdId))?.snapshot().cwd).toBe(
+                "/tmp/rig-created-through-connect",
+            );
 
             const forkedId = rig.forkSession(createdId);
             await waitFor(
-                () => store.get(forkedId) !== undefined || mutationFailures.length > 0,
+                async () =>
+                    (await store.get(forkedId)) !== undefined || mutationFailures.length > 0,
                 `the fork to exist; requests: ${requests.join(", ")}`,
             );
             expect(mutationFailures).toEqual([]);
-            expect(store.get(forkedId)?.snapshot().id).toBe(forkedId);
+            expect((await store.get(forkedId))?.snapshot().id).toBe(forkedId);
         } finally {
             session.close();
             rig.close();
@@ -167,7 +179,7 @@ describe("rig-connect against a live daemon", () => {
 
     it("tracks what the session is doing without asking the daemon anything else", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        const session = await store.create({ cwd: "/tmp/rig-connect-test" });
 
         await withSessionConnection(
             endpoint,
@@ -192,7 +204,7 @@ describe("rig-connect against a live daemon", () => {
 
     it("reports the session title as the daemon learns it", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        const session = await store.create({ cwd: "/tmp/rig-connect-test" });
 
         await withSessionConnection(
             endpoint,
@@ -203,7 +215,7 @@ describe("rig-connect against a live daemon", () => {
                     "the stream to open",
                 );
 
-                session.events.append({
+                await session.events.append({
                     createdAt: Date.now(),
                     data: { status: "ready", title: "Ship rig-connect" },
                     id: session.events.lastEventId() ?? "",
@@ -221,13 +233,13 @@ describe("rig-connect against a live daemon", () => {
 
     it("delivers real turn boundaries to a client that attaches after the work", async () => {
         const { endpoint, store } = await startDaemon({ withModel: true });
-        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        const session = await store.create({ cwd: "/tmp/rig-connect-test" });
 
         // The work happens before anyone is watching, so everything the client
         // renders has to come from the opening frame.
-        const first = session.submit({ text: "First ask." });
+        const first = await session.submit({ text: "First ask." });
         await session.waitForRun(first.runId);
-        const second = session.submit({ text: "Second ask." });
+        const second = await session.submit({ text: "Second ask." });
         await session.waitForRun(second.runId);
 
         await withSessionConnection(
@@ -277,7 +289,7 @@ describe("rig-connect against a live daemon", () => {
             inferenceGate,
             withModel: true,
         });
-        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        const session = await store.create({ cwd: "/tmp/rig-connect-test" });
         await withSessionConnection(
             endpoint,
             { onChange: () => undefined, sessionId: session.id },
@@ -287,7 +299,7 @@ describe("rig-connect against a live daemon", () => {
                     "the stream to open",
                 );
 
-                const submitted = session.submit({ text: "Keep this clock." });
+                const submitted = await session.submit({ text: "Keep this clock." });
                 const submission = (session.events.since(undefined) ?? []).find(
                     (event) =>
                         event.type === "message_submitted" && event.data.runId === submitted.runId,
@@ -342,9 +354,9 @@ describe("rig-connect against a live daemon", () => {
 
     it("says so when the conversation began before the window it was given", async () => {
         const { endpoint, store } = await startDaemon({ withModel: true });
-        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        const session = await store.create({ cwd: "/tmp/rig-connect-test" });
         for (let index = 0; index < 22; index += 1) {
-            const submitted = session.submit({ text: `Ask ${index}.` });
+            const submitted = await session.submit({ text: `Ask ${index}.` });
             await session.waitForRun(submitted.runId);
         }
 
@@ -449,9 +461,9 @@ function assistantMessage(model: string): AssistantMessage {
 describe("loading earlier turns through the connection", () => {
     it("pages back to the beginning of a real conversation", async () => {
         const { endpoint, store } = await startDaemon({ withModel: true });
-        const session = store.create({ cwd: "/tmp/rig-load-earlier" });
+        const session = await store.create({ cwd: "/tmp/rig-load-earlier" });
         for (const text of ["One.", "Two.", "Three."]) {
-            const submitted = session.submit({ text });
+            const submitted = await session.submit({ text });
             await session.waitForRun(submitted.runId);
         }
 
@@ -506,9 +518,9 @@ describe("loading earlier turns through the connection", () => {
 describe("paging back through a transcript", () => {
     it("serves the turns before an anchor, and refuses a missing one", async () => {
         const { endpoint, store } = await startDaemon({ withModel: true });
-        const session = store.create({ cwd: "/tmp/rig-transcript-page" });
+        const session = await store.create({ cwd: "/tmp/rig-transcript-page" });
         for (const text of ["One.", "Two.", "Three."]) {
-            const submitted = session.submit({ text });
+            const submitted = await session.submit({ text });
             await session.waitForRun(submitted.runId);
         }
 

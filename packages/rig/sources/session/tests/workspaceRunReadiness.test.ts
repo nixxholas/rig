@@ -12,13 +12,13 @@ const workspace = {
 } as ProjectWorkspace;
 
 const projects = {
-    getWorkspace: () => workspace,
+    getWorkspace: async () => workspace,
 };
 
 describe("workspaceRunReadiness", () => {
-    it("keeps the run queued when checkout availability cannot be determined", () => {
+    it("keeps the run queued when checkout availability cannot be determined", async () => {
         expect(
-            workspaceRunReadiness(
+            await workspaceRunReadiness(
                 projects,
                 {
                     cwd: workspace.path,
@@ -32,21 +32,21 @@ describe("workspaceRunReadiness", () => {
         ).toEqual({ retryable: true, state: "waiting" });
     });
 
-    it("fails only when the checkout is durably or demonstrably unavailable", () => {
+    it("fails only when the checkout is durably or demonstrably unavailable", async () => {
         const target = {
             cwd: workspace.path,
             projectId: workspace.projectId,
             workspaceId: workspace.id,
         };
         expect(
-            workspaceRunReadiness(projects, target, () => {
+            await workspaceRunReadiness(projects, target, () => {
                 throw Object.assign(new Error("Missing."), { code: "ENOENT" });
             }),
         ).toMatchObject({ state: "failed" });
         expect(
-            workspaceRunReadiness(
+            await workspaceRunReadiness(
                 {
-                    getWorkspace: () => ({ ...workspace, presence: "missing" }),
+                    getWorkspace: async () => ({ ...workspace, presence: "missing" }),
                 },
                 target,
                 () => {

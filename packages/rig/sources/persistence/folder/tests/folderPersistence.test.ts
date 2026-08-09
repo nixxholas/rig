@@ -8,20 +8,42 @@ import { folderArchive } from "../folderArchive.js";
 import { folderCreate } from "../folderCreate.js";
 import { folderMove } from "../folderMove.js";
 import { folderUpdate } from "../folderUpdate.js";
+import {
+    queryFolderMutationReceipt,
+    recordFolderMutationReceipt,
+} from "../folderMutationReceipt.js";
 import { queryFolder } from "../queryFolder.js";
 import { queryFolders } from "../queryFolders.js";
 import { sessionMoveScope } from "../../session/sessionMoveScope.js";
 
 describe("folder persistence", () => {
-    it("creates folders at the root and inside a parent", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("records and reads folder mutation receipts through the semantic boundary", async () => {
+        const opened = await openFolderDatabase();
+
+        await recordFolderMutationReceipt(opened.database, {
+            action: "create",
+            folderId: "media",
+            mutationId: "mutation-1",
+            now: 1,
+        });
+
+        expect(await queryFolderMutationReceipt(opened.database, "mutation-1")).toEqual({
+            action: "create",
+            folderId: "media",
+        });
+        expect(await queryFolderMutationReceipt(opened.database, "missing")).toBeUndefined();
+        opened.client.close();
+    });
+
+    it("creates folders at the root and inside a parent", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "videos",
             name: "Videos",
             now: 2,
@@ -29,7 +51,7 @@ describe("folder persistence", () => {
             path: "/folders/videos",
         });
 
-        expect(queryFolder(opened.database, "media")).toEqual({
+        expect(await queryFolder(opened.database, "media")).toEqual({
             createdAt: 1,
             id: "media",
             name: "Media",
@@ -39,19 +61,19 @@ describe("folder persistence", () => {
             updatedAt: 1,
             version: 1,
         });
-        expect(queryFolder(opened.database, "videos")?.parentId).toBe("media");
-        expect(queryFolders(opened.database).map((folder) => folder.id)).toEqual([
+        expect((await queryFolder(opened.database, "videos"))?.parentId).toBe("media");
+        expect((await queryFolders(opened.database)).map((folder) => folder.id)).toEqual([
             "media",
             "videos",
         ]);
         opened.client.close();
     });
 
-    it("gives every new folder the last order key among its shared direct children", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, { id: "a", name: "A", now: 1, path: "/folders/a" });
-        folderCreate(opened.database, { id: "b", name: "B", now: 1, path: "/folders/b" });
-        folderCreate(opened.database, {
+    it("gives every new folder the last order key among its shared direct children", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, { id: "a", name: "A", now: 1, path: "/folders/a" });
+        await folderCreate(opened.database, { id: "b", name: "B", now: 1, path: "/folders/b" });
+        await folderCreate(opened.database, {
             id: "a1",
             name: "A1",
             now: 1,
@@ -60,18 +82,22 @@ describe("folder persistence", () => {
         });
 
         const keys = new Map(
-            queryFolders(opened.database).map((folder) => [folder.id, folder.orderKey]),
+            (await queryFolders(opened.database)).map((folder) => [folder.id, folder.orderKey]),
         );
         expect(keys.get("a")).toBe("a0");
         expect(keys.get("b")).toBe("a1");
         expect(keys.get("a1")).toBe("a0");
-        expect(queryFolders(opened.database).map((folder) => folder.id)).toEqual(["a", "a1", "b"]);
+        expect((await queryFolders(opened.database)).map((folder) => folder.id)).toEqual([
+            "a",
+            "a1",
+            "b",
+        ]);
         opened.client.close();
     });
 
-    it("clears an optional field with null and leaves absent fields alone", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("clears an optional field with null and leaves absent fields alone", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             description: "Video work",
             icon: "🎬",
             id: "media",
@@ -80,48 +106,48 @@ describe("folder persistence", () => {
             path: "/folders/media",
         });
 
-        expect(folderUpdate(opened.database, "media", { description: null }, 2)).toBe(1);
+        expect(await folderUpdate(opened.database, "media", { description: null }, 2)).toBe(1);
 
-        expect(queryFolder(opened.database, "media")).toMatchObject({
+        expect(await queryFolder(opened.database, "media")).toMatchObject({
             icon: "🎬",
             name: "Media",
             updatedAt: 2,
             version: 2,
         });
-        expect(queryFolder(opened.database, "media")?.description).toBeUndefined();
+        expect((await queryFolder(opened.database, "media"))?.description).toBeUndefined();
         opened.client.close();
     });
 
-    it("refuses a stale update and accepts the current version", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("refuses a stale update and accepts the current version", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
 
-        expect(folderUpdate(opened.database, "media", { name: "Films" }, 2, 7)).toBe(0);
-        expect(folderUpdate(opened.database, "media", { name: "Films" }, 2, 1)).toBe(1);
-        expect(queryFolder(opened.database, "media")?.name).toBe("Films");
+        expect(await folderUpdate(opened.database, "media", { name: "Films" }, 2, 7)).toBe(0);
+        expect(await folderUpdate(opened.database, "media", { name: "Films" }, 2, 1)).toBe(1);
+        expect((await queryFolder(opened.database, "media"))?.name).toBe("Films");
         opened.client.close();
     });
 
-    it("moves a folder between parents without touching its storage directory", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("moves a folder between parents without touching its storage directory", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "notes",
             name: "Notes",
             now: 1,
             path: "/folders/notes",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "videos",
             name: "Videos",
             now: 1,
@@ -129,11 +155,11 @@ describe("folder persistence", () => {
             path: "/folders/videos",
         });
 
-        expect(folderMove(opened.database, "videos", "notes", "a5", 3)).toEqual({
+        expect(await folderMove(opened.database, "videos", "notes", "a5", 3)).toEqual({
             outcome: "moved",
         });
 
-        expect(queryFolder(opened.database, "videos")).toMatchObject({
+        expect(await queryFolder(opened.database, "videos")).toMatchObject({
             orderKey: "a5",
             parentId: "notes",
             path: "/folders/videos",
@@ -142,15 +168,15 @@ describe("folder persistence", () => {
         opened.client.close();
     });
 
-    it("refuses a move directly through persistence that would create a cycle", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("refuses a move directly through persistence that would create a cycle", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "videos",
             name: "Videos",
             now: 1,
@@ -158,26 +184,26 @@ describe("folder persistence", () => {
             path: "/folders/videos",
         });
 
-        expect(folderMove(opened.database, "media", "videos", "a0", 2)).toEqual({
+        expect(await folderMove(opened.database, "media", "videos", "a0", 2)).toEqual({
             outcome: "cycle",
         });
-        expect(queryFolder(opened.database, "media")?.parentId).toBeUndefined();
-        expect(queryFolder(opened.database, "videos")?.parentId).toBe("media");
+        expect((await queryFolder(opened.database, "media"))?.parentId).toBeUndefined();
+        expect((await queryFolder(opened.database, "videos"))?.parentId).toBe("media");
         opened.client.close();
     });
 
-    it("refuses archived or missing parents through persistence", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("refuses archived or missing parents through persistence", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "archive",
             name: "Archive",
             now: 1,
             path: "/folders/archive",
         });
-        folderArchive(opened.database, "archive", 2);
+        await folderArchive(opened.database, "archive", 2);
 
         expect(
-            folderCreate(opened.database, {
+            await folderCreate(opened.database, {
                 id: "child",
                 name: "Child",
                 now: 3,
@@ -185,48 +211,48 @@ describe("folder persistence", () => {
                 path: "/folders/child",
             }),
         ).toEqual({ outcome: "parent_archived" });
-        expect(folderMove(opened.database, "archive", "missing", "a0", 3)).toEqual({
+        expect(await folderMove(opened.database, "archive", "missing", "a0", 3)).toEqual({
             outcome: "parent_not_found",
         });
         opened.client.close();
     });
 
-    it("archives a folder together with everything nested under it", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("archives a folder together with everything nested under it", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "videos",
             name: "Videos",
             now: 1,
             parentId: "media",
             path: "/folders/videos",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "cuts",
             name: "Cuts",
             now: 1,
             parentId: "videos",
             path: "/folders/cuts",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "notes",
             name: "Notes",
             now: 1,
             path: "/folders/notes",
         });
 
-        expect(folderArchive(opened.database, "media", 9)).toEqual({
+        expect(await folderArchive(opened.database, "media", 9)).toEqual({
             folders: 3,
             sessionIds: [],
         });
 
         expect(
-            queryFolders(opened.database).map((folder) => [folder.id, folder.archivedAt]),
+            (await queryFolders(opened.database)).map((folder) => [folder.id, folder.archivedAt]),
         ).toEqual([
             ["media", 9],
             ["videos", 9],
@@ -236,26 +262,26 @@ describe("folder persistence", () => {
         opened.client.close();
     });
 
-    it("archives folder chats without turning them into workspace-archived sessions", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("archives folder chats without turning them into workspace-archived sessions", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        insertSession(opened.database, "session-1");
-        sessionMoveScope(opened.database, {
+        await insertSession(opened.database, "session-1");
+        await sessionMoveScope(opened.database, {
             cwd: "/folders/media",
             now: 2,
             scope: { folderId: "media", kind: "folder" },
             sessionId: "session-1",
         });
 
-        folderArchive(opened.database, "media", 3);
+        await folderArchive(opened.database, "media", 3);
 
         expect(
-            opened.database
+            await opened.database
                 .select({ archived: sessions.archived, status: sessions.status })
                 .from(sessions)
                 .where(eq(sessions.id, "session-1"))
@@ -264,40 +290,42 @@ describe("folder persistence", () => {
         opened.client.close();
     });
 
-    it("reports already hidden folder chats so their retained runtimes are still retired", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("reports already hidden folder chats so their retained runtimes are still retired", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        insertSession(opened.database, "session-1");
-        sessionMoveScope(opened.database, {
+        await insertSession(opened.database, "session-1");
+        await sessionMoveScope(opened.database, {
             cwd: "/folders/media",
             now: 2,
             scope: { folderId: "media", kind: "folder" },
             sessionId: "session-1",
         });
-        opened.database
+        await opened.database
             .update(sessions)
             .set({ archived: true })
             .where(eq(sessions.id, "session-1"))
             .run();
 
-        expect(folderArchive(opened.database, "media", 3).sessionIds).toEqual(["session-1"]);
+        expect((await folderArchive(opened.database, "media", 3)).sessionIds).toEqual([
+            "session-1",
+        ]);
         opened.client.close();
     });
 
-    it("keeps the moment an already archived folder was put away", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("keeps the moment an already archived folder was put away", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        folderCreate(opened.database, {
+        await folderCreate(opened.database, {
             id: "videos",
             name: "Videos",
             now: 1,
@@ -305,62 +333,66 @@ describe("folder persistence", () => {
             path: "/folders/videos",
         });
 
-        expect(folderArchive(opened.database, "videos", 4)).toEqual({
+        expect(await folderArchive(opened.database, "videos", 4)).toEqual({
             folders: 1,
             sessionIds: [],
         });
-        expect(folderArchive(opened.database, "media", 9)).toEqual({
+        expect(await folderArchive(opened.database, "media", 9)).toEqual({
             folders: 1,
             sessionIds: [],
         });
 
-        expect(queryFolder(opened.database, "videos")?.archivedAt).toBe(4);
-        expect(queryFolder(opened.database, "media")?.archivedAt).toBe(9);
+        expect((await queryFolder(opened.database, "videos"))?.archivedAt).toBe(4);
+        expect((await queryFolder(opened.database, "media"))?.archivedAt).toBe(9);
         opened.client.close();
     });
 
-    it("files a chat into a folder and clears it back to Unsorted", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("files a chat into a folder and clears it back to Unsorted", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "media",
             name: "Media",
             now: 1,
             path: "/folders/media",
         });
-        insertSession(opened.database, "session-1");
+        await insertSession(opened.database, "session-1");
 
         expect(
-            sessionMoveScope(opened.database, {
-                cwd: "/folders/media",
-                now: 5,
-                scope: { folderId: "media", kind: "folder" },
-                sessionId: "session-1",
-            }).scope,
+            (
+                await sessionMoveScope(opened.database, {
+                    cwd: "/folders/media",
+                    now: 5,
+                    scope: { folderId: "media", kind: "folder" },
+                    sessionId: "session-1",
+                })
+            ).scope,
         ).toEqual({ folderId: "media", kind: "folder" });
-        expect(sessionFolderId(opened.database, "session-1")).toBe("media");
+        expect(await sessionFolderId(opened.database, "session-1")).toBe("media");
 
         expect(
-            sessionMoveScope(opened.database, {
-                cwd: "/folders/unsorted/session-1",
-                now: 6,
-                scope: { kind: "unsorted" },
-                sessionId: "session-1",
-            }).scope,
+            (
+                await sessionMoveScope(opened.database, {
+                    cwd: "/folders/unsorted/session-1",
+                    now: 6,
+                    scope: { kind: "unsorted" },
+                    sessionId: "session-1",
+                })
+            ).scope,
         ).toEqual({ kind: "unsorted" });
-        expect(sessionFolderId(opened.database, "session-1")).toBeNull();
+        expect(await sessionFolderId(opened.database, "session-1")).toBeNull();
         opened.client.close();
     });
 
-    it("refuses inactive folders and mismatched workspace ownership at the persistence boundary", () => {
-        const opened = openFolderDatabase();
-        folderCreate(opened.database, {
+    it("refuses inactive folders and mismatched workspace ownership at the persistence boundary", async () => {
+        const opened = await openFolderDatabase();
+        await folderCreate(opened.database, {
             id: "archive",
             name: "Archive",
             now: 1,
             path: "/folders/archive",
         });
-        folderArchive(opened.database, "archive", 2);
-        opened.database
+        await folderArchive(opened.database, "archive", 2);
+        await opened.database
             .insert(projects)
             .values({
                 createdAtMs: 1,
@@ -383,7 +415,7 @@ describe("folder persistence", () => {
                 worktreeSupport: "unknown",
             })
             .run();
-        opened.database
+        await opened.database
             .insert(projectWorkspaces)
             .values({
                 branch: "feature",
@@ -407,17 +439,17 @@ describe("folder persistence", () => {
                 version: 1,
             })
             .run();
-        insertSession(opened.database, "session-1");
+        await insertSession(opened.database, "session-1");
 
-        expect(() =>
+        await expect(
             sessionMoveScope(opened.database, {
                 cwd: "/folders/archive",
                 now: 3,
                 scope: { folderId: "archive", kind: "folder" },
                 sessionId: "session-1",
             }),
-        ).toThrow("active folder");
-        expect(() =>
+        ).rejects.toThrow("active folder");
+        await expect(
             sessionMoveScope(opened.database, {
                 cwd: "/workspace/feature",
                 now: 3,
@@ -428,15 +460,17 @@ describe("folder persistence", () => {
                 },
                 sessionId: "session-1",
             }),
-        ).toThrow("does not belong");
+        ).rejects.toThrow("does not belong");
         opened.client.close();
     });
 });
 
-function openFolderDatabase(): ReturnType<typeof openSessionDatabase> {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
-    opened.database
+async function openFolderDatabase(): Promise<
+    Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>
+> {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
+    await opened.database
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -462,11 +496,11 @@ function openFolderDatabase(): ReturnType<typeof openSessionDatabase> {
     return opened;
 }
 
-function insertSession(
-    database: ReturnType<typeof openSessionDatabase>["database"],
+async function insertSession(
+    database: Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>["database"],
     sessionId: string,
-): void {
-    database
+): Promise<void> {
+    await database
         .insert(sessions)
         .values({
             agentId: `agent-${sessionId}`,
@@ -503,13 +537,15 @@ function insertSession(
         .run();
 }
 
-function sessionFolderId(
-    database: ReturnType<typeof openSessionDatabase>["database"],
+async function sessionFolderId(
+    database: Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>["database"],
     sessionId: string,
-): string | null | undefined {
-    return database
-        .select({ folderId: sessions.folderId })
-        .from(sessions)
-        .where(eq(sessions.id, sessionId))
-        .get()?.folderId;
+): Promise<string | null | undefined> {
+    return (
+        await database
+            .select({ folderId: sessions.folderId })
+            .from(sessions)
+            .where(eq(sessions.id, sessionId))
+            .get()
+    )?.folderId;
 }

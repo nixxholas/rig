@@ -5,7 +5,7 @@ import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../../utils/orderKeyAfter.js";
 import { folders, projectWorkspaces, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope, TX } from "../Transaction.js";
 import { querySessionOrderItems } from "./querySessionOrderItems.js";
 import { sessionScopeValues } from "./impl/sessionScope.js";
 import { sessionScopeFromRow } from "./impl/sessionScope.js";
@@ -23,8 +23,8 @@ export interface SessionScopeMove {
 }
 
 /** Moves one root chat and its position into a different collection as one durable transition. */
-export function sessionMoveScope(
-    tx: TX,
+export async function sessionMoveScope(
+    tx: DatabaseScope,
     input: {
         afterId?: string | null;
         cwd: string;
@@ -33,10 +33,10 @@ export function sessionMoveScope(
         sessionId: string;
         mutationId?: string;
     },
-): SessionScopeMove {
-    return inTx(tx, (tx) => {
+): Promise<SessionScopeMove> {
+    return await inTx(tx, async (tx) => {
         if (input.mutationId !== undefined) {
-            const receipt = querySessionMutationReceipt(tx, {
+            const receipt = await querySessionMutationReceipt(tx, {
                 action: SESSION_SCOPE_MUTATION_ACTION,
                 mutationId: input.mutationId,
                 sessionId: input.sessionId,
@@ -44,10 +44,10 @@ export function sessionMoveScope(
             if (receipt === "conflict") {
                 throw new Error("That mutation ID was already used for another session change.");
             }
-            if (receipt === "applied") return queryCurrentScopeMove(tx, input.sessionId);
+            if (receipt === "applied") return await queryCurrentScopeMove(tx, input.sessionId);
         }
         if (input.scope.kind === "folder") {
-            const folder = tx
+            const folder = await tx
                 .select({ archivedAtMs: folders.archivedAtMs })
                 .from(folders)
                 .where(eq(folders.id, input.scope.folderId))
@@ -57,7 +57,7 @@ export function sessionMoveScope(
             }
         }
         if (input.scope.kind === "workspace") {
-            const workspace = tx
+            const workspace = await tx
                 .select({ id: projectWorkspaces.id })
                 .from(projectWorkspaces)
                 .where(
@@ -71,7 +71,7 @@ export function sessionMoveScope(
                 throw new Error("That workspace does not belong to the requested project.");
             }
         }
-        const current = tx.get<{ scope_kind: string; unsorted_since_ms: number | null }>(sql`
+        const current = await tx.get<{ scope_kind: string; unsorted_since_ms: number | null }>(sql`
             SELECT scope_kind, unsorted_since_ms
             FROM sessions
             WHERE id = ${input.sessionId}
@@ -79,7 +79,7 @@ export function sessionMoveScope(
                 AND parent_session_id IS NULL
         `);
         if (current === undefined) throw new Error("The session is no longer available.");
-        const targetItems = querySessionOrderItems(tx, input.scope);
+        const targetItems = await querySessionOrderItems(tx, input.scope);
         const existing = targetItems.find((item) => item.id === input.sessionId);
         const orderKey =
             input.afterId === undefined
@@ -110,26 +110,28 @@ export function sessionMoveScope(
                     ? (current.unsorted_since_ms ?? input.now)
                     : input.now
                 : null;
-        const changed = tx
-            .update(sessions)
-            .set({
-                ...sessionScopeValues(input.scope),
-                cwd: input.cwd,
-                orderKey,
-                unsortedSinceMs: unsortedSince,
-                updatedAtMs: input.now,
-            })
-            .where(
-                and(
-                    eq(sessions.id, input.sessionId),
-                    eq(sessions.sessionKind, "primary"),
-                    isNull(sessions.parentSessionId),
-                ),
-            )
-            .run().changes;
+        const changed = (
+            await tx
+                .update(sessions)
+                .set({
+                    ...sessionScopeValues(input.scope),
+                    cwd: input.cwd,
+                    orderKey,
+                    unsortedSinceMs: unsortedSince,
+                    updatedAtMs: input.now,
+                })
+                .where(
+                    and(
+                        eq(sessions.id, input.sessionId),
+                        eq(sessions.sessionKind, "primary"),
+                        isNull(sessions.parentSessionId),
+                    ),
+                )
+                .run()
+        ).rowsAffected;
         if (changed === 0) throw new Error("The session is no longer available.");
         if (input.mutationId !== undefined) {
-            sessionRecordMutationReceipt(tx, {
+            await sessionRecordMutationReceipt(tx, {
                 action: SESSION_SCOPE_MUTATION_ACTION,
                 mutationId: input.mutationId,
                 now: input.now,
@@ -145,8 +147,8 @@ export function sessionMoveScope(
     });
 }
 
-function queryCurrentScopeMove(tx: TX, sessionId: string): SessionScopeMove {
-    const row = tx.get<Record<string, unknown>>(sql`
+async function queryCurrentScopeMove(tx: TX, sessionId: string): Promise<SessionScopeMove> {
+    const row = await tx.get<Record<string, unknown>>(sql`
         SELECT cwd, folder_id, order_key, project_id, scope_kind, unsorted_since_ms, workspace_id
         FROM sessions
         WHERE id = ${sessionId}

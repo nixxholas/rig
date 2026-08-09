@@ -1,7 +1,7 @@
 # Folder persistence
 
-This directory owns synchronous SQLite operations for the folder tree and for the folder a chat is
-filed into. Every operation accepts the shared `TX` facade first. Public reads use the `query`
+This directory owns asynchronous SQLite operations for the folder tree and for the folder a chat is
+filed into. Every operation accepts the shared `DatabaseScope` first. Public reads use the `query`
 prefix; mutations retain any reads needed inside their complete consistency boundary.
 
 ```text

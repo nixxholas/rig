@@ -1,14 +1,16 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
-export function queryFirstRootSessionIdForWorkspace(
-    tx: TX,
+export async function queryFirstRootSessionIdForWorkspace(
+    tx: DatabaseScope,
     projectId: string,
     workspaceId: string,
-): string | undefined {
-    const row = tx.get<Record<string, unknown>>(sql`
+): Promise<string | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx.get<Record<string, unknown>>(sql`
         SELECT id FROM sessions
         WHERE project_id = ${projectId}
             AND workspace_id = ${workspaceId}
@@ -16,5 +18,6 @@ export function queryFirstRootSessionIdForWorkspace(
         ORDER BY created_at_ms ASC, id ASC
         LIMIT 1
     `);
-    return row === undefined ? undefined : readString(row, "id");
+        return row === undefined ? undefined : readString(row, "id");
+    });
 }

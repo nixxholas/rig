@@ -13,12 +13,12 @@ import { workspaceReserve } from "../workspaceReserve.js";
 import { workspaceApplyProbe } from "../workspaceApplyProbe.js";
 
 describe("project persistence", () => {
-    it("rolls back the avatar asset and project reference together", () => {
-        const opened = databaseWithProject();
+    it("rolls back the avatar asset and project reference together", async () => {
+        const opened = await databaseWithProject();
 
-        expect(() =>
-            inTx(opened.database, (tx) => {
-                projectSetAvatar(tx, {
+        await expect(
+            inTx(opened.database, async (tx) => {
+                await projectSetAvatar(tx, {
                     asset: { byteLength: 3, hash: "a".repeat(64), height: 1, width: 1 },
                     now: 2,
                     projectId: "project-1",
@@ -26,11 +26,11 @@ describe("project persistence", () => {
                 });
                 throw new Error("fail after avatar");
             }),
-        ).toThrow("fail after avatar");
+        ).rejects.toThrow("fail after avatar");
 
-        expect(opened.database.select().from(projectAvatarAssets).all()).toEqual([]);
+        expect(await opened.database.select().from(projectAvatarAssets).all()).toEqual([]);
         expect(
-            opened.database
+            await opened.database
                 .select({ avatarHash: projects.avatarHash })
                 .from(projects)
                 .where(eq(projects.id, "project-1"))
@@ -39,12 +39,12 @@ describe("project persistence", () => {
         opened.client.close();
     });
 
-    it("rolls back a complete workspace reservation with its outer action", () => {
-        const opened = databaseWithProject();
+    it("rolls back a complete workspace reservation with its outer action", async () => {
+        const opened = await databaseWithProject();
 
-        expect(() =>
-            inTx(opened.database, (tx) => {
-                workspaceReserve(tx, {
+        await expect(
+            inTx(opened.database, async (tx) => {
+                await workspaceReserve(tx, {
                     baseCommit: "a".repeat(40),
                     baseRef: "main",
                     gitCommonDir: "/workspace/.git",
@@ -56,15 +56,15 @@ describe("project persistence", () => {
                 });
                 throw new Error("fail after workspace");
             }),
-        ).toThrow("fail after workspace");
+        ).rejects.toThrow("fail after workspace");
 
-        expect(opened.database.select().from(projectWorkspaces).all()).toEqual([]);
+        expect(await opened.database.select().from(projectWorkspaces).all()).toEqual([]);
         opened.client.close();
     });
 
-    it("does not let an initialization-era probe overwrite workspace presence", () => {
-        const opened = databaseWithProject();
-        workspaceReserve(opened.database, {
+    it("does not let an initialization-era probe overwrite workspace presence", async () => {
+        const opened = await databaseWithProject();
+        await workspaceReserve(opened.database, {
             id: "workspace-1",
             name: "Feature",
             now: 2,
@@ -73,7 +73,7 @@ describe("project persistence", () => {
         });
 
         expect(
-            workspaceApplyProbe(
+            await workspaceApplyProbe(
                 opened.database,
                 "project-1",
                 "workspace-1",
@@ -90,7 +90,7 @@ describe("project persistence", () => {
             ),
         ).toBe(0);
         expect(
-            opened.database
+            await opened.database
                 .select({
                     presence: projectWorkspaces.presence,
                     status: projectWorkspaces.status,
@@ -102,11 +102,11 @@ describe("project persistence", () => {
         opened.client.close();
     });
 
-    it("stores and clears the default workspace compute atomically", () => {
-        const opened = databaseWithProject();
+    it("stores and clears the default workspace compute atomically", async () => {
+        const opened = await databaseWithProject();
 
         expect(
-            projectSetSettings(
+            await projectSetSettings(
                 opened.database,
                 "project-1",
                 { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
@@ -114,7 +114,7 @@ describe("project persistence", () => {
                 1,
             ),
         ).toBe(1);
-        expect(queryProject(opened.database, "project-1")).toMatchObject({
+        expect(await queryProject(opened.database, "project-1")).toMatchObject({
             settings: {
                 defaultWorkspaceCompute: {
                     generation: 1,
@@ -126,7 +126,7 @@ describe("project persistence", () => {
         });
 
         expect(
-            projectSetSettings(
+            await projectSetSettings(
                 opened.database,
                 "project-1",
                 { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
@@ -134,7 +134,7 @@ describe("project persistence", () => {
                 2,
             ),
         ).toBe(1);
-        expect(queryProject(opened.database, "project-1")).toMatchObject({
+        expect(await queryProject(opened.database, "project-1")).toMatchObject({
             settings: {
                 defaultWorkspaceCompute: {
                     generation: 1,
@@ -145,7 +145,7 @@ describe("project persistence", () => {
             version: 3,
         });
         expect(
-            projectSetSettings(
+            await projectSetSettings(
                 opened.database,
                 "project-1",
                 { defaultWorkspaceCompute: { type: "local" } },
@@ -153,7 +153,7 @@ describe("project persistence", () => {
                 3,
             ),
         ).toBe(1);
-        expect(queryProject(opened.database, "project-1")).toMatchObject({
+        expect(await queryProject(opened.database, "project-1")).toMatchObject({
             settings: {
                 defaultWorkspaceCompute: {
                     generation: 2,
@@ -162,7 +162,7 @@ describe("project persistence", () => {
             },
             version: 4,
         });
-        expect(() =>
+        await expect(
             projectSetSettings(
                 opened.database,
                 "project-1",
@@ -170,20 +170,20 @@ describe("project persistence", () => {
                 5,
                 4,
             ),
-        ).toThrow("must not contain whitespace");
+        ).rejects.toThrow("must not contain whitespace");
         opened.client.close();
     });
 
-    it("guards settings with the last user mutation rather than enrichment", () => {
-        const opened = databaseWithProject();
-        opened.database
+    it("guards settings with the last user mutation rather than enrichment", async () => {
+        const opened = await databaseWithProject();
+        await opened.database
             .update(projects)
             .set({ version: sql`${projects.version} + 1` })
             .where(eq(projects.id, "project-1"))
             .run();
 
         expect(
-            projectSetSettings(
+            await projectSetSettings(
                 opened.database,
                 "project-1",
                 { defaultWorkspaceCompute: { type: "local" } },
@@ -192,7 +192,7 @@ describe("project persistence", () => {
             ),
         ).toBe(1);
         expect(
-            projectSetSettings(
+            await projectSetSettings(
                 opened.database,
                 "project-1",
                 { defaultWorkspaceCompute: { type: "docker", image: "rig-dev:latest" } },
@@ -203,12 +203,12 @@ describe("project persistence", () => {
         opened.client.close();
     });
 
-    it("keeps refresh out of the user mutation watermark", () => {
-        const opened = databaseWithProject();
+    it("keeps refresh out of the user mutation watermark", async () => {
+        const opened = await databaseWithProject();
 
-        expect(projectRefresh(opened.database, "project-1", 2)).toBe(1);
+        expect(await projectRefresh(opened.database, "project-1", 2)).toBe(1);
         expect(
-            opened.database
+            await opened.database
                 .select({
                     userMutationVersion: projects.userMutationVersion,
                     version: projects.version,
@@ -221,10 +221,12 @@ describe("project persistence", () => {
     });
 });
 
-function databaseWithProject(): ReturnType<typeof openSessionDatabase> {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
-    opened.database
+async function databaseWithProject(): Promise<
+    Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>
+> {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
+    await opened.database
         .insert(projects)
         .values({
             createdAtMs: 1,

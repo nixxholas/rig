@@ -17,7 +17,7 @@ import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { DaemonLog } from "../DaemonLog.js";
 
-const servers: ReturnType<typeof createProtocolHttpServer>[] = [];
+const servers: Awaited<ReturnType<typeof createProtocolHttpServer>>[] = [];
 const PNG = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
     "base64",
@@ -44,7 +44,7 @@ afterEach(async () => {
 describe("plugin HTTP protocol", () => {
     it("serves explicit plugin states and bounded current logs", async () => {
         const plugins = context();
-        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer({ plugins, token: "secret" });
         servers.push(server);
         const port = await listen(server);
         await expect(requestJson(port, "/plugins")).resolves.toMatchObject({
@@ -78,7 +78,7 @@ describe("plugin HTTP protocol", () => {
                 "---\nname: clock\ndescription: Reads time\n---\n# Clock\n",
             ),
         ]);
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: TEST_MODEL.id,
                 defaultProviderId: "test",
@@ -92,7 +92,7 @@ describe("plugin HTTP protocol", () => {
             mcpRegistry: new PluginMcpRegistry(),
             store,
         });
-        const server = createProtocolHttpServer({ plugins: manager, token: "secret" });
+        const server = await createProtocolHttpServer({ plugins: manager, token: "secret" });
         servers.push(server);
         try {
             const port = await listen(server);
@@ -132,7 +132,7 @@ describe("plugin HTTP protocol", () => {
 
     it("authenticates and validates source-folder installation and uninstallation", async () => {
         const plugins = context();
-        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer({ plugins, token: "secret" });
         servers.push(server);
         const port = await listen(server);
 
@@ -243,7 +243,7 @@ describe("plugin HTTP protocol", () => {
         vi.mocked(plugins.uninstall).mockRejectedValueOnce(
             new PluginNotFoundError("No plugin named Missing is installed."),
         );
-        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer({ plugins, token: "secret" });
         servers.push(server);
         const port = await listen(server);
 
@@ -317,7 +317,7 @@ describe("plugin HTTP protocol", () => {
             name: "Clock",
             version: "1.2.0",
         });
-        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer({ plugins, token: "secret" });
         servers.push(server);
         const port = await listen(server);
 
@@ -356,7 +356,7 @@ describe("plugin HTTP protocol", () => {
 
     it("authenticates MCP App resources, tools, and namespaced storage and closes stale errors", async () => {
         const plugins = context();
-        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer({ plugins, token: "secret" });
         servers.push(server);
         const port = await listen(server);
         const base = "/plugin-apps/usage%3Aoverview/generations/current";
@@ -536,7 +536,9 @@ function context(): Pick<
     };
 }
 
-async function listen(server: ReturnType<typeof createProtocolHttpServer>): Promise<number> {
+async function listen(
+    server: Awaited<ReturnType<typeof createProtocolHttpServer>>,
+): Promise<number> {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("Missing test port.");

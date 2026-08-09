@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function rigProfiles(database: SessionDatabase): void {
-    database.run(
+export async function rigProfiles(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`CREATE TABLE rig_profiles (
             id TEXT NOT NULL PRIMARY KEY,
             parent_instance_id TEXT NOT NULL,
@@ -14,7 +14,7 @@ export function rigProfiles(database: SessionDatabase): void {
             updated_at_ms INTEGER NOT NULL
         )`),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX rig_profiles_parent_instance ON rig_profiles (parent_instance_id, id)",
         ),

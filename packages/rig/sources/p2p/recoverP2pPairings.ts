@@ -7,7 +7,7 @@ export async function recoverP2pPairings(
 ): Promise<readonly P2pTrustedPeer[]> {
     const recovered: P2pTrustedPeer[] = [];
     const errors: unknown[] = [];
-    for (const pending of peerTrustStore.readyPairings()) {
+    for (const pending of await peerTrustStore.readyPairings()) {
         try {
             const peer = await pending.activate();
             if (pending.pairing.assignPrimary) {

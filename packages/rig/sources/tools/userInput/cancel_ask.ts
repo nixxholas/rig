@@ -27,18 +27,18 @@ export const cancelAskTool = defineTool({
     ),
     execution: "immediate",
     steerable: false,
-    execute({ ask_id }, context) {
+    async execute({ ask_id }, context) {
         if (context.userInput?.cancel === undefined) {
-            return Promise.resolve({
+            return {
                 cancelled: false,
                 reason: "This session cannot withdraw questions.",
-            });
+            };
         }
-        const result = context.userInput.cancel(ask_id);
-        return Promise.resolve({
+        const result = await context.userInput.cancel(ask_id);
+        return {
             cancelled: result.cancelled,
             ...(result.reason === undefined ? {} : { reason: result.reason }),
-        });
+        };
     },
     toLLM: (result) => [
         {

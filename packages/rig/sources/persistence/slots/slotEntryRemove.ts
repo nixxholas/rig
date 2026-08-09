@@ -1,8 +1,11 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
 
 import { slotEntries } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function slotEntryRemove(tx: TX, id: string): void {
-    tx.delete(slotEntries).where(eq(slotEntries.id, id)).run();
+export async function slotEntryRemove(tx: DatabaseScope, id: string): Promise<void> {
+    return await inDatabase(tx, async (tx) => {
+        await tx.delete(slotEntries).where(eq(slotEntries.id, id)).run();
+    });
 }

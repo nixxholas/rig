@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import Database from "better-sqlite3";
+import { createClient } from "@libsql/client";
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
 import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
@@ -32,9 +32,15 @@ afterEach(() => {
 
 describe("InMemorySession metadata settlement", () => {
     it("titles from the first message immediately, then refines after the first agent response", async () => {
-        const harness = createHarness();
+        let releaseAgent!: () => void;
+        const agentGate = new Promise<void>((resolve) => {
+            releaseAgent = resolve;
+        });
+        const harness = createHarness({ agentGate });
 
-        const first = harness.session.submit({ text: "Implement immediate session metadata." });
+        const first = await harness.session.submit({
+            text: "Implement immediate session metadata.",
+        });
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(1));
         await vi.waitFor(() =>
             expect(harness.inferenceKinds.slice(0, 2)).toEqual(["metadata", "agent"]),
@@ -46,6 +52,7 @@ describe("InMemorySession metadata settlement", () => {
             "Final visible response 1.",
         );
 
+        releaseAgent();
         await harness.session.waitForRun(first.runId);
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
         const firstMessageEvent = harness.session.events
@@ -69,7 +76,7 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
             workspaceRunReadiness: () => ({ state: "waiting" }),
         });
-        const submitted = waiting.session.submit({ text: "Resume after workspace setup." });
+        const submitted = await waiting.session.submit({ text: "Resume after workspace setup." });
         const restoredState = waiting.session.state();
         const restoredEvents = waiting.session.events.since(undefined) ?? [];
         let releaseMetadata: (() => void) | undefined;
@@ -100,7 +107,7 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
             workspaceRunReadiness: () => ({ state: "waiting" }),
         });
-        const submitted = waiting.session.submit({ text: "Do not wait forever for naming." });
+        const submitted = await waiting.session.submit({ text: "Do not wait forever for naming." });
         const restored = createHarness({
             afterMetadataAbort: neverSettles,
             events: waiting.session.events.since(undefined) ?? [],
@@ -125,7 +132,9 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
             workspaceRunReadiness: () => ({ state: "waiting" }),
         });
-        const submitted = waiting.session.submit({ text: "Retry the transient directory probe." });
+        const submitted = await waiting.session.submit({
+            text: "Retry the transient directory probe.",
+        });
         let probes = 0;
         const restored = createHarness({
             events: waiting.session.events.since(undefined) ?? [],
@@ -148,7 +157,9 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
             workspaceRunReadiness: () => ({ state: "waiting" }),
         });
-        const submitted = waiting.session.submit({ text: "Bound repeated directory probes." });
+        const submitted = await waiting.session.submit({
+            text: "Bound repeated directory probes.",
+        });
         const restored = createHarness({
             events: waiting.session.events.since(undefined) ?? [],
             restore: waiting.session.state(),
@@ -182,7 +193,9 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
             workspaceRunReadiness: () => ({ retryable: true, state: "waiting" }),
         });
-        const submitted = harness.session.submit({ text: "Keep this queued through shutdown." });
+        const submitted = await harness.session.submit({
+            text: "Keep this queued through shutdown.",
+        });
 
         const shutdown = harness.session.beginShutdown();
         await taskDrain.drain();
@@ -203,7 +216,7 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
             workspaceRunReadiness: () => ({ state: "waiting" }),
         });
-        waiting.session.submit({ text: "Stop this before naming finishes." });
+        await waiting.session.submit({ text: "Stop this before naming finishes." });
         const restored = createHarness({
             afterMetadataAbort: Promise.resolve(),
             events: waiting.session.events.since(undefined) ?? [],
@@ -229,9 +242,9 @@ describe("InMemorySession metadata settlement", () => {
         });
         const harness = createHarness({ agentGate });
 
-        const first = harness.session.submit({ text: "Start from this message." });
+        const first = await harness.session.submit({ text: "Start from this message." });
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(1));
-        const second = harness.session.submit({ text: "Use this clarification too." });
+        const second = await harness.session.submit({ text: "Use this clarification too." });
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
         expect(JSON.stringify(harness.metadataContexts[1])).toContain("Start from this message.");
         expect(JSON.stringify(harness.metadataContexts[1])).toContain(
@@ -251,7 +264,7 @@ describe("InMemorySession metadata settlement", () => {
         const inheritedTitles: string[] = [];
         const harness = createHarness({ inheritedTitles, workspaceId: "workspace-1" });
 
-        const first = harness.session.submit({ text: "Name this workspace from the chat." });
+        const first = await harness.session.submit({ text: "Name this workspace from the chat." });
         await harness.session.waitForRun(first.runId);
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
 
@@ -266,7 +279,7 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
         });
 
-        const first = harness.session.submit({ text: "Name this workspace from the chat." });
+        const first = await harness.session.submit({ text: "Name this workspace from the chat." });
         await harness.session.waitForRun(first.runId);
         await vi.waitFor(() =>
             expect(harness.session.snapshot()).toMatchObject({
@@ -293,7 +306,7 @@ describe("InMemorySession metadata settlement", () => {
         const harness = createHarness({ failedMetadataAttempts: 10 });
 
         for (const text of ["Give up eventually.", "Second.", "Third.", "Fourth.", "Fifth."]) {
-            const submitted = harness.session.submit({ text });
+            const submitted = await harness.session.submit({ text });
             await harness.session.waitForRun(submitted.runId);
         }
         await vi.waitFor(() => expect(harness.session.snapshot().titleStatus).toBe("error"));
@@ -302,7 +315,7 @@ describe("InMemorySession metadata settlement", () => {
     });
 
     it("lets a database failure from initial workspace naming escape the settlement", async () => {
-        const databaseError = captureDriverError();
+        const databaseError = await captureDriverError();
         let harness: ReturnType<typeof createHarness> | undefined;
 
         const escaped = await captureUnhandledRejection(async () => {
@@ -313,12 +326,42 @@ describe("InMemorySession metadata settlement", () => {
                 workspaceId: "workspace-1",
             });
 
-            harness.session.submit({ text: "Name this workspace from the chat." });
+            void harness.session.submit({ text: "Name this workspace from the chat." });
             await vi.waitFor(() => expect(harness?.metadataContexts).toHaveLength(1));
         });
 
         expect(escaped).toBe(databaseError);
         expect(harness?.session.snapshot().titleStatus).not.toBe("error");
+    });
+
+    it("restores title projections when the ready metadata event fails to persist", async () => {
+        const databaseError = await captureDriverError();
+        const inheritedTitles: string[] = [];
+        let harness: ReturnType<typeof createHarness> | undefined;
+
+        const escaped = await captureUnhandledRejection(async () => {
+            harness = createHarness({
+                inheritedTitles,
+                onAppendEvent: (event) => {
+                    if (event.type === "session_title_changed" && event.data.status === "ready") {
+                        throw databaseError;
+                    }
+                },
+                workspaceId: "workspace-1",
+            });
+
+            void harness.session.submit({ text: "Keep failed metadata out of memory." });
+            await vi.waitFor(() => expect(harness?.metadataContexts).toHaveLength(1));
+        });
+
+        expect(escaped).toBe(databaseError);
+        expect(harness?.session.snapshot()).toMatchObject({
+            titleStatus: "generating",
+        });
+        expect(harness?.session.snapshot().title).toBeUndefined();
+        expect(harness?.session.snapshot().recap).toBeUndefined();
+        expect(harness?.session.snapshot().metadataUpdatedAt).toBeUndefined();
+        expect(inheritedTitles).toEqual([]);
     });
 
     it("keeps ordinary initial workspace naming failures optional", async () => {
@@ -330,7 +373,7 @@ describe("InMemorySession metadata settlement", () => {
             workspaceId: "workspace-1",
         });
 
-        const first = harness.session.submit({ text: "Name this workspace from the chat." });
+        const first = await harness.session.submit({ text: "Name this workspace from the chat." });
         await harness.session.waitForRun(first.runId);
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
 
@@ -345,11 +388,11 @@ describe("InMemorySession metadata settlement", () => {
         });
         const harness = createHarness({ staleMetadata: staleReleased });
 
-        const first = harness.session.submit({ text: "Initial request." });
+        const first = await harness.session.submit({ text: "Initial request." });
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(1));
         expect(harness.metadataSignals[0]?.aborted).toBe(false);
 
-        const second = harness.session.submit({ text: "A newer request supersedes it." });
+        const second = await harness.session.submit({ text: "A newer request supersedes it." });
         expect(harness.metadataSignals[0]?.aborted).toBe(false);
         releaseStale?.();
         await harness.session.waitForRun(first.runId);
@@ -370,22 +413,22 @@ describe("InMemorySession metadata settlement", () => {
         const harness = createHarness({ afterMetadataAbort: Promise.resolve() });
 
         for (const text of ["Ask the wrong thing.", "Ask a different wrong thing."]) {
-            harness.session.submit({ text });
+            await harness.session.submit({ text });
             await vi.waitFor(() => expect(harness.metadataSignals).not.toHaveLength(0));
             const pending = harness.metadataSignals.length;
             await harness.session.reset();
             expect(harness.metadataSignals[pending - 1]?.aborted).toBe(true);
         }
 
-        harness.session.submit({ text: "Ask the right thing." });
+        await harness.session.submit({ text: "Ask the right thing." });
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(3));
     });
 
     it("does not count naming cancelled by a rewind as a naming failure", async () => {
         const harness = createHarness({ afterMetadataAbort: Promise.resolve() });
-        const first = harness.session.submit({ text: "Keep this turn." });
+        const first = await harness.session.submit({ text: "Keep this turn." });
         await harness.session.waitForRun(first.runId);
-        const second = harness.session.submit({ text: "Remove this turn." });
+        const second = await harness.session.submit({ text: "Remove this turn." });
         await harness.session.waitForRun(second.runId);
         await vi.waitFor(() => expect(harness.metadataSignals).not.toHaveLength(0));
 
@@ -398,7 +441,7 @@ describe("InMemorySession metadata settlement", () => {
                     message.blocks[0].text === "Remove this turn.",
             );
         if (secondMessage === undefined) throw new Error("Second user message was not persisted.");
-        harness.session.rewind(secondMessage.id);
+        await harness.session.rewind(secondMessage.id);
 
         // Rewinding closes the runtime the naming request was running through. That is the rewind
         // cancelling its own work, not the chat failing to earn a name.
@@ -410,9 +453,9 @@ describe("InMemorySession metadata settlement", () => {
     it("keeps the name a chat has been given through rewind and reset", async () => {
         const inherited = vi.fn();
         const harness = createHarness({ onInitialTitle: inherited, workspaceId: "workspace-1" });
-        const first = harness.session.submit({ text: "Keep this turn." });
+        const first = await harness.session.submit({ text: "Keep this turn." });
         await harness.session.waitForRun(first.runId);
-        const second = harness.session.submit({ text: "Remove this turn." });
+        const second = await harness.session.submit({ text: "Remove this turn." });
         await harness.session.waitForRun(second.runId);
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
         const named = harness.session.snapshot().title;
@@ -426,7 +469,7 @@ describe("InMemorySession metadata settlement", () => {
                     message.blocks[0].text === "Remove this turn.",
             );
         if (secondMessage === undefined) throw new Error("Second user message was not persisted.");
-        harness.session.rewind(secondMessage.id);
+        await harness.session.rewind(secondMessage.id);
         expect(harness.session.snapshot()).toMatchObject({ title: named, titleStatus: "ready" });
 
         // Clearing the chat empties the transcript, and the name the chat earned outlives it.
@@ -449,7 +492,9 @@ describe("InMemorySession metadata settlement", () => {
             },
             taskDrain,
         });
-        const foreground = harness.session.submit({ text: "Abort in-flight metadata safely." });
+        const foreground = await harness.session.submit({
+            text: "Abort in-flight metadata safely.",
+        });
         await harness.session.waitForRun(foreground.runId);
         expect(harness.metadataContexts).toHaveLength(1);
 
@@ -470,6 +515,7 @@ function createHarness(
         events?: readonly SessionEvent[];
         /** How many naming attempts fail before one succeeds. */
         failedMetadataAttempts?: number;
+        onAppendEvent?: (event: SessionEvent) => void | Promise<void>;
         onMetadataAbort?: () => void;
         restore?: PersistedSessionState;
         staleMetadata?: Promise<void>;
@@ -517,7 +563,12 @@ function createHarness(
                         });
                         options.onMetadataAbort?.();
                         await options.afterMetadataAbort;
-                        throw new Error("Metadata generation was cancelled.");
+                        const ignoredAbort = assistantMessage(
+                            "<title>Ignored abort</title>\n<recap>This result must be discarded.</recap>",
+                        );
+                        yield { type: "start", partial: ignoredAbort };
+                        yield { type: "done", reason: "stop", message: ignoredAbort };
+                        return ignoredAbort;
                     }
                     if (metadataResponses === 1 && options.staleMetadata !== undefined) {
                         await options.staleMetadata;
@@ -575,6 +626,7 @@ function createHarness(
             return createRuntime(runtimeOptions, provider);
         },
         modelCatalog: catalog,
+        ...(options.onAppendEvent === undefined ? {} : { onAppendEvent: options.onAppendEvent }),
         ...(options.events === undefined ? {} : { events: options.events }),
         ...(options.onInitialTitle === undefined && options.inheritedTitles === undefined
             ? {}
@@ -647,15 +699,15 @@ function assistantMessage(text: string): AssistantMessage {
     };
 }
 
-function captureDriverError(): unknown {
-    const database = new Database(":memory:");
+async function captureDriverError(): Promise<unknown> {
+    const database = createClient({ url: "file::memory:" });
     try {
-        database.prepare("select * from missing_table").all();
+        await database.execute("select * from missing_table");
         throw new Error("Expected the driver to fail.");
     } catch (error) {
         return error;
     } finally {
-        database.close();
+        await database.close();
     }
 }
 

@@ -49,7 +49,7 @@ describe("InMemorySession quota observations", () => {
             },
         });
 
-        const submitted = session.submit({ text: "Observe this run." });
+        const submitted = await session.submit({ text: "Observe this run." });
         await expect(session.waitForRun(submitted.runId)).resolves.toEqual({ status: "completed" });
 
         const observations = session.events

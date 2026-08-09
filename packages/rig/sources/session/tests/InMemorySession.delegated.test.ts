@@ -15,7 +15,7 @@ import { InMemorySession } from "../InMemorySession.js";
 
 /** A delegated session exposes its parent relationship for completion and agent-tree ownership. */
 describe("InMemorySession delegated conversations", () => {
-    it("exposes the delegator in its metadata and snapshot", () => {
+    it("exposes the delegator in its metadata and snapshot", async () => {
         const session = createDelegatedSession();
 
         expect(session.agentMetadata().delegatedBySessionId).toBe("delegator-session");

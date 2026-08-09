@@ -200,7 +200,7 @@ async function handleRequest(
     }
     if (request.method === "GET" && url.pathname === "/projects") {
         sendJson<{ projects: readonly HappyProject[] }>(response, 200, {
-            projects: options.store.listProjects().map(toHappyProject),
+            projects: (await options.store.listProjects()).map(toHappyProject),
         });
         return;
     }
@@ -213,7 +213,7 @@ async function handleRequest(
             "Workspace list settings",
         );
         sendJson<{ workspaces: readonly HappyWorkspace[] }>(response, 200, {
-            workspaces: options.store.listWorkspaces(input.projectId).map(toHappyWorkspace),
+            workspaces: (await options.store.listWorkspaces(input.projectId)).map(toHappyWorkspace),
         });
         return;
     }
@@ -242,20 +242,23 @@ async function handleRequest(
         return;
     }
     if (request.method === "GET" && url.pathname === "/sessions") {
+        const summaries = await options.store.list();
         sendJson<{ sessions: readonly HappySession[] }>(response, 200, {
-            sessions: options.store.list().map((session) => toHappySession(options.store, session)),
+            sessions: await Promise.all(
+                summaries.map((session) => toHappySession(options.store, session)),
+            ),
         });
         return;
     }
     if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await readJson(request, createSessionInputSchema, "Session settings");
-        const session = options.store.create(
-            configureSessionRequest(body, options.defaultDocker, () =>
+        const session = await options.store.create(
+            await configureSessionRequest(body, options.defaultDocker, () =>
                 options.store.queryProjectSettings(body.cwd),
             ),
         );
         sendJson<{ session: HappySession }>(response, 201, {
-            session: toHappySession(options.store, session.snapshot()),
+            session: await toHappySession(options.store, session.snapshot()),
         });
         return;
     }
@@ -356,7 +359,7 @@ async function handleRequest(
             "Slot list settings",
         );
         sendJson<{ entries: readonly HappySlotEntry[] }>(response, 200, {
-            entries: options.store.slots.list(input),
+            entries: await options.store.slots.list(input),
         });
         return;
     }
@@ -364,7 +367,7 @@ async function handleRequest(
         const body = await readJson(request, createHappySlotEntryInputSchema, "Slot entry");
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 201, {
-                entry: options.store.slots.create({
+                entry: await options.store.slots.create({
                     ...body,
                     author: {
                         folder: options.pluginFolder,
@@ -605,7 +608,7 @@ async function handleRequest(
         const body = await readJson(request, updateHappySlotEntryInputSchema, "Slot entry update");
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 200, {
-                entry: options.store.slots.update(parts[1], body),
+                entry: await options.store.slots.update(parts[1], body),
             });
         } catch (error) {
             if (error instanceof SlotEntryInvalidError) {
@@ -627,7 +630,7 @@ async function handleRequest(
     ) {
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 200, {
-                entry: options.store.slots.remove(parts[1]),
+                entry: await options.store.slots.remove(parts[1]),
             });
         } catch (error) {
             if (error instanceof SlotEntryNotFoundError) {
@@ -644,9 +647,9 @@ async function handleRequest(
         parts[0] === "workspaces" &&
         parts[1] !== undefined
     ) {
-        const workspace = options.store
-            .listWorkspaces()
-            .find((candidate) => candidate.id === parts[1]);
+        const workspace = (await options.store.listWorkspaces()).find(
+            (candidate) => candidate.id === parts[1],
+        );
         if (workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found." });
             return;
@@ -989,12 +992,12 @@ async function handleRequest(
         parts[2] === "messages"
     ) {
         const body = await readJson(request, sendAgentMessageBodySchema, "Agent message");
-        const target = options.store.findByAgentId(parts[1]);
+        const target = await options.store.findByAgentId(parts[1]);
         if (target === undefined) {
             sendJson(response, 404, { error: "No agent has that Agent ID." });
             return;
         }
-        const delivered = target.deliverNotification({
+        const delivered = await target.deliverNotification({
             displayText: `${options.pluginName}: ${body.message}`,
             text: [
                 `Message from the Rig plugin ${JSON.stringify(options.pluginName)}.`,
@@ -1051,7 +1054,7 @@ async function handleRequest(
                 renameWorkspaceBodySchema,
                 "Workspace rename settings",
             );
-            const workspace = options.store.renameWorkspace(
+            const workspace = await options.store.renameWorkspace(
                 projectId,
                 workspaceId,
                 body.name,
@@ -1139,14 +1142,14 @@ function toHappyWorkspace(workspace: ProjectWorkspace): HappyWorkspace {
     };
 }
 
-function toHappySession(
+async function toHappySession(
     store: SessionStore,
     session: Pick<
         SessionSummary,
         "archived" | "cwd" | "id" | "projectId" | "status" | "title" | "workspaceId"
     >,
-): HappySession {
-    const agentId = store.get(session.id)?.agentIdentity().agentId;
+): Promise<HappySession> {
+    const agentId = (await store.get(session.id))?.agentIdentity().agentId;
     if (agentId === undefined) {
         throw new Error(`Rig could not resolve the agent for session ${session.id}.`);
     }

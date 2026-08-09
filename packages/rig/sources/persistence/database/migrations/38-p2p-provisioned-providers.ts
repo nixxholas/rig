@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * Provider credentials supplied by a trusted P2P peer.
@@ -9,8 +9,8 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * globally: more than one owner may provision the same provider ID without
  * either credential replacing the other.
  */
-export function p2pProvisionedProviders(database: SessionDatabase): void {
-    database.run(
+export async function p2pProvisionedProviders(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS p2p_provisioned_providers (
                 owner_instance_id TEXT NOT NULL,
@@ -26,7 +26,7 @@ export function p2pProvisionedProviders(database: SessionDatabase): void {
             )
         `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX IF NOT EXISTS p2p_provisioned_providers_owner_position ON p2p_provisioned_providers (owner_instance_id, position, provider_id)",
         ),

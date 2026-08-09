@@ -17,16 +17,16 @@ import type { FileSystemContext } from "./FileSystemContext.js";
  * builds this context; a tool can never claim another agent's authorship through arguments.
  */
 export interface SlotContext {
-    createEntry(request: Omit<CreateSlotEntryRequest, "author">): SlotEntry;
+    createEntry(request: Omit<CreateSlotEntryRequest, "author">): Promise<SlotEntry>;
     createApplet(
         request: Omit<CreateAppletRequest, "authorSessionId">,
         sourceFileSystem?: FileSystemContext,
     ): Promise<Applet>;
-    listEntries(filter?: SlotEntryFilter): readonly SlotEntry[];
-    listApplets(): readonly Applet[];
-    removeEntry(id: string): SlotEntry;
-    revertApplet(name: string, request: RevertAppletRequest): Applet;
-    updateEntry(id: string, request: UpdateSlotEntryRequest): SlotEntry;
+    listEntries(filter?: SlotEntryFilter): Promise<readonly SlotEntry[]>;
+    listApplets(): Promise<readonly Applet[]>;
+    removeEntry(id: string): Promise<SlotEntry>;
+    revertApplet(name: string, request: RevertAppletRequest): Promise<Applet>;
+    updateEntry(id: string, request: UpdateSlotEntryRequest): Promise<SlotEntry>;
     updateApplet(
         name: string,
         request: UpdateAppletRequest,

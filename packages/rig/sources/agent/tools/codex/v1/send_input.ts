@@ -52,14 +52,14 @@ export const codexV1SendInputTool = defineTool({
         if (message.length === 0) throw new Error("send_input requires message or items.");
         const subagents = requireSubagentContext(context);
         await applySubagentReadOnlyOverride(subagents, args.target, args.read_only);
-        const agent = (() => {
+        const agent = await (async () => {
             if (args.interrupt === true) {
-                subagents.interrupt(args.target);
-                return subagents.followUp(args.target, message);
+                await subagents.interrupt(args.target);
+                return await subagents.followUp(args.target, message);
             }
             const sendMessage = subagents.sendMessage;
             return sendMessage === undefined
-                ? subagents.followUp(args.target, message)
+                ? await subagents.followUp(args.target, message)
                 : sendMessage(args.target, message);
         })();
         return {

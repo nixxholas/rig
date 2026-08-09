@@ -37,7 +37,7 @@ export const grokFollowupSubagentTool = defineTool({
     execute: async ({ effort, prompt, read_only, target }, context) => {
         const subagents = requireSubagentContext(context);
         await applySubagentReadOnlyOverride(subagents, target, read_only);
-        const subagent = subagents.followUp(target, prompt, effort);
+        const subagent = await subagents.followUp(target, prompt, effort);
         return {
             agent_id: subagent.agentId,
             path: subagent.path,

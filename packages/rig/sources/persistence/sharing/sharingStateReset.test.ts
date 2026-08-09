@@ -24,7 +24,7 @@ describe("resetting Sharing state", () => {
     it("keeps the selected profile while removing its Murmur identity and folder groups", async () => {
         const homeDirectory = await mkdtemp(join(tmpdir(), "rig-sharing-reset-"));
         directories.push(homeDirectory);
-        const database = new PersistentSessionStore({
+        const database = await PersistentSessionStore.open({
             databasePath: ":memory:",
             homeDirectory,
         });
@@ -33,31 +33,31 @@ describe("resetting Sharing state", () => {
             localInstanceId: database.localInstanceId,
             publish: () => undefined,
         });
-        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
-        const root = database.createFolder({ name: "Shared" });
-        database.createFolder({ name: "Child", parentId: root.id });
-        database.markFolderShared(root.id, GROUP_ID);
-        database.transaction((tx) => {
-            sharingProfileBind(tx, profile.id, GROUP_ID, 1);
-            folderShareCreate(tx, {
+        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const root = await database.createFolder({ name: "Shared" });
+        await database.createFolder({ name: "Child", parentId: root.id });
+        await database.markFolderShared(root.id, GROUP_ID);
+        await database.transaction(async (tx) => {
+            await sharingProfileBind(tx, profile.id, GROUP_ID, 1);
+            await folderShareCreate(tx, {
                 groupId: GROUP_ID,
                 now: 1,
                 rootFolderId: root.id,
                 sender: GROUP_ID,
                 shareId: "01900000-0000-7000-8000-000000000001",
-                state: database.sharedFolderState(root.id),
+                state: await database.sharedFolderState(root.id),
                 status: "synced",
             });
         });
 
-        database.resetSharingState();
+        await database.resetSharingState();
 
-        expect(database.getFolder(root.id)).toMatchObject({ shared: false, version: 3 });
-        expect(database.query(queryFolderShares)).toEqual([]);
-        expect(database.query(querySharingProfileBinding)).toEqual({
+        expect(await database.getFolder(root.id)).toMatchObject({ shared: false, version: 3 });
+        expect(await database.query(queryFolderShares)).toEqual([]);
+        expect(await database.query(querySharingProfileBinding)).toEqual({
             murmurIdentity: null,
             profileId: profile.id,
         });
-        database.close();
+        await database.close();
     });
 });

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -108,23 +109,38 @@ async function readSubmissionCounts(
     gym: Gym,
     displayText: string,
 ): Promise<{ eventCount: number; messageCount: number }> {
-    const script = `
-const { DatabaseSync } = require("node:sqlite");
-const database = new DatabaseSync("/home/rig/.server/sessions.sqlite");
-const session = database.prepare(
-  "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1"
-).get();
-const events = database.prepare(
-  "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'message_submitted'"
-).all(session.id).map((row) => JSON.parse(row.data_json));
+    const script = libsqlCommonJsScript(`
+const database = await openDatabase("/home/rig/.server/sessions.sqlite");
+let result;
+try {
+const session = (
+    await database.execute(
+        "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
+    )
+).rows[0];
+const events = (
+    await database.execute({
+        sql: "SELECT data_json FROM session_events WHERE session_id = ? AND type = 'message_submitted'",
+        args: [session.id],
+    })
+).rows.map((row) => JSON.parse(row.data_json));
 const matching = events.filter((event) => event.displayText === ${JSON.stringify(displayText)});
 const messageIds = matching.map((event) => event.message.id);
-const messageCount = messageIds.length === 0 ? 0 : database.prepare(
-  "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?"
-).get(session.id, messageIds[0]).count;
-database.close();
-process.stdout.write(JSON.stringify({ eventCount: matching.length, messageCount }));
-`;
+const messageCount =
+    messageIds.length === 0
+        ? 0
+        : (
+              await database.execute({
+                  sql: "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
+                  args: [session.id, messageIds[0]],
+              })
+          ).rows[0].count;
+result = { eventCount: matching.length, messageCount };
+} finally {
+    await database.close();
+}
+process.stdout.write(JSON.stringify(result));
+`);
     const result = await gym.runInContainer("node", ["-e", script]);
     expect(result.stderr).toBe("");
     return JSON.parse(result.stdout) as { eventCount: number; messageCount: number };

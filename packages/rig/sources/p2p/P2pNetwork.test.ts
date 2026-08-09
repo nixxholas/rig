@@ -23,9 +23,9 @@ const peerTrustStore: P2pPeerTrustStoreContract = {
     preparePairing: async () => {
         throw new Error("Pairing is not used by this test.");
     },
-    peerForBinding: () => undefined,
-    peers: () => [],
-    readyPairings: () => [],
+    peerForBinding: async () => undefined,
+    peers: async () => [],
+    readyPairings: async () => [],
     validate: async () => undefined,
     verifyOrPin: async () => undefined,
 };
@@ -62,7 +62,7 @@ describe("P2pNetwork", () => {
             onTransportUnavailable: unavailable,
             peerTrustStore: {
                 ...peerTrustStore,
-                peers: () => {
+                peers: async () => {
                     throw new Error("The saved P2P peer trust is invalid.");
                 },
             },
@@ -189,11 +189,11 @@ describe("P2pNetwork", () => {
             irohSecretKeyPath: "unused",
             peerTrustStore: {
                 ...peerTrustStore,
-                peerForBinding: (_transport, address) =>
+                peerForBinding: async (_transport, address) =>
                     persistedPeer?.bindings.some((binding) => binding.address === address) === true
                         ? remoteIdentity
                         : undefined,
-                peers: () => (persistedPeer === undefined ? [] : [persistedPeer]),
+                peers: async () => (persistedPeer === undefined ? [] : [persistedPeer]),
                 validate,
             },
         });

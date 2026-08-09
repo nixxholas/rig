@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -59,41 +60,38 @@ node /workspace/create-session.mjs
 exec node /app/packages/rig/dist/main.js resume "$(cat /workspace/session-id)"
 `;
 
-const createSessionScript = String.raw`
-import { writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
-import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js";
-import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";
-
+const createSessionScript = libsqlEsmScript(
+    String.raw`
 const databasePath = "/home/rig/.happy/rig/sessions.sqlite";
 const createdAt = Date.now() - 60_000;
-const store = new PersistentSessionStore({ databasePath, now: () => createdAt });
-const session = store.create({
+const store = await PersistentSessionStore.open({ databasePath, now: () => createdAt });
+const session = await store.create({
     cwd: "/workspace",
     modelId: "openai/gym",
     permissionMode: "full_access",
     providerId: "gym",
 });
-store.close();
+await store.close();
 
-const database = new DatabaseSync(databasePath);
-const sessionRow = database
-    .prepare("SELECT last_event_id FROM sessions WHERE id = ?")
-    .get(session.id);
+const database = await openDatabase(databasePath);
+try {
+const sessionRow = (
+    await database.execute({
+        sql: "SELECT last_event_id FROM sessions WHERE id = ?",
+        args: [session.id],
+    })
+).rows[0];
 const createEventId = createEventIdFactory({
     after: sessionRow.last_event_id,
     now: () => createdAt + 1,
 });
-const insertEvent = database.prepare(
-    "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, ?, ?, ?)",
-);
-const insertMessage = database.prepare(
-    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
-);
+const insertEventSql =
+    "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, ?, ?, ?)";
+const insertMessageSql =
+    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, ?, ?, ?, 0, ?, ?, ?)";
 
 let lastEventId = sessionRow.last_event_id;
-database.exec("BEGIN IMMEDIATE");
+const transaction = await database.transaction("write");
 try {
     for (let index = 0; index < 32; index += 1) {
         const text = "history-" + String(index);
@@ -102,53 +100,59 @@ try {
             id: "message-" + String(index),
             role: "user",
         };
-        insertMessage.run(
-            session.id,
-            index,
-            message.id,
-            message.role,
-            "run-" + String(index),
-            JSON.stringify(message),
-            createdAt + index,
-        );
+        await transaction.execute({
+            sql: insertMessageSql,
+            args: [
+                session.id,
+                index,
+                message.id,
+                message.role,
+                "run-" + String(index),
+                JSON.stringify(message),
+                createdAt + index,
+            ],
+        });
         lastEventId = createEventId();
-        insertEvent.run(
-            session.id,
-            lastEventId,
-            "message_submitted",
-            createdAt + index,
-            JSON.stringify({
+        await transaction.execute({
+            sql: insertEventSql,
+            args: [
+                session.id,
+                lastEventId,
+                "message_submitted",
+                createdAt + index,
+                JSON.stringify({
                 delivery: "run",
                 displayText: text,
                 message,
                 runId: "run-" + String(index),
-            }),
-        );
+                }),
+            ],
+        });
     }
     const contextMessage = {
         blocks: [{ text: "<conversation_summary>Earlier work was compacted.</conversation_summary>", type: "text" }],
         id: "summary-1",
         role: "user",
     };
-    database
-        .prepare(
-            "INSERT INTO session_context_messages (session_id, position, message_id, role, message_json) VALUES (?, 0, ?, ?, ?)",
-        )
-        .run(session.id, contextMessage.id, contextMessage.role, JSON.stringify(contextMessage));
-    database
-        .prepare(
-            "UPDATE sessions SET last_event_id = ?, status = 'completed', updated_at_ms = ? WHERE id = ?",
-        )
-        .run(
-            lastEventId,
-            createdAt + 32,
-            session.id,
-        );
-    database.exec("COMMIT");
+    await transaction.execute({
+        sql: "INSERT INTO session_context_messages (session_id, position, message_id, role, message_json) VALUES (?, 0, ?, ?, ?)",
+        args: [session.id, contextMessage.id, contextMessage.role, JSON.stringify(contextMessage)],
+    });
+    await transaction.execute({
+        sql: "UPDATE sessions SET last_event_id = ?, status = 'completed', updated_at_ms = ? WHERE id = ?",
+        args: [lastEventId, createdAt + 32, session.id],
+    });
+    await transaction.commit();
 } catch (error) {
-    database.exec("ROLLBACK");
+    await transaction.rollback();
     throw error;
+} finally {
+    await transaction.close();
 }
-database.close();
+} finally {
+    await database.close();
+}
 writeFileSync("/workspace/session-id", session.id);
-`;
+`,
+    'import { writeFileSync } from "node:fs"; import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js"; import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";',
+);

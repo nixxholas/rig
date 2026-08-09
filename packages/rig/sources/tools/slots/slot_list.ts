@@ -22,8 +22,8 @@ export const slotListTool = defineTool({
         { entries: Type.Array(slotEntrySchema) },
         { additionalProperties: false },
     ),
-    execute: (args, context): { entries: SlotEntry[] } => ({
-        entries: [...requireSlots(context).listEntries(args)],
+    execute: async (args, context): Promise<{ entries: SlotEntry[] }> => ({
+        entries: [...(await requireSlots(context).listEntries(args))],
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>

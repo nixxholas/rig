@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     `CREATE TABLE session_share_capabilities (
@@ -34,6 +34,6 @@ const statements = [
     "CREATE INDEX session_share_peer_actions_recent ON session_share_peer_actions(share_id, created_at_ms DESC)",
 ] as const;
 
-export function sessionSharePeerCapabilities(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function sessionSharePeerCapabilities(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

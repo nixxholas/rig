@@ -42,7 +42,7 @@ function newest(
 }
 
 describe("sessionTranscriptWindow", () => {
-    it("records stable inference groups and their exact boundaries", () => {
+    it("records stable inference groups and their exact boundaries", async () => {
         const facts = transcriptRunFacts([
             sessionEvent("run_started", 10, { runId: "run-1" }),
             sessionEvent("agent_event", 20, {
@@ -91,7 +91,7 @@ describe("sessionTranscriptWindow", () => {
         );
     });
 
-    it("closes a group at compaction, the same as it does at steering", () => {
+    it("closes a group at compaction, the same as it does at steering", async () => {
         const facts = transcriptRunFacts([
             sessionEvent("run_started", 10, { runId: "run-1" }),
             sessionEvent("agent_event", 20, {
@@ -155,7 +155,7 @@ describe("sessionTranscriptWindow", () => {
         ]);
     });
 
-    it("records which group a steering message closes", () => {
+    it("records which group a steering message closes", async () => {
         // The clock cannot say: a boundary and the group it opens routinely
         // share a millisecond.
         const facts = transcriptRunFacts([
@@ -179,7 +179,7 @@ describe("sessionTranscriptWindow", () => {
         expect(facts.get("run-1")?.boundaryGroupIds).toEqual({ "steer-1": "message-1" });
     });
 
-    it("groups contiguous messages of one run into a single turn", () => {
+    it("groups contiguous messages of one run into a single turn", async () => {
         const window = newest(turn("run-1", 2), new Map(), 20);
 
         expect(window.turns).toHaveLength(1);
@@ -187,7 +187,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.complete).toBe(true);
     });
 
-    it("keeps queued runs whole when their messages interleave", () => {
+    it("keeps queued runs whole when their messages interleave", async () => {
         const entries: TranscriptEntry[] = [
             { message: userMessage("run-1-u"), runId: "run-1" },
             { message: userMessage("run-2-u"), runId: "run-2" },
@@ -208,7 +208,7 @@ describe("sessionTranscriptWindow", () => {
         ]);
     });
 
-    it("keeps only the most recent turns when the conversation is longer", () => {
+    it("keeps only the most recent turns when the conversation is longer", async () => {
         const entries = Array.from({ length: 50 }, (_, index) => turn(`run-${index}`)).flat();
 
         const window = newest(entries, new Map(), 20);
@@ -219,7 +219,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.complete).toBe(false);
     });
 
-    it("never splits a turn, so a long turn arrives whole", () => {
+    it("never splits a turn, so a long turn arrives whole", async () => {
         // The oldest turn is dropped entirely; the newest is 40 messages and is
         // kept intact rather than trimmed to fit a message budget.
         const entries = [...turn("run-old"), ...turn("run-big", 38)];
@@ -234,13 +234,13 @@ describe("sessionTranscriptWindow", () => {
         );
     });
 
-    it("reports the transcript complete when every turn fits", () => {
+    it("reports the transcript complete when every turn fits", async () => {
         const entries = [...turn("run-1"), ...turn("run-2")];
 
         expect(newest(entries, new Map(), 20).complete).toBe(true);
     });
 
-    it("carries the timing and outcome of each retained turn", () => {
+    it("carries the timing and outcome of each retained turn", async () => {
         const facts = new Map<string, TranscriptRunFacts>([
             ["run-1", { endedAt: 90, outcome: "success", startedAt: 10 }],
             ["run-2", { endedAt: 260, errorMessage: "Boom", outcome: "error", startedAt: 200 }],
@@ -252,7 +252,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[1]).toMatchObject({ errorMessage: "Boom", outcome: "error" });
     });
 
-    it("carries durable inference errors as messages in their turn", () => {
+    it("carries durable inference errors as messages in their turn", async () => {
         const error: Message = {
             attempt: 2,
             blocks: [{ text: "Connection lost", type: "text" }],
@@ -279,7 +279,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[0]?.messageIds).toContain("retry-1");
     });
 
-    it("carries each message's own occurrence time", () => {
+    it("carries each message's own occurrence time", async () => {
         const entries = turn("run-1").map((entry, index) => ({
             ...entry,
             createdAt: 100 + index * 25,
@@ -300,7 +300,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.messageSteeredAt).toEqual({ "run-1-u": 120 });
     });
 
-    it("leaves a still-running turn without an end", () => {
+    it("leaves a still-running turn without an end", async () => {
         const facts = new Map<string, TranscriptRunFacts>([["run-1", { startedAt: 10 }]]);
 
         const window = newest(turn("run-1"), facts, 20);
@@ -309,7 +309,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[0]?.outcome).toBeUndefined();
     });
 
-    it("omits messages the model needs but a reader must never see", () => {
+    it("omits messages the model needs but a reader must never see", async () => {
         const entries: TranscriptEntry[] = [
             { message: { ...userMessage("hidden"), internal: true }, runId: "run-1" },
             ...turn("run-1"),
@@ -320,7 +320,7 @@ describe("sessionTranscriptWindow", () => {
         expect(window.messages.map((message: Message) => message.id)).not.toContain("hidden");
     });
 
-    it("keeps messages with no run of their own from joining a neighbouring turn", () => {
+    it("keeps messages with no run of their own from joining a neighbouring turn", async () => {
         const entries: TranscriptEntry[] = [
             { message: userMessage("loose-1") },
             { message: userMessage("loose-2") },
@@ -335,7 +335,7 @@ describe("sessionTranscriptWindow", () => {
 describe("paging back through a transcript", () => {
     const entries = Array.from({ length: 50 }, (_, index) => turn(`run-${index}`)).flat();
 
-    it("returns the turns immediately before the anchor", () => {
+    it("returns the turns immediately before the anchor", async () => {
         const page = sessionTranscriptWindow(entries, new Map(), 20, "run-30");
 
         // The anchor is the oldest turn the caller already has, so the page ends
@@ -346,7 +346,7 @@ describe("paging back through a transcript", () => {
         expect(page?.complete).toBe(false);
     });
 
-    it("reports reaching the beginning of the conversation", () => {
+    it("reports reaching the beginning of the conversation", async () => {
         const page = sessionTranscriptWindow(entries, new Map(), 20, "run-5");
 
         expect(page?.turns.map((item) => item.runId)).toEqual(
@@ -357,21 +357,21 @@ describe("paging back through a transcript", () => {
         expect(page?.complete).toBe(true);
     });
 
-    it("returns an empty and complete page at the very beginning", () => {
+    it("returns an empty and complete page at the very beginning", async () => {
         const page = sessionTranscriptWindow(entries, new Map(), 20, "run-0");
 
         expect(page?.turns).toEqual([]);
         expect(page?.complete).toBe(true);
     });
 
-    it("refuses an anchor the transcript no longer has", () => {
+    it("refuses an anchor the transcript no longer has", async () => {
         // A rewind can remove the turn a reader was paging from. Returning the
         // newest turns instead would look like a successful page and duplicate
         // the conversation.
         expect(sessionTranscriptWindow(entries, new Map(), 20, "run-gone")).toBeUndefined();
     });
 
-    it("carries only the messages of the turns it returns", () => {
+    it("carries only the messages of the turns it returns", async () => {
         const page = sessionTranscriptWindow(entries, new Map(), 2, "run-30");
 
         expect(page?.messages.map((message) => message.id)).toEqual([

@@ -7,7 +7,7 @@ import { OnboardingService } from "./OnboardingService.js";
 
 describe("OnboardingService", () => {
     it("returns provider setup before consulting the profile when no provider is configured", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profileComplete = vi.fn(() => true);
         try {
             const onboarding = new OnboardingService({
@@ -24,12 +24,12 @@ describe("OnboardingService", () => {
             });
             expect(profileComplete).not.toHaveBeenCalled();
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("requires a profile once a provider is configured", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
             const onboarding = new OnboardingService({
                 murmurConfigured: () => false,
@@ -43,14 +43,14 @@ describe("OnboardingService", () => {
                 onboardingVersion: 2,
                 state: "profile_required",
             });
-            expect(store.query(queryOnboardingState)).toEqual({ completedVersion: 0 });
+            expect(await store.query(queryOnboardingState)).toEqual({ completedVersion: 0 });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("marks completion durably once every requirement is satisfied", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
             const onboarding = new OnboardingService({
                 murmurConfigured: () => true,
@@ -64,16 +64,16 @@ describe("OnboardingService", () => {
                 onboardingVersion: 2,
                 state: "complete",
             });
-            expect(store.query(queryOnboardingState)).toEqual({ completedVersion: 2 });
+            expect(await store.query(queryOnboardingState)).toEqual({ completedVersion: 2 });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("uses the completion marker as a fast path without checking profile or providers", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
-            store.transaction((tx) => onboardingMarkCompleted(tx, 2));
+            await store.transaction(async (tx) => onboardingMarkCompleted(tx, 2));
 
             const profileComplete = vi.fn(() => {
                 throw new Error("The fast path must not inspect profiles.");
@@ -100,14 +100,14 @@ describe("OnboardingService", () => {
             expect(profileComplete).not.toHaveBeenCalled();
             expect(providersConfigured).not.toHaveBeenCalled();
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("reopens onboarding when the required version advances", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
-            store.transaction((tx) => onboardingMarkCompleted(tx, 1));
+            await store.transaction(async (tx) => onboardingMarkCompleted(tx, 1));
 
             const onboarding = new OnboardingService({
                 currentVersion: 2,
@@ -123,12 +123,12 @@ describe("OnboardingService", () => {
                 state: "profile_required",
             });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("keeps completion authoritative when configuration is read concurrently", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
             const onboarding = new OnboardingService({
                 murmurConfigured: () => true,
@@ -137,7 +137,7 @@ describe("OnboardingService", () => {
                 profileComplete: () => true,
                 providersConfigured: async () => {
                     // Another caller finishes onboarding while this check is in flight.
-                    store.transaction((tx) => onboardingMarkCompleted(tx, 2));
+                    await store.transaction(async (tx) => onboardingMarkCompleted(tx, 2));
                     return false;
                 },
             });
@@ -147,12 +147,12 @@ describe("OnboardingService", () => {
                 state: "complete",
             });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("requires an explicit Murmur choice after the profile step", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         try {
             const onboarding = new OnboardingService({
                 murmurConfigured: () => false,
@@ -166,14 +166,14 @@ describe("OnboardingService", () => {
                 onboardingVersion: 2,
                 state: "murmur_setup",
             });
-            expect(store.query(queryOnboardingState)).toEqual({ completedVersion: 0 });
+            expect(await store.query(queryOnboardingState)).toEqual({ completedVersion: 0 });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("persists version-two completion after enabling or disabling Murmur", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         let configured = false;
         try {
             const onboardMurmur = vi.fn(async () => {
@@ -192,13 +192,13 @@ describe("OnboardingService", () => {
                 enabled: false,
             });
             expect(onboardMurmur).toHaveBeenCalledWith({ enabled: false });
-            expect(store.query(queryOnboardingState)).toEqual({ completedVersion: 2 });
+            expect(await store.query(queryOnboardingState)).toEqual({ completedVersion: 2 });
             await expect(onboarding.status()).resolves.toEqual({
                 onboardingVersion: 2,
                 state: "complete",
             });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 });

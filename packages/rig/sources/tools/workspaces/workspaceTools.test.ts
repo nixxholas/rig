@@ -161,27 +161,27 @@ describe("workspace tools", () => {
         ).toThrow("only available in a primary session");
     });
 
-    it("lists the workspaces and conversations the session can reach", () => {
+    it("lists the workspaces and conversations the session can reach", async () => {
         const harness = createJustBashToolHarness();
-        const listWorkspaces = vi.fn(() => [workspace()]);
-        const listSessions = vi.fn(() => [session()]);
+        const listWorkspaces = vi.fn(async () => [workspace()]);
+        const listSessions = vi.fn(async () => [session()]);
         harness.context.workspaces = workspaceContext({ listSessions, listWorkspaces });
 
-        expect(listWorkspacesTool.execute({}, harness.context, {})).toEqual({
+        await expect(listWorkspacesTool.execute({}, harness.context, {})).resolves.toEqual({
             workspaces: [workspace()],
         });
         expect(listWorkspaces).toHaveBeenCalledWith(undefined);
-        expect(
+        await expect(
             listWorkspaceSessionsTool.execute({ workspace_id: "workspace-1" }, harness.context, {}),
-        ).toEqual({ sessions: [session()] });
+        ).resolves.toEqual({ sessions: [session()] });
         expect(listSessions).toHaveBeenCalledWith({ workspaceId: "workspace-1" });
     });
 
-    it("keeps project listing behind the cross-workspace setting", () => {
+    it("keeps project listing behind the cross-workspace setting", async () => {
         const harness = createJustBashToolHarness();
         harness.context.workspaces = workspaceContext({});
 
-        expect(() => listProjectsTool.execute({}, harness.context, {})).toThrow(
+        await expect(listProjectsTool.execute({}, harness.context, {})).rejects.toThrow(
             "features.cross_workspace",
         );
     });

@@ -35,7 +35,7 @@ export async function handleHappySessionRpc(options: {
         answers: Record<string, unknown>,
     ) => Promise<unknown> | unknown;
     cancelQuestion: (requestId: string) => Promise<unknown> | unknown;
-    context: () => AgentContext;
+    context: () => AgentContext | Promise<AgentContext>;
     method: string;
     params: unknown;
 }): Promise<unknown> {
@@ -59,7 +59,7 @@ export async function handleHappySessionRpc(options: {
         await options.answerQuestion(id, answers);
         return { success: true };
     }
-    const context = options.context();
+    const context = await options.context();
     if (method === "bash") {
         const command = requireString(params.command, "command");
         const result = await context.bash.run({

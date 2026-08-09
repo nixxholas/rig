@@ -1,7 +1,8 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { and, asc, eq, isNull } from "drizzle-orm";
 
 import { folderItems, folders } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 /** One active folder or folder item in the same direct-child ordering space. */
 export interface FolderChildOrder {
@@ -13,37 +14,42 @@ export interface FolderChildOrder {
  * Reads the active direct children of one folder, or the active root folders when `parentId` is
  * null. Folder items cannot be placed at the root, so the root query only returns folders.
  */
-export function queryFolderChildren(tx: TX, parentId: string | null): readonly FolderChildOrder[] {
-    const childFolders = tx
-        .select({
-            id: folders.id,
-            orderKey: folders.orderKey,
-            sharedGroupId: folders.sharedGroupId,
-        })
-        .from(folders)
-        .where(
-            and(
-                parentId === null ? isNull(folders.parentId) : eq(folders.parentId, parentId),
-                isNull(folders.archivedAtMs),
-            ),
-        )
-        .orderBy(asc(folders.orderKey), asc(folders.id))
-        .all();
-    if (parentId === null) {
-        return childFolders.sort(
-            (left, right) =>
-                Number(right.sharedGroupId !== null) - Number(left.sharedGroupId !== null) ||
-                compareChildren(left, right),
-        );
-    }
+export async function queryFolderChildren(
+    tx: DatabaseScope,
+    parentId: string | null,
+): Promise<readonly FolderChildOrder[]> {
+    return await inDatabase(tx, async (tx) => {
+        const childFolders = await tx
+            .select({
+                id: folders.id,
+                orderKey: folders.orderKey,
+                sharedGroupId: folders.sharedGroupId,
+            })
+            .from(folders)
+            .where(
+                and(
+                    parentId === null ? isNull(folders.parentId) : eq(folders.parentId, parentId),
+                    isNull(folders.archivedAtMs),
+                ),
+            )
+            .orderBy(asc(folders.orderKey), asc(folders.id))
+            .all();
+        if (parentId === null) {
+            return childFolders.sort(
+                (left, right) =>
+                    Number(right.sharedGroupId !== null) - Number(left.sharedGroupId !== null) ||
+                    compareChildren(left, right),
+            );
+        }
 
-    const childItems = tx
-        .select({ id: folderItems.id, orderKey: folderItems.orderKey })
-        .from(folderItems)
-        .where(and(eq(folderItems.folderId, parentId), isNull(folderItems.archivedAtMs)))
-        .orderBy(asc(folderItems.orderKey), asc(folderItems.id))
-        .all();
-    return [...childFolders, ...childItems].sort(compareChildren);
+        const childItems = await tx
+            .select({ id: folderItems.id, orderKey: folderItems.orderKey })
+            .from(folderItems)
+            .where(and(eq(folderItems.folderId, parentId), isNull(folderItems.archivedAtMs)))
+            .orderBy(asc(folderItems.orderKey), asc(folderItems.id))
+            .all();
+        return [...childFolders, ...childItems].sort(compareChildren);
+    });
 }
 
 function compareChildren(left: FolderChildOrder, right: FolderChildOrder): number {

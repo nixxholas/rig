@@ -1,17 +1,19 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
 import { AttachmentSchema, type Attachment } from "../../protocol/index.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
 /** Finds one attachment only when a committed, visible agent message in the session owns it. */
-export function querySessionAttachment(
-    tx: TX,
+export async function querySessionAttachment(
+    tx: DatabaseScope,
     sessionId: string,
     attachmentId: string,
-): Attachment | undefined {
-    const row = tx.get<Record<string, unknown>>(sql`
+): Promise<Attachment | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx.get<Record<string, unknown>>(sql`
         SELECT attachment.value AS attachment_json
         FROM session_messages
         JOIN json_each(session_messages.message_json, '$.attachments') AS attachment
@@ -23,7 +25,8 @@ export function querySessionAttachment(
         ORDER BY session_messages.position DESC
         LIMIT 1
     `);
-    if (row === undefined) return undefined;
-    const value: unknown = JSON.parse(readString(row, "attachment_json"));
-    return Value.Check(AttachmentSchema, value) ? value : undefined;
+        if (row === undefined) return undefined;
+        const value: unknown = JSON.parse(readString(row, "attachment_json"));
+        return Value.Check(AttachmentSchema, value) ? value : undefined;
+    });
 }

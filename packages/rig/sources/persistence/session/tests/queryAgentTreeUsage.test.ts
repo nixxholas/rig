@@ -7,16 +7,16 @@ import { projects, sessions } from "../../database/schema.js";
 import { queryAgentTreeUsage } from "../queryAgentTreeUsage.js";
 
 describe("queryAgentTreeUsage", () => {
-    it("counts nested, completed, hidden, and delegated descendants exactly once", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, {
+    it("counts nested, completed, hidden, and delegated descendants exactly once", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, {
             agentId: "agent-root",
             id: "root",
             lifetimeTotalTokens: 100,
             title: "Plugin delivery",
             usageJson: usageEnvelope(100, 25),
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-child",
             createdAtMs: 2,
             depth: 1,
@@ -29,7 +29,7 @@ describe("queryAgentTreeUsage", () => {
             status: "completed",
             taskName: "persistence_review",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-delegate",
             createdAtMs: 3,
             delegatedBySessionId: "root",
@@ -40,7 +40,7 @@ describe("queryAgentTreeUsage", () => {
             status: "completed",
             title: "Visible reviewer",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-nested",
             createdAtMs: 4,
             depth: 2,
@@ -50,7 +50,7 @@ describe("queryAgentTreeUsage", () => {
             rootSessionId: "root",
             sessionKind: "subagent",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-zero",
             createdAtMs: 5,
             depth: 1,
@@ -59,14 +59,14 @@ describe("queryAgentTreeUsage", () => {
             rootSessionId: "root",
             sessionKind: "subagent",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-unrelated",
             createdAtMs: 6,
             id: "unrelated",
             lifetimeTotalTokens: 999,
         });
 
-        expect(queryAgentTreeUsage(opened.database, "root")).toEqual({
+        expect(await queryAgentTreeUsage(opened.database, "root")).toEqual({
             sessions: [
                 {
                     agentId: "agent-root",
@@ -127,11 +127,11 @@ describe("queryAgentTreeUsage", () => {
         opened.client.close();
     });
 
-    it("returns exact zero usage for a session with no recorded inference", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, { agentId: "agent-root", id: "root" });
+    it("returns exact zero usage for a session with no recorded inference", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, { agentId: "agent-root", id: "root" });
 
-        expect(queryAgentTreeUsage(opened.database, "root")).toEqual({
+        expect(await queryAgentTreeUsage(opened.database, "root")).toEqual({
             sessions: [
                 {
                     agentId: "agent-root",
@@ -148,15 +148,15 @@ describe("queryAgentTreeUsage", () => {
         opened.client.close();
     });
 
-    it("terminates cycles and returns each reachable session once", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, {
+    it("terminates cycles and returns each reachable session once", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, {
             agentId: "agent-root",
             id: "root",
             lifetimeTotalTokens: 10,
             parentSessionId: "child",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-child",
             createdAtMs: 2,
             id: "child",
@@ -164,7 +164,7 @@ describe("queryAgentTreeUsage", () => {
             parentSessionId: "root",
         });
 
-        expect(queryAgentTreeUsage(opened.database, "root")).toMatchObject({
+        expect(await queryAgentTreeUsage(opened.database, "root")).toMatchObject({
             sessions: [
                 { relation: "root", sessionId: "root", totalTokens: 10 },
                 {
@@ -179,14 +179,14 @@ describe("queryAgentTreeUsage", () => {
         opened.client.close();
     });
 
-    it("starts at a subagent caller without including any ancestor", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, {
+    it("starts at a subagent caller without including any ancestor", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, {
             agentId: "agent-ancestor",
             id: "ancestor",
             lifetimeTotalTokens: 100,
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-caller",
             createdAtMs: 2,
             id: "caller",
@@ -195,7 +195,7 @@ describe("queryAgentTreeUsage", () => {
             rootSessionId: "ancestor",
             sessionKind: "subagent",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "agent-child",
             createdAtMs: 3,
             id: "child",
@@ -205,7 +205,7 @@ describe("queryAgentTreeUsage", () => {
             sessionKind: "subagent",
         });
 
-        const usage = queryAgentTreeUsage(opened.database, "caller");
+        const usage = await queryAgentTreeUsage(opened.database, "caller");
         expect(usage?.sessions.map((session) => session.sessionId)).toEqual(["caller", "child"]);
         expect(usage).toMatchObject({
             sessions: [
@@ -218,28 +218,28 @@ describe("queryAgentTreeUsage", () => {
         opened.client.close();
     });
 
-    it("follows a deep mixed delegation and subagent chain", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, { agentId: "root-agent", id: "root" });
-        insertSession(opened.database, {
+    it("follows a deep mixed delegation and subagent chain", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, { agentId: "root-agent", id: "root" });
+        await insertSession(opened.database, {
             agentId: "delegate-agent",
             createdAtMs: 2,
             delegatedBySessionId: "root",
             id: "delegate",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "hidden-agent",
             createdAtMs: 3,
             id: "hidden",
             parentSessionId: "delegate",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "reviewer-agent",
             createdAtMs: 4,
             delegatedBySessionId: "hidden",
             id: "reviewer",
         });
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "deep-agent",
             createdAtMs: 5,
             id: "deep",
@@ -247,7 +247,7 @@ describe("queryAgentTreeUsage", () => {
         });
 
         expect(
-            queryAgentTreeUsage(opened.database, "root")?.sessions.map((session) => ({
+            (await queryAgentTreeUsage(opened.database, "root"))?.sessions.map((session) => ({
                 parentSessionId: session.parentSessionId,
                 relation: session.relation,
                 sessionId: session.sessionId,
@@ -262,12 +262,12 @@ describe("queryAgentTreeUsage", () => {
         opened.client.close();
     });
 
-    it("returns exactly 10,000 sessions and rejects the first session beyond the bound", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, { agentId: "root-agent", id: "root" });
+    it("returns exactly 10,000 sessions and rejects the first session beyond the bound", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, { agentId: "root-agent", id: "root" });
         for (let index = 1; index < MAX_AGENT_TREE_USAGE_SESSIONS; index += 1) {
             const suffix = String(index).padStart(5, "0");
-            insertSession(opened.database, {
+            await insertSession(opened.database, {
                 agentId: `agent-${suffix}`,
                 createdAtMs: index + 1,
                 id: `child-${suffix}`,
@@ -276,26 +276,26 @@ describe("queryAgentTreeUsage", () => {
             });
         }
 
-        const atLimit = queryAgentTreeUsage(opened.database, "root");
+        const atLimit = await queryAgentTreeUsage(opened.database, "root");
         expect(atLimit?.sessions).toHaveLength(MAX_AGENT_TREE_USAGE_SESSIONS);
         expect(atLimit?.totalTokens).toBe(MAX_AGENT_TREE_USAGE_SESSIONS - 1);
 
-        insertSession(opened.database, {
+        await insertSession(opened.database, {
             agentId: "overflow-agent",
             createdAtMs: MAX_AGENT_TREE_USAGE_SESSIONS + 1,
             id: "overflow",
             parentSessionId: "root",
         });
-        expect(() => queryAgentTreeUsage(opened.database, "root")).toThrow(
+        await expect(queryAgentTreeUsage(opened.database, "root")).rejects.toThrow(
             "Agent tree usage is limited to 10,000 sessions.",
         );
         opened.client.close();
     }, 30_000);
 
-    it("rejects a session with both parent link types", () => {
-        const opened = createDatabase();
-        insertSession(opened.database, { agentId: "root-agent", id: "root" });
-        insertSession(opened.database, {
+    it("rejects a session with both parent link types", async () => {
+        const opened = await createDatabase();
+        await insertSession(opened.database, { agentId: "root-agent", id: "root" });
+        await insertSession(opened.database, {
             agentId: "invalid-agent",
             createdAtMs: 2,
             delegatedBySessionId: "root",
@@ -303,17 +303,17 @@ describe("queryAgentTreeUsage", () => {
             parentSessionId: "root",
         });
 
-        expect(() => queryAgentTreeUsage(opened.database, "root")).toThrow(
+        await expect(queryAgentTreeUsage(opened.database, "root")).rejects.toThrow(
             "Session 'invalid' has both subagent and delegation parents.",
         );
         opened.client.close();
     });
 });
 
-function createDatabase() {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
-    opened.database
+async function createDatabase() {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
+    await opened.database
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -339,12 +339,12 @@ function createDatabase() {
     return opened;
 }
 
-function insertSession(
-    database: ReturnType<typeof createDatabase>["database"],
+async function insertSession(
+    database: Awaited<ReturnType<typeof createDatabase>>["database"],
     overrides: Partial<typeof sessions.$inferInsert> &
         Pick<typeof sessions.$inferInsert, "agentId" | "id">,
 ) {
-    database
+    await database
         .insert(sessions)
         .values({
             archived: false,

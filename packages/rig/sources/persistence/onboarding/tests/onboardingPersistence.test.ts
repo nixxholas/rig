@@ -18,61 +18,61 @@ afterEach(() => {
 });
 
 describe("onboarding persistence", () => {
-    it("starts with an uncompleted onboarding state", () => {
-        const opened = openOnboardingDatabase();
+    it("starts with an uncompleted onboarding state", async () => {
+        const opened = await openOnboardingDatabase();
         try {
-            expect(queryOnboardingState(opened.database)).toEqual({ completedVersion: 0 });
+            expect(await queryOnboardingState(opened.database)).toEqual({ completedVersion: 0 });
         } finally {
             opened.client.close();
         }
     });
 
-    it("advances completion monotonically", () => {
-        const opened = openOnboardingDatabase();
+    it("advances completion monotonically", async () => {
+        const opened = await openOnboardingDatabase();
         try {
-            expect(onboardingMarkCompleted(opened.database, 2)).toBe(true);
-            expect(onboardingMarkCompleted(opened.database, 2)).toBe(false);
-            expect(onboardingMarkCompleted(opened.database, 1)).toBe(false);
-            expect(queryOnboardingState(opened.database)).toEqual({ completedVersion: 2 });
+            expect(await onboardingMarkCompleted(opened.database, 2)).toBe(true);
+            expect(await onboardingMarkCompleted(opened.database, 2)).toBe(false);
+            expect(await onboardingMarkCompleted(opened.database, 1)).toBe(false);
+            expect(await queryOnboardingState(opened.database)).toEqual({ completedVersion: 2 });
         } finally {
             opened.client.close();
         }
     });
 
-    it("persists completion across a database restart", () => {
+    it("persists completion across a database restart", async () => {
         const directory = createDirectory();
         const databasePath = join(directory, "sessions.sqlite");
-        const first = openSessionDatabase(databasePath);
-        migrateSessionDatabase(first.database);
-        onboardingMarkCompleted(first.database, 4);
+        const first = await openSessionDatabase(databasePath);
+        await migrateSessionDatabase(first.database);
+        await onboardingMarkCompleted(first.database, 4);
         first.client.close();
 
-        const restarted = openSessionDatabase(databasePath);
+        const restarted = await openSessionDatabase(databasePath);
         try {
-            migrateSessionDatabase(restarted.database);
-            expect(queryOnboardingState(restarted.database)).toEqual({ completedVersion: 4 });
+            await migrateSessionDatabase(restarted.database);
+            expect(await queryOnboardingState(restarted.database)).toEqual({ completedVersion: 4 });
         } finally {
             restarted.client.close();
         }
     });
 
-    it("rejects invalid durable values before writing", () => {
-        const opened = openOnboardingDatabase();
+    it("rejects invalid durable values before writing", async () => {
+        const opened = await openOnboardingDatabase();
         try {
-            expect(() => onboardingMarkCompleted(opened.database, -1)).toThrow(
+            await expect(onboardingMarkCompleted(opened.database, -1)).rejects.toThrow(
                 "The onboarding completion version is invalid.",
             );
-            expect(queryOnboardingState(opened.database)).toEqual({ completedVersion: 0 });
+            expect(await queryOnboardingState(opened.database)).toEqual({ completedVersion: 0 });
         } finally {
             opened.client.close();
         }
     });
 });
 
-function openOnboardingDatabase() {
+async function openOnboardingDatabase() {
     const directory = createDirectory();
-    const opened = openSessionDatabase(join(directory, "sessions.sqlite"));
-    migrateSessionDatabase(opened.database);
+    const opened = await openSessionDatabase(join(directory, "sessions.sqlite"));
+    await migrateSessionDatabase(opened.database);
     return opened;
 }
 

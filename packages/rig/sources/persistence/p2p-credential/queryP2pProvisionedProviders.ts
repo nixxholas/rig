@@ -1,32 +1,35 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { asc, eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { p2pProvisionedProviders } from "../database/schema.js";
 import {
     p2pProvisionedProviderRecordSchema,
     type P2pProvisionedProviderRecord,
 } from "./P2pProvisionedProviderRecord.js";
 
-export function queryP2pProvisionedProviders(
-    tx: TX,
+export async function queryP2pProvisionedProviders(
+    tx: DatabaseScope,
     ownerInstanceId?: string,
-): readonly P2pProvisionedProviderRecord[] {
-    const query =
-        ownerInstanceId === undefined
-            ? tx.select().from(p2pProvisionedProviders)
-            : tx
-                  .select()
-                  .from(p2pProvisionedProviders)
-                  .where(eq(p2pProvisionedProviders.ownerInstanceId, ownerInstanceId));
-    return query
-        .orderBy(
-            asc(p2pProvisionedProviders.ownerInstanceId),
-            asc(p2pProvisionedProviders.position),
-            asc(p2pProvisionedProviders.providerId),
-        )
-        .all()
-        .map((row) => {
+): Promise<readonly P2pProvisionedProviderRecord[]> {
+    return await inDatabase(tx, async (tx) => {
+        const query =
+            ownerInstanceId === undefined
+                ? tx.select().from(p2pProvisionedProviders)
+                : tx
+                      .select()
+                      .from(p2pProvisionedProviders)
+                      .where(eq(p2pProvisionedProviders.ownerInstanceId, ownerInstanceId));
+        return (
+            await query
+                .orderBy(
+                    asc(p2pProvisionedProviders.ownerInstanceId),
+                    asc(p2pProvisionedProviders.position),
+                    asc(p2pProvisionedProviders.providerId),
+                )
+                .all()
+        ).map((row) => {
             const record: unknown = {
                 createdAt: row.createdAtMs,
                 encryptedMaterialJson: row.encryptedMaterialJson,
@@ -43,4 +46,5 @@ export function queryP2pProvisionedProviders(
             }
             return record;
         });
+    });
 }

@@ -12,9 +12,9 @@ describe("GitHub secret HTTP status", () => {
     it("reports model availability without serializing the token", async () => {
         const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
-        const store = new InMemorySessionStore();
-        store.registerSpecialSecret({ kind: "github", token: "never-serialize-this" });
-        const server = createProtocolHttpServer({ store, token: "daemon-token" });
+        const store = await InMemorySessionStore.open();
+        await store.registerSpecialSecret({ kind: "github", token: "never-serialize-this" });
+        const server = await createProtocolHttpServer({ store, token: "daemon-token" });
         try {
             await new Promise<void>((resolve) => server.listen(socketPath, resolve));
             const client = new ProtocolHttpClient({

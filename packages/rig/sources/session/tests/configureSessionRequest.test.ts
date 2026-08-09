@@ -3,27 +3,27 @@ import { expect, it } from "vitest";
 import { configureSessionRequest } from "../configureSessionRequest.js";
 import { SessionConfigurationError } from "../SessionConfigurationError.js";
 
-it("applies the daemon Docker default to remotely created sessions", () => {
-    expect(
+it("applies the daemon Docker default to remotely created sessions", async () => {
+    await expect(
         configureSessionRequest(
             { cwd: "/workspace", permissionMode: "auto" },
             { image: "node:latest", workingDirectory: "/workspace" },
         ),
-    ).toMatchObject({
+    ).resolves.toMatchObject({
         cwd: "/workspace",
         docker: { image: "node:latest" },
         permissionMode: "auto",
     });
-    expect(
+    await expect(
         configureSessionRequest(
             { cwd: "/workspace", local: true, permissionMode: "auto" },
             { image: "node:latest", workingDirectory: "/workspace" },
         ),
-    ).not.toHaveProperty("docker");
+    ).resolves.not.toHaveProperty("docker");
 });
 
-it("prefers the project compute default over the daemon default", () => {
-    expect(
+it("prefers the project compute default over the daemon default", async () => {
+    await expect(
         configureSessionRequest(
             { cwd: "/projects/rig", permissionMode: "auto" },
             { image: "daemon:latest", workingDirectory: "/workspace" },
@@ -38,7 +38,7 @@ it("prefers the project compute default over the daemon default", () => {
                 },
             }),
         ),
-    ).toMatchObject({
+    ).resolves.toMatchObject({
         docker: {
             image: "project:latest",
             mounts: expect.arrayContaining([{ source: "/projects/rig", target: "/workspace" }]),
@@ -46,7 +46,7 @@ it("prefers the project compute default over the daemon default", () => {
             workingDirectory: "/workspace",
         },
     });
-    expect(
+    await expect(
         configureSessionRequest(
             { cwd: "/workspaces/feature", permissionMode: "auto" },
             undefined,
@@ -62,10 +62,10 @@ it("prefers the project compute default over the daemon default", () => {
                 workspaceId: "workspace-1",
             }),
         ),
-    ).toMatchObject({
+    ).resolves.toMatchObject({
         docker: { name: "rig-workspace-workspace-1-3" },
     });
-    expect(
+    await expect(
         configureSessionRequest(
             { cwd: "/projects/rig", permissionMode: "auto" },
             { image: "daemon:latest", workingDirectory: "/workspace" },
@@ -76,21 +76,21 @@ it("prefers the project compute default over the daemon default", () => {
                 },
             }),
         ),
-    ).not.toHaveProperty("docker");
+    ).resolves.not.toHaveProperty("docker");
 });
 
-it("keeps an explicit session compute choice ahead of the project default", () => {
-    const queryProjectSettings = () => {
+it("keeps an explicit session compute choice ahead of the project default", async () => {
+    const queryProjectSettings = async () => {
         throw new Error("Project settings should not be read for an explicit choice.");
     };
-    expect(
+    await expect(
         configureSessionRequest(
             { cwd: "/workspace", local: true },
             { image: "daemon:latest", workingDirectory: "/workspace" },
             queryProjectSettings,
         ),
-    ).not.toHaveProperty("docker");
-    expect(
+    ).resolves.not.toHaveProperty("docker");
+    await expect(
         configureSessionRequest(
             {
                 cwd: "/workspace",
@@ -99,11 +99,13 @@ it("keeps an explicit session compute choice ahead of the project default", () =
             undefined,
             queryProjectSettings,
         ),
-    ).toMatchObject({ docker: { image: "explicit:latest", workingDirectory: "/work" } });
+    ).resolves.toMatchObject({
+        docker: { image: "explicit:latest", workingDirectory: "/work" },
+    });
 });
 
-it("classifies conflicting and malformed execution settings as client errors", () => {
-    expect(() =>
+it("classifies conflicting and malformed execution settings as client errors", async () => {
+    await expect(
         configureSessionRequest(
             {
                 cwd: "/workspace",
@@ -112,8 +114,8 @@ it("classifies conflicting and malformed execution settings as client errors", (
             },
             undefined,
         ),
-    ).toThrow(SessionConfigurationError);
-    expect(() =>
+    ).rejects.toThrow(SessionConfigurationError);
+    await expect(
         configureSessionRequest(
             {
                 cwd: "/workspace",
@@ -121,5 +123,5 @@ it("classifies conflicting and malformed execution settings as client errors", (
             },
             undefined,
         ),
-    ).toThrow(SessionConfigurationError);
+    ).rejects.toThrow(SessionConfigurationError);
 });

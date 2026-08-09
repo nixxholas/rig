@@ -1,25 +1,25 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function remoteProjects(database: SessionDatabase): void {
+export async function remoteProjects(database: SessionDatabase): Promise<void> {
     const columns = new Set(
-        database
-            .all<{ name: string }>(sql.raw("PRAGMA table_info(projects)"))
-            .map((column) => column.name),
+        (await database.all<{ name: string }>(sql.raw("PRAGMA table_info(projects)"))).map(
+            (column) => column.name,
+        ),
     );
-    addColumn(database, columns, "remote_source_json", "TEXT");
-    addColumn(database, columns, "required_secret_kind", "TEXT");
-    addColumn(database, columns, "creator_instance_id", "TEXT");
-    addColumn(database, columns, "creator_profile_id", "TEXT");
+    await addColumn(database, columns, "remote_source_json", "TEXT");
+    await addColumn(database, columns, "required_secret_kind", "TEXT");
+    await addColumn(database, columns, "creator_instance_id", "TEXT");
+    await addColumn(database, columns, "creator_profile_id", "TEXT");
 }
 
-function addColumn(
+async function addColumn(
     database: SessionDatabase,
     columns: ReadonlySet<string>,
     name: string,
     type: "TEXT",
-): void {
+): Promise<void> {
     if (columns.has(name)) return;
-    database.run(sql.raw(`ALTER TABLE projects ADD COLUMN ${name} ${type}`));
+    await database.run(sql.raw(`ALTER TABLE projects ADD COLUMN ${name} ${type}`));
 }

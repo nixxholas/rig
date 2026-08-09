@@ -99,10 +99,10 @@ async function createPresenceStore(
     return presence;
 }
 
-type Session = ReturnType<InMemorySessionStore["create"]>;
+type Session = Awaited<ReturnType<InMemorySessionStore["create"]>>;
 
-function createSession(store: InMemorySessionStore): Session {
-    return store.create({
+async function createSession(store: InMemorySessionStore): Promise<Session> {
+    return await store.create({
         cwd: "/tmp/rig-presence-session",
         modelId: model.id,
         permissionMode: "full_access",
@@ -123,13 +123,13 @@ async function waitForOpenQuestion(session: Session): Promise<string> {
 describe("presence and questions", () => {
     it("keeps a question open in the inbox but lets the agent finish while the user is Away", async () => {
         const inference = installGymInference();
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence: await createPresenceStore("away"),
         });
         try {
-            const session = createSession(store);
-            const submitted = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const submitted = await session.submit({ text: "Choose a database." });
             await session.waitForRun(submitted.runId);
 
             expect(inference.requests).toHaveLength(2);
@@ -139,7 +139,9 @@ describe("presence and questions", () => {
             const toolResultText = JSON.stringify(inference.requests.at(-1));
             expect(toolResultText).toContain("the user is Away");
             expect(toolResultText).toContain("cancel_ask");
-            const open = store.listDurableUserInputs().filter((call) => isOpenQuestion(call));
+            const open = (await store.listDurableUserInputs()).filter((call) =>
+                isOpenQuestion(call),
+            );
             expect(open).toHaveLength(1);
             expect(open[0]?.detachedAt).toBeTypeOf("number");
         } finally {
@@ -150,13 +152,13 @@ describe("presence and questions", () => {
     it("releases an open question when the user goes Away", async () => {
         const inference = installGymInference();
         const presence = new PresenceStore({ presences: resolvePresences() });
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence,
         });
         try {
-            const session = createSession(store);
-            const submitted = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const submitted = await session.submit({ text: "Choose a database." });
             await waitForOpenQuestion(session);
 
             await presence.setPresence({ presenceId: "away" });
@@ -164,7 +166,7 @@ describe("presence and questions", () => {
 
             expect(JSON.stringify(inference.requests.at(-1))).toContain("the user is Away");
             expect(
-                store.listDurableUserInputs().filter((call) => isOpenQuestion(call)),
+                (await store.listDurableUserInputs()).filter((call) => isOpenQuestion(call)),
             ).toHaveLength(1);
         } finally {
             inference.restore();
@@ -174,19 +176,19 @@ describe("presence and questions", () => {
     it("notifies an existing agent when presence changes", async () => {
         const inference = installGymInference();
         const presence = new PresenceStore({ presences: resolvePresences() });
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence,
         });
         try {
-            const session = createSession(store);
-            const first = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const first = await session.submit({ text: "Choose a database." });
             const requestId = await waitForOpenQuestion(session);
-            session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
+            await session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
             await session.waitForRun(first.runId);
 
             await presence.setPresence({ presenceId: "away" });
-            const second = session.submit({ text: "Keep going." });
+            const second = await session.submit({ text: "Keep going." });
             await session.waitForRun(second.runId);
 
             const latest = JSON.stringify(inference.requests.at(-1));
@@ -199,21 +201,23 @@ describe("presence and questions", () => {
 
     it("stops waiting once a custom state's answer window runs out", async () => {
         const inference = installGymInference();
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence: await createPresenceStore("errands", {
                 errands: { answerWaitMs: 25, emoji: "🚶", title: "Running errands" },
             }),
         });
         try {
-            const session = createSession(store);
-            const submitted = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const submitted = await session.submit({ text: "Choose a database." });
             await session.waitForRun(submitted.runId);
 
             const toolResultText = JSON.stringify(inference.requests.at(-1));
             expect(toolResultText).toContain("Nobody answered within");
             expect(toolResultText).toContain("Running errands");
-            const open = store.listDurableUserInputs().filter((call) => isOpenQuestion(call));
+            const open = (await store.listDurableUserInputs()).filter((call) =>
+                isOpenQuestion(call),
+            );
             expect(open).toHaveLength(1);
         } finally {
             inference.restore();
@@ -222,20 +226,22 @@ describe("presence and questions", () => {
 
     it("tells the agent about an answer that arrives after it stopped waiting", async () => {
         const inference = installGymInference();
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence: await createPresenceStore("away"),
         });
         try {
-            const session = createSession(store);
-            const first = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const first = await session.submit({ text: "Choose a database." });
             await session.waitForRun(first.runId);
-            const open = store.listDurableUserInputs().filter((call) => isOpenQuestion(call));
+            const open = (await store.listDurableUserInputs()).filter((call) =>
+                isOpenQuestion(call),
+            );
             const requestId = open[0]?.request.requestId;
             if (requestId === undefined) throw new Error("Expected an open question.");
 
-            session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
-            const second = session.submit({ text: "Carry on." });
+            await session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
+            const second = await session.submit({ text: "Carry on." });
             await session.waitForRun(second.runId);
 
             const latest = JSON.stringify(inference.requests.at(-1));
@@ -262,21 +268,21 @@ describe("presence and questions", () => {
                 ],
             };
         });
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence: await createPresenceStore("away"),
         });
         try {
-            const session = createSession(store);
-            const submitted = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const submitted = await session.submit({ text: "Choose a database." });
             await session.waitForRun(submitted.runId);
 
             expect(JSON.stringify(inference.requests.at(-1))).toContain(
                 "The question was withdrawn",
             );
-            expect(store.listDurableUserInputs().filter((call) => isOpenQuestion(call))).toEqual(
-                [],
-            );
+            expect(
+                (await store.listDurableUserInputs()).filter((call) => isOpenQuestion(call)),
+            ).toEqual([]);
         } finally {
             inference.restore();
         }
@@ -284,16 +290,16 @@ describe("presence and questions", () => {
 
     it("blocks on the question while the user is Online", async () => {
         const inference = installGymInference();
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: catalog,
             presence: new PresenceStore({ presences: resolvePresences() }),
         });
         try {
-            const session = createSession(store);
-            const submitted = session.submit({ text: "Choose a database." });
+            const session = await createSession(store);
+            const submitted = await session.submit({ text: "Choose a database." });
             const requestId = await waitForOpenQuestion(session);
 
-            session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
+            await session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
             await session.waitForRun(submitted.runId);
 
             expect(inference.requests).toHaveLength(2);

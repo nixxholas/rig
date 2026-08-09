@@ -4,7 +4,7 @@ import type { FolderItemTarget } from "../../protocol/index.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { folderItems, folders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderChildren } from "../folder/queryFolderChildren.js";
 
 export type FolderItemCreateResult =
@@ -12,8 +12,8 @@ export type FolderItemCreateResult =
     | { outcome: "folder_not_found" }
     | { outcome: "id_conflict" };
 
-export function folderItemCreate(
-    tx: TX,
+export async function folderItemCreate(
+    tx: DatabaseScope,
     input: {
         folderId: string;
         id: string;
@@ -21,9 +21,9 @@ export function folderItemCreate(
         orderKey?: string;
         target: FolderItemTarget;
     },
-): FolderItemCreateResult {
-    return inTx(tx, (tx) => {
-        const folder = tx
+): Promise<FolderItemCreateResult> {
+    return await inTx(tx, async (tx) => {
+        const folder = await tx
             .select({ archivedAtMs: folders.archivedAtMs })
             .from(folders)
             .where(eq(folders.id, input.folderId))
@@ -32,13 +32,17 @@ export function folderItemCreate(
             return { outcome: "folder_not_found" };
         }
         if (
-            tx.select({ id: folders.id }).from(folders).where(eq(folders.id, input.id)).get() !==
-            undefined
+            (await tx
+                .select({ id: folders.id })
+                .from(folders)
+                .where(eq(folders.id, input.id))
+                .get()) !== undefined
         ) {
             return { outcome: "id_conflict" };
         }
-        const last = queryFolderChildren(tx, input.folderId).at(-1);
-        tx.insert(folderItems)
+        const last = (await queryFolderChildren(tx, input.folderId)).at(-1);
+        await tx
+            .insert(folderItems)
             .values({
                 createdAtMs: input.now,
                 folderId: input.folderId,

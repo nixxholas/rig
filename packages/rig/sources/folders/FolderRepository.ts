@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { createId } from "@paralleldrive/cuid2";
-import { sql } from "drizzle-orm";
 
 import {
     type CreateFolderItemRequest,
@@ -38,6 +37,10 @@ import {
     queryFolderSubtreeHasContents,
     querySharedFolderRoot,
 } from "../persistence/folder/queryFolderSharedGroup.js";
+import {
+    queryFolderMutationReceipt,
+    recordFolderMutationReceipt,
+} from "../persistence/folder/folderMutationReceipt.js";
 import { folderItemArchive } from "../persistence/folderItem/folderItemArchive.js";
 import { folderItemCreate } from "../persistence/folderItem/folderItemCreate.js";
 import { folderItemMove } from "../persistence/folderItem/folderItemMove.js";
@@ -71,7 +74,6 @@ import {
 } from "../persistence/folder/queryFolderChildren.js";
 
 type FolderMutationAction = "archive" | "create" | "move" | "update";
-const MAX_FOLDER_MUTATION_RECEIPTS = 10_000;
 
 export class FolderError extends Error {
     readonly code: FolderErrorCode;
@@ -89,11 +91,11 @@ export interface FolderRepositoryOptions {
     foldersDirectory?: string;
     homeDirectory?: string;
     now?: () => number;
-    onEvent?: (event: FolderEvent) => void;
-    onFolderContextChanged?: (folderIds: readonly string[]) => void;
-    onSessionsArchived?: (sessionIds: readonly string[]) => void;
+    onEvent?: (event: FolderEvent) => void | Promise<void>;
+    onFolderContextChanged?: (folderIds: readonly string[]) => void | Promise<void>;
+    onSessionsArchived?: (sessionIds: readonly string[]) => void | Promise<void>;
     unsortedDirectory?: string;
-    transaction?: <T>(body: (tx: TX) => T) => T;
+    transaction?: <T>(body: (tx: TX) => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -108,10 +110,14 @@ export class FolderRepository {
     readonly #database: SessionDatabase;
     readonly #foldersDirectory: string;
     readonly #now: () => number;
-    readonly #onEvent: ((event: FolderEvent) => void) | undefined;
-    readonly #onFolderContextChanged: ((folderIds: readonly string[]) => void) | undefined;
-    readonly #onSessionsArchived: ((sessionIds: readonly string[]) => void) | undefined;
-    readonly #transactionRunner: (<T>(body: (tx: TX) => T) => T) | undefined;
+    readonly #onEvent: ((event: FolderEvent) => void | Promise<void>) | undefined;
+    readonly #onFolderContextChanged:
+        | ((folderIds: readonly string[]) => void | Promise<void>)
+        | undefined;
+    readonly #onSessionsArchived:
+        | ((sessionIds: readonly string[]) => void | Promise<void>)
+        | undefined;
+    readonly #transactionRunner: (<T>(body: (tx: TX) => Promise<T>) => Promise<T>) | undefined;
     readonly #unsortedDirectory: string;
 
     constructor(options: FolderRepositoryOptions) {
@@ -129,35 +135,38 @@ export class FolderRepository {
     }
 
     /** The whole tree, every parent ahead of what is nested under it. */
-    listFolders(): readonly Folder[] {
-        return queryFolders(this.#database);
+    async listFolders(): Promise<readonly Folder[]> {
+        return queryFolders(this.#database.database);
     }
 
-    folderCatalog(): ListFoldersResponse {
-        return this.#mutate((tx) => {
-            const items = queryFolderItems(tx);
+    async folderCatalog(): Promise<ListFoldersResponse> {
+        return this.#mutate(async (tx) => {
+            const items = await queryFolderItems(tx);
             return {
-                folders: [...queryFolders(tx)],
-                items: [...folderItemsWithActiveTargets(tx, items)],
-                revision: queryFolderCatalogRevision(tx),
+                folders: [...(await queryFolders(tx))],
+                items: [...(await folderItemsWithActiveTargets(tx, items))],
+                revision: await queryFolderCatalogRevision(tx),
             };
         });
     }
 
-    folderCatalogRevision(): number {
-        return queryFolderCatalogRevision(this.#database);
+    async folderCatalogRevision(): Promise<number> {
+        return queryFolderCatalogRevision(this.#database.database);
     }
 
-    getFolder(folderId: string): Folder | undefined {
-        return queryFolder(this.#database, folderId);
+    async getFolder(folderId: string): Promise<Folder | undefined> {
+        return queryFolder(this.#database.database, folderId);
     }
 
-    getFolderItem(itemId: string): FolderItem | undefined {
-        return queryFolderItem(this.#database, itemId);
+    async getFolderItem(itemId: string): Promise<FolderItem | undefined> {
+        return queryFolderItem(this.#database.database, itemId);
     }
 
-    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem {
-        if (this.sharedFolderGroup(folderId) !== undefined) {
+    async createFolderItem(
+        folderId: string,
+        request: CreateFolderItemRequest,
+    ): Promise<FolderItem> {
+        if ((await this.sharedFolderGroup(folderId)) !== undefined) {
             throw new FolderError(
                 "shared_folder_contents_forbidden",
                 "A shared folder can contain only folders.",
@@ -169,9 +178,9 @@ export class FolderRepository {
             id: request.id ?? null,
             target: request.target,
         });
-        const applied = this.#itemReceipt(request.mutationId, "create", fingerprint);
+        const applied = await this.#itemReceipt(request.mutationId, "create", fingerprint);
         if (applied !== undefined) {
-            const item = this.getFolderItem(applied);
+            const item = await this.getFolderItem(applied);
             if (item !== undefined) return item;
         }
         const id =
@@ -187,16 +196,16 @@ export class FolderRepository {
                           );
                       }
                   })();
-        if (this.getFolderItem(id) !== undefined) {
+        if ((await this.getFolderItem(id)) !== undefined) {
             throw new FolderError("invalid_request", "That folder item ID is already in use.");
         }
-        if (this.getFolder(id) !== undefined) {
+        if ((await this.getFolder(id)) !== undefined) {
             throw new FolderError("invalid_request", "That folder item ID is already in use.");
         }
-        if (!queryFolderItemTargetExists(this.#database, request.target)) {
+        if (!(await queryFolderItemTargetExists(this.#database.database, request.target))) {
             throw new FolderError("target_not_found", "That folder item target was not found.");
         }
-        const siblings = queryFolderChildren(this.#database, folderId);
+        const siblings = await queryFolderChildren(this.#database.database, folderId);
         const appendedKey = generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null);
         let orderKey = appendedKey;
         if (request.afterId !== undefined) {
@@ -219,8 +228,8 @@ export class FolderRepository {
                 );
             }
         }
-        return this.#mutate((tx) => {
-            const outcome = folderItemCreate(tx, {
+        return this.#mutate(async (tx) => {
+            const outcome = await folderItemCreate(tx, {
                 folderId,
                 id,
                 now: this.#now(),
@@ -233,26 +242,26 @@ export class FolderRepository {
             if (outcome.outcome === "id_conflict") {
                 throw new FolderError("invalid_request", "That folder item ID is already in use.");
             }
-            this.#recordItemReceipt(tx, request.mutationId, "create", fingerprint, id);
-            this.#advanceItemAndPublish(tx, request.mutationId);
-            return queryFolderItem(tx, id)!;
+            await this.#recordItemReceipt(tx, request.mutationId, "create", fingerprint, id);
+            await this.#advanceItemAndPublish(tx, request.mutationId);
+            return (await queryFolderItem(tx, id))!;
         });
     }
 
-    moveFolderItem(
+    async moveFolderItem(
         itemId: string,
         request: MoveFolderItemRequest,
         expectedVersion?: number,
-    ): FolderItem | undefined {
+    ): Promise<FolderItem | undefined> {
         const fingerprint = JSON.stringify({ expectedVersion, itemId, request });
-        const applied = this.#itemReceipt(request.mutationId, "move", fingerprint);
+        const applied = await this.#itemReceipt(request.mutationId, "move", fingerprint);
         if (applied !== undefined) return this.getFolderItem(applied);
-        const current = this.getFolderItem(itemId);
+        const current = await this.getFolderItem(itemId);
         if (current === undefined || current.archivedAt !== undefined) return undefined;
         if (expectedVersion !== undefined && current.version !== expectedVersion) {
             throw new FolderError("version_conflict", "The folder item changed before it moved.");
         }
-        if (this.sharedFolderGroup(request.folderId) !== undefined) {
+        if ((await this.sharedFolderGroup(request.folderId)) !== undefined) {
             throw new FolderError(
                 "shared_folder_contents_forbidden",
                 "A shared folder can contain only folders.",
@@ -264,9 +273,9 @@ export class FolderRepository {
                 "A folder item cannot be placed after itself.",
             );
         }
-        const siblings = queryFolderChildren(this.#database, request.folderId).filter(
-            (child) => child.id !== itemId,
-        );
+        const siblings = (
+            await queryFolderChildren(this.#database.database, request.folderId)
+        ).filter((child) => child.id !== itemId);
         const placeholder =
             request.folderId === current.folderId
                 ? current
@@ -284,13 +293,13 @@ export class FolderRepository {
             );
         }
         if (request.folderId === current.folderId && orderKey === current.orderKey) {
-            this.#mutate((tx) =>
+            await this.#mutate(async (tx) =>
                 this.#recordItemReceipt(tx, request.mutationId, "move", fingerprint, itemId),
             );
             return current;
         }
-        return this.#mutate((tx) => {
-            const outcome = folderItemMove(
+        return this.#mutate(async (tx) => {
+            const outcome = await folderItemMove(
                 tx,
                 itemId,
                 request.folderId,
@@ -308,21 +317,21 @@ export class FolderRepository {
                 );
             }
             if (outcome.outcome === "item_not_found") return undefined;
-            this.#recordItemReceipt(tx, request.mutationId, "move", fingerprint, itemId);
-            this.#advanceItemAndPublish(tx, request.mutationId);
+            await this.#recordItemReceipt(tx, request.mutationId, "move", fingerprint, itemId);
+            await this.#advanceItemAndPublish(tx, request.mutationId);
             return queryFolderItem(tx, itemId);
         });
     }
 
-    archiveFolderItem(
+    async archiveFolderItem(
         itemId: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): FolderItem | undefined {
+    ): Promise<FolderItem | undefined> {
         const fingerprint = JSON.stringify({ expectedVersion, itemId });
-        const applied = this.#itemReceipt(mutationId, "archive", fingerprint);
+        const applied = await this.#itemReceipt(mutationId, "archive", fingerprint);
         if (applied !== undefined) return this.getFolderItem(applied);
-        const current = this.getFolderItem(itemId);
+        const current = await this.getFolderItem(itemId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && current.version !== expectedVersion) {
             throw new FolderError(
@@ -331,32 +340,32 @@ export class FolderRepository {
             );
         }
         if (current.archivedAt !== undefined) {
-            this.#mutate((tx) =>
+            await this.#mutate(async (tx) =>
                 this.#recordItemReceipt(tx, mutationId, "archive", fingerprint, itemId),
             );
             return current;
         }
-        return this.#mutate((tx) => {
-            const changed = folderItemArchive(tx, itemId, this.#now(), expectedVersion);
+        return this.#mutate(async (tx) => {
+            const changed = await folderItemArchive(tx, itemId, this.#now(), expectedVersion);
             if (changed === 0) {
                 throw new FolderError(
                     "version_conflict",
                     "The folder item changed before it was archived.",
                 );
             }
-            this.#recordItemReceipt(tx, mutationId, "archive", fingerprint, itemId);
-            this.#advanceItemAndPublish(tx, mutationId);
+            await this.#recordItemReceipt(tx, mutationId, "archive", fingerprint, itemId);
+            await this.#advanceItemAndPublish(tx, mutationId);
             return queryFolderItem(tx, itemId);
         });
     }
 
     /** Resolves one active folder through its enforced flat-storage boundary. */
-    activeFolderStoragePath(folderId: string): string {
-        const folder = this.getFolder(folderId);
+    async activeFolderStoragePath(folderId: string): Promise<string> {
+        const folder = await this.getFolder(folderId);
         if (folder === undefined || folder.archivedAt !== undefined) {
             throw new FolderError("folder_not_found", "That folder was not found.");
         }
-        if (this.sharedFolderGroup(folderId) !== undefined) {
+        if ((await this.sharedFolderGroup(folderId)) !== undefined) {
             throw new FolderError(
                 "shared_folder_contents_forbidden",
                 "A shared folder can contain only folders.",
@@ -366,8 +375,8 @@ export class FolderRepository {
     }
 
     /** Revalidates persisted storage even when its virtual folder is already archived. */
-    folderStoragePath(folderId: string): string {
-        const folder = this.getFolder(folderId);
+    async folderStoragePath(folderId: string): Promise<string> {
+        const folder = await this.getFolder(folderId);
         if (folder === undefined) {
             throw new FolderError("folder_not_found", "That folder was not found.");
         }
@@ -380,33 +389,43 @@ export class FolderRepository {
      * The client names what it creates, so repeating a request that already landed answers with the
      * folder the first attempt made instead of creating a second one.
      */
-    createFolder(request: CreateFolderRequest): Folder {
+    async createFolder(request: CreateFolderRequest): Promise<Folder> {
         const id = this.#folderId(request.id);
-        if (this.#wasMutationApplied(this.#database, request.mutationId, "create", id)) {
-            const applied = this.getFolder(id);
+        if (
+            await this.#wasMutationApplied(
+                this.#database.database,
+                request.mutationId,
+                "create",
+                id,
+            )
+        ) {
+            const applied = await this.getFolder(id);
             if (applied !== undefined) return applied;
         }
-        const existing = this.getFolder(id);
+        const existing = await this.getFolder(id);
         if (existing !== undefined) {
             this.#validateStorageDirectory(id, existing.path);
-            this.#rememberNoopMutation(request.mutationId, "create", id);
+            await this.#rememberNoopMutation(request.mutationId, "create", id);
             return existing;
         }
-        if (this.getFolderItem(id) !== undefined) {
+        if ((await this.getFolderItem(id)) !== undefined) {
             throw new FolderError("invalid_request", "That folder ID is already in use.");
         }
         const name = this.#folderName(request.name);
         if (request.parentId !== undefined) {
-            const parent = this.getFolder(request.parentId);
+            const parent = await this.getFolder(request.parentId);
             if (parent === undefined || parent.archivedAt !== undefined) {
                 throw new FolderError("parent_not_found", "That parent folder was not found.");
             }
-            const sharedGroupId = this.sharedFolderGroup(request.parentId);
+            const sharedGroupId = await this.sharedFolderGroup(request.parentId);
             const sharedRootId =
-                sharedGroupId === undefined ? undefined : this.sharedFolderRoot(sharedGroupId);
+                sharedGroupId === undefined
+                    ? undefined
+                    : await this.sharedFolderRoot(sharedGroupId);
             if (
                 sharedRootId !== undefined &&
-                this.sharedFolderState(sharedRootId).folders.length >= MAX_SHARED_FOLDER_NODES
+                (await this.sharedFolderState(sharedRootId)).folders.length >=
+                    MAX_SHARED_FOLDER_NODES
             ) {
                 throw new FolderError(
                     "invalid_request",
@@ -419,8 +438,8 @@ export class FolderRepository {
         const icon = request.icon === undefined ? undefined : this.#folderIcon(request.icon);
         let created: Folder;
         try {
-            created = this.#mutate((tx) => {
-                const outcome = folderCreate(tx, {
+            created = await this.#mutate(async (tx) => {
+                const outcome = await folderCreate(tx, {
                     ...(request.description === undefined
                         ? {}
                         : { description: request.description }),
@@ -433,14 +452,14 @@ export class FolderRepository {
                     ...(request.rules === undefined ? {} : { rules: request.rules }),
                 });
                 this.#throwForCreateOutcome(outcome);
-                const created = queryFolder(tx, id);
+                const created = await queryFolder(tx, id);
                 if (created === undefined) {
                     throw new FolderError(
                         "folder_not_found",
                         "The new folder could not be read back.",
                     );
                 }
-                this.#advanceAndPublish(tx, request.mutationId, "create", id);
+                await this.#advanceAndPublish(tx, request.mutationId, "create", id);
                 return created;
             });
         } catch (error) {
@@ -450,15 +469,22 @@ export class FolderRepository {
         return created;
     }
 
-    updateFolder(
+    async updateFolder(
         folderId: string,
         request: UpdateFolderRequest,
         expectedVersion?: number,
-    ): Folder | undefined {
-        if (this.#wasMutationApplied(this.#database, request.mutationId, "update", folderId)) {
+    ): Promise<Folder | undefined> {
+        if (
+            await this.#wasMutationApplied(
+                this.#database.database,
+                request.mutationId,
+                "update",
+                folderId,
+            )
+        ) {
             return this.getFolder(folderId);
         }
-        const current = this.getFolder(folderId);
+        const current = await this.getFolder(folderId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new FolderError(
@@ -478,11 +504,11 @@ export class FolderRepository {
             (name === undefined || name === current.name) &&
             (request.rules === undefined || (request.rules ?? undefined) === current.rules);
         if (unchanged) {
-            this.#rememberNoopMutation(request.mutationId, "update", folderId);
+            await this.#rememberNoopMutation(request.mutationId, "update", folderId);
             return current;
         }
-        const updated = this.#mutate((tx) => {
-            const changed = folderUpdate(
+        const updated = await this.#mutate(async (tx) => {
+            const changed = await folderUpdate(
                 tx,
                 folderId,
                 {
@@ -505,8 +531,8 @@ export class FolderRepository {
                 }
                 return queryFolder(tx, folderId);
             }
-            const folder = queryFolder(tx, folderId);
-            this.#advanceAndPublish(tx, request.mutationId, "update", folderId);
+            const folder = await queryFolder(tx, folderId);
+            await this.#advanceAndPublish(tx, request.mutationId, "update", folderId);
             return folder;
         });
         if (updated !== undefined) {
@@ -518,8 +544,10 @@ export class FolderRepository {
                 const affected =
                     request.name === undefined
                         ? [folderId]
-                        : collectSubtree(this.listFolders(), folderId).map((folder) => folder.id);
-                this.#onFolderContextChanged?.(affected);
+                        : collectSubtree(await this.listFolders(), folderId).map(
+                              (folder) => folder.id,
+                          );
+                await this.#onFolderContextChanged?.(affected);
             }
         }
         return updated;
@@ -531,15 +559,22 @@ export class FolderRepository {
      * Only the folder's parent and order key change; its storage directory stays where it is, and a
      * folder can never be dropped inside its own subtree.
      */
-    moveFolder(
+    async moveFolder(
         folderId: string,
         request: MoveFolderRequest,
         expectedVersion?: number,
-    ): Folder | undefined {
-        if (this.#wasMutationApplied(this.#database, request.mutationId, "move", folderId)) {
+    ): Promise<Folder | undefined> {
+        if (
+            await this.#wasMutationApplied(
+                this.#database.database,
+                request.mutationId,
+                "move",
+                folderId,
+            )
+        ) {
             return this.getFolder(folderId);
         }
-        const folders = this.listFolders();
+        const folders = await this.listFolders();
         const current = folders.find((folder) => folder.id === folderId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
@@ -561,24 +596,26 @@ export class FolderRepository {
                 throw new FolderError("parent_not_found", "That parent folder was not found.");
             }
             if (
-                this.sharedFolderGroup(parentId) !== undefined &&
-                queryFolderSubtreeHasContents(this.#database, folderId)
+                (await this.sharedFolderGroup(parentId)) !== undefined &&
+                (await queryFolderSubtreeHasContents(this.#database.database, folderId))
             ) {
                 throw new FolderError(
                     "shared_folder_contents_forbidden",
                     "A shared folder can contain only folders.",
                 );
             }
-            const targetGroupId = this.sharedFolderGroup(parentId);
-            const currentGroupId = this.sharedFolderGroup(folderId);
+            const targetGroupId = await this.sharedFolderGroup(parentId);
+            const currentGroupId = await this.sharedFolderGroup(folderId);
             const targetRootId =
-                targetGroupId === undefined ? undefined : this.sharedFolderRoot(targetGroupId);
+                targetGroupId === undefined
+                    ? undefined
+                    : await this.sharedFolderRoot(targetGroupId);
             if (targetRootId !== undefined && targetGroupId !== currentGroupId) {
                 const arrivingCount = collectSubtree(folders, folderId).filter(
                     (folder) => folder.archivedAt === undefined,
                 ).length;
                 if (
-                    this.sharedFolderState(targetRootId).folders.length + arrivingCount >
+                    (await this.sharedFolderState(targetRootId)).folders.length + arrivingCount >
                     MAX_SHARED_FOLDER_NODES
                 ) {
                     throw new FolderError(
@@ -592,17 +629,17 @@ export class FolderRepository {
             throw new FolderError("invalid_request", "A folder cannot be placed after itself.");
         }
         const orderKey = orderKeyForDrop(
-            queryFolderChildren(this.#database, parentId ?? null),
+            await queryFolderChildren(this.#database.database, parentId ?? null),
             current,
             parentId,
             request.afterId,
         );
         if (parentId === current.parentId && orderKey === current.orderKey) {
-            this.#rememberNoopMutation(request.mutationId, "move", folderId);
+            await this.#rememberNoopMutation(request.mutationId, "move", folderId);
             return current;
         }
-        const moved = this.#mutate((tx) => {
-            const outcome = folderMove(
+        const moved = await this.#mutate(async (tx) => {
+            const outcome = await folderMove(
                 tx,
                 folderId,
                 request.parentId,
@@ -612,8 +649,8 @@ export class FolderRepository {
             );
             switch (outcome.outcome) {
                 case "moved":
-                    const folder = queryFolder(tx, folderId);
-                    this.#advanceAndPublish(tx, request.mutationId, "move", folderId);
+                    const folder = await queryFolder(tx, folderId);
+                    await this.#advanceAndPublish(tx, request.mutationId, "move", folderId);
                     return folder;
                 case "folder_not_found":
                     return undefined;
@@ -636,23 +673,25 @@ export class FolderRepository {
             }
         });
         if (moved !== undefined && parentId !== current.parentId) {
-            this.#onFolderContextChanged?.(
-                collectSubtree(this.listFolders(), folderId).map((folder) => folder.id),
+            await this.#onFolderContextChanged?.(
+                collectSubtree(await this.listFolders(), folderId).map((folder) => folder.id),
             );
         }
         return moved;
     }
 
     /** Puts a folder away together with everything nested under it. */
-    archiveFolder(
+    async archiveFolder(
         folderId: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): Folder | undefined {
-        if (this.#wasMutationApplied(this.#database, mutationId, "archive", folderId)) {
+    ): Promise<Folder | undefined> {
+        if (
+            await this.#wasMutationApplied(this.#database.database, mutationId, "archive", folderId)
+        ) {
             return this.getFolder(folderId);
         }
-        const folders = this.listFolders();
+        const folders = await this.listFolders();
         const folder = folders.find((candidate) => candidate.id === folderId);
         if (folder === undefined) return undefined;
         if (folder.shared) {
@@ -671,31 +710,31 @@ export class FolderRepository {
             (candidate) => candidate.archivedAt === undefined,
         );
         if (subtree.length === 0) {
-            this.#rememberNoopMutation(mutationId, "archive", folderId);
+            await this.#rememberNoopMutation(mutationId, "archive", folderId);
             return folder;
         }
         let archivedSessionIds: readonly string[] = [];
-        const result = this.#mutate((tx) => {
-            archivedSessionIds = folderArchive(tx, folderId, this.#now()).sessionIds;
-            this.#advanceAndPublish(tx, mutationId, "archive", folderId);
+        const result = await this.#mutate(async (tx) => {
+            archivedSessionIds = (await folderArchive(tx, folderId, this.#now())).sessionIds;
+            await this.#advanceAndPublish(tx, mutationId, "archive", folderId);
             return queryFolder(tx, folderId);
         });
-        this.#onSessionsArchived?.(archivedSessionIds);
+        await this.#onSessionsArchived?.(archivedSessionIds);
         return result;
     }
 
     /** Files one chat into a folder, or takes it back out into Unsorted with `null`. */
-    setSessionFolder(
+    async setSessionFolder(
         sessionId: string,
         folderId: string | null,
         afterId?: string | null,
         mutationId?: string,
-    ): SessionScopeMove {
+    ): Promise<SessionScopeMove> {
         const now = this.#now();
         if (folderId === null) {
             const storage = this.#privateUnsortedDirectory(sessionId);
             try {
-                return this.#mutate((tx) =>
+                return await this.#mutate((tx) =>
                     sessionMoveScope(tx, {
                         cwd: storage.path,
                         ...(afterId === undefined ? {} : { afterId }),
@@ -712,13 +751,13 @@ export class FolderRepository {
                 throw error;
             }
         }
-        if (this.sharedFolderGroup(folderId) !== undefined) {
+        if ((await this.sharedFolderGroup(folderId)) !== undefined) {
             throw new FolderError(
                 "shared_folder_contents_forbidden",
                 "A shared folder can contain only folders.",
             );
         }
-        const path = this.activeFolderStoragePath(folderId);
+        const path = await this.activeFolderStoragePath(folderId);
         return this.#mutate((tx) =>
             sessionMoveScope(tx, {
                 cwd: path,
@@ -732,8 +771,8 @@ export class FolderRepository {
     }
 
     /** The canonical, path-free current state of one root and every active folder below it. */
-    sharedFolderState(rootFolderId: string): SharedFolderState {
-        const folders = collectSubtree(this.listFolders(), rootFolderId).filter(
+    async sharedFolderState(rootFolderId: string): Promise<SharedFolderState> {
+        const folders = collectSubtree(await this.listFolders(), rootFolderId).filter(
             (folder) => folder.archivedAt === undefined,
         );
         if (folders.length === 0 || folders[0]?.id !== rootFolderId) {
@@ -763,20 +802,20 @@ export class FolderRepository {
         };
     }
 
-    sharedFolderGroup(folderId: string): string | undefined {
-        return queryFolderSharedGroup(this.#database, folderId);
+    async sharedFolderGroup(folderId: string): Promise<string | undefined> {
+        return await queryFolderSharedGroup(this.#database.database, folderId);
     }
 
-    sharedFolderRoot(groupId: string): string | undefined {
-        return querySharedFolderRoot(this.#database, groupId);
+    async sharedFolderRoot(groupId: string): Promise<string | undefined> {
+        return await querySharedFolderRoot(this.#database.database, groupId);
     }
 
-    assertFolderShareable(folderId: string): void {
-        const problem = queryFolderShareRootProblem(this.#database, folderId);
+    async assertFolderShareable(folderId: string): Promise<void> {
+        const problem = await queryFolderShareRootProblem(this.#database.database, folderId);
         switch (problem) {
             case undefined:
             case "not_root":
-                if (queryFolderSubtreeHasContents(this.#database, folderId)) {
+                if (await queryFolderSubtreeHasContents(this.#database.database, folderId)) {
                     throw new FolderError(
                         "shared_folder_contents_forbidden",
                         "A shared folder can contain only folders.",
@@ -796,21 +835,21 @@ export class FolderRepository {
     }
 
     /** Pins an existing empty root to one Murmur group. */
-    markFolderShared(folderId: string, groupId: string): Folder {
-        if (this.sharedFolderGroup(folderId) === groupId) {
-            const current = this.getFolder(folderId);
+    async markFolderShared(folderId: string, groupId: string): Promise<Folder> {
+        if ((await this.sharedFolderGroup(folderId)) === groupId) {
+            const current = await this.getFolder(folderId);
             if (current !== undefined) return current;
         }
-        const result = this.#mutate((tx) => {
-            const outcome = folderMarkShared(tx, folderId, groupId, this.#now());
+        const result = await this.#mutate(async (tx) => {
+            const outcome = await folderMarkShared(tx, folderId, groupId, this.#now());
             if (outcome.outcome === "marked") {
-                this.#advanceAndPublish(tx, undefined, "update", folderId);
+                await this.#advanceAndPublish(tx, undefined, "update", folderId);
             }
             return outcome;
         });
         switch (result.outcome) {
             case "marked":
-                return this.getFolder(folderId)!;
+                return (await this.getFolder(folderId))!;
             case "folder_not_found":
                 throw new FolderError("folder_not_found", "That folder was not found.");
             case "not_root":
@@ -838,19 +877,19 @@ export class FolderRepository {
      * the first unapplied node, while the Murmur delivery is acknowledged only after the final
      * state has landed.
      */
-    applySharedFolderState(groupId: string, state: SharedFolderState): Folder {
+    async applySharedFolderState(groupId: string, state: SharedFolderState): Promise<Folder> {
         validateSharedFolderState(state);
-        let rootId = this.sharedFolderRoot(groupId);
+        let rootId = await this.sharedFolderRoot(groupId);
         const rootNode = state.folders[0]!;
         if (rootId === undefined) {
-            if (this.getFolder(rootNode.id) !== undefined) {
+            if ((await this.getFolder(rootNode.id)) !== undefined) {
                 throw new FolderError(
                     "shared_folder_boundary",
                     "The incoming shared folder conflicts with a local folder.",
                 );
             }
-            this.createFolder(folderRequest(rootNode));
-            this.markFolderShared(rootNode.id, groupId);
+            await this.createFolder(folderRequest(rootNode));
+            await this.markFolderShared(rootNode.id, groupId);
             rootId = rootNode.id;
         }
         if (rootId !== state.rootId) {
@@ -860,12 +899,12 @@ export class FolderRepository {
             );
         }
 
-        const before = collectSubtree(this.listFolders(), rootId);
+        const before = collectSubtree(await this.listFolders(), rootId);
         const beforeIds = new Set(before.map((folder) => folder.id));
         for (const node of state.folders) {
-            const current = this.getFolder(node.id);
+            const current = await this.getFolder(node.id);
             if (current === undefined) {
-                this.createFolder(folderRequest(node));
+                await this.createFolder(folderRequest(node));
                 continue;
             }
             if (!beforeIds.has(node.id)) {
@@ -875,19 +914,28 @@ export class FolderRepository {
                 );
             }
             if (current.archivedAt !== undefined) {
-                const siblings = queryFolderChildren(this.#database, node.parentId ?? null);
+                const siblings = await queryFolderChildren(
+                    this.#database.database,
+                    node.parentId ?? null,
+                );
                 const orderKey = generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null);
-                this.#mutate((tx) => {
+                await this.#mutate(async (tx) => {
                     if (
-                        folderRestoreShared(tx, node.id, node.parentId!, orderKey, this.#now()) > 0
+                        (await folderRestoreShared(
+                            tx,
+                            node.id,
+                            node.parentId!,
+                            orderKey,
+                            this.#now(),
+                        )) > 0
                     ) {
-                        this.#advanceAndPublish(tx, undefined, "update", node.id);
+                        await this.#advanceAndPublish(tx, undefined, "update", node.id);
                     }
                 });
             }
-            const active = this.getFolder(node.id)!;
+            const active = (await this.getFolder(node.id))!;
             const patch = folderPatch(active, node);
-            if (Object.keys(patch).length > 0) this.updateFolder(node.id, patch);
+            if (Object.keys(patch).length > 0) await this.updateFolder(node.id, patch);
         }
 
         const children = new Map<string, SharedFolderNode[]>();
@@ -902,27 +950,27 @@ export class FolderRepository {
             );
             let afterId: string | null = null;
             for (const node of siblings) {
-                const current = this.getFolder(node.id);
+                const current = await this.getFolder(node.id);
                 if (current === undefined) continue;
-                this.moveFolder(node.id, { afterId, parentId }, current.version);
+                await this.moveFolder(node.id, { afterId, parentId }, current.version);
                 afterId = node.id;
             }
         }
 
         const incomingIds = new Set(state.folders.map((folder) => folder.id));
-        const removed = collectSubtree(this.listFolders(), rootId).filter(
+        const removed = collectSubtree(await this.listFolders(), rootId).filter(
             (folder) => folder.id !== rootId && !incomingIds.has(folder.id),
         );
         const removedIds = new Set(removed.map((folder) => folder.id));
         for (const folder of removed) {
             if (folder.parentId !== undefined && removedIds.has(folder.parentId)) continue;
-            this.archiveFolder(folder.id, folder.version);
+            await this.archiveFolder(folder.id, folder.version);
         }
-        return this.getFolder(rootId)!;
+        return (await this.getFolder(rootId))!;
     }
 
-    sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean {
-        const receipt = querySessionMutationReceipt(this.#database, {
+    async sessionScopeMutationApplied(sessionId: string, mutationId: string): Promise<boolean> {
+        const receipt = await querySessionMutationReceipt(this.#database.database, {
             action: SESSION_SCOPE_MUTATION_ACTION,
             mutationId,
             sessionId,
@@ -936,9 +984,9 @@ export class FolderRepository {
         return receipt === "applied";
     }
 
-    rememberSessionScopeMutation(sessionId: string, mutationId: string): void {
-        this.#mutate((tx) => {
-            const receipt = querySessionMutationReceipt(tx, {
+    async rememberSessionScopeMutation(sessionId: string, mutationId: string): Promise<void> {
+        await this.#mutate(async (tx) => {
+            const receipt = await querySessionMutationReceipt(tx, {
                 action: SESSION_SCOPE_MUTATION_ACTION,
                 mutationId,
                 sessionId,
@@ -950,7 +998,7 @@ export class FolderRepository {
                     "That mutation ID was already used for another session change.",
                 );
             }
-            sessionRecordMutationReceipt(tx, {
+            await sessionRecordMutationReceipt(tx, {
                 action: SESSION_SCOPE_MUTATION_ACTION,
                 mutationId,
                 now: this.#now(),
@@ -1129,13 +1177,13 @@ export class FolderRepository {
         return name;
     }
 
-    #itemReceipt(
+    async #itemReceipt(
         mutationId: string | undefined,
         action: string,
         fingerprint: string,
-    ): string | undefined {
+    ): Promise<string | undefined> {
         if (mutationId === undefined) return undefined;
-        const receipt = queryFolderItemMutationReceipt(this.#database, mutationId);
+        const receipt = await queryFolderItemMutationReceipt(this.#database.database, mutationId);
         if (receipt === undefined) return undefined;
         if (receipt.action !== action || receipt.fingerprint !== fingerprint) {
             throw new FolderError(
@@ -1146,15 +1194,15 @@ export class FolderRepository {
         return receipt.itemId;
     }
 
-    #recordItemReceipt(
+    async #recordItemReceipt(
         tx: TX,
         mutationId: string | undefined,
         action: string,
         fingerprint: string,
         itemId: string,
-    ): void {
+    ): Promise<void> {
         if (mutationId === undefined) return;
-        recordFolderItemMutationReceipt(tx, {
+        await recordFolderItemMutationReceipt(tx, {
             action,
             fingerprint,
             itemId,
@@ -1174,20 +1222,20 @@ export class FolderRepository {
         return icon;
     }
 
-    #mutate<T>(body: (tx: TX) => T): T {
+    async #mutate<T>(body: (tx: TX) => Promise<T>): Promise<T> {
         if (this.#transactionRunner !== undefined) return this.#transactionRunner(body);
         return inTx(this.#database, body);
     }
 
-    #advanceAndPublish(
+    async #advanceAndPublish(
         tx: TX,
         mutationId: string | undefined,
         action: FolderMutationAction,
         folderId: string,
-    ): number {
-        this.#recordMutation(tx, mutationId, action, folderId);
-        const revision = advanceFolderCatalogRevision(tx);
-        this.#onEvent?.({
+    ): Promise<number> {
+        await this.#recordMutation(tx, mutationId, action, folderId);
+        const revision = await advanceFolderCatalogRevision(tx);
+        await this.#onEvent?.({
             createdAt: this.#now(),
             data: {
                 ...(mutationId === undefined ? {} : { mutationId }),
@@ -1199,9 +1247,9 @@ export class FolderRepository {
         return revision;
     }
 
-    #advanceItemAndPublish(tx: TX, mutationId: string | undefined): number {
-        const revision = advanceFolderCatalogRevision(tx);
-        this.#onEvent?.({
+    async #advanceItemAndPublish(tx: TX, mutationId: string | undefined): Promise<number> {
+        const revision = await advanceFolderCatalogRevision(tx);
+        await this.#onEvent?.({
             createdAt: this.#now(),
             data: {
                 ...(mutationId === undefined ? {} : { mutationId }),
@@ -1213,55 +1261,44 @@ export class FolderRepository {
         return revision;
     }
 
-    #rememberNoopMutation(
+    async #rememberNoopMutation(
         mutationId: string | undefined,
         action: FolderMutationAction,
         folderId: string,
-    ): void {
+    ): Promise<void> {
         if (mutationId === undefined) return;
-        this.#mutate((tx) => {
-            if (!this.#wasMutationApplied(tx, mutationId, action, folderId)) {
-                this.#recordMutation(tx, mutationId, action, folderId);
+        await this.#mutate(async (tx) => {
+            if (!(await this.#wasMutationApplied(tx, mutationId, action, folderId))) {
+                await this.#recordMutation(tx, mutationId, action, folderId);
             }
         });
     }
 
-    #recordMutation(
+    async #recordMutation(
         tx: TX,
         mutationId: string | undefined,
         action: FolderMutationAction,
         folderId: string,
-    ): void {
+    ): Promise<void> {
         if (mutationId === undefined) return;
-        tx.run(sql`
-            INSERT INTO folder_mutations (mutation_id, action, folder_id, created_at_ms)
-            VALUES (${mutationId}, ${action}, ${folderId}, ${this.#now()})
-        `);
-        tx.run(sql`
-            DELETE FROM folder_mutations
-            WHERE mutation_id IN (
-                SELECT mutation_id
-                FROM folder_mutations
-                ORDER BY created_at_ms DESC, mutation_id DESC
-                LIMIT -1 OFFSET ${MAX_FOLDER_MUTATION_RECEIPTS}
-            )
-        `);
+        await recordFolderMutationReceipt(tx, {
+            action,
+            folderId,
+            mutationId,
+            now: this.#now(),
+        });
     }
 
-    #wasMutationApplied(
+    async #wasMutationApplied(
         tx: TX,
         mutationId: string | undefined,
         action: FolderMutationAction,
         folderId: string,
-    ): boolean {
+    ): Promise<boolean> {
         if (mutationId === undefined) return false;
-        const receipt = tx.get<{ action: string; folder_id: string }>(sql`
-            SELECT action, folder_id
-            FROM folder_mutations
-            WHERE mutation_id = ${mutationId}
-        `);
+        const receipt = await queryFolderMutationReceipt(tx, mutationId);
         if (receipt === undefined) return false;
-        if (receipt.action !== action || receipt.folder_id !== folderId) {
+        if (receipt.action !== action || receipt.folderId !== folderId) {
             throw new FolderError(
                 "invalid_request",
                 "That mutation ID was already used for a different folder change.",

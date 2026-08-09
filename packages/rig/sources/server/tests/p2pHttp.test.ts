@@ -80,7 +80,7 @@ async function startServer(p2pStatus?: () => P2pStatus): Promise<{
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
-    const server = createProtocolHttpServer({
+    const server = await createProtocolHttpServer({
         ...(p2pStatus === undefined ? {} : { p2pStatus }),
         token: "test-token",
     });

@@ -55,9 +55,9 @@ describe("InMemorySession subagent usage", () => {
             },
         });
 
-        const first = session.submit({ text: "First turn." });
+        const first = await session.submit({ text: "First turn." });
         await expect(session.waitForRun(first.runId)).resolves.toEqual({ status: "completed" });
-        const second = session.submit({ text: "Second turn." });
+        const second = await session.submit({ text: "Second turn." });
         await expect(session.waitForRun(second.runId)).resolves.toEqual({ status: "completed" });
 
         expect(session.subagentSummary().usage).toMatchObject({

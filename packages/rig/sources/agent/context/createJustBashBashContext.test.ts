@@ -48,7 +48,9 @@ describe("createJustBashBashContext", () => {
     it("reports an unobserved background command exit", async () => {
         const context = createJustBashBashContext(new Bash({ cwd: "/workspace" }), "/workspace");
         const exits: BashSessionExit[] = [];
-        context.setSessionExitListener?.((exit) => exits.push(exit));
+        context.setSessionExitListener?.((exit) => {
+            exits.push(exit);
+        });
 
         await context.startSession({ command: "echo finished" });
 

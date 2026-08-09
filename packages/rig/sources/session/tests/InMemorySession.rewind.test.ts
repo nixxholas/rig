@@ -13,11 +13,11 @@ import {
 } from "../InMemorySession.js";
 
 describe("InMemorySession rewind", () => {
-    it("removes the selected user turn and everything after it", () => {
-        const deleteMessagesFrom = vi.fn();
+    it("removes the selected user turn and everything after it", async () => {
+        const deleteMessagesFrom = vi.fn(async () => undefined);
         const session = createRestoredSession(deleteMessagesFrom);
 
-        const result = session.rewind("user-2");
+        const result = await session.rewind("user-2");
 
         expect(result.message).toMatchObject({ id: "user-2", role: "user" });
         expect(session.state().totalTokens).toBe(0);
@@ -45,10 +45,10 @@ describe("InMemorySession rewind", () => {
         expect(restarted.snapshot().permissionReviews).toEqual([]);
     });
 
-    it("invalidates the current context when the model changes", () => {
+    it("invalidates the current context when the model changes", async () => {
         const session = createRestoredSession(vi.fn());
 
-        session.changeModel({ modelId: "test/next-model", providerId: "test" });
+        await session.changeModel({ modelId: "test/next-model", providerId: "test" });
 
         expect(session.state().totalTokens).toBe(0);
         expect(session.snapshot().sessionTokenCount).toEqual({
@@ -57,20 +57,20 @@ describe("InMemorySession rewind", () => {
         });
     });
 
-    it("rejects a message that is not a visible user turn", () => {
+    it("rejects a message that is not a visible user turn", async () => {
         const session = createRestoredSession(vi.fn());
 
-        expect(() => session.rewind("agent-1")).toThrow(
+        await expect(session.rewind("agent-1")).rejects.toThrow(
             "The selected user message is no longer available.",
         );
-        expect(() => session.rewind("missing")).toThrow(
+        await expect(session.rewind("missing")).rejects.toThrow(
             "The selected user message is no longer available.",
         );
     });
 });
 
 function createRestoredSession(
-    deleteMessagesFrom: (sessionId: string, position: number) => void,
+    deleteMessagesFrom: (sessionId: string, position: number) => Promise<void>,
     events?: readonly SessionEvent[],
 ) {
     const model = defineModel({

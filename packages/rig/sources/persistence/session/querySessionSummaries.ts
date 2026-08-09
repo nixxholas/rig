@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type {
@@ -10,7 +11,7 @@ import type {
 import { parsePermissionMode } from "../../permissions/index.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import { summarizeDockerExecution } from "../../execution/index.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import {
     readNumber,
     readOptionalNumber,
@@ -19,12 +20,13 @@ import {
 } from "./impl/sqliteRow.js";
 import { sessionScopeFromRow } from "./impl/sessionScope.js";
 
-export function querySessionSummaries(
-    tx: TX,
+export async function querySessionSummaries(
+    tx: DatabaseScope,
     activeOnly: boolean,
     options: { limit?: number },
-): readonly SessionSummary[] {
-    const rows = tx.all<Record<string, unknown>>(sql`
+): Promise<readonly SessionSummary[]> {
+    return await inDatabase(tx, async (tx) => {
+        const rows = await tx.all<Record<string, unknown>>(sql`
         SELECT listed_sessions.*
         FROM (
             SELECT
@@ -50,74 +52,82 @@ export function querySessionSummaries(
         LIMIT ${options.limit ?? (activeOnly ? -1 : 500)}
     `);
 
-    return rows.map((row) => {
-        const effort = readOptionalString(row, "effort");
-        const serviceTier = readOptionalString(row, "service_tier");
-        const title = readOptionalString(row, "title");
-        const titleError = readOptionalString(row, "title_error");
-        const recap = readOptionalString(row, "recap");
-        const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
-        const metadataUpdatedAt = readOptionalNumber(row, "metadata_updated_at_ms");
-        const metadataRunId = readOptionalString(row, "metadata_run_id");
-        const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
-        const lastEventId = readOptionalString(row, "last_event_id");
-        const profileId = readOptionalString(row, "profile_id");
-        const interruptionJson = readOptionalString(row, "interruption_json");
-        const draft = readOptionalString(row, "draft");
-        const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
-        const dockerJson = readOptionalString(row, "docker_json");
-        const docker =
-            dockerJson === undefined
-                ? undefined
-                : (JSON.parse(dockerJson) as DockerExecutionConfig);
-        const unreadReason = readOptionalString(row, "unread_reason");
-        const unreadSince = readOptionalNumber(row, "unread_since_ms");
-        const scope = sessionScopeFromRow(row);
-        // An empty stored key means the session has no place in an ordered
-        // list, which the protocol says by leaving the position out.
-        const orderKey = readString(row, "order_key");
-        return {
-            id: readString(row, "id"),
-            ownerInstanceId: readString(row, "owner_instance_id"),
-            ...(profileId === undefined ? {} : { profileId }),
-            archived: readNumber(row, "archived") !== 0,
-            scope,
-            ...(scope.kind === "project" || scope.kind === "workspace"
-                ? { projectId: scope.projectId }
-                : {}),
-            ...(scope.kind === "workspace" ? { workspaceId: scope.workspaceId } : {}),
-            ...(scope.kind === "folder" ? { folderId: scope.folderId } : {}),
-            ...(orderKey === "" ? {} : { orderKey }),
-            trackUnread: readNumber(row, "track_unread") !== 0,
-            ...(unreadReason !== undefined && unreadSince !== undefined
-                ? { unread: { reason: unreadReason as SessionUnreadReason, since: unreadSince } }
-                : {}),
-            cwd: readString(row, "cwd"),
-            ...(draft === undefined ? {} : { draft }),
-            ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
-            providerId: readString(row, "provider_id"),
-            modelId: readString(row, "model_id"),
-            permissionMode: parsePermissionMode(readString(row, "permission_mode")),
-            environment: summarizeDockerExecution(docker),
-            ...(effort !== undefined ? { effort } : {}),
-            ...(serviceTier === "fast" ? { serviceTier } : {}),
-            status: readString(row, "status") as SessionSummary["status"],
-            titleStatus: readString(row, "title_status") as SessionTitleStatus,
-            createdAt: readNumber(row, "created_at_ms"),
-            updatedAt: readNumber(row, "updated_at_ms"),
-            ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
-            ...(lastEventId !== undefined ? { lastEventId } : {}),
-            ...(title !== undefined ? { title } : {}),
-            ...(titleError !== undefined ? { titleError } : {}),
-            ...(recap !== undefined ? { recap } : {}),
-            ...(sessionTokenCountJson === undefined
-                ? {}
-                : { sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount }),
-            ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
-            ...(metadataRunId !== undefined ? { metadataRunId } : {}),
-            ...(interruptionJson === undefined
-                ? {}
-                : { interruption: JSON.parse(interruptionJson) as SessionInterruption }),
-        };
+        return rows.map((row) => {
+            const effort = readOptionalString(row, "effort");
+            const serviceTier = readOptionalString(row, "service_tier");
+            const title = readOptionalString(row, "title");
+            const titleError = readOptionalString(row, "title_error");
+            const recap = readOptionalString(row, "recap");
+            const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
+            const metadataUpdatedAt = readOptionalNumber(row, "metadata_updated_at_ms");
+            const metadataRunId = readOptionalString(row, "metadata_run_id");
+            const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
+            const lastEventId = readOptionalString(row, "last_event_id");
+            const profileId = readOptionalString(row, "profile_id");
+            const interruptionJson = readOptionalString(row, "interruption_json");
+            const draft = readOptionalString(row, "draft");
+            const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
+            const dockerJson = readOptionalString(row, "docker_json");
+            const docker =
+                dockerJson === undefined
+                    ? undefined
+                    : (JSON.parse(dockerJson) as DockerExecutionConfig);
+            const unreadReason = readOptionalString(row, "unread_reason");
+            const unreadSince = readOptionalNumber(row, "unread_since_ms");
+            const scope = sessionScopeFromRow(row);
+            // An empty stored key means the session has no place in an ordered
+            // list, which the protocol says by leaving the position out.
+            const orderKey = readString(row, "order_key");
+            return {
+                id: readString(row, "id"),
+                ownerInstanceId: readString(row, "owner_instance_id"),
+                ...(profileId === undefined ? {} : { profileId }),
+                archived: readNumber(row, "archived") !== 0,
+                scope,
+                ...(scope.kind === "project" || scope.kind === "workspace"
+                    ? { projectId: scope.projectId }
+                    : {}),
+                ...(scope.kind === "workspace" ? { workspaceId: scope.workspaceId } : {}),
+                ...(scope.kind === "folder" ? { folderId: scope.folderId } : {}),
+                ...(orderKey === "" ? {} : { orderKey }),
+                trackUnread: readNumber(row, "track_unread") !== 0,
+                ...(unreadReason !== undefined && unreadSince !== undefined
+                    ? {
+                          unread: {
+                              reason: unreadReason as SessionUnreadReason,
+                              since: unreadSince,
+                          },
+                      }
+                    : {}),
+                cwd: readString(row, "cwd"),
+                ...(draft === undefined ? {} : { draft }),
+                ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
+                providerId: readString(row, "provider_id"),
+                modelId: readString(row, "model_id"),
+                permissionMode: parsePermissionMode(readString(row, "permission_mode")),
+                environment: summarizeDockerExecution(docker),
+                ...(effort !== undefined ? { effort } : {}),
+                ...(serviceTier === "fast" ? { serviceTier } : {}),
+                status: readString(row, "status") as SessionSummary["status"],
+                titleStatus: readString(row, "title_status") as SessionTitleStatus,
+                createdAt: readNumber(row, "created_at_ms"),
+                updatedAt: readNumber(row, "updated_at_ms"),
+                ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
+                ...(lastEventId !== undefined ? { lastEventId } : {}),
+                ...(title !== undefined ? { title } : {}),
+                ...(titleError !== undefined ? { titleError } : {}),
+                ...(recap !== undefined ? { recap } : {}),
+                ...(sessionTokenCountJson === undefined
+                    ? {}
+                    : {
+                          sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount,
+                      }),
+                ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
+                ...(metadataRunId !== undefined ? { metadataRunId } : {}),
+                ...(interruptionJson === undefined
+                    ? {}
+                    : { interruption: JSON.parse(interruptionJson) as SessionInterruption }),
+            };
+        });
     });
 }

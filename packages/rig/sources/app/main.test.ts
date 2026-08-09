@@ -32,7 +32,7 @@ describe("main command dispatch", () => {
         vi.mocked(readPackageVersion).mockClear();
         vi.mocked(runHappyAuthCommand).mockReset();
         vi.mocked(runRigInspection).mockReset();
-        vi.mocked(runRigInspection).mockReturnValue({
+        vi.mocked(runRigInspection).mockResolvedValue({
             cliProtocolVersion: 5,
             cliVersion: "1.2.3",
             data: { status: "absent" },

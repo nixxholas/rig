@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function rigDataIdentityNamedChecks(database: SessionDatabase): void {
-    database.run(
+export async function rigDataIdentityNamedChecks(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`CREATE TABLE rig_data_identity_next (
             singleton INTEGER NOT NULL PRIMARY KEY
                 CONSTRAINT rig_data_identity_singleton CHECK (singleton = 1),
@@ -12,10 +12,10 @@ export function rigDataIdentityNamedChecks(database: SessionDatabase): void {
                 CONSTRAINT rig_data_identity_format_version CHECK (format_version = 1)
         )`),
     );
-    database.run(
+    await database.run(
         sql.raw(`INSERT INTO rig_data_identity_next (singleton, epoch, format_version)
             SELECT singleton, epoch, format_version FROM rig_data_identity`),
     );
-    database.run(sql.raw("DROP TABLE rig_data_identity"));
-    database.run(sql.raw("ALTER TABLE rig_data_identity_next RENAME TO rig_data_identity"));
+    await database.run(sql.raw("DROP TABLE rig_data_identity"));
+    await database.run(sql.raw("ALTER TABLE rig_data_identity_next RENAME TO rig_data_identity"));
 }

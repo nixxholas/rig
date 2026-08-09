@@ -1,11 +1,11 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /** Represents slot authors as typed agents or plugins while preserving every existing agent row. */
-export function slotEntryAuthors(database: SessionDatabase): void {
-    database.run(sql.raw("ALTER TABLE slot_entries RENAME TO slot_entries_agent_authors"));
-    database.run(
+export async function slotEntryAuthors(database: SessionDatabase): Promise<void> {
+    await database.run(sql.raw("ALTER TABLE slot_entries RENAME TO slot_entries_agent_authors"));
+    await database.run(
         sql.raw(`
         CREATE TABLE slot_entries (
             id TEXT NOT NULL PRIMARY KEY,
@@ -25,7 +25,7 @@ export function slotEntryAuthors(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         INSERT INTO slot_entries (
             id,
@@ -61,5 +61,5 @@ export function slotEntryAuthors(database: SessionDatabase): void {
         FROM slot_entries_agent_authors
     `),
     );
-    database.run(sql.raw("DROP TABLE slot_entries_agent_authors"));
+    await database.run(sql.raw("DROP TABLE slot_entries_agent_authors"));
 }

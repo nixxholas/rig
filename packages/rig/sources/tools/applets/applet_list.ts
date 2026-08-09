@@ -11,8 +11,8 @@ export const appletListTool = defineTool({
         "List every applet with its description, purpose, author session, current version, and full version history.",
     arguments: Type.Object({}, { additionalProperties: false }),
     returnType: Type.Object({ applets: Type.Array(appletSchema) }, { additionalProperties: false }),
-    execute: (_args, context): { applets: Applet[] } => ({
-        applets: [...requireSlots(context).listApplets()],
+    execute: async (_args, context): Promise<{ applets: Applet[] }> => ({
+        applets: [...(await requireSlots(context).listApplets())],
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>

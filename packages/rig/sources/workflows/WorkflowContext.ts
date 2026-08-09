@@ -53,8 +53,8 @@ export interface LaunchWorkflowRequest {
     description: string;
     execute(options: {
         onAgentCall(): void;
-        onAgentResult(index: number, result: WorkflowAgentCacheEntry): void;
-        onCheckpoint(checkpoint: WorkflowCheckpoint): void;
+        onAgentResult(index: number, result: WorkflowAgentCacheEntry): void | Promise<void>;
+        onCheckpoint(checkpoint: WorkflowCheckpoint): void | Promise<void>;
         onLog(message: string): void;
         resumeAgentCalls: readonly (WorkflowAgentCacheEntry | undefined)[];
         resumeCheckpoint?: WorkflowCheckpoint;

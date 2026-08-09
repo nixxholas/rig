@@ -61,30 +61,30 @@ export interface AgentSessionRepository {
         request: CreateSessionRequest,
         metadata: SessionAgentMetadata,
         contextMessages?: readonly Message[],
-    ): InMemorySession;
+    ): Promise<InMemorySession>;
     createDelegatedSession?(
         request: CreateSessionRequest,
         metadata: SessionAgentMetadata,
         id: string,
-    ): InMemorySession;
-    configureWorkspaceRequest?(request: CreateSessionRequest): CreateSessionRequest;
+    ): Promise<InMemorySession>;
+    configureWorkspaceRequest?(request: CreateSessionRequest): Promise<CreateSessionRequest>;
     findByAgentId?(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
-    listProjects?(): readonly Project[];
+    listProjects?(): Promise<readonly Project[]>;
     registerProject?(path: string): Promise<Project>;
-    listProjectWorkspaces?(projectId: string): readonly ProjectWorkspace[];
+    listProjectWorkspaces?(projectId: string): Promise<readonly ProjectWorkspace[]>;
     listProjectSessions?(target: {
         projectId: string;
         workspaceId?: string;
-    }): readonly AgentWorkspaceSession[];
+    }): Promise<readonly AgentWorkspaceSession[]>;
     queryAgentTreeUsage?(sessionId: string): AgentTreeUsage | undefined;
     ownedWorkspace?(
         ownerSessionId: string,
         projectId: string,
         workspaceId: string,
-    ): ProjectWorkspace | undefined;
-    workspace?(projectId: string, workspaceId: string): ProjectWorkspace | undefined;
+    ): Promise<ProjectWorkspace | undefined>;
+    workspace?(projectId: string, workspaceId: string): Promise<ProjectWorkspace | undefined>;
     waitForWorkspaceReady?(
         projectId: string,
         workspaceId: string,
@@ -94,7 +94,7 @@ export interface AgentSessionRepository {
     scheduleSessionTransfer?(
         sessionId: string,
         targetWorkspaceId: string,
-    ): AgentSessionTransferSchedule;
+    ): Promise<AgentSessionTransferSchedule>;
 }
 
 export interface AgentSessionManagerOptions {
@@ -224,11 +224,11 @@ export class AgentSessionManager {
         await complete(sessionId, targetWorkspaceId);
     }
 
-    listProjects(sessionId: string): readonly AgentProject[] {
+    async listProjects(sessionId: string): Promise<readonly AgentProject[]> {
         const list = this.#repository.listProjects;
         if (list === undefined) throw new Error("This session cannot list projects.");
         const currentProjectId = codeSessionIdentity(this.#current(sessionId)).projectId;
-        return list().map((project) => ({
+        return (await list()).map((project) => ({
             current: project.id === currentProjectId,
             id: project.id,
             name: project.name,
@@ -248,26 +248,26 @@ export class AgentSessionManager {
         };
     }
 
-    listWorkspaces(
+    async listWorkspaces(
         sessionId: string,
         projectId: string | undefined,
         options: { crossWorkspace: boolean },
-    ): readonly AgentWorkspace[] {
+    ): Promise<readonly AgentWorkspace[]> {
         const list = this.#repository.listProjectWorkspaces;
         if (list === undefined) throw new Error("This session cannot list workspaces.");
         const target = this.#targetProjectId(sessionId, projectId, options);
-        return list(target).map((workspace) => this.#agentWorkspace(sessionId, workspace));
+        return (await list(target)).map((workspace) => this.#agentWorkspace(sessionId, workspace));
     }
 
-    listSessions(
+    async listSessions(
         sessionId: string,
         target: { projectId?: string; workspaceId?: string },
         options: { crossWorkspace: boolean },
-    ): readonly AgentWorkspaceSession[] {
+    ): Promise<readonly AgentWorkspaceSession[]> {
         const list = this.#repository.listProjectSessions;
         if (list === undefined) throw new Error("This session cannot list conversations.");
         const projectId = this.#targetProjectId(sessionId, target.projectId, options);
-        return list({
+        return await list({
             projectId,
             ...(target.workspaceId === undefined ? {} : { workspaceId: target.workspaceId }),
         });
@@ -297,7 +297,7 @@ export class AgentSessionManager {
         }
         const snapshot = delegator.snapshot();
         const projectId = this.#targetProjectId(delegatorSessionId, request.projectId, options);
-        let workspace = resolveWorkspace(projectId, request.workspaceId);
+        let workspace = await resolveWorkspace(projectId, request.workspaceId);
         if (workspace === undefined) {
             throw new Error("That workspace was not found in that project.");
         }
@@ -319,8 +319,9 @@ export class AgentSessionManager {
             ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
             ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
         };
-        const delegate = create(
-            this.#repository.configureWorkspaceRequest?.(workspaceRequest) ?? workspaceRequest,
+        const delegate = await create(
+            (await this.#repository.configureWorkspaceRequest?.(workspaceRequest)) ??
+                workspaceRequest,
             {
                 delegatedBySessionId: delegatorSessionId,
                 depth: 0,
@@ -330,7 +331,7 @@ export class AgentSessionManager {
             },
             sessionId,
         );
-        const submitted = delegate.submit({
+        const submitted = await delegate.submit({
             agentMessageTriggerTurn: true,
             provenance: "agent",
             text: request.prompt,
@@ -427,7 +428,7 @@ export class AgentSessionManager {
         }
         const projectId = codeSessionIdentity(parent).projectId;
         throwIfAborted(signal);
-        let workspace = resolveWorkspace(parentSessionId, projectId, request.workspaceId);
+        let workspace = await resolveWorkspace(parentSessionId, projectId, request.workspaceId);
         if (workspace === undefined) {
             throw new Error("This workspace was not created by the current session.");
         }
@@ -541,13 +542,13 @@ export class AgentSessionManager {
         }
     }
 
-    followUp(
+    async followUp(
         parentSessionId: string,
         target: string,
         message: string,
         effort?: string,
         encryptedMessage?: string,
-    ): ManagedSubagent {
+    ): Promise<ManagedSubagent> {
         const child = this.#resolveTarget(parentSessionId, target);
         const parent = this.#current(parentSessionId);
         if (encryptedMessage !== undefined) {
@@ -568,11 +569,11 @@ export class AgentSessionManager {
         if (childStatus !== "running" && childStatus !== "queued") {
             this.#assertTurnSlotAvailable(child.agentMetadata().rootSessionId);
         }
-        if (childStatus === "suspended") child.clearSuspension();
+        if (childStatus === "suspended") await child.clearSuspension();
         this.#stoppedExplicitly.delete(child.id);
         const childPath = this.#pathFor(child);
         const parentPath = this.#pathFor(parent);
-        const submitted = child.submit({
+        const submitted = await child.submit({
             agentMessageTriggerTurn: true,
             ...(this.#repository.get(parentSessionId)?.activeRunDebug?.() === true
                 ? { debug: true }
@@ -665,12 +666,12 @@ export class AgentSessionManager {
         return this.#managedSubagent(child);
     }
 
-    interrupt(parentSessionId: string, target: string): ManagedSubagent {
+    async interrupt(parentSessionId: string, target: string): Promise<ManagedSubagent> {
         const child = this.#resolveTarget(parentSessionId, target);
         const previous = this.#managedSubagent(child);
-        void this.stopDescendants(child.id);
-        if (child.subagentSummary().status === "suspended") child.clearSuspension();
-        void Promise.resolve(child.abort({ stopDescendants: false })).catch(rethrowDatabaseFailure);
+        await this.stopDescendants(child.id);
+        if (child.subagentSummary().status === "suspended") await child.clearSuspension();
+        await child.abort({ stopDescendants: false });
         this.recordChanged(child);
         return previous;
     }
@@ -707,7 +708,7 @@ export class AgentSessionManager {
                 this.recordChanged(child);
             }),
         );
-        parent.recordSubagentsSuspended(active.map((child) => this.#managedSubagent(child)));
+        await parent.recordSubagentsSuspended(active.map((child) => this.#managedSubagent(child)));
         return active.length;
     }
 
@@ -727,7 +728,7 @@ export class AgentSessionManager {
             (child) => child.subagentSummary().status === "suspended",
         );
         for (const child of suspended) {
-            child.clearSuspension();
+            await child.clearSuspension();
             this.recordChanged(child);
         }
         for (const child of active) this.#stoppedExplicitly.add(child.id);
@@ -902,7 +903,7 @@ export class AgentSessionManager {
             signal,
         );
         let child: InMemorySession;
-        let submitted: ReturnType<InMemorySession["submit"]>;
+        let submitted: Awaited<ReturnType<InMemorySession["submit"]>>;
         let taskName: string;
         try {
             parentRequest ??= parent.requestForSubagent();
@@ -940,7 +941,8 @@ export class AgentSessionManager {
                 request.workspaceId !== undefined &&
                 (parentScope.kind !== "workspace" ||
                     request.workspaceId !== parentScope.workspaceId)
-                    ? (this.#repository.configureWorkspaceRequest?.(childRequest) ?? childRequest)
+                    ? ((await this.#repository.configureWorkspaceRequest?.(childRequest)) ??
+                      childRequest)
                     : childRequest;
             const inheritedContextMessages = (() => {
                 if (request.contextMode !== "parent" || request.contextMessages === undefined) {
@@ -962,15 +964,15 @@ export class AgentSessionManager {
             })();
             child =
                 request.contextMode === "parent"
-                    ? this.#repository.createSubagent(
+                    ? await this.#repository.createSubagent(
                           configuredChildRequest,
                           metadata,
                           inheritedContextMessages,
                       )
-                    : this.#repository.createSubagent(configuredChildRequest, metadata);
+                    : await this.#repository.createSubagent(configuredChildRequest, metadata);
             const childPath = this.#pathFor(child);
             const parentPath = this.#pathFor(parent);
-            submitted = child.submit({
+            submitted = await child.submit({
                 agentMessageTriggerTurn: true,
                 ...(parent.activeRunDebug?.() === true ? { debug: true } : {}),
                 ...(request.encryptedPrompt === undefined

@@ -28,7 +28,9 @@ export class ProjectRemoteTerminalStore {
     ) => RemoteTerminalManager;
     #closed = false;
     readonly #projectClosures = new Map<string, Promise<void>>();
-    readonly #resolveContext: (scope: RemoteTerminalScope) => ProjectRemoteTerminalContext;
+    readonly #resolveContext: (
+        scope: RemoteTerminalScope,
+    ) => ProjectRemoteTerminalContext | Promise<ProjectRemoteTerminalContext>;
     readonly #onChange: (
         scope: RemoteTerminalScope,
         terminals: readonly RemoteTerminalSummary[],
@@ -46,7 +48,9 @@ export class ProjectRemoteTerminalStore {
             scope: RemoteTerminalScope,
             terminals: readonly RemoteTerminalSummary[],
         ) => void;
-        resolveContext: (scope: RemoteTerminalScope) => ProjectRemoteTerminalContext;
+        resolveContext: (
+            scope: RemoteTerminalScope,
+        ) => ProjectRemoteTerminalContext | Promise<ProjectRemoteTerminalContext>;
     }) {
         this.#createManager =
             options.createManager ??
@@ -107,7 +111,7 @@ export class ProjectRemoteTerminalStore {
         ) {
             throw new Error("This project or workspace is closing and cannot open a terminal.");
         }
-        const scoped = this.#manager(scope);
+        const scoped = await this.#manager(scope);
         if (scoped.closing !== undefined) {
             throw new Error("This project or workspace is closing and cannot open a terminal.");
         }
@@ -158,11 +162,11 @@ export class ProjectRemoteTerminalStore {
         return scoped.closing;
     }
 
-    #manager(scope: RemoteTerminalScope): ScopedRemoteTerminalManager {
+    async #manager(scope: RemoteTerminalScope): Promise<ScopedRemoteTerminalManager> {
         const key = scopeKey(scope);
         const existing = this.#scopes.get(key);
         if (existing !== undefined) return existing;
-        const context = this.#resolveContext(scope);
+        const context = await this.#resolveContext(scope);
         const scoped = {
             manager: this.#createManager(context, key, (terminals) =>
                 this.#onChange(scope, terminals),

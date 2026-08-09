@@ -55,8 +55,8 @@ interface WorkflowRunnerOptions {
     agentContext: AgentContext;
     args: unknown;
     onAgentCall(): void;
-    onAgentResult?(index: number, result: WorkflowAgentCacheEntry): void;
-    onCheckpoint?(checkpoint: WorkflowCheckpoint): void;
+    onAgentResult?(index: number, result: WorkflowAgentCacheEntry): void | Promise<void>;
+    onCheckpoint?(checkpoint: WorkflowCheckpoint): void | Promise<void>;
     onLog(message: string): void;
     parentToolCallId?: string;
     parentMessages?: readonly Message[];
@@ -71,8 +71,10 @@ export class WorkflowScriptRunner {
     readonly #agentCalls: (WorkflowAgentCacheEntry | undefined)[];
     readonly #args: unknown;
     readonly #onAgentCall: () => void;
-    readonly #onAgentResult: ((index: number, result: WorkflowAgentCacheEntry) => void) | undefined;
-    readonly #onCheckpoint: ((checkpoint: WorkflowCheckpoint) => void) | undefined;
+    readonly #onAgentResult:
+        | ((index: number, result: WorkflowAgentCacheEntry) => void | Promise<void>)
+        | undefined;
+    readonly #onCheckpoint: ((checkpoint: WorkflowCheckpoint) => void | Promise<void>) | undefined;
     readonly #onLog: (message: string) => void;
     readonly #parentToolCallId: string | undefined;
     readonly #parentMessages: readonly Message[] | undefined;
@@ -126,8 +128,8 @@ export class WorkflowScriptRunner {
                 maxRecursionDepth: 200,
             },
             onPrint: (text) => this.#onLog(text.trimEnd()),
-            onSnapshot: (snapshot) =>
-                this.#onCheckpoint?.({
+            onSnapshot: async (snapshot) =>
+                await this.#onCheckpoint?.({
                     nextAgentCallIndex: this.#nextAgentCallIndex,
                     phase: this.#phase,
                     snapshot,
@@ -165,7 +167,7 @@ export class WorkflowScriptRunner {
         const cached = this.#resumeAgentCalls[cacheIndex];
         if (cached?.signature === signature) {
             this.#agentCalls[cacheIndex] = cached;
-            this.#onAgentResult?.(cacheIndex, cached);
+            await this.#onAgentResult?.(cacheIndex, cached);
             this.#onLog(`Reused ${options.label ?? this.#phase} from the previous run.`);
             return cached.output;
         }
@@ -200,7 +202,7 @@ export class WorkflowScriptRunner {
                 : parseStructuredWorkflowResult(result.output, options.schema);
         const cacheEntry = { output, signature };
         this.#agentCalls[cacheIndex] = cacheEntry;
-        this.#onAgentResult?.(cacheIndex, cacheEntry);
+        await this.#onAgentResult?.(cacheIndex, cacheEntry);
         return output;
     }
 

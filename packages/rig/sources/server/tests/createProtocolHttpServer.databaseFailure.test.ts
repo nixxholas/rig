@@ -2,7 +2,7 @@ import { rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 
-import Database from "better-sqlite3";
+import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
@@ -11,17 +11,15 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("createProtocolHttpServer database failures", () => {
     it("escapes a route recovery catch as an unhandled rejection", async () => {
-        const store = new InMemorySessionStore();
-        const error = captureDriverError((database) => {
-            database.prepare("select * from missing_table").all();
-        });
+        const store = await InMemorySessionStore.open();
+        const error = await captureDriverError();
         vi.spyOn(store, "registerSecret").mockImplementation(() => {
             throw error;
         });
 
         const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
-        const server = createProtocolHttpServer({ store, token: "secret" });
+        const server = await createProtocolHttpServer({ store, token: "secret" });
         await new Promise<void>((resolve, reject) => {
             server.once("error", reject);
             server.listen(socketPath, () => {
@@ -60,7 +58,7 @@ describe("createProtocolHttpServer database failures", () => {
         } finally {
             request.destroy();
             await new Promise<void>((resolve) => server.close(() => resolve()));
-            store.close();
+            await store.close();
             await rm(directory, { force: true, recursive: true });
         }
     });
@@ -86,14 +84,14 @@ async function captureUnhandledRejection(run: () => Promise<void>): Promise<unkn
     }
 }
 
-function captureDriverError(act: (database: Database.Database) => void): unknown {
-    const database = new Database(":memory:");
+async function captureDriverError(): Promise<unknown> {
+    const database = createClient({ url: "file::memory:" });
     try {
-        act(database);
+        await database.execute("select * from missing_table");
         throw new Error("Expected the driver to fail.");
     } catch (error) {
         return error;
     } finally {
-        if (database.open) database.close();
+        await database.close();
     }
 }

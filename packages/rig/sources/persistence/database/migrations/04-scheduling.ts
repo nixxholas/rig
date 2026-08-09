@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function scheduling(database: SessionDatabase): void {
-    database.run(
+export async function scheduling(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE durable_waits (
             id TEXT NOT NULL PRIMARY KEY,
@@ -26,13 +26,13 @@ export function scheduling(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE INDEX durable_waits_session_created
         ON durable_waits (session_id, created_at_ms)
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE scheduled_messages (
             id TEXT NOT NULL PRIMARY KEY,
@@ -48,13 +48,13 @@ export function scheduling(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE INDEX scheduled_messages_sender_created
         ON scheduled_messages (sender_session_id, created_at_ms)
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE INDEX scheduled_messages_pending_due
         ON scheduled_messages (status, due_at_ms)

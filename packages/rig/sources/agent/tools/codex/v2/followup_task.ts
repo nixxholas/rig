@@ -44,7 +44,7 @@ Send follow-up work to an existing subagent, including one that completed or was
             subagents.encryptedMessages === true
                 ? subagents.followUp(target, "", undefined, message)
                 : subagents.followUp(target, message);
-        return toCodexManagedSubagentResult(agent);
+        return toCodexManagedSubagentResult(await agent);
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Sent follow-up work to ${result.path}.`,

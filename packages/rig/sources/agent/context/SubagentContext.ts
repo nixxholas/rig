@@ -76,9 +76,9 @@ export interface SubagentContext {
         message: string,
         effort?: string,
         encryptedMessage?: string,
-    ): ManagedSubagent;
+    ): Promise<ManagedSubagent>;
     inspect?(target: string): ManagedSubagent;
-    interrupt(target: string): ManagedSubagent;
+    interrupt(target: string): Promise<ManagedSubagent>;
     list(pathPrefix?: string): readonly ManagedSubagent[];
     maxActive?: number;
     maxDepth: number;

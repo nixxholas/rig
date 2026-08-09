@@ -6,7 +6,8 @@ import {
     type SharedFolderState,
 } from "../../protocol/FolderSharingProtocol.js";
 import { folderShareOutbox, folderShares } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import { inDatabase } from "../database/inDatabase.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export interface FolderShareRecord {
     error?: string;
@@ -25,35 +26,61 @@ export interface FolderShareOutboxRecord {
     payloadJson: string;
 }
 
-export function queryFolderShares(tx: TX): readonly FolderShareRecord[] {
-    return tx
-        .select()
-        .from(folderShares)
-        .orderBy(asc(folderShares.createdAtMs), asc(folderShares.groupId))
-        .all()
-        .map(readShare);
+export async function queryFolderShares(tx: DatabaseScope): Promise<readonly FolderShareRecord[]> {
+    return await inDatabase(tx, async (tx) => {
+        const rows = await tx
+            .select()
+            .from(folderShares)
+            .orderBy(asc(folderShares.createdAtMs), asc(folderShares.groupId))
+            .all();
+        return rows.map(readShare);
+    });
 }
 
-export function queryFolderShare(tx: TX, groupId: string): FolderShareRecord | undefined {
-    const row = tx.select().from(folderShares).where(eq(folderShares.groupId, groupId)).get();
-    return row === undefined ? undefined : readShare(row);
+export async function queryFolderShare(
+    tx: DatabaseScope,
+    groupId: string,
+): Promise<FolderShareRecord | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx
+            .select()
+            .from(folderShares)
+            .where(eq(folderShares.groupId, groupId))
+            .get();
+        return row === undefined ? undefined : readShare(row);
+    });
 }
 
-export function queryFolderShareByShareId(tx: TX, shareId: string): FolderShareRecord | undefined {
-    const row = tx.select().from(folderShares).where(eq(folderShares.shareId, shareId)).get();
-    return row === undefined ? undefined : readShare(row);
+export async function queryFolderShareByShareId(
+    tx: DatabaseScope,
+    shareId: string,
+): Promise<FolderShareRecord | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx
+            .select()
+            .from(folderShares)
+            .where(eq(folderShares.shareId, shareId))
+            .get();
+        return row === undefined ? undefined : readShare(row);
+    });
 }
 
-export function queryPendingFolderShareOutbox(tx: TX): readonly FolderShareOutboxRecord[] {
-    return tx
-        .select({
-            groupId: folderShareOutbox.groupId,
-            operationId: folderShareOutbox.operationId,
-            payloadJson: folderShareOutbox.payloadJson,
-        })
-        .from(folderShareOutbox)
-        .orderBy(asc(folderShareOutbox.createdAtMs), asc(folderShareOutbox.operationId))
-        .all();
+export async function queryPendingFolderShareOutbox(
+    tx: DatabaseScope,
+): Promise<readonly FolderShareOutboxRecord[]> {
+    return await inDatabase(
+        tx,
+        async (tx) =>
+            await tx
+                .select({
+                    groupId: folderShareOutbox.groupId,
+                    operationId: folderShareOutbox.operationId,
+                    payloadJson: folderShareOutbox.payloadJson,
+                })
+                .from(folderShareOutbox)
+                .orderBy(asc(folderShareOutbox.createdAtMs), asc(folderShareOutbox.operationId))
+                .all(),
+    );
 }
 
 function readShare(row: typeof folderShares.$inferSelect): FolderShareRecord {

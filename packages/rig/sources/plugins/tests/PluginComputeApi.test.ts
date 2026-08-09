@@ -24,7 +24,7 @@ describe("plugin compute API", () => {
         const socketPath = join(directory, "api.sock");
         const source = join(directory, "source");
         await mkdir(source);
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",

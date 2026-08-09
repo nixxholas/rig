@@ -7,10 +7,10 @@ import { externalToolCalls, projects, sessions } from "../../database/schema.js"
 import { durablePermissionHandoff } from "../durablePermissionHandoff.js";
 
 describe("durablePermissionHandoff", () => {
-    it("rolls back the external call when the permission input cannot be saved", () => {
-        const opened = openSessionDatabase(":memory:");
-        migrateSessionDatabase(opened.database);
-        opened.database
+    it("rolls back the external call when the permission input cannot be saved", async () => {
+        const opened = await openSessionDatabase(":memory:");
+        await migrateSessionDatabase(opened.database);
+        await opened.database
             .insert(projects)
             .values({
                 createdAtMs: 1,
@@ -33,7 +33,7 @@ describe("durablePermissionHandoff", () => {
                 worktreeSupport: "unknown",
             })
             .run();
-        opened.database
+        await opened.database
             .insert(sessions)
             .values({
                 agentId: "agent-1",
@@ -69,7 +69,7 @@ describe("durablePermissionHandoff", () => {
             })
             .run();
 
-        expect(() =>
+        await expect(
             durablePermissionHandoff(
                 opened.database,
                 {
@@ -105,9 +105,9 @@ describe("durablePermissionHandoff", () => {
                     toolName: "external_operation",
                 },
             ),
-        ).toThrow();
+        ).rejects.toThrow();
         expect(
-            opened.database
+            await opened.database
                 .select()
                 .from(externalToolCalls)
                 .where(eq(externalToolCalls.id, "external-call-1"))

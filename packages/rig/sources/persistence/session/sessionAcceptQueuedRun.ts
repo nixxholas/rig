@@ -4,7 +4,7 @@ import type { SessionEvent } from "../../protocol/index.js";
 import type { PersistedQueuedRun, PersistedSessionMessage } from "../../session/InMemorySession.js";
 import { sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { sessionAppendEvent } from "./sessionAppendEvent.js";
 import { sessionSaveMessage } from "./sessionSaveMessage.js";
 import { sessionSaveQueuedRun } from "./sessionSaveQueuedRun.js";
@@ -20,11 +20,14 @@ export interface SessionAcceptQueuedRunInput {
 }
 
 /** Durably accepts one visible user message and its run as a single consistency boundary. */
-export function sessionAcceptQueuedRun(tx: TX, input: SessionAcceptQueuedRunInput): void {
-    inTx(tx, (tx) => {
-        sessionSaveQueuedRun(tx, input.sessionId, input.run, input.now);
-        sessionSaveMessage(tx, input.sessionId, input.message, input.now);
-        sessionAppendEvent(
+export async function sessionAcceptQueuedRun(
+    tx: DatabaseScope,
+    input: SessionAcceptQueuedRunInput,
+): Promise<void> {
+    await inTx(tx, async (tx) => {
+        await sessionSaveQueuedRun(tx, input.sessionId, input.run, input.now);
+        await sessionSaveMessage(tx, input.sessionId, input.message, input.now);
+        await sessionAppendEvent(
             tx,
             input.event,
             {
@@ -33,7 +36,8 @@ export function sessionAcceptQueuedRun(tx: TX, input: SessionAcceptQueuedRunInpu
             },
             input.now,
         );
-        tx.update(sessions)
+        await tx
+            .update(sessions)
             .set({
                 interrupted: false,
                 interruptionJson: null,

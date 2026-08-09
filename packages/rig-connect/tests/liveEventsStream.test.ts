@@ -14,15 +14,19 @@ import { readSseFrames } from "@/sseFrames.js";
 
 const started: { close: () => Promise<void> }[] = [];
 const openStreams: AbortController[] = [];
+const stores = new Set<InMemorySessionStore>();
 
 afterEach(async () => {
     for (const controller of openStreams.splice(0)) controller.abort();
     for (const server of started.splice(0)) await server.close();
+    for (const store of stores) await store.close();
+    stores.clear();
 });
 
 async function startDaemon(): Promise<{ endpoint: string; store: InMemorySessionStore }> {
-    const store = new InMemorySessionStore();
-    const server = createProtocolHttpServer({ store, token: "secret" });
+    const store = await InMemorySessionStore.open();
+    stores.add(store);
+    const server = await createProtocolHttpServer({ store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const { port } = server.address() as AddressInfo;
     started.push({
@@ -101,7 +105,7 @@ describe("the live event stream", () => {
         const { endpoint, store } = await startDaemon();
         const { frames } = await openStream(endpoint);
 
-        const session = store.create({ cwd: "/tmp/rig-live-stream" });
+        const session = await store.create({ cwd: "/tmp/rig-live-stream" });
         await waitFor(() => frames.some((frame) => frame.name === "update"), "an update to arrive");
 
         const update = frames.find(
@@ -114,10 +118,10 @@ describe("the live event stream", () => {
 
     it("carries live-only events the durable log drops", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = store.create({ cwd: "/tmp/rig-live-draft" });
+        const session = await store.create({ cwd: "/tmp/rig-live-draft" });
         const { frames } = await openStream(endpoint);
 
-        session.setDraft({ draft: "typed", updatedAt: Date.now() });
+        await session.setDraft({ draft: "typed", updatedAt: Date.now() });
         await waitFor(
             () =>
                 frames.some(
@@ -131,12 +135,12 @@ describe("the live event stream", () => {
     it("resumes from a cursor without repeating what was already delivered", async () => {
         const { endpoint, store } = await startDaemon();
         const first = await openStream(endpoint);
-        const session = store.create({ cwd: "/tmp/rig-live-resume" });
+        const session = await store.create({ cwd: "/tmp/rig-live-resume" });
         await waitFor(() => first.frames.length > 0, "the first update");
         const resumeFrom = first.frames.at(-1)!.data.cursor as string;
         const alreadySeen = new Set(first.frames.map((frame) => frame.data.cursor));
 
-        session.setArchived(true);
+        await session.setArchived(true);
         const resumed = await openStream(endpoint, resumeFrom);
         expect(resumed.hello.data.gap).toBe(false);
         expect(resumed.hello.data.resumed).toBe(true);
@@ -158,7 +162,7 @@ describe("the live event stream", () => {
         expect(typeof hello.data.cursor).toBe("string");
 
         // A gap tells the client to re-fetch; the stream itself stays usable.
-        store.create({ cwd: "/tmp/rig-live-gap" });
+        await store.create({ cwd: "/tmp/rig-live-gap" });
         await waitFor(() => frames.length > 0, "the stream to keep delivering after a gap");
     });
 

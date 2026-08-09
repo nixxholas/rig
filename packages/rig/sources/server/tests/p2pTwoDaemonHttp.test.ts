@@ -25,9 +25,9 @@ const peerTrustStore: P2pPeerTrustStoreContract = {
     preparePairing: async () => {
         throw new Error("Pairing is not used by this test.");
     },
-    peerForBinding: () => undefined,
-    peers: () => [],
-    readyPairings: () => [],
+    peerForBinding: async () => undefined,
+    peers: async () => [],
+    readyPairings: async () => [],
     validate: async () => undefined,
     verifyOrPin: async () => undefined,
 };
@@ -254,7 +254,7 @@ async function startDaemon(
     const store =
         options === undefined
             ? undefined
-            : new PersistentSessionStore({
+            : await PersistentSessionStore.open({
                   databasePath: ":memory:",
                   homeDirectory: directory,
                   localInstanceId: options.localInstanceId,
@@ -268,7 +268,7 @@ async function startDaemon(
                   localInstanceId: options!.localInstanceId,
                   publish: () => undefined,
               });
-    profiles?.replicate(options!.remoteProfile, options!.allowedProvisionPeerId);
+    await profiles?.replicate(options!.remoteProfile, options!.allowedProvisionPeerId);
     const remoteProject =
         store === undefined
             ? undefined
@@ -287,7 +287,7 @@ async function startDaemon(
                       githubToken: "test-github-token",
                   },
               );
-    const server = createProtocolHttpServer({
+    const server = await createProtocolHttpServer({
         ...(options === undefined
             ? {}
             : {
@@ -315,7 +315,7 @@ async function startDaemon(
         await new Promise<void>((resolve, reject) => {
             server.close((error) => (error === undefined ? resolve() : reject(error)));
         });
-        store?.close();
+        await store?.close();
         await rm(directory, { force: true, recursive: true });
     };
     cleanups.push(close);

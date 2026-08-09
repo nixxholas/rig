@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { eq, sql } from "drizzle-orm";
 
 import {
@@ -6,7 +7,7 @@ import {
 } from "../../protocol/index.js";
 import { documentMutations, documents } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export type DocumentCreateResult =
     | { outcome: "applied"; version: number }
@@ -14,8 +15,8 @@ export type DocumentCreateResult =
     | { outcome: "id_conflict" }
     | { outcome: "mutation_conflict" };
 
-export function documentCreate(
-    tx: TX,
+export async function documentCreate(
+    tx: DatabaseScope,
     input: {
         createdBy: DocumentCreatedBy;
         fingerprint: string;
@@ -26,10 +27,10 @@ export function documentCreate(
         stateJson: string;
         unreadCursor?: string;
     },
-): DocumentCreateResult {
-    return inTx(tx, (tx) => {
+): Promise<DocumentCreateResult> {
+    return await inTx(tx, async (tx) => {
         if (input.mutationId !== undefined) {
-            const receipt = tx
+            const receipt = await tx
                 .select()
                 .from(documentMutations)
                 .where(eq(documentMutations.mutationId, input.mutationId))
@@ -42,13 +43,14 @@ export function documentCreate(
                     : { outcome: "mutation_conflict" };
             }
         }
-        const existing = tx
+        const existing = await tx
             .select({ id: documents.id })
             .from(documents)
             .where(eq(documents.id, input.id))
             .get();
         if (existing !== undefined) return { outcome: "id_conflict" };
-        tx.insert(documents)
+        await tx
+            .insert(documents)
             .values({
                 createdAtMs: input.now,
                 createdByInstanceId: input.createdBy.instanceId,
@@ -63,7 +65,8 @@ export function documentCreate(
             })
             .run();
         if (input.mutationId !== undefined) {
-            tx.insert(documentMutations)
+            await tx
+                .insert(documentMutations)
                 .values({
                     action: "create",
                     createdAtMs: input.now,
@@ -73,15 +76,16 @@ export function documentCreate(
                     resultVersion: 1,
                 })
                 .run();
-            pruneReceipts(tx, input.id);
+            await pruneReceipts(tx, input.id);
         }
         return { outcome: "created", version: 1 };
     });
 }
 
-export function pruneReceipts(tx: TX, documentId: string): void {
-    tx.run(
-        sql`
+export async function pruneReceipts(tx: DatabaseScope, documentId: string): Promise<void> {
+    return await inDatabase(tx, async (tx) => {
+        await tx.run(
+            sql`
         DELETE FROM document_mutations
         WHERE action = 'write'
           AND document_id = ${documentId}
@@ -92,5 +96,6 @@ export function pruneReceipts(tx: TX, documentId: string): void {
             LIMIT -1 OFFSET ${DOCUMENT_UPDATE_RETENTION_MAX_COUNT}
           )
         `,
-    );
+        );
+    });
 }

@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     `CREATE TABLE session_share_entries (
@@ -15,6 +15,6 @@ const statements = [
     )`,
 ] as const;
 
-export function sessionShareEntryLog(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function sessionShareEntryLog(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

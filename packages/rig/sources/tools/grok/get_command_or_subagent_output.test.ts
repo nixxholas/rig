@@ -76,8 +76,8 @@ function subagentContext(completed: () => boolean): SubagentContext {
     return {
         canSpawn: true,
         depth: 0,
-        followUp: vi.fn(agent),
-        interrupt: vi.fn(agent),
+        followUp: vi.fn(async () => agent()),
+        interrupt: vi.fn(async () => agent()),
         list: vi.fn(() => [agent()]),
         maxDepth: 3,
         spawn: vi.fn(),

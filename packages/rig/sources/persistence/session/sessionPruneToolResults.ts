@@ -7,7 +7,7 @@ import {
     TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE,
 } from "../../agent/boundToolResultPresentation.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 
 export interface SessionToolResultPruneCursor {
@@ -27,11 +27,11 @@ export type SessionToolResultPrunePage =
  * operation. Session and message activity timestamps are also left unchanged: maintenance must
  * not make an old chat look active.
  */
-export function sessionPruneToolResults(
-    tx: TX,
+export async function sessionPruneToolResults(
+    tx: DatabaseScope,
     input: { after?: SessionToolResultPruneCursor; before: number; limit: number },
-): SessionToolResultPrunePage {
-    return inTx(tx, (tx) => {
+): Promise<SessionToolResultPrunePage> {
+    return await inTx(tx, async (tx) => {
         const after: SQL =
             input.after === undefined
                 ? sql`1`
@@ -39,7 +39,7 @@ export function sessionPruneToolResults(
                     (session_id, position)
                         > (${input.after.sessionId}, ${input.after.position})
                 `;
-        const rows = tx.all<Record<string, unknown>>(sql`
+        const rows = await tx.all<Record<string, unknown>>(sql`
             SELECT session_id, position
             FROM session_messages
             WHERE ${after}
@@ -80,7 +80,8 @@ export function sessionPruneToolResults(
             AND length(json_extract(block.value, '$.presentation.output'))
                 > ${TOOL_RESULT_PRESENTATION_MAXIMUM_OUTPUT_CHARACTERS}
         `;
-        const changed = tx.run(sql`
+        const changed = (
+            await tx.run(sql`
             UPDATE session_messages AS message
             SET message_json = json_set(
                 message.message_json,
@@ -123,7 +124,8 @@ export function sessionPruneToolResults(
                     WHERE (${stale} AND ${hasRetainedOutput})
                         OR ${hasOversizedPresentation}
                 )
-        `).changes;
+        `)
+        ).rowsAffected;
 
         if (rows.length < input.limit) return { complete: true, pruned: changed };
         return { complete: false, cursor, pruned: changed };

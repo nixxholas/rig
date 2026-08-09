@@ -19,7 +19,7 @@ afterEach(async () => {
 describe("global event stream", () => {
     it("carries only events, never the entities a client loads from the catalog", async () => {
         const fixture = await startServer();
-        fixture.store.create({ cwd: "/tmp/rig-group-a" });
+        await fixture.store.create({ cwd: "/tmp/rig-group-a" });
 
         const stream = await fixture.openStream("/events/stream");
         await stream.settle();
@@ -33,7 +33,7 @@ describe("global event stream", () => {
 
     it("answers the catalog with the groups a client renders immediately", async () => {
         const fixture = await startServer();
-        const session = fixture.store.create({ cwd: "/tmp/rig-group-a" });
+        const session = await fixture.store.create({ cwd: "/tmp/rig-group-a" });
 
         const catalog = await fixture.catalog();
 
@@ -50,7 +50,7 @@ describe("global event stream", () => {
 
     it("replays the stored log to a client attaching without a cursor", async () => {
         const fixture = await startServer();
-        const created = fixture.store.create({ cwd: "/tmp/rig-group-a" });
+        const created = await fixture.store.create({ cwd: "/tmp/rig-group-a" });
 
         const stream = await fixture.openStream("/events/stream");
         await stream.waitForText(created.id);
@@ -65,7 +65,7 @@ describe("global event stream", () => {
         const fixture = await startServer();
         const queue = fixture.store.globalEventQueue;
         for (let index = 0; index < 2_001; index += 1) {
-            queue.append({
+            await queue.append({
                 createdAt: index,
                 data: { project: { id: `project-${index}` } as never },
                 id: `stored-${index}` as never,
@@ -75,7 +75,7 @@ describe("global event stream", () => {
         }
 
         const stream = await fixture.openStream("/events/stream");
-        const concurrent = queue.append({
+        const concurrent = await queue.append({
             createdAt: 2_001,
             data: { project: { id: "project-concurrent" } as never },
             id: "stored-concurrent" as never,
@@ -97,7 +97,7 @@ describe("global event stream", () => {
         const stream = await fixture.openStream("/events/stream");
         await stream.settle();
 
-        const created = fixture.store.create({ cwd: "/tmp/rig-group-late" });
+        const created = await fixture.store.create({ cwd: "/tmp/rig-group-late" });
         await stream.waitForText(created.id);
 
         expect(stream.frames.join("")).toContain(created.id);
@@ -109,7 +109,7 @@ describe("global event stream", () => {
         const stream = await fixture.openStream("/events/live", "aremotepeerinstance0000001");
         await stream.waitForText("event: hello");
 
-        fixture.store.create({ cwd: "/tmp/rig-shared-project" });
+        await fixture.store.create({ cwd: "/tmp/rig-shared-project" });
         await stream.waitForText("project_created");
         await stream.waitForText("session_created");
 
@@ -120,13 +120,13 @@ describe("global event stream", () => {
 
     it("resumes from a cursor without replaying what the client already holds", async () => {
         const fixture = await startServer();
-        const earlier = fixture.store.create({ cwd: "/tmp/rig-group-a" });
+        const earlier = await fixture.store.create({ cwd: "/tmp/rig-group-a" });
         const cursor = fixture.store.globalEventQueue.cursor();
 
         const stream = await fixture.openStream(
             `/events/stream?after=${encodeURIComponent(cursor)}`,
         );
-        const created = fixture.store.create({ cwd: "/tmp/rig-group-late" });
+        const created = await fixture.store.create({ cwd: "/tmp/rig-group-late" });
         await stream.waitForText(created.id);
 
         expect(stream.frames.join("")).not.toContain(earlier.id);
@@ -160,8 +160,8 @@ async function startServer(): Promise<{
 }> {
     const root = await createTestSocketDirectory();
     const socketPath = join(root, "server.sock");
-    const store = new InMemorySessionStore();
-    const server: Server = createProtocolHttpServer({ store, token: "t" });
+    const store = await InMemorySessionStore.open();
+    const server: Server = await createProtocolHttpServer({ store, token: "t" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {
@@ -172,7 +172,7 @@ async function startServer(): Promise<{
     cleanups.push(async () => {
         server.closeAllConnections();
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        store.close();
+        await store.close();
         await rm(root, { force: true, recursive: true });
     });
 

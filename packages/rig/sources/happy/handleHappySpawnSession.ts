@@ -9,7 +9,7 @@ import { createHappySpawnSessionId } from "./createHappySpawnSessionId.js";
 import type { HappySpawnSessionRequest, HappySpawnSessionResult } from "./types.js";
 
 export async function handleHappySpawnSession(options: {
-    createSession: (id: string, request: CreateSessionRequest) => void;
+    createSession: (id: string, request: CreateSessionRequest) => void | Promise<void>;
     machineId: string;
     modelCatalog: ModelCatalog;
     params: unknown;
@@ -53,7 +53,7 @@ export async function handleHappySpawnSession(options: {
             request.clientRequestId,
         );
         options.signal?.throwIfAborted();
-        options.createSession(localSessionId, {
+        await options.createSession(localSessionId, {
             cwd: directory,
             effort,
             modelId,

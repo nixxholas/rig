@@ -1,6 +1,7 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readOptionalString, readString } from "./impl/sqliteRow.js";
 
 export interface TerminalRunEvent {
@@ -8,12 +9,13 @@ export interface TerminalRunEvent {
     status: "aborted" | "completed" | "error";
 }
 
-export function queryTerminalRunEvent(
-    tx: TX,
+export async function queryTerminalRunEvent(
+    tx: DatabaseScope,
     sessionId: string,
     runId: string,
-): TerminalRunEvent | undefined {
-    const row = tx.get<Record<string, unknown>>(sql`
+): Promise<TerminalRunEvent | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx.get<Record<string, unknown>>(sql`
         SELECT type, data_json, (
             SELECT event_id FROM session_events AS latest
             WHERE latest.session_id = ${sessionId}
@@ -25,16 +27,17 @@ export function queryTerminalRunEvent(
             AND json_extract(data_json, '$.runId') = ${runId}
         ORDER BY seq DESC LIMIT 1
     `);
-    if (row === undefined) return undefined;
-    const type = readString(row, "type");
-    const data = JSON.parse(readString(row, "data_json")) as { stopReason?: string };
-    return {
-        lastEventId: readOptionalString(row, "last_event_id") ?? null,
-        status:
-            type === "run_error"
-                ? "error"
-                : data.stopReason === "aborted"
-                  ? "aborted"
-                  : "completed",
-    };
+        if (row === undefined) return undefined;
+        const type = readString(row, "type");
+        const data = JSON.parse(readString(row, "data_json")) as { stopReason?: string };
+        return {
+            lastEventId: readOptionalString(row, "last_event_id") ?? null,
+            status:
+                type === "run_error"
+                    ? "error"
+                    : data.stopReason === "aborted"
+                      ? "aborted"
+                      : "completed",
+        };
+    });
 }

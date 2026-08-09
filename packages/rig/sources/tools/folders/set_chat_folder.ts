@@ -25,8 +25,8 @@ export const setChatFolderTool = defineTool({
         { additionalProperties: false },
     ),
     shouldReviewInAutoMode: () => false,
-    execute: ({ folder_id }, context) => {
-        const folder = requireFolders(context).setCurrentChatFolder(folder_id ?? null);
+    execute: async ({ folder_id }, context) => {
+        const folder = await requireFolders(context).setCurrentChatFolder(folder_id ?? null);
         return folder === undefined ? {} : { folder };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],

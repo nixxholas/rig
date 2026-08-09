@@ -8,18 +8,18 @@ import {
     type P2pTransportBinding,
 } from "../../p2p/P2pPeer.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { p2pPeers } from "../database/schema.js";
 import { queryP2pPeers } from "./queryP2pPeers.js";
 
-export function p2pPeerVerifyOrPin(
-    tx: TX,
+export async function p2pPeerVerifyOrPin(
+    tx: DatabaseScope,
     identity: P2pPeerIdentity,
     binding: P2pTransportBinding | undefined,
     connections: P2pPeerConnections | undefined,
     name: string | undefined,
     now: number,
-): void {
+): Promise<void> {
     const normalized = { instanceId: identity.instanceId, publicKey: identity.publicKey };
     if (!Value.Check(p2pPeerIdentitySchema, normalized)) {
         throw new Error("The peer presented an invalid P2P identity.");
@@ -27,8 +27,8 @@ export function p2pPeerVerifyOrPin(
     if (name !== undefined && !Value.Check(p2pPeerNameSchema, name)) {
         throw new Error("The peer presented an invalid P2P name.");
     }
-    inTx(tx, (transaction) => {
-        const peers = queryP2pPeers(transaction);
+    await inTx(tx, async (transaction) => {
+        const peers = await queryP2pPeers(transaction);
         const byInstance = peers.find((peer) => peer.instanceId === identity.instanceId);
         if (byInstance !== undefined && byInstance.publicKey !== identity.publicKey) {
             throw new Error("The peer's stable P2P identity key does not match its pin.");
@@ -53,7 +53,7 @@ export function p2pPeerVerifyOrPin(
             if (name === undefined) {
                 throw new Error("A new trusted P2P peer must have a display name.");
             }
-            transaction
+            await transaction
                 .insert(p2pPeers)
                 .values({
                     bindingsJson: JSON.stringify(binding === undefined ? [] : [binding]),
@@ -85,7 +85,7 @@ export function p2pPeerVerifyOrPin(
         ) {
             return;
         }
-        transaction
+        await transaction
             .update(p2pPeers)
             .set({
                 bindingsJson: JSON.stringify(bindings),

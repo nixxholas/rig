@@ -60,8 +60,7 @@
             "@ffprobe-installer/linux-ia32",
             "@ffprobe-installer/linux-x64",
             "@ffprobe-installer/win32-ia32",
-            "@ffprobe-installer/win32-x64",
-            "better-sqlite3"
+            "@ffprobe-installer/win32-x64"
         ]
     }
 }

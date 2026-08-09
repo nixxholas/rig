@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { Value } from "@sinclair/typebox/value";
 
 import {
@@ -6,62 +7,64 @@ import {
     type HappyCloudStatus,
 } from "../../protocol/HappyCloudProtocol.js";
 import { happyCloudEnrollment } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
-    const row = tx
-        .select({
-            contractVersion: happyCloudEnrollment.contractVersion,
-            enrollmentChangedAtMs: happyCloudEnrollment.enrollmentChangedAtMs,
-            enrollmentState: happyCloudEnrollment.enrollmentState,
-            groupChatsChangedAtMs: happyCloudEnrollment.groupChatsChangedAtMs,
-            groupChatsConsent: happyCloudEnrollment.groupChatsConsent,
-            happyProfileChangedAtMs: happyCloudEnrollment.happyProfileChangedAtMs,
-            happyProfileConsent: happyCloudEnrollment.happyProfileConsent,
-            profileChangedAtMs: happyCloudEnrollment.profileChangedAtMs,
-            profileVersion: happyCloudEnrollment.profileVersion,
-            remoteControlChangedAtMs: happyCloudEnrollment.remoteControlChangedAtMs,
-            remoteControlConsent: happyCloudEnrollment.remoteControlConsent,
-            sessionBlobPersistenceChangedAtMs:
-                happyCloudEnrollment.sessionBlobPersistenceChangedAtMs,
-            sessionBlobPersistenceConsent: happyCloudEnrollment.sessionBlobPersistenceConsent,
-            updatedAtMs: happyCloudEnrollment.updatedAtMs,
-            version: happyCloudEnrollment.version,
-        })
-        .from(happyCloudEnrollment)
-        .get();
-    if (row === undefined) return defaultHappyCloudStatus();
-    return Value.Decode(happyCloudStatusSchema, {
-        authority: "local_record_only",
-        capabilities: {
-            group_chats: {
-                changedAt: row.groupChatsChangedAtMs,
-                consent: row.groupChatsConsent,
+export async function queryHappyCloudStatus(tx: DatabaseScope): Promise<HappyCloudStatus> {
+    return await inDatabase(tx, async (tx) => {
+        const row = await tx
+            .select({
+                contractVersion: happyCloudEnrollment.contractVersion,
+                enrollmentChangedAtMs: happyCloudEnrollment.enrollmentChangedAtMs,
+                enrollmentState: happyCloudEnrollment.enrollmentState,
+                groupChatsChangedAtMs: happyCloudEnrollment.groupChatsChangedAtMs,
+                groupChatsConsent: happyCloudEnrollment.groupChatsConsent,
+                happyProfileChangedAtMs: happyCloudEnrollment.happyProfileChangedAtMs,
+                happyProfileConsent: happyCloudEnrollment.happyProfileConsent,
+                profileChangedAtMs: happyCloudEnrollment.profileChangedAtMs,
+                profileVersion: happyCloudEnrollment.profileVersion,
+                remoteControlChangedAtMs: happyCloudEnrollment.remoteControlChangedAtMs,
+                remoteControlConsent: happyCloudEnrollment.remoteControlConsent,
+                sessionBlobPersistenceChangedAtMs:
+                    happyCloudEnrollment.sessionBlobPersistenceChangedAtMs,
+                sessionBlobPersistenceConsent: happyCloudEnrollment.sessionBlobPersistenceConsent,
+                updatedAtMs: happyCloudEnrollment.updatedAtMs,
+                version: happyCloudEnrollment.version,
+            })
+            .from(happyCloudEnrollment)
+            .get();
+        if (row === undefined) return defaultHappyCloudStatus();
+        return Value.Decode(happyCloudStatusSchema, {
+            authority: "local_record_only",
+            capabilities: {
+                group_chats: {
+                    changedAt: row.groupChatsChangedAtMs,
+                    consent: row.groupChatsConsent,
+                },
+                happy_profile: {
+                    changedAt: row.happyProfileChangedAtMs,
+                    consent: row.happyProfileConsent,
+                },
+                remote_control: {
+                    changedAt: row.remoteControlChangedAtMs,
+                    consent: row.remoteControlConsent,
+                },
+                session_blob_persistence: {
+                    changedAt: row.sessionBlobPersistenceChangedAtMs,
+                    consent: row.sessionBlobPersistenceConsent,
+                },
             },
-            happy_profile: {
-                changedAt: row.happyProfileChangedAtMs,
-                consent: row.happyProfileConsent,
+            contractVersion: row.contractVersion,
+            enrollment: {
+                changedAt: row.enrollmentChangedAtMs,
+                state: row.enrollmentState,
             },
-            remote_control: {
-                changedAt: row.remoteControlChangedAtMs,
-                consent: row.remoteControlConsent,
+            profile: {
+                changedAt: row.profileChangedAtMs,
+                state: row.profileVersion === null ? "not_created" : "created",
             },
-            session_blob_persistence: {
-                changedAt: row.sessionBlobPersistenceChangedAtMs,
-                consent: row.sessionBlobPersistenceConsent,
-            },
-        },
-        contractVersion: row.contractVersion,
-        enrollment: {
-            changedAt: row.enrollmentChangedAtMs,
-            state: row.enrollmentState,
-        },
-        profile: {
-            changedAt: row.profileChangedAtMs,
-            state: row.profileVersion === null ? "not_created" : "created",
-        },
-        updatedAt: row.updatedAtMs,
-        version: row.version,
+            updatedAt: row.updatedAtMs,
+            version: row.version,
+        });
     });
 }
 

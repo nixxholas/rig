@@ -1,12 +1,12 @@
 import { durableGlobalEvents, durableGlobalEventState } from "../database/schema.js";
 
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function globalEventReset(tx: TX): number {
-    return inTx(tx, (tx) => {
-        const changes = tx.delete(durableGlobalEvents).run().changes;
-        tx.delete(durableGlobalEventState).run();
+export async function globalEventReset(tx: DatabaseScope): Promise<number> {
+    return await inTx(tx, async (tx) => {
+        const changes = (await tx.delete(durableGlobalEvents).run()).rowsAffected;
+        await tx.delete(durableGlobalEventState).run();
         return changes;
     });
 }

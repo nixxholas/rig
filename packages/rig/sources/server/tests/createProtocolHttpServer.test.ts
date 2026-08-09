@@ -55,8 +55,8 @@ const removeFixtureOptions = {
 describe("createProtocolHttpServer", () => {
     it("keeps busy transfers as conflicts and reports target restore failures as server errors", async () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-transfer-http-"));
-        const store = new InMemorySessionStore();
-        const session = store.create({ cwd: directory });
+        const store = await InMemorySessionStore.open();
+        const session = await store.create({ cwd: directory });
         const transfer = vi.spyOn(store, "transferSession");
         const { close, socketPath } = await startServer({ store });
         try {
@@ -86,7 +86,7 @@ describe("createProtocolHttpServer", () => {
             ).resolves.toMatchObject({ statusCode: 500 });
         } finally {
             await close();
-            store.close();
+            await store.close();
             await rm(directory, removeFixtureOptions);
         }
     });
@@ -144,14 +144,14 @@ describe("createProtocolHttpServer", () => {
                 width: 1280,
             },
         ];
-        const initialStore = new PersistentSessionStore({ databasePath });
-        initialStore.saveSession({
+        const initialStore = await PersistentSessionStore.open({ databasePath });
+        await initialStore.saveSession({
             ...pausedGoalState(),
             cwd: workspace,
             docker: { image: "example.test/rig", workingDirectory: "/workspace" },
             messages: [],
         });
-        initialStore.upsertMessage("goal-session", {
+        await initialStore.upsertMessage("goal-session", {
             isPartial: false,
             message: {
                 blocks: [{ text: "Show the result.", type: "text" }],
@@ -161,7 +161,7 @@ describe("createProtocolHttpServer", () => {
             position: 0,
             runId: "run-1",
         });
-        initialStore.upsertMessage("goal-session", {
+        await initialStore.upsertMessage("goal-session", {
             isPartial: false,
             message: {
                 attachments,
@@ -174,7 +174,7 @@ describe("createProtocolHttpServer", () => {
         });
         for (let turn = 2; turn <= 82; turn += 1) {
             const runId = `run-${String(turn)}`;
-            initialStore.upsertMessage("goal-session", {
+            await initialStore.upsertMessage("goal-session", {
                 isPartial: false,
                 message: {
                     blocks: [{ text: `Question ${String(turn)}`, type: "text" }],
@@ -184,7 +184,7 @@ describe("createProtocolHttpServer", () => {
                 position: turn * 2 - 2,
                 runId,
             });
-            initialStore.upsertMessage("goal-session", {
+            await initialStore.upsertMessage("goal-session", {
                 isPartial: false,
                 message: {
                     blocks: [{ text: `Answer ${String(turn)}`, type: "text" }],
@@ -195,7 +195,7 @@ describe("createProtocolHttpServer", () => {
                 runId,
             });
         }
-        initialStore.upsertMessage("goal-session", {
+        await initialStore.upsertMessage("goal-session", {
             isPartial: false,
             message: {
                 attachments: [{ ...attachments[0]!, id: "internal-attachment" }],
@@ -207,10 +207,10 @@ describe("createProtocolHttpServer", () => {
             position: 164,
             runId: "run-83",
         });
-        initialStore.close();
-        const store = new PersistentSessionStore({ databasePath });
-        expect(store.get("goal-session")?.attachment("attachment-1")).toBeUndefined();
-        expect(store.attachment("goal-session", "attachment-1")).toMatchObject({
+        await initialStore.close();
+        const store = await PersistentSessionStore.open({ databasePath });
+        expect((await store.get("goal-session"))?.attachment("attachment-1")).toBeUndefined();
+        expect(await store.attachment("goal-session", "attachment-1")).toMatchObject({
             source: "generated/result.txt",
         });
         const { close, socketPath } = await startServer({ store });
@@ -267,7 +267,7 @@ describe("createProtocolHttpServer", () => {
             ).resolves.toMatchObject({ statusCode: 404 });
         } finally {
             await close();
-            store.close();
+            await store.close();
             await rm(workspace, removeFixtureOptions);
             await rm(outside, removeFixtureOptions);
             await rm(stateDirectory, removeFixtureOptions);
@@ -277,9 +277,9 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("keeps private model context out of a bounded session state response", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const privateMarker = "private-model-context:";
-        store.saveSession({
+        await store.saveSession({
             ...pausedGoalState(),
             contextMessages: [
                 {
@@ -294,10 +294,10 @@ describe("createProtocolHttpServer", () => {
                 },
             ],
         });
-        const session = store.get("goal-session");
+        const session = await store.get("goal-session");
         if (session === undefined) throw new Error("Expected the restored session.");
         const createEventId = createEventIdFactory();
-        session.events.append({
+        await session.events.append({
             createdAt: 1,
             data: {
                 command: "finished command",
@@ -310,7 +310,7 @@ describe("createProtocolHttpServer", () => {
             sessionId: session.id,
             type: "shell_command_finished",
         });
-        session.events.append({
+        await session.events.append({
             createdAt: 2,
             data: {
                 command: "running command",
@@ -345,7 +345,7 @@ describe("createProtocolHttpServer", () => {
             ]);
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
@@ -521,15 +521,16 @@ describe("createProtocolHttpServer", () => {
         await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
         await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
         const worktreeAddStarted = deferred<void>();
+        const releaseWorktreeAdd = deferred<void>();
         const createRuntime = vi.fn();
         const search = vi.fn(async () => []);
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             createRuntime,
             databasePath: join(stateDirectory, "sessions.sqlite"),
             projectGit: async (cwd, args) => {
                 if (args[0] === "worktree" && args[1] === "add") {
                     worktreeAddStarted.resolve();
-                    await new Promise<void>(() => undefined);
+                    await releaseWorktreeAdd.promise;
                 }
                 const result = await execFile("git", args, { cwd });
                 return result.stdout.trim();
@@ -574,7 +575,7 @@ describe("createProtocolHttpServer", () => {
             await expect(client.submitMessage(created.session.id, submission)).resolves.toEqual(
                 first,
             );
-            expect(store.get(created.session.id)?.snapshot()).toMatchObject({
+            expect((await store.get(created.session.id))?.snapshot()).toMatchObject({
                 status: "queued",
                 workspaceId: workspace.id,
             });
@@ -606,8 +607,9 @@ describe("createProtocolHttpServer", () => {
                 ]),
             );
         } finally {
+            releaseWorktreeAdd.resolve();
             await close();
-            store.close();
+            await store.close();
             await rm(projectDirectory, removeFixtureOptions);
             await rm(stateDirectory, removeFixtureOptions);
         }
@@ -668,7 +670,7 @@ describe("createProtocolHttpServer", () => {
                 projectId: sourceProjectId,
                 workspaceId: workspace.id,
             });
-            expect(store.get(attached.session.id)?.requestForSubagent().docker?.name).toBe(
+            expect((await store.get(attached.session.id))?.requestForSubagent().docker?.name).toBe(
                 `rig-workspace-${workspace.id}-1`,
             );
         } finally {
@@ -687,7 +689,7 @@ describe("createProtocolHttpServer", () => {
         const initializationContinued = deferred<void>();
         const releaseInitialization = deferred<void>();
         let topLevelReads = 0;
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: join(stateDirectory, "sessions.sqlite"),
             homeDirectory: root,
             projectGit: async (cwd, args) => {
@@ -717,7 +719,7 @@ describe("createProtocolHttpServer", () => {
 
             releaseFirstProbe.resolve();
             await initializationContinued.promise;
-            expect(store.getProject(project.id)).toMatchObject({
+            expect(await store.getProject(project.id)).toMatchObject({
                 initializationStatus: "initializing",
                 version: project.version + 1,
             });
@@ -749,13 +751,13 @@ describe("createProtocolHttpServer", () => {
             releaseFirstProbe.resolve();
             releaseInitialization.resolve();
             await close();
-            store.close();
+            await store.close();
             await rm(root, removeFixtureOptions);
         }
     });
 
     it("archives a project with its chats and restores it when the folder is used again", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { client, close } = await startServer({ store });
         try {
             const first = await client.createSession({ cwd: "/tmp/rig-archive-api/project" });
@@ -793,7 +795,7 @@ describe("createProtocolHttpServer", () => {
     it("registers projects without sessions and returns strict typed path failures", async () => {
         const repository = await mkdtemp(join(tmpdir(), "rig-project-registration-http-"));
         await execFile("git", ["init", "--quiet", "--initial-branch=main"], { cwd: repository });
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { client, close, socketPath } = await startServer({ store });
         try {
             const projectId = createId();
@@ -803,8 +805,8 @@ describe("createProtocolHttpServer", () => {
             expect(repeated).toEqual(first);
             expect(first.project).toMatchObject({ id: projectId });
             expect(first.project.path).toBe(await realpath(repository));
-            expect(store.list()).toEqual([]);
-            expect(store.listWorkspaces()).toEqual([]);
+            expect(await store.list()).toEqual([]);
+            expect(await store.listWorkspaces()).toEqual([]);
 
             const invalid = await requestRawJson(socketPath, "/projects", {
                 body: JSON.stringify({ extra: true, path: repository }),
@@ -861,26 +863,29 @@ describe("createProtocolHttpServer", () => {
             });
         } finally {
             await close();
-            store.close();
+            await store.close();
             await rm(repository, removeFixtureOptions);
         }
     });
 
     it("starts managed project clones through the API without exposing GitHub credentials", async () => {
         const localInstanceId = "alocalcloneapi00000000001";
-        const store = new PersistentSessionStore({ databasePath: ":memory:", localInstanceId });
+        const store = await PersistentSessionStore.open({
+            databasePath: ":memory:",
+            localInstanceId,
+        });
         const profiles = new RigProfileStore({
             database: store,
             localInstanceId,
             publish: () => undefined,
         });
-        const profile = profiles.create({
+        const profile = await profiles.create({
             email: "steve@example.test",
             name: "Steve Korshakov",
         });
-        const session = store.create({ cwd: "/tmp/rig-managed-project-api" });
-        const project = store.getProject(session.snapshot().projectId!)!;
-        store.registerSpecialSecret({ kind: "github", token: "api-token" });
+        const session = await store.create({ cwd: "/tmp/rig-managed-project-api" });
+        const project = (await store.getProject(session.snapshot().projectId!))!;
+        await store.registerSpecialSecret({ kind: "github", token: "api-token" });
         const create = vi.spyOn(store, "createRemoteProject").mockResolvedValue(project);
         const { close, socketPath } = await startServer({ profiles, store });
         const request = {
@@ -918,12 +923,12 @@ describe("createProtocolHttpServer", () => {
             expect(create).toHaveBeenCalledTimes(1);
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("lists, renames, snapshots, and updates project avatars", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { client, close } = await startServer({ store });
         try {
             const first = await client.createSession({ cwd: "/tmp/rig-project-api/one/project" });
@@ -933,12 +938,12 @@ describe("createProtocolHttpServer", () => {
             const firstProject = await client.renameProject(
                 firstProjectId,
                 { name: "Shared" },
-                store.getProject(firstProjectId)?.version ?? 1,
+                (await store.getProject(firstProjectId))?.version ?? 1,
             );
             const secondProject = await client.renameProject(
                 secondProjectId,
                 { name: "Shared" },
-                store.getProject(secondProjectId)?.version ?? 1,
+                (await store.getProject(secondProjectId))?.version ?? 1,
             );
             expect(firstProject.project.name).toBe("Shared");
             expect(secondProject.project.name).toBe("Shared (2)");
@@ -1064,12 +1069,12 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("shares versioned project compute by default while preserving session overrides", async () => {
-        const store = new InMemorySessionStore();
+        const store = await InMemorySessionStore.open();
         const { client, close } = await startServer({ store });
         const cwd = "/tmp/rig-project-compute/project";
         try {
             const seed = await client.createSession({ cwd });
-            const project = store.getProject(seed.session.projectId!)!;
+            const project = (await store.getProject(seed.session.projectId!))!;
             const dockerProject = await client.updateProjectSettings(
                 project.id,
                 {
@@ -1084,11 +1089,12 @@ describe("createProtocolHttpServer", () => {
 
             const firstDocker = await client.createSession({ cwd });
             const secondDocker = await client.createSession({ cwd });
-            const sharedName = store.get(firstDocker.session.id)?.requestForSubagent().docker?.name;
+            const sharedName = (await store.get(firstDocker.session.id))?.requestForSubagent()
+                .docker?.name;
             expect(sharedName).toBe(`rig-project-${project.id}-1`);
-            expect(store.get(secondDocker.session.id)?.requestForSubagent().docker?.name).toBe(
-                sharedName,
-            );
+            expect(
+                (await store.get(secondDocker.session.id))?.requestForSubagent().docker?.name,
+            ).toBe(sharedName);
 
             const explicitLocal = await client.createSession({ cwd, local: true });
             expect(explicitLocal.session.environment).toEqual({ type: "local" });
@@ -1099,9 +1105,9 @@ describe("createProtocolHttpServer", () => {
                     workingDirectory: "/workspace",
                 },
             });
-            expect(store.get(explicitDocker.session.id)?.requestForSubagent().docker?.name).toBe(
-                `rig-${explicitDocker.session.id}`,
-            );
+            expect(
+                (await store.get(explicitDocker.session.id))?.requestForSubagent().docker?.name,
+            ).toBe(`rig-${explicitDocker.session.id}`);
 
             const localProject = await client.updateProjectSettings(
                 project.id,
@@ -1113,9 +1119,9 @@ describe("createProtocolHttpServer", () => {
             );
             const defaultLocal = await client.createSession({ cwd });
             expect(defaultLocal.session.environment).toEqual({ type: "local" });
-            expect(store.get(firstDocker.session.id)?.requestForSubagent().docker?.name).toBe(
-                sharedName,
-            );
+            expect(
+                (await store.get(firstDocker.session.id))?.requestForSubagent().docker?.name,
+            ).toBe(sharedName);
 
             await client.updateProjectSettings(
                 project.id,
@@ -1129,18 +1135,18 @@ describe("createProtocolHttpServer", () => {
                 localProject.project.version,
             );
             const nextDocker = await client.createSession({ cwd });
-            expect(store.get(nextDocker.session.id)?.requestForSubagent().docker?.name).toBe(
-                `rig-project-${project.id}-3`,
-            );
+            expect(
+                (await store.get(nextDocker.session.id))?.requestForSubagent().docker?.name,
+            ).toBe(`rig-project-${project.id}-3`);
         } finally {
             await close();
         }
     });
 
     it("broadcasts one fully configured message to every primary session", async () => {
-        const store = new InMemorySessionStore();
-        const first = store.create({ cwd: "/tmp/broadcast-first" });
-        const second = store.create({ cwd: "/tmp/broadcast-second" });
+        const store = await InMemorySessionStore.open();
+        const first = await store.create({ cwd: "/tmp/broadcast-first" });
+        const second = await store.create({ cwd: "/tmp/broadcast-second" });
         const firstSubmit = vi.spyOn(first, "submit");
         const secondSubmit = vi.spyOn(second, "submit");
         const { client, close } = await startServer({ store });
@@ -1187,10 +1193,10 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("lists and idempotently resolves external function calls through the integration API", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const state = pausedGoalState();
-        store.saveSession(state);
-        store.upsertExternalToolCall({
+        await store.saveSession(state);
+        await store.upsertExternalToolCall({
             arguments: { ticket: 42 },
             batchId: "batch-1",
             consumed: false,
@@ -1235,7 +1241,7 @@ describe("createProtocolHttpServer", () => {
             ).resolves.toMatchObject({ accepted: false });
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
@@ -1293,7 +1299,7 @@ describe("createProtocolHttpServer", () => {
                 },
             ],
         };
-        const store = new InMemorySessionStore({ localInstanceId, modelCatalog });
+        const store = await InMemorySessionStore.open({ localInstanceId, modelCatalog });
         const getProviderQuota = vi.fn(async () => undefined);
         const { client, close } = await startServer({ getProviderQuota, store });
         try {
@@ -1308,18 +1314,18 @@ describe("createProtocolHttpServer", () => {
             expect(getProviderQuota).toHaveBeenCalledWith(providerId, localInstanceId, credential);
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("unions session and project attachment sources and detaches them independently", async () => {
-        const store = new InMemorySessionStore();
-        store.registerSecret({
+        const store = await InMemorySessionStore.open();
+        await store.registerSecret({
             description: "Service API credentials",
             environment: { SERVICE_TOKEN: "secret-value" },
             id: "service",
         });
-        store.registerSpecialSecret({ kind: "github", token: "native-token" });
+        await store.registerSpecialSecret({ kind: "github", token: "native-token" });
         const { client, close } = await startServer({ store });
         try {
             const created = await client.createSession({ cwd: "/tmp/secret-project" });
@@ -1367,9 +1373,8 @@ describe("createProtocolHttpServer", () => {
                 sessionSecretIds: [],
             });
             expect(
-                store
-                    .get(created.session.id)
-                    ?.events.since(undefined)
+                (await store.get(created.session.id))?.events
+                    .since(undefined)
                     ?.filter((event) => event.type === "secrets_changed")
                     .at(-1),
             ).toMatchObject({
@@ -1401,9 +1406,9 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer({ getProviderQuota });
         try {
             const created = await client.createSession({ cwd: "/tmp/usage-project" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             if (session === undefined) throw new Error("Expected the created session.");
-            session.events.append({
+            await session.events.append({
                 createdAt: 2,
                 data: {
                     message: {
@@ -1464,8 +1469,8 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("applies project attachments to existing and future sessions in the same cwd only", async () => {
-        const store = new InMemorySessionStore();
-        store.registerSecret({
+        const store = await InMemorySessionStore.open();
+        await store.registerSecret({
             description: "Shared project credentials",
             environment: { PROJECT_TOKEN: "project-value" },
             id: "project-service",
@@ -1478,13 +1483,13 @@ describe("createProtocolHttpServer", () => {
 
             await client.attachSecret(first.session.id, "project-service", "project");
 
-            expect(store.get(first.session.id)?.snapshot().projectSecretIds).toEqual([
+            expect((await store.get(first.session.id))?.snapshot().projectSecretIds).toEqual([
                 "project-service",
             ]);
-            expect(store.get(existing.session.id)?.snapshot().projectSecretIds).toEqual([
+            expect((await store.get(existing.session.id))?.snapshot().projectSecretIds).toEqual([
                 "project-service",
             ]);
-            expect(store.get(isolated.session.id)?.snapshot().secretIds).toEqual([]);
+            expect((await store.get(isolated.session.id))?.snapshot().secretIds).toEqual([]);
 
             const future = await client.createSession({ cwd: "/tmp/shared-secret-project" });
             const isolatedFuture = await client.createSession({
@@ -1498,9 +1503,9 @@ describe("createProtocolHttpServer", () => {
             expect(isolatedFuture.session.secretIds).toEqual([]);
 
             await client.detachSecret(existing.session.id, "project-service", "project");
-            expect(store.get(first.session.id)?.snapshot().secretIds).toEqual([]);
-            expect(store.get(existing.session.id)?.snapshot().secretIds).toEqual([]);
-            expect(store.get(future.session.id)?.snapshot().secretIds).toEqual([]);
+            expect((await store.get(first.session.id))?.snapshot().secretIds).toEqual([]);
+            expect((await store.get(existing.session.id))?.snapshot().secretIds).toEqual([]);
+            expect((await store.get(future.session.id))?.snapshot().secretIds).toEqual([]);
         } finally {
             await close();
         }
@@ -1614,7 +1619,7 @@ describe("createProtocolHttpServer", () => {
                 removed: true,
             });
             expect(await client.listSecrets()).toEqual({ secrets: [] });
-            expect(store.get(created.session.id)?.snapshot()).toMatchObject({
+            expect((await store.get(created.session.id))?.snapshot()).toMatchObject({
                 projectSecretIds: [],
                 secretIds: [],
                 sessionSecretIds: [],
@@ -1655,9 +1660,9 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer({ getProviderQuota });
         try {
             const created = await client.createSession({ cwd: "/tmp/multi-provider-usage" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             if (session === undefined) throw new Error("Expected the created session.");
-            session.events.append({
+            await session.events.append({
                 createdAt: 2,
                 data: {
                     message: {
@@ -1708,7 +1713,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/activity-project" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             if (session === undefined) throw new Error("Expected the created session.");
             const recordUserActivity = vi.spyOn(session, "recordUserActivity");
             const eventCount = session.events.since(undefined)?.length;
@@ -1725,8 +1730,8 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("accepts registered initial attachments and rejects malformed secret ID lists", async () => {
-        const store = new InMemorySessionStore();
-        store.registerSecret({
+        const store = await InMemorySessionStore.open();
+        await store.registerSecret({
             description: "Service API credentials",
             environment: { SERVICE_TOKEN: "secret-value" },
             id: "service",
@@ -1751,7 +1756,7 @@ describe("createProtocolHttpServer", () => {
                     secretIds: ["missing"],
                 }),
             ).rejects.toThrow("not registered");
-            expect(store.list()).toHaveLength(1);
+            expect(await store.list()).toHaveLength(1);
         } finally {
             await close();
         }
@@ -1775,7 +1780,7 @@ describe("createProtocolHttpServer", () => {
                 local: true,
             });
 
-            expect(store.get(configured.session.id)?.requestForSubagent().docker).toEqual({
+            expect((await store.get(configured.session.id))?.requestForSubagent().docker).toEqual({
                 image: "default:local",
                 mounts: [
                     { source: "/tmp/default-project", target: "/workspace" },
@@ -1789,11 +1794,13 @@ describe("createProtocolHttpServer", () => {
                 name: `rig-${configured.session.id}`,
                 workingDirectory: "/workspace",
             });
-            expect(store.get(explicit.session.id)?.requestForSubagent().docker).toEqual({
+            expect((await store.get(explicit.session.id))?.requestForSubagent().docker).toEqual({
                 container: "already-running",
                 workingDirectory: "/repo",
             });
-            expect(store.get(local.session.id)?.requestForSubagent().docker).toBeUndefined();
+            expect(
+                (await store.get(local.session.id))?.requestForSubagent().docker,
+            ).toBeUndefined();
         } finally {
             await close();
         }
@@ -1884,11 +1891,11 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("enables and disables the durable queue through daemon configuration", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const { client, close } = await startServer({
-            onDaemonSettingsChange: (settings) => ({
+            onDaemonSettingsChange: async (settings) => ({
                 inferenceMaxRetries: settings.inferenceMaxRetries,
-                globalEventQueue: store.setDurableGlobalEventQueue(
+                globalEventQueue: await store.setDurableGlobalEventQueue(
                     settings.durableGlobalEventQueue,
                 ),
             }),
@@ -1976,12 +1983,12 @@ describe("createProtocolHttpServer", () => {
             await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("accepts UUIDv7 cursors emitted by the default in-memory queue", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const { client, close } = await startServer({
             globalEventQueue: store.globalEventQueue,
             store,
@@ -2001,12 +2008,12 @@ describe("createProtocolHttpServer", () => {
             });
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("streams and trims durable events across every session", async () => {
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             durableGlobalEventQueue: true,
         });
@@ -2069,7 +2076,7 @@ describe("createProtocolHttpServer", () => {
             });
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
@@ -2201,7 +2208,7 @@ describe("createProtocolHttpServer", () => {
         await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
         await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
         const search = vi.fn(async () => [{ fileName: "note.txt", path: "note.txt" }]);
-        const store = new InMemorySessionStore({ workspacesDirectory });
+        const store = await InMemorySessionStore.open({ workspacesDirectory });
         const { client, close } = await startServer({
             fileSearchService: { close: vi.fn(), search },
             store,
@@ -2225,9 +2232,9 @@ describe("createProtocolHttpServer", () => {
                 },
                 { interval: 20, timeout: 5_000 },
             );
-            expect(store.list().some((session) => session.workspaceId === workspace.id)).toBe(
-                false,
-            );
+            expect(
+                (await store.list()).some((session) => session.workspaceId === workspace.id),
+            ).toBe(false);
 
             const scope = {
                 projectId: rootProjectId,
@@ -2248,7 +2255,7 @@ describe("createProtocolHttpServer", () => {
             expect(search).toHaveBeenCalledWith(workspace.path, "note", 20);
         } finally {
             await close();
-            store.close();
+            await store.close();
             await rm(projectDirectory, removeFixtureOptions);
             await rm(workspacesDirectory, removeFixtureOptions);
         }
@@ -2385,7 +2392,7 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("archives sessions as an idempotent listing state and unarchives on user activity", async () => {
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             durableGlobalEventQueue: true,
         });
@@ -2420,9 +2427,9 @@ describe("createProtocolHttpServer", () => {
                 session: { archived: true, id: hidden.session.id },
             });
             expect(
-                store.globalEventQueue
-                    ?.list()
-                    ?.filter((entry) => entry.event.type === "session_archived"),
+                (await store.globalEventQueue?.list())?.filter(
+                    (entry) => entry.event.type === "session_archived",
+                ),
             ).toHaveLength(1);
 
             const unarchived = await client.unarchiveSession(hidden.session.id);
@@ -2448,7 +2455,7 @@ describe("createProtocolHttpServer", () => {
         } finally {
             await close();
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 
@@ -2526,7 +2533,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             expect(session).toBeDefined();
             const run = session?.launchWorkflow({
                 code: "42",
@@ -2551,7 +2558,7 @@ describe("createProtocolHttpServer", () => {
                     status: "stopped",
                 }),
             });
-            session?.abort();
+            await session?.abort();
         } finally {
             await close();
         }
@@ -2561,7 +2568,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             expect(session).toBeDefined();
             const stopBackgroundProcesses = vi
                 .spyOn(session!, "stopBackgroundProcesses")
@@ -2596,9 +2603,8 @@ describe("createProtocolHttpServer", () => {
                 messageId: "context-route-note",
             });
             expect(
-                store
-                    .get(created.session.id)
-                    ?.events.since(undefined)
+                (await store.get(created.session.id))?.events
+                    .since(undefined)
                     ?.filter((event) => event.type === "run_started"),
             ).toEqual([]);
             const rejected = await requestRawJson(
@@ -2632,9 +2638,8 @@ describe("createProtocolHttpServer", () => {
 
             expect(accepted).toMatchObject({ delivery: "run" });
             expect(
-                store
-                    .get(created.session.id)
-                    ?.events.since(undefined)
+                (await store.get(created.session.id))?.events
+                    .since(undefined)
                     ?.find((event) => event.id === accepted.eventId),
             ).toMatchObject({
                 data: {
@@ -2653,7 +2658,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, socketPath, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             if (session === undefined) throw new Error("Expected the created session.");
             const submit = vi.spyOn(session, "submit");
             const steer = vi.spyOn(session, "steer");
@@ -2738,7 +2743,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             expect(session).toBeDefined();
             vi.spyOn(session!, "abort").mockRejectedValueOnce(
                 new Error("The background process could not be stopped."),
@@ -2757,9 +2762,9 @@ describe("createProtocolHttpServer", () => {
         const { client, close, socketPath, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             if (session === undefined) throw new Error("Expected the created session.");
-            const event = session.events.append({
+            const event = await session.events.append({
                 createdAt: 1,
                 data: {
                     continuePendingSteering: true,
@@ -2795,8 +2800,8 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("updates and clears a persisted goal through dedicated endpoints", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession(pausedGoalState());
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        await store.saveSession(pausedGoalState());
         const { client, close } = await startServer({ store });
         try {
             const changed = await client.changeGoalStatus("goal-session", { status: "blocked" });
@@ -2809,7 +2814,7 @@ describe("createProtocolHttpServer", () => {
             expect(cleared.session.goal).toBeUndefined();
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
@@ -2817,7 +2822,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             expect(session).toBeDefined();
             const pending = session?.requestUserInput({
                 requestId: "question/1",
@@ -2912,9 +2917,9 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-scheduling" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             if (session === undefined) throw new Error("Expected the scheduled session.");
-            const scheduled = session.scheduleMessage({
+            const scheduled = await session.scheduleMessage({
                 dueAt: Date.now() + 60_000,
                 message: "Check the build later.",
                 targetAgentId: created.session.agentId,
@@ -2950,13 +2955,13 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             expect(session).toBeDefined();
             const createEventId = createEventIdFactory({ now: () => 1_700_000_000_000 });
             const first = sessionResetEvent(created.session.id, createEventId());
             const second = sessionResetEvent(created.session.id, createEventId());
-            session?.events.append(first);
-            session?.events.append(second);
+            await session?.events.append(first);
+            await session?.events.append(second);
 
             const received = await client.getEvents(created.session.id, first.id);
 
@@ -2993,7 +2998,7 @@ describe("createProtocolHttpServer", () => {
         const { client, close, store } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            const session = store.get(created.session.id);
+            const session = await store.get(created.session.id);
             expect(session).toBeDefined();
             const createEventId = createEventIdFactory({ now: () => 1_700_000_000_000 });
             const cursor = sessionResetEvent(created.session.id, createEventId());
@@ -3041,11 +3046,11 @@ describe("createProtocolHttpServer", () => {
                 type: "agent_event",
             };
             const durable = sessionResetEvent(created.session.id, createEventId());
-            session?.events.append(cursor);
-            session?.events.append(transient);
-            session?.events.append(compaction);
-            session?.events.append(backgroundProcesses);
-            session?.events.append(durable);
+            await session?.events.append(cursor);
+            await session?.events.append(transient);
+            await session?.events.append(compaction);
+            await session?.events.append(backgroundProcesses);
+            await session?.events.append(durable);
 
             const initial = await client.getEvents(created.session.id);
             const catchup = await client.getEvents(created.session.id, cursor.id);
@@ -3201,7 +3206,7 @@ describe("createProtocolHttpServer", () => {
         let restoredStore: PersistentSessionStore | undefined;
         let server: Awaited<ReturnType<typeof startServer>> | undefined;
         try {
-            originalStore = new PersistentSessionStore({ databasePath });
+            originalStore = await PersistentSessionStore.open({ databasePath });
             server = await startServer({ store: originalStore });
             const created = await server.client.createSession({ cwd: "/tmp/rig-protocol-test" });
             const written = await server.client.setSessionDraft(created.session.id, {
@@ -3209,10 +3214,10 @@ describe("createProtocolHttpServer", () => {
             });
             await server.close();
             server = undefined;
-            originalStore.close();
+            await originalStore.close();
             originalStore = undefined;
 
-            restoredStore = new PersistentSessionStore({ databasePath });
+            restoredStore = await PersistentSessionStore.open({ databasePath });
             server = await startServer({ store: restoredStore });
 
             const restored = await server.client.getSession(created.session.id);
@@ -3222,8 +3227,8 @@ describe("createProtocolHttpServer", () => {
             expect(listed.sessions[0]?.draft).toBe("Unsent when the terminal closed");
         } finally {
             await server?.close();
-            restoredStore?.close();
-            originalStore?.close();
+            await restoredStore?.close();
+            await originalStore?.close();
             await rm(databaseDirectory, { recursive: true, force: true });
         }
     });
@@ -3235,8 +3240,8 @@ describe("createProtocolHttpServer", () => {
         let restoredStore: PersistentSessionStore | undefined;
         let server: Awaited<ReturnType<typeof startServer>> | undefined;
         try {
-            originalStore = new PersistentSessionStore({ databasePath });
-            const session = originalStore.create({ cwd: "/tmp/rig-protocol-test" });
+            originalStore = await PersistentSessionStore.open({ databasePath });
+            const session = await originalStore.create({ cwd: "/tmp/rig-protocol-test" });
             const createFutureEventId = createEventIdFactory({ now: () => Date.now() + 60_000 });
             const transient: SessionEvent = {
                 createdAt: Date.now(),
@@ -3248,12 +3253,12 @@ describe("createProtocolHttpServer", () => {
                 sessionId: session.id,
                 type: "agent_event",
             } as SessionEvent;
-            session.events.append(transient);
-            originalStore.close();
+            await session.events.append(transient);
+            await originalStore.close();
             originalStore = undefined;
 
-            restoredStore = new PersistentSessionStore({ databasePath });
-            const restored = restoredStore.get(session.id);
+            restoredStore = await PersistentSessionStore.open({ databasePath });
+            const restored = await restoredStore.get(session.id);
             await restored?.changePermissionMode({ permissionMode: "read_only" });
             const durable = restored?.events.since(transient.id) ?? [];
             expect(durable.map((event) => event.type)).toContain("permission_mode_changed");
@@ -3278,8 +3283,8 @@ describe("createProtocolHttpServer", () => {
             expect(streamed).toEqual(durable);
         } finally {
             await server?.close();
-            restoredStore?.close();
-            originalStore?.close();
+            await restoredStore?.close();
+            await originalStore?.close();
             await rm(databaseDirectory, { recursive: true, force: true });
         }
     });
@@ -3303,8 +3308,8 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("reports disconnected settled sessions as idle and restores live status", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession(completedPrimaryState("idle-session"));
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        await store.saveSession(completedPrimaryState("idle-session"));
         const { client, close } = await startServer({ store });
         let idleTerminal:
             | Awaited<ReturnType<ProtocolHttpClient["connectSessionTerminal"]>>
@@ -3330,14 +3335,14 @@ describe("createProtocolHttpServer", () => {
         } finally {
             await idleTerminal?.close();
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("keeps settled sessions in the default listing so resume can find them", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession(completedPrimaryState("settled-session"));
-        store.saveSession({ ...completedPrimaryState("shelved-session"), archived: true });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        await store.saveSession(completedPrimaryState("settled-session"));
+        await store.saveSession({ ...completedPrimaryState("shelved-session"), archived: true });
         const { client, close } = await startServer({ store });
         try {
             const listed = await client.listSessions();
@@ -3350,13 +3355,13 @@ describe("createProtocolHttpServer", () => {
             ).toEqual(["shelved-session"]);
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("keeps unread state for background clients and clears it when any client is focused", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession({
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        await store.saveSession({
             ...completedPrimaryState("unread-session"),
             trackUnread: true,
             unread: { reason: "attention_needed", since: 123 },
@@ -3380,30 +3385,33 @@ describe("createProtocolHttpServer", () => {
                 focused: true,
             });
             expect((await listedSession(client, "unread-session"))?.unread).toBeUndefined();
-            expect(store.get("unread-session")?.snapshot().unread).toBeUndefined();
+            expect((await store.get("unread-session"))?.snapshot().unread).toBeUndefined();
 
-            const session = store.get("unread-session");
+            const session = await store.get("unread-session");
             const pending = session?.requestUserInput({
                 requestId: "focused-question",
                 questions: [],
             });
-            expect(session?.snapshot().unread?.reason).toBe("attention_needed");
+            await vi.waitFor(
+                () => expect(session?.snapshot().unread?.reason).toBe("attention_needed"),
+                { interval: 10, timeout: 1_000 },
+            );
             await foreground.close();
             foreground = undefined;
             expect(session?.snapshot().unread).toBeUndefined();
-            session?.answerUserInput("focused-question", { answers: {} });
+            await session?.answerUserInput("focused-question", { answers: {} });
             await pending;
         } finally {
             await background?.close();
             await foreground?.close();
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("lets a client without a terminal mark a chat read", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession({
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        await store.saveSession({
             ...completedPrimaryState("read-session"),
             trackUnread: true,
             unread: { reason: "attention_needed", since: 123 },
@@ -3424,7 +3432,7 @@ describe("createProtocolHttpServer", () => {
             expect(again.session.unread).toBeUndefined();
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
@@ -3569,7 +3577,7 @@ describe("createProtocolHttpServer", () => {
     });
 
     it("rewinds a session to a selected user message", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const state = pausedGoalState();
         const first = {
             blocks: [{ text: "Keep this", type: "text" as const }],
@@ -3581,14 +3589,14 @@ describe("createProtocolHttpServer", () => {
             id: "message-2",
             role: "user" as const,
         };
-        store.saveSession({ ...state, contextMessages: [first, second] });
-        store.upsertMessage(state.id, {
+        await store.saveSession({ ...state, contextMessages: [first, second] });
+        await store.upsertMessage(state.id, {
             isPartial: false,
             message: first,
             position: 0,
             runId: "run-1",
         });
-        store.upsertMessage(state.id, {
+        await store.upsertMessage(state.id, {
             isPartial: false,
             message: second,
             position: 1,
@@ -3602,13 +3610,13 @@ describe("createProtocolHttpServer", () => {
             expect(response.session.snapshot.messages).toEqual([first]);
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 
     it("serves subagent history but rejects attempts to resume it", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession(readOnlySubagentState());
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        await store.saveSession(readOnlySubagentState());
         const { client, close } = await startServer({ store });
         try {
             const loaded = await client.getSession("subagent-1");
@@ -3641,7 +3649,7 @@ describe("createProtocolHttpServer", () => {
             ).rejects.toThrow("cannot receive broadcasts");
         } finally {
             await close();
-            store.close();
+            await store.close();
         }
     });
 });
@@ -3679,12 +3687,12 @@ async function startServer(
     const socketPath = join(directory, "server.sock");
     const store =
         options.store ??
-        new InMemorySessionStore({
+        (await InMemorySessionStore.open({
             ...(options.defaultDocker === undefined
                 ? {}
                 : { defaultDocker: options.defaultDocker }),
-        });
-    const server = createProtocolHttpServer({
+        }));
+    const server = await createProtocolHttpServer({
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
         ...(options.fileSearchService !== undefined
             ? { fileSearchService: options.fileSearchService }

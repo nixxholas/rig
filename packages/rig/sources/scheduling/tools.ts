@@ -150,7 +150,7 @@ export const scheduleMessageTool = defineTool({
         },
         { additionalProperties: false },
     ),
-    execute(args, context) {
+    async execute(args, context) {
         const scheduling = requireScheduling(context.scheduling);
         const { at, agent_id: targetAgentId, message, ...duration } = args;
         const hasDuration = Object.values(duration).some((value) => value !== undefined);
@@ -161,7 +161,7 @@ export const scheduleMessageTool = defineTool({
             at === undefined
                 ? scheduling.now() + parseDurationMs(duration)
                 : Math.max(scheduling.now(), parseDateMs(at));
-        const scheduled = scheduling.scheduleMessage({ dueAt, message, targetAgentId });
+        const scheduled = await scheduling.scheduleMessage({ dueAt, message, targetAgentId });
         return {
             due_at: new Date(scheduled.dueAt).toISOString(),
             id: scheduled.id,

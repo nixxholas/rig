@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function presenceDetachedQuestions(database: SessionDatabase): void {
-    database.run(
+export async function presenceDetachedQuestions(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         ALTER TABLE durable_user_inputs
         ADD COLUMN detached_at_ms INTEGER

@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * A workspace has one name again, and its branch follows that name.
@@ -11,15 +11,17 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * it alone, and `branch` makes the managed branch durable instead of deriving it from the immutable
  * folder key it no longer has to match.
  */
-export function workspaceBranchNaming(database: SessionDatabase): void {
-    database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN title"));
-    database.run(
+export async function workspaceBranchNaming(database: SessionDatabase): Promise<void> {
+    await database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN title"));
+    await database.run(
         sql.raw(
             "ALTER TABLE project_workspaces ADD COLUMN name_configured INTEGER NOT NULL DEFAULT 0",
         ),
     );
-    database.run(
+    await database.run(
         sql.raw("ALTER TABLE project_workspaces ADD COLUMN branch TEXT NOT NULL DEFAULT ''"),
     );
-    database.run(sql.raw("UPDATE project_workspaces SET branch = 'worktree/' || storage_key"));
+    await database.run(
+        sql.raw("UPDATE project_workspaces SET branch = 'worktree/' || storage_key"),
+    );
 }

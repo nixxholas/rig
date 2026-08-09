@@ -23,6 +23,7 @@ import type {
     ListGlobalEventQueueOptions,
 } from "./GlobalEventQueue.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import type { GlobalEventStartup } from "../persistence/global-event/queryGlobalEventStartup.js";
 import { shouldPersistGlobalEventType } from "./shouldPersistGlobalEventType.js";
 
 export class PersistentGlobalEventQueue implements GlobalEventQueue {
@@ -34,10 +35,9 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     #head: EventId;
     #trimmedThrough: EventId | undefined;
 
-    constructor(database: SessionDatabase, options: { resetStream?: boolean } = {}) {
+    private constructor(database: SessionDatabase, startup: GlobalEventStartup) {
         this.#database = database;
-        if (options.resetStream === true) globalEventReset(this.#database);
-        const { latestCursor, trimmedThrough } = queryGlobalEventStartup(this.#database);
+        const { latestCursor, trimmedThrough } = startup;
         this.#trimmedThrough = trimmedThrough;
         const seed =
             latestCursor === null || latestCursor === undefined
@@ -49,7 +49,19 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         this.#head = seed ?? this.#createCursor();
     }
 
-    append(event: GlobalEvent, tx: TX = this.#database): GlobalEventQueueEntry | undefined {
+    static async open(
+        database: SessionDatabase,
+        options: { resetStream?: boolean } = {},
+    ): Promise<PersistentGlobalEventQueue> {
+        if (options.resetStream === true) await globalEventReset(database.database);
+        const startup = await queryGlobalEventStartup(database.database);
+        return new PersistentGlobalEventQueue(database, startup);
+    }
+
+    async append(
+        event: GlobalEvent,
+        tx: TX = this.#database.database,
+    ): Promise<GlobalEventQueueEntry | undefined> {
         return this.#append(event, tx, false);
     }
 
@@ -58,14 +70,18 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
      *
      * Replaying the exact event is success without publishing it twice.
      */
-    appendReplaySafe(
+    async appendReplaySafe(
         event: GlobalEvent,
-        tx: TX = this.#database,
-    ): GlobalEventQueueEntry | undefined {
+        tx: TX = this.#database.database,
+    ): Promise<GlobalEventQueueEntry | undefined> {
         return this.#append(event, tx, true);
     }
 
-    #append(event: GlobalEvent, tx: TX, replaySafe: boolean): GlobalEventQueueEntry | undefined {
+    async #append(
+        event: GlobalEvent,
+        tx: TX,
+        replaySafe: boolean,
+    ): Promise<GlobalEventQueueEntry | undefined> {
         if (isLiveGlobalEvent(event)) return undefined;
         if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
         let aggregate: {
@@ -87,7 +103,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         }
         const cursor = this.#createCursor();
         const append = replaySafe ? globalEventAppendReplaySafe : globalEventAppend;
-        const entry = append(tx, {
+        const entry = await append(tx, {
             aggregateId: aggregate.id,
             aggregateKind: aggregate.kind,
             cursor,
@@ -134,7 +150,9 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         this.#listeners.clear();
     }
 
-    list(options: ListGlobalEventQueueOptions = {}): readonly GlobalEventQueueEntry[] | undefined {
+    async list(
+        options: ListGlobalEventQueueOptions = {},
+    ): Promise<readonly GlobalEventQueueEntry[] | undefined> {
         const after = options.after?.toLowerCase();
         if (
             after !== undefined &&
@@ -144,7 +162,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         ) {
             return undefined;
         }
-        return queryGlobalEvents(this.#database, after, options.limit ?? -1);
+        return queryGlobalEvents(this.#database.database, after, options.limit ?? -1);
     }
 
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void {
@@ -156,12 +174,12 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         };
     }
 
-    trim(through: string): TrimGlobalEventsResponse | undefined {
+    async trim(through: string): Promise<TrimGlobalEventsResponse | undefined> {
         const normalized = through.toLowerCase();
         if (!eventIdsShareScope(normalized, this.#head) || normalized > this.#head) {
             return undefined;
         }
-        const trimmed = globalEventTrim(this.#database, normalized);
+        const trimmed = await globalEventTrim(this.#database.database, normalized);
         if (this.#trimmedThrough === undefined || normalized > this.#trimmedThrough) {
             this.#trimmedThrough = normalized as EventId;
         }

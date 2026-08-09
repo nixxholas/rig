@@ -178,7 +178,7 @@ describe("Folders over HTTP", () => {
     it("files a chat into a folder and back out to Unsorted", async () => {
         const fixture = await startServer();
         const folder = await fixture.send("POST", "/folders", { name: "Trip planning" });
-        const chat = fixture.store.create({ cwd: "/tmp/rig-folders" });
+        const chat = await fixture.store.create({ cwd: "/tmp/rig-folders" });
 
         const filed = await fixture.send("PUT", `/sessions/${chat.id}/scope`, {
             afterId: null,
@@ -200,8 +200,8 @@ describe("Folders over HTTP", () => {
     it("moves a chat through the canonical scope route with scoped ordering and retry identity", async () => {
         const fixture = await startServer();
         const folder = await fixture.send("POST", "/folders", { name: "Ordered" });
-        const first = fixture.store.create({ cwd: "/tmp/rig-folders" });
-        const second = fixture.store.create({ cwd: "/tmp/rig-folders" });
+        const first = await fixture.store.create({ cwd: "/tmp/rig-folders" });
+        const second = await fixture.store.create({ cwd: "/tmp/rig-folders" });
         const mutationId = "move-first";
         const staleVersion = first.events.lastEventId();
 
@@ -311,7 +311,7 @@ describe("Folders over HTTP", () => {
     it("prevents work and individual restoration after a chat's folder is archived", async () => {
         const fixture = await startServer();
         const folder = await fixture.send("POST", "/folders", { name: "Finished" });
-        const chat = fixture.store.create({
+        const chat = await fixture.store.create({
             cwd: "/ignored",
             scope: { folderId: folder.body.folder.id, kind: "folder" },
         });
@@ -323,7 +323,7 @@ describe("Folders over HTTP", () => {
             { "if-match": String(folder.body.folder.version) },
         );
         expect(archived.status).toBe(200);
-        expect(() => chat.submit({ text: "Continue after archival." })).toThrow("archived");
+        await expect(chat.submit({ text: "Continue after archival." })).rejects.toThrow("archived");
 
         const restored = await fixture.send("POST", `/sessions/${chat.id}/unarchive`);
         expect(restored.status).toBe(409);
@@ -343,11 +343,11 @@ async function startServer(): Promise<{
     const root = await createTestFixtureDirectory();
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         homeDirectory: root,
         workspacesDirectory: join(root, "workspaces"),
     });
-    const server: Server = createProtocolHttpServer({ store, token: "t" });
+    const server: Server = await createProtocolHttpServer({ store, token: "t" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {

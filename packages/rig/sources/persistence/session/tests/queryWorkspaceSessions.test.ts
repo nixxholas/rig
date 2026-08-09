@@ -14,16 +14,18 @@ describe("queryWorkspaceSessions", () => {
     it("identifies an archived conversation whose activity status is still idle", async () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-workspace-sessions-"));
         const databasePath = join(directory, "sessions.sqlite");
-        createSessionDatabaseFixture(databasePath);
-        const opened = openSessionDatabase(databasePath);
+        await createSessionDatabaseFixture(databasePath);
+        const opened = await openSessionDatabase(databasePath);
         try {
-            opened.database
+            await opened.database
                 .update(sessions)
                 .set({ archived: true })
                 .where(eq(sessions.id, "session-1"))
                 .run();
 
-            expect(queryWorkspaceSessions(opened.database, { projectId: "project-1" })).toEqual([
+            expect(
+                await queryWorkspaceSessions(opened.database, { projectId: "project-1" }),
+            ).toEqual([
                 expect.objectContaining({
                     archived: true,
                     id: "session-1",

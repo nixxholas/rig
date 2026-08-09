@@ -26,34 +26,50 @@ export function attachHttpConnectProxy(server: Server, token: string, store: Ses
         return closeServer(callback);
     }) as Server["close"];
     server.on("connect", (request, client, head) => {
-        if (request.url === "/p2p/transports/ssh") return;
-        if (matchP2pPeerRoute(request.url) !== undefined) return;
-        const scope = matchHttpProxyRoute(request.url);
-        if (scope === undefined) {
-            client.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-            return;
-        }
-        if (!isAuthorizedProtocolRequest(request, token)) {
-            client.end(
-                'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm="Rig"\r\nConnection: close\r\n\r\n',
-            );
-            return;
-        }
-
-        const resolution = resolveHttpProxyProjectScope(scope, store);
-        if (!resolution.allowed) {
-            endWithStatus(client, resolution);
-            return;
-        }
-
-        tunnels.add(client);
-        client.once("close", () => tunnels.delete(client));
-        client.once("error", () => client.destroy());
-        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        proxyServer.emit("connection", client);
-        if (head.length > 0) client.unshift(head);
-        client.resume();
+        void handleHttpConnect(request, client, head, proxyServer, store, token, tunnels).catch(
+            () => {
+                client.destroy();
+            },
+        );
     });
+}
+
+async function handleHttpConnect(
+    request: IncomingMessage,
+    client: Duplex,
+    head: Buffer,
+    proxyServer: Server,
+    store: SessionStore,
+    token: string,
+    tunnels: Set<Duplex>,
+): Promise<void> {
+    if (request.url === "/p2p/transports/ssh") return;
+    if (matchP2pPeerRoute(request.url) !== undefined) return;
+    const scope = matchHttpProxyRoute(request.url);
+    if (scope === undefined) {
+        client.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    if (!isAuthorizedProtocolRequest(request, token)) {
+        client.end(
+            'HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm="Rig"\r\nConnection: close\r\n\r\n',
+        );
+        return;
+    }
+
+    const resolution = await resolveHttpProxyProjectScope(scope, store);
+    if (!resolution.allowed) {
+        endWithStatus(client, resolution);
+        return;
+    }
+
+    tunnels.add(client);
+    client.once("close", () => tunnels.delete(client));
+    client.once("error", () => client.destroy());
+    client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    proxyServer.emit("connection", client);
+    if (head.length > 0) client.unshift(head);
+    client.resume();
 }
 
 function connectProxyTarget(

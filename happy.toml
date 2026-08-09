@@ -5,8 +5,6 @@ setup_commands = ["pnpm install --frozen-lockfile"]
 # Rig's own tests start daemons, HTTP servers, and unix sockets on the loopback
 # interface, so a sandboxed command has to be allowed to listen locally.
 allow_local_binding = true
-# Every package this repository installs comes from the npm registry. The second
-# domain is only for `better-sqlite3`: it has no prebuilt binary, so node-gyp
-# fetches the Node headers it compiles against whenever that cache is cold.
-allowed_domains = ["registry.npmjs.org", "nodejs.org"]
+# Every package this repository installs comes from the npm registry.
+allowed_domains = ["registry.npmjs.org"]
 allowed_ports = [443]

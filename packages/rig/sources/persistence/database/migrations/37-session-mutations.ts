@@ -1,10 +1,10 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /** Bounded durable receipts for session mutations whose HTTP response may be lost. */
-export function sessionMutations(database: SessionDatabase): void {
-    database.run(
+export async function sessionMutations(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE session_mutations (
             mutation_id TEXT NOT NULL PRIMARY KEY,
@@ -14,7 +14,7 @@ export function sessionMutations(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX session_mutations_created ON session_mutations(created_at_ms DESC, mutation_id DESC)",
         ),

@@ -56,11 +56,11 @@ export async function serveFolderItemRequest(
                 );
                 return;
             }
-            const item = store.createFolderItem(route.folderId, {
+            const item = await store.createFolderItem(route.folderId, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
-            sendJson<FolderItemResponse>(response, 201, itemResponse(store, item.id, item));
+            sendJson<FolderItemResponse>(response, 201, await itemResponse(store, item.id, item));
             return;
         }
 
@@ -74,7 +74,7 @@ export async function serveFolderItemRequest(
                 sendJson(response, 405, { error: "Method not allowed" });
                 return;
             }
-            const item = store.getFolderItem(itemId);
+            const item = await store.getFolderItem(itemId);
             if (item === undefined) {
                 sendFolderItemError(
                     response,
@@ -84,7 +84,7 @@ export async function serveFolderItemRequest(
                 );
                 return;
             }
-            sendJson<FolderItemResponse>(response, 200, itemResponse(store, itemId, item));
+            sendJson<FolderItemResponse>(response, 200, await itemResponse(store, itemId, item));
             return;
         }
         if (request.method !== "POST") {
@@ -105,7 +105,7 @@ export async function serveFolderItemRequest(
         }
         const mutationId = requestMutationId(request);
         if (route.name === "folder-item-archive") {
-            const item = store.archiveFolderItem(itemId, expectedVersion, mutationId);
+            const item = await store.archiveFolderItem(itemId, expectedVersion, mutationId);
             if (item === undefined) {
                 sendFolderItemError(
                     response,
@@ -115,7 +115,7 @@ export async function serveFolderItemRequest(
                 );
                 return;
             }
-            sendJson<FolderItemResponse>(response, 200, itemResponse(store, itemId, item));
+            sendJson<FolderItemResponse>(response, 200, await itemResponse(store, itemId, item));
             return;
         }
         const body = await readJson(16 * 1024);
@@ -132,7 +132,7 @@ export async function serveFolderItemRequest(
             sendFolderItemError(response, 400, "invalid_request", "The mutation ID did not match.");
             return;
         }
-        const item = store.moveFolderItem(
+        const item = await store.moveFolderItem(
             itemId,
             { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
             expectedVersion,
@@ -141,16 +141,16 @@ export async function serveFolderItemRequest(
             sendFolderItemError(response, 404, "item_not_found", "That folder item was not found.");
             return;
         }
-        sendJson<FolderItemResponse>(response, 200, itemResponse(store, itemId, item));
+        sendJson<FolderItemResponse>(response, 200, await itemResponse(store, itemId, item));
     } catch (error) {
         if (!(error instanceof FolderError)) throw error;
         if (error.code === "version_conflict" && route.itemId !== undefined) {
-            const current = store.getFolderItem(route.itemId);
+            const current = await store.getFolderItem(route.itemId);
             if (current !== undefined) {
                 sendJson<FolderItemResponse>(
                     response,
                     409,
-                    itemResponse(store, route.itemId, current),
+                    await itemResponse(store, route.itemId, current),
                 );
                 return;
             }
@@ -159,12 +159,12 @@ export async function serveFolderItemRequest(
     }
 }
 
-function itemResponse(
+async function itemResponse(
     store: SessionStore,
     itemId: string,
     fallback: FolderItemResponse["item"],
-): FolderItemResponse {
-    const catalog = store.folderCatalog();
+): Promise<FolderItemResponse> {
+    const catalog = await store.folderCatalog();
     return {
         item: catalog.items.find((item) => item.id === itemId) ?? fallback,
         revision: catalog.revision,

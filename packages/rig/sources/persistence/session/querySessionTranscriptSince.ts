@@ -2,8 +2,8 @@ import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { EventId } from "../../protocol/index.js";
-import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
+import { inTx } from "../inTx.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 import {
     querySessionTranscriptNotices,
@@ -12,13 +12,14 @@ import {
 
 export type SessionTranscriptMessageRange = SessionTranscriptNoticeSlice;
 
-export function querySessionTranscriptSince(
-    tx: TX,
+export async function querySessionTranscriptSince(
+    tx: DatabaseScope,
     sessionId: string,
     turnLimit: number,
     after: EventId,
-): SessionTranscriptMessageRange | undefined {
-    const anchor = tx.get<Record<string, unknown>>(sql`
+): Promise<SessionTranscriptMessageRange | undefined> {
+    return await inTx(tx, async (tx) => {
+        const anchor = await tx.get<Record<string, unknown>>(sql`
         SELECT
             messages.position,
             messages.run_id,
@@ -34,24 +35,24 @@ export function querySessionTranscriptSince(
         WHERE events.session_id = ${sessionId} AND events.event_id = ${after}
         LIMIT 1
     `);
-    if (anchor === undefined) return undefined;
-    const anchorPosition = readNumber(anchor, "position");
-    const anchorRunId = readOptionalString(anchor, "run_id");
-    const lowerPosition =
-        anchorRunId === undefined ? anchorPosition : readNumber(anchor, "first_position");
-    const runRows = tx.all<Record<string, unknown>>(sql`
+        if (anchor === undefined) return undefined;
+        const anchorPosition = readNumber(anchor, "position");
+        const anchorRunId = readOptionalString(anchor, "run_id");
+        const lowerPosition =
+            anchorRunId === undefined ? anchorPosition : readNumber(anchor, "first_position");
+        const runRows = await tx.all<Record<string, unknown>>(sql`
         SELECT turns.run_id, turns.first_position FROM session_turns AS turns
         WHERE turns.session_id = ${sessionId}
           AND turns.first_position >= ${lowerPosition}
         ORDER BY turns.first_position ASC
         LIMIT ${turnLimit}
     `);
-    const runIds = runRows.map((row) => readString(row, "run_id"));
-    const turnMessages =
-        runIds.length === 0
-            ? []
-            : tx
-                  .all<Record<string, unknown>>(sql`
+        const runIds = runRows.map((row) => readString(row, "run_id"));
+        const turnMessages =
+            runIds.length === 0
+                ? []
+                : (
+                      await tx.all<Record<string, unknown>>(sql`
                       SELECT position, is_partial, run_id, message_json
                       FROM session_messages
                       WHERE session_id = ${sessionId}
@@ -62,17 +63,17 @@ export function querySessionTranscriptSince(
                           )})
                       ORDER BY position ASC
                   `)
-                  .map((row) => ({
+                  ).map((row) => ({
                       isPartial: readNumber(row, "is_partial") !== 0,
                       message: JSON.parse(readString(row, "message_json")) as Message,
                       position: readNumber(row, "position"),
                       runId: readString(row, "run_id"),
                   }));
-    const lastRunPosition = runRows.at(-1);
-    const nextRun =
-        lastRunPosition === undefined
-            ? undefined
-            : tx.get<Record<string, unknown>>(sql`
+        const lastRunPosition = runRows.at(-1);
+        const nextRun =
+            lastRunPosition === undefined
+                ? undefined
+                : await tx.get<Record<string, unknown>>(sql`
                   SELECT first_position
                   FROM session_turns
                   WHERE session_id = ${sessionId}
@@ -80,14 +81,20 @@ export function querySessionTranscriptSince(
                   ORDER BY first_position ASC
                   LIMIT 1
               `);
-    const upperPosition =
-        nextRun === undefined ? Number.MAX_SAFE_INTEGER : readNumber(nextRun, "first_position");
-    const notices = querySessionTranscriptNotices(tx, sessionId, lowerPosition, upperPosition);
-    if (turnMessages.length === 0 && notices.messages.length === 0) return undefined;
-    return {
-        messages: [...turnMessages, ...notices.messages].sort(
-            (left, right) => left.position - right.position,
-        ),
-        truncated: notices.truncated,
-    };
+        const upperPosition =
+            nextRun === undefined ? Number.MAX_SAFE_INTEGER : readNumber(nextRun, "first_position");
+        const notices = await querySessionTranscriptNotices(
+            tx,
+            sessionId,
+            lowerPosition,
+            upperPosition,
+        );
+        if (turnMessages.length === 0 && notices.messages.length === 0) return undefined;
+        return {
+            messages: [...turnMessages, ...notices.messages].sort(
+                (left, right) => left.position - right.position,
+            ),
+            truncated: notices.truncated,
+        };
+    });
 }

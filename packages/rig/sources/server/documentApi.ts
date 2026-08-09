@@ -29,7 +29,9 @@ export async function serveDocumentRequest(
     response: ServerResponse,
     searchParams: URLSearchParams,
     readJson: (limitBytes: number) => Promise<unknown>,
-    resolveCreatedBy: (identity: string | null | undefined) => DocumentCreatedBy | undefined,
+    resolveCreatedBy: (
+        identity: string | null | undefined,
+    ) => Promise<DocumentCreatedBy | undefined>,
 ): Promise<void> {
     try {
         if (route.name === "documents") {
@@ -57,9 +59,9 @@ export async function serveDocumentRequest(
                 );
                 return;
             }
-            const createdBy = resolveCreatedBy(body.identity);
+            const createdBy = await resolveCreatedBy(body.identity);
             if (createdBy === undefined) return;
-            const document = store.createDocument(
+            const document = await store.createDocument(
                 { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
                 createdBy,
             );
@@ -77,7 +79,7 @@ export async function serveDocumentRequest(
                 sendJson(response, 405, { error: "Method not allowed" });
                 return;
             }
-            const document = store.getDocument(documentId);
+            const document = await store.getDocument(documentId);
             if (document === undefined) {
                 sendDocumentError(
                     response,
@@ -118,7 +120,7 @@ export async function serveDocumentRequest(
                 );
                 return;
             }
-            const page = store.documentUpdates(documentId, {
+            const page = await store.documentUpdates(documentId, {
                 afterVersion,
                 ...(limit === undefined ? {} : { limit }),
             });
@@ -165,7 +167,7 @@ export async function serveDocumentRequest(
             sendDocumentError(response, 400, "invalid_request", "The mutation ID did not match.");
             return;
         }
-        const document = store.writeDocument(
+        const document = await store.writeDocument(
             documentId,
             { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
             expectedVersion,
@@ -178,7 +180,7 @@ export async function serveDocumentRequest(
     } catch (error) {
         if (!(error instanceof DocumentError)) throw error;
         if (error.code === "version_conflict" && route.documentId !== undefined) {
-            const current = store.getDocument(route.documentId);
+            const current = await store.getDocument(route.documentId);
             if (current !== undefined) {
                 sendJson<DocumentResponse>(response, 409, { document: current });
                 return;

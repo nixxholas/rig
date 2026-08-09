@@ -2,7 +2,8 @@ import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
+import { inTx } from "../inTx.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 import { querySessionTranscriptNotices } from "./querySessionTranscriptNotices.js";
 
@@ -11,39 +12,42 @@ export interface SessionTranscriptMessagePage {
     noticesTruncated: boolean;
 }
 
-export function querySessionTranscriptPage(
-    tx: TX,
+export async function querySessionTranscriptPage(
+    tx: DatabaseScope,
     sessionId: string,
     turnLimit: number,
     before?: string,
-): SessionTranscriptMessagePage | undefined {
-    const beforeRow =
-        before === undefined
-            ? undefined
-            : tx.get<Record<string, unknown>>(sql`
+): Promise<SessionTranscriptMessagePage | undefined> {
+    return await inTx(tx, async (tx) => {
+        const beforeRow =
+            before === undefined
+                ? undefined
+                : await tx.get<Record<string, unknown>>(sql`
                   SELECT first_position
                   FROM session_turns
                   WHERE session_id = ${sessionId} AND run_id = ${before}
               `);
-    // Partial-only runs have messages but no session_turns row. They are not
-    // valid transcript page anchors and must not be dereferenced as one.
-    if (before !== undefined && beforeRow === undefined) return undefined;
-    const beforePosition =
-        beforeRow === undefined ? Number.MAX_SAFE_INTEGER : readNumber(beforeRow, "first_position");
-    const runRows = tx.all<Record<string, unknown>>(sql`
+        // Partial-only runs have messages but no session_turns row. They are not
+        // valid transcript page anchors and must not be dereferenced as one.
+        if (before !== undefined && beforeRow === undefined) return undefined;
+        const beforePosition =
+            beforeRow === undefined
+                ? Number.MAX_SAFE_INTEGER
+                : readNumber(beforeRow, "first_position");
+        const runRows = await tx.all<Record<string, unknown>>(sql`
         SELECT run_id, first_position FROM session_turns
         WHERE session_id = ${sessionId}
           AND first_position < ${beforePosition}
         ORDER BY first_position DESC
         LIMIT ${turnLimit}
     `);
-    const orderedRows = runRows.reverse();
-    const runIds = orderedRows.map((row) => readString(row, "run_id"));
-    const turnMessages =
-        runIds.length === 0
-            ? []
-            : tx
-                  .all<Record<string, unknown>>(sql`
+        const orderedRows = runRows.reverse();
+        const runIds = orderedRows.map((row) => readString(row, "run_id"));
+        const turnMessages =
+            runIds.length === 0
+                ? []
+                : (
+                      await tx.all<Record<string, unknown>>(sql`
                       SELECT position, is_partial, run_id, message_json
                       FROM session_messages
                       WHERE session_id = ${sessionId}
@@ -54,30 +58,36 @@ export function querySessionTranscriptPage(
                           )})
                       ORDER BY position ASC
                   `)
-                  .map((row) => ({
+                  ).map((row) => ({
                       isPartial: readNumber(row, "is_partial") !== 0,
                       message: JSON.parse(readString(row, "message_json")) as Message,
                       position: readNumber(row, "position"),
                       runId: readString(row, "run_id"),
                   }));
-    const firstPosition =
-        orderedRows.length === 0 ? undefined : readNumber(orderedRows[0]!, "first_position");
-    const hasEarlierTurn =
-        firstPosition !== undefined &&
-        tx.get(sql`
+        const firstPosition =
+            orderedRows.length === 0 ? undefined : readNumber(orderedRows[0]!, "first_position");
+        const hasEarlierTurn =
+            firstPosition !== undefined &&
+            (await tx.get(sql`
             SELECT 1 FROM session_turns
             WHERE session_id = ${sessionId}
               AND first_position < ${firstPosition}
             LIMIT 1
-        `) !== undefined;
-    // The oldest turn owns every preceding runless notice. Using the turn's
-    // first message as this bound would permanently hide notices recorded while idle.
-    const lowerPosition = firstPosition === undefined || !hasEarlierTurn ? 0 : firstPosition;
-    const notices = querySessionTranscriptNotices(tx, sessionId, lowerPosition, beforePosition);
-    return {
-        messages: [...turnMessages, ...notices.messages].sort(
-            (left, right) => left.position - right.position,
-        ),
-        noticesTruncated: notices.truncated,
-    };
+        `)) !== undefined;
+        // The oldest turn owns every preceding runless notice. Using the turn's
+        // first message as this bound would permanently hide notices recorded while idle.
+        const lowerPosition = firstPosition === undefined || !hasEarlierTurn ? 0 : firstPosition;
+        const notices = await querySessionTranscriptNotices(
+            tx,
+            sessionId,
+            lowerPosition,
+            beforePosition,
+        );
+        return {
+            messages: [...turnMessages, ...notices.messages].sort(
+                (left, right) => left.position - right.position,
+            ),
+            noticesTruncated: notices.truncated,
+        };
+    });
 }

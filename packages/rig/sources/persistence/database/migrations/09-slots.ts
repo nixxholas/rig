@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * Slot entries and webapps.
@@ -13,8 +13,8 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * Webapps are imported source folders served as static files. Each import is a version row and
  * the webapp row names which version is current.
  */
-export function slots(database: SessionDatabase): void {
-    database.run(
+export async function slots(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE slot_entries (
             id TEXT NOT NULL PRIMARY KEY,
@@ -32,7 +32,7 @@ export function slots(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE webapps (
             name TEXT NOT NULL PRIMARY KEY,
@@ -46,7 +46,7 @@ export function slots(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE webapp_versions (
             webapp_name TEXT NOT NULL REFERENCES webapps(name) ON DELETE CASCADE,

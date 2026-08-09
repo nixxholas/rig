@@ -8,13 +8,13 @@ import type {
 import { MAX_SHARED_FOLDER_NODES } from "../../protocol/index.js";
 import { folderShareNodes, folderShareOutbox, folderShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderShare } from "./queryFolderShares.js";
 
 const MAX_PENDING_FOLDER_SHARE_OPERATIONS = 10_000;
 
-export function folderShareQueueState(
-    tx: TX,
+export async function folderShareQueueState(
+    tx: DatabaseScope,
     input: {
         groupId: string;
         force?: boolean;
@@ -23,9 +23,9 @@ export function folderShareQueueState(
         sender: string;
         state: SharedFolderState;
     },
-): FolderSharePacket | undefined {
-    return inTx(tx, (tx) => {
-        const share = queryFolderShare(tx, input.groupId);
+): Promise<FolderSharePacket | undefined> {
+    return await inTx(tx, async (tx) => {
+        const share = await queryFolderShare(tx, input.groupId);
         if (share === undefined) return undefined;
         const operations = diffState(share.state, input.state);
         if (operations.length === 0 && input.force === true) {
@@ -33,12 +33,13 @@ export function folderShareQueueState(
         }
         if (operations.length === 0) return undefined;
         const knownFolderIds = new Set(
-            tx
-                .select({ folderId: folderShareNodes.folderId })
-                .from(folderShareNodes)
-                .where(eq(folderShareNodes.groupId, input.groupId))
-                .all()
-                .map((row) => row.folderId),
+            (
+                await tx
+                    .select({ folderId: folderShareNodes.folderId })
+                    .from(folderShareNodes)
+                    .where(eq(folderShareNodes.groupId, input.groupId))
+                    .all()
+            ).map((row) => row.folderId),
         );
         for (const operation of operations) {
             knownFolderIds.add(
@@ -48,10 +49,12 @@ export function folderShareQueueState(
         if (knownFolderIds.size > MAX_SHARED_FOLDER_NODES) {
             throw new Error("A shared folder cannot retain more folder identities.");
         }
-        const pendingCount = tx.get<{ count: number }>(sql`
-            SELECT COUNT(*) AS count
-            FROM folder_share_outbox
-        `)?.count;
+        const pendingCount = (
+            await tx.get<{ count: number }>(sql`
+                SELECT COUNT(*) AS count
+                FROM folder_share_outbox
+            `)
+        )?.count;
         if (pendingCount === undefined || pendingCount >= MAX_PENDING_FOLDER_SHARE_OPERATIONS) {
             throw new Error("Folder synchronization has too much pending work.");
         }
@@ -67,7 +70,8 @@ export function folderShareQueueState(
         for (const operation of operations) {
             const folderId = operation.type === "upsert" ? operation.node.id : operation.folderId;
             const nodeJson = operation.type === "upsert" ? JSON.stringify(operation.node) : null;
-            tx.insert(folderShareNodes)
+            await tx
+                .insert(folderShareNodes)
                 .values({
                     folderId,
                     groupId: input.groupId,
@@ -87,7 +91,8 @@ export function folderShareQueueState(
                 })
                 .run();
         }
-        tx.update(folderShares)
+        await tx
+            .update(folderShares)
             .set({
                 error: null,
                 logicalClock: clock,
@@ -97,7 +102,8 @@ export function folderShareQueueState(
             })
             .where(eq(folderShares.groupId, input.groupId))
             .run();
-        tx.insert(folderShareOutbox)
+        await tx
+            .insert(folderShareOutbox)
             .values({
                 createdAtMs: input.now,
                 groupId: input.groupId,

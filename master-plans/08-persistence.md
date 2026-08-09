@@ -16,7 +16,7 @@ files, whether it is raw SQL or expressed through a typed query builder or ORM.
 
 ## Operations and transactions
 
-Every operation receives `tx`, the common facade for database work. It is the
+Every asynchronous operation receives `tx`, the common facade for database work. It is the
 ORM database or transaction object — whether that is Drizzle, Prisma, or
 something else does not matter — because both expose the same operations. One
 runs outside a transaction and the other inside one.
@@ -25,18 +25,34 @@ An operation that is consistent by itself, such as a plain create or upsert,
 does not need to start a transaction. It can run against either kind of `tx`,
 so it also composes inside another operation.
 
-An operation that needs a transaction calls `inTx` with its current `tx` and
-receives a `tx` to use. If the current object is already a transaction, this
-is a no-op and the same object is used. Otherwise `inTx` starts a transaction.
-Each small operation therefore contains its own complete consistency boundary
-while remaining easy to read, understand, and compose.
+An operation that needs a transaction awaits `inTx` with its current `tx` and
+receives a `tx` to use. If the current object is already a transaction, this is
+a no-op and the same object is used. Otherwise `inTx` acquires the database
+lock and starts a transaction. Each small operation therefore contains its own
+complete consistency boundary while remaining easy to read, understand, and
+compose.
 
 ## SQLite
 
-Rig uses synchronous SQLite. Persistence operations are synchronous too.
-Synchronous code is much simpler, and SQLite is sufficient for an embedded
-server. Supporting multiple database engines, including Postgres, is not a
-goal.
+Rig contains only asynchronous SQLite code, and every persistence operation is
+asynchronous. There is no synchronous SQLite implementation or archive tree.
+All access to a database connection, including reads and transactions, runs
+through its `asyncLock` so only one operation owns that connection at a time.
+Work already inside a transaction composes through its `tx` without attempting
+to acquire the lock again. Supporting multiple database engines, including
+Postgres, is not a goal.
+
+### Asynchronous SQLite surface map
+
+| Surface                | Required contract                                                                                                                                                                                                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session database       | One lifecycle owner holds the libSQL client, Drizzle facade, `asyncLock`, transaction ownership, and awaited close boundary. Plain work acquires the lock; an active owned transaction is reused only inside its async context.                                               |
+| Persistence operations | Every semantic read and mutation accepts the shared database scope and returns a promise. SQL and Drizzle schema access stay inside `persistence/`.                                                                                                                           |
+| Models and stores      | Session, project, folder, document, sharing, Happy, HTTP, and daemon callsites await persistence. Multi-model mutations use one transaction, restore memory on rollback, and defer irreversible runtime or filesystem work until commit.                                      |
+| Migrations             | `migrations/` is the single canonical history and contains only async migrations. There is no separate synchronous, archived, or counterpart migration tree. Once released, a migration's number, order, and SQL are immutable; every later schema change is a new migration. |
+| Murmur sharing store   | The libSQL-backed store serializes operations and transactions through its own `asyncLock`, drains admitted work before close, and rejects work admitted after closing begins.                                                                                                |
+| Gym and scripts        | Database inspection and mutation helpers use the same asynchronous driver, await transactions and close, and fail the script when database work fails.                                                                                                                        |
+| Packaging              | The async SQLite driver is a runtime dependency and build external. Native synchronous SQLite rebuilds, types, install allowlists, and deployment assumptions do not remain.                                                                                                  |
 
 ## In-memory models
 
@@ -46,8 +62,9 @@ logic.
 
 The order is always database first, memory second. A model first attempts the
 database operation, with a transaction where needed, and only after that
-succeeds does it synchronously update its in-memory state. It must be
-impossible to change memory first and then fail to persist the change.
+succeeds does it update its in-memory state. The model awaits persistence
+before changing memory. It must be impossible to change memory first and then
+fail to persist the change.
 
 ## Database failures
 
@@ -63,7 +80,11 @@ database error is not an option.
   no raw or typed SQL exists outside persistence files.
 - Every operation works through `tx`, and `inTx` starts a transaction only
   when one is not already active.
-- Persistence uses synchronous SQLite rather than an asynchronous or
-  multi-engine abstraction.
+- Persistence uses asynchronous SQLite, and every operation is awaited.
+- `migrations/` is the only migration history; it is async, and released
+  migration numbers, order, and SQL never change.
+- Each database connection uses `asyncLock` for exclusive access, while
+  transaction-scoped operations reuse their current `tx` without reacquiring
+  the lock.
 - Models persist changes before updating their in-memory state.
 - Any database query failure terminates the system.

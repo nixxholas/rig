@@ -9,7 +9,7 @@ import { AgentSessionManager } from "../AgentSessionManager.js";
 import type { InMemorySession } from "../InMemorySession.js";
 
 describe("AgentSessionManager", () => {
-    it("shares agent lookup, messaging, and scheduling across trusted peer owners", () => {
+    it("shares agent lookup, messaging, and scheduling across trusted peer owners", async () => {
         const deliveredToSameOwner = vi.fn();
         const deliveredToOtherOwner = vi.fn();
         const peerA = {
@@ -278,7 +278,7 @@ describe("AgentSessionManager", () => {
         );
     });
 
-    it("forwards opaque Codex collaboration only within one compatible provider and region", () => {
+    it("forwards opaque Codex collaboration only within one compatible provider and region", async () => {
         const submit = vi.fn(() => ({ runId: "child-run" }));
         const deliverAgentMessage = vi.fn();
         const deliverParentMessage = vi.fn();
@@ -348,9 +348,9 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        expect(
+        await expect(
             manager.followUp(parent.id, "/root/audit", "", undefined, "opaque-task"),
-        ).toMatchObject({
+        ).resolves.toMatchObject({
             agentId: "child-agent",
         });
         expect(submit).toHaveBeenCalledWith({
@@ -418,9 +418,9 @@ describe("AgentSessionManager", () => {
         });
 
         encryptedAgentTransportScope.mockReturnValue('["bedrock","us-east-1"]');
-        expect(() =>
+        await expect(
             manager.followUp(parent.id, "/root/audit", "", undefined, "opaque-task"),
-        ).toThrow(
+        ).rejects.toThrow(
             "Native encrypted collaboration only works within the same compatible provider and region. Retry with `rig.followup_task` and provide the task normally.",
         );
         expect(() => manager.sendMessage(parent.id, "/root/audit", "", "opaque-message")).toThrow(
@@ -428,9 +428,9 @@ describe("AgentSessionManager", () => {
         );
         expect(submit).toHaveBeenCalledOnce();
 
-        expect(
+        await expect(
             manager.followUp(parent.id, "/root/audit", "Plain cross-provider task"),
-        ).toMatchObject({ agentId: "child-agent" });
+        ).resolves.toMatchObject({ agentId: "child-agent" });
         expect(submit).toHaveBeenLastCalledWith({
             agentMessageTriggerTurn: true,
             provenance: "agent",
@@ -438,7 +438,7 @@ describe("AgentSessionManager", () => {
         });
     });
 
-    it("enforces the shared child limit before starting an idle follow-up", () => {
+    it("enforces the shared child limit before starting an idle follow-up", async () => {
         const idle = {
             agentMetadata: () => ({
                 depth: 1,
@@ -488,12 +488,12 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        expect(() => manager.followUp(root.id, "/root/idle", "Continue.")).toThrow(
+        await expect(manager.followUp(root.id, "/root/idle", "Continue.")).rejects.toThrow(
             "No more than 3 subagents can run at once.",
         );
     });
 
-    it("keeps the existing generic limit and narrows Codex V2 trees", () => {
+    it("keeps the existing generic limit and narrows Codex V2 trees", async () => {
         const codexRoot = {
             encryptedAgentTransportScope: () => '["codex",null]',
             id: "codex-root",
@@ -505,7 +505,7 @@ describe("AgentSessionManager", () => {
         } as unknown as InMemorySession;
         const manager = new AgentSessionManager({
             repository: {
-                createSubagent: () => {
+                createSubagent: async () => {
                     throw new Error("Not used by this test.");
                 },
                 get: (sessionId) =>
@@ -524,7 +524,7 @@ describe("AgentSessionManager", () => {
         expect(manager.maxActiveFor(bedrockRoot.id)).toBe(8);
     });
 
-    it("reads paginated history from the root and nested subagents by task path", () => {
+    it("reads paginated history from the root and nested subagents by task path", async () => {
         const root = historySession({
             id: "root-1",
             messages: ["root-one", "root-two"],
@@ -612,7 +612,7 @@ describe("AgentSessionManager", () => {
         ).toThrow("was not found");
     });
 
-    it("filters full stored content and navigates filtered matches from either end", () => {
+    it("filters full stored content and navigates filtered matches from either end", async () => {
         const root = historyMessageSession({
             id: "root-1",
             messages: [
@@ -740,7 +740,7 @@ describe("AgentSessionManager", () => {
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(
-            (_request: CreateSessionRequest, _metadata: SessionAgentMetadata) => child,
+            async (_request: CreateSessionRequest, _metadata: SessionAgentMetadata) => child,
         );
         const manager = new AgentSessionManager({
             repository: {
@@ -833,7 +833,7 @@ describe("AgentSessionManager", () => {
             }),
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
-        const createSubagent = vi.fn(() => child);
+        const createSubagent = vi.fn(async () => child);
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent,
@@ -880,7 +880,7 @@ describe("AgentSessionManager", () => {
                 providerId: "codex",
             }),
         } as unknown as InMemorySession;
-        const createSubagent = vi.fn(() => child);
+        const createSubagent = vi.fn(async () => child);
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent,
@@ -948,7 +948,7 @@ describe("AgentSessionManager", () => {
                 providerId: "codex-a",
             }),
         } as unknown as InMemorySession;
-        const createSubagent = vi.fn(() => child);
+        const createSubagent = vi.fn(async () => child);
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent,
@@ -1014,7 +1014,7 @@ describe("AgentSessionManager", () => {
             }),
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
-        const createSubagent = vi.fn(() => child);
+        const createSubagent = vi.fn(async () => child);
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent,
@@ -1116,7 +1116,7 @@ describe("AgentSessionManager", () => {
         } as unknown as InMemorySession;
         let childRequest: CreateSessionRequest | undefined;
         const createSubagent = vi.fn(
-            (request: CreateSessionRequest, _metadata: SessionAgentMetadata) => {
+            async (request: CreateSessionRequest, _metadata: SessionAgentMetadata) => {
                 childRequest = request;
                 return child;
             },
@@ -1220,9 +1220,9 @@ describe("AgentSessionManager", () => {
         });
 
         await manager.setSubagentReadOnly(parent.id, "/root/inspect_code", true);
-        manager.followUp(parent.id, "/root/inspect_code", "Inspect first.");
+        await manager.followUp(parent.id, "/root/inspect_code", "Inspect first.");
         await manager.setSubagentReadOnly(parent.id, "/root/inspect_code", false);
-        manager.followUp(parent.id, "/root/inspect_code", "Now make the fix.");
+        await manager.followUp(parent.id, "/root/inspect_code", "Now make the fix.");
 
         expect(changePermissionMode).toHaveBeenNthCalledWith(
             1,
@@ -1398,7 +1398,7 @@ describe("AgentSessionManager", () => {
         ]);
         const manager = new AgentSessionManager({
             repository: {
-                createSubagent: () => {
+                createSubagent: async () => {
                     created = true;
                     return child;
                 },
@@ -1454,9 +1454,9 @@ describe("AgentSessionManager", () => {
         });
         status = "completed";
 
-        expect(
+        await expect(
             manager.followUp("root-1", "/root/inspect_code", "Check one more file.", "high"),
-        ).toMatchObject({ agentId: "agent-2" });
+        ).resolves.toMatchObject({ agentId: "agent-2" });
         expect(childSubmit).toHaveBeenLastCalledWith({
             agentMessageTriggerTurn: true,
             effort: "high",
@@ -1466,13 +1466,13 @@ describe("AgentSessionManager", () => {
         childSubmit.mockImplementationOnce(() => {
             throw new Error("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
         });
-        expect(() =>
+        await expect(
             manager.followUp("root-1", "/root/inspect_code", "Try unsupported effort.", "ultra"),
-        ).toThrow("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
+        ).rejects.toThrow("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
         expect(childSubmit).toHaveBeenCalledTimes(3);
         await vi.waitFor(() => expect(waitForRun).toHaveBeenCalledTimes(2));
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledTimes(2));
-        expect(manager.interrupt("root-1", "/root/inspect_code")).toMatchObject({
+        await expect(manager.interrupt("root-1", "/root/inspect_code")).resolves.toMatchObject({
             status: "completed",
         });
         expect(abort).toHaveBeenCalledOnce();
@@ -1543,7 +1543,7 @@ describe("AgentSessionManager", () => {
         let created = false;
         const manager = new AgentSessionManager({
             repository: {
-                createSubagent: () => {
+                createSubagent: async () => {
                     created = true;
                     return child;
                 },
@@ -1636,7 +1636,7 @@ describe("AgentSessionManager", () => {
         let nextChild = 0;
         const manager = new AgentSessionManager({
             repository: {
-                createSubagent: () => {
+                createSubagent: async () => {
                     const child = children[nextChild++];
                     if (child === undefined) throw new Error("No child session available.");
                     sessions.set(child.id, child);
@@ -1734,7 +1734,7 @@ describe("AgentSessionManager", () => {
         } as unknown as InMemorySession;
         const manager = new AgentSessionManager({
             repository: {
-                createSubagent: () => child,
+                createSubagent: async () => child,
                 get: (sessionId) => (sessionId === "subagent-1" ? child : parent),
                 listByRoot: () => [],
             },
@@ -1827,7 +1827,9 @@ describe("AgentSessionManager", () => {
             expect.objectContaining({ agentId: "grandchild-1-agent", status: "aborted" }),
         ]);
 
-        expect(manager.followUp(root.id, "/root/audit_code", "Inspect one more file.")).toEqual(
+        await expect(
+            manager.followUp(root.id, "/root/audit_code", "Inspect one more file."),
+        ).resolves.toEqual(
             expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
         );
         expect(child.submit).toHaveBeenCalledWith({
@@ -1905,9 +1907,9 @@ describe("AgentSessionManager", () => {
 
         expect(retireWorkflowChild).toHaveBeenCalledOnce();
         expect(retireCompletedChild).toHaveBeenCalledOnce();
-        expect(() =>
+        await expect(
             manager.followUp(root.id, "completed-child-agent", "Resume old work."),
-        ).toThrow("retired");
+        ).rejects.toThrow("retired");
     });
 
     it("suspends active descendants until each retained session receives follow-up work", async () => {
@@ -2004,7 +2006,9 @@ describe("AgentSessionManager", () => {
             expect.objectContaining({ agentId: "grandchild-1-agent", status: "suspended" }),
         ]);
 
-        expect(manager.followUp(root.id, "/root/audit_code", "Continue the audit.")).toEqual(
+        await expect(
+            manager.followUp(root.id, "/root/audit_code", "Continue the audit."),
+        ).resolves.toEqual(
             expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
         );
 
@@ -2309,7 +2313,7 @@ describe("AgentSessionManager", () => {
             waitForRun: vi.fn(async () => ({ status: "completed" as const })),
         } as unknown as InMemorySession;
         let created = false;
-        const createSubagent = vi.fn(() => {
+        const createSubagent = vi.fn(async () => {
             created = true;
             return queued;
         });
@@ -2340,7 +2344,7 @@ describe("AgentSessionManager", () => {
         expect(createSubagent).toHaveBeenCalledOnce();
     });
 
-    it("routes subagent task operations to the root session", () => {
+    it("routes subagent task operations to the root session", async () => {
         const root = {
             agentMetadata: () => ({ depth: 0, rootSessionId: "session-1", type: "primary" }),
         } as unknown as InMemorySession;
@@ -2357,7 +2361,7 @@ describe("AgentSessionManager", () => {
         ]);
         const manager = new AgentSessionManager({
             repository: {
-                createSubagent: () => child,
+                createSubagent: async () => child,
                 get: (sessionId) => sessions.get(sessionId),
                 listByRoot: () => [child],
             },
@@ -2402,8 +2406,8 @@ describe("AgentSessionManager", () => {
             }),
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
-        const createSubagent = vi.fn(() => child);
-        const configureWorkspaceRequest = vi.fn((request: CreateSessionRequest) => ({
+        const createSubagent = vi.fn(async () => child);
+        const configureWorkspaceRequest = vi.fn(async (request: CreateSessionRequest) => ({
             ...request,
             docker: {
                 image: "workspace:latest",
@@ -2417,7 +2421,7 @@ describe("AgentSessionManager", () => {
                 createSubagent,
                 get: (id) => (id === parent.id ? parent : undefined),
                 listByRoot: () => [],
-                ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
+                ownedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
                     ownerSessionId === parent.id &&
                     projectId === "project-1" &&
                     workspaceId === "workspace-1"
@@ -2497,7 +2501,7 @@ describe("AgentSessionManager", () => {
                 modelId === "anthropic/sonnet-5" && providerId === "claude",
             providerIdsForModel: (modelId) => (modelId === "anthropic/sonnet-5" ? ["claude"] : []),
         });
-        const createDelegatedSession = vi.fn(() => delegated);
+        const createDelegatedSession = vi.fn(async () => delegated);
         let workspacePresence: ProjectWorkspace["presence"] = "missing";
         const manager = new AgentSessionManager({
             repository: {
@@ -2505,7 +2509,7 @@ describe("AgentSessionManager", () => {
                 createSubagent: vi.fn(),
                 get: (id) => (id === delegator.id ? delegator : undefined),
                 listByRoot: () => [],
-                workspace: (projectId, workspaceId) =>
+                workspace: async (projectId, workspaceId) =>
                     projectId === "project-1" && workspaceId === "workspace-2"
                         ? ({
                               id: workspaceId,
@@ -2599,11 +2603,11 @@ describe("AgentSessionManager", () => {
         });
         const manager = new AgentSessionManager({
             repository: {
-                createDelegatedSession: () => delegated,
+                createDelegatedSession: async () => delegated,
                 createSubagent: vi.fn(),
                 get: (id) => (id === delegator.id ? delegator : undefined),
                 listByRoot: () => [],
-                workspace: () =>
+                workspace: async () =>
                     ({
                         id: "workspace-2",
                         name: "Changelog",
@@ -2631,48 +2635,48 @@ describe("AgentSessionManager", () => {
         });
     });
 
-    it("keeps another project's workspaces and conversations behind cross-workspace access", () => {
+    it("keeps another project's workspaces and conversations behind cross-workspace access", async () => {
         const delegator = delegatorSession();
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent: vi.fn(),
                 get: (id) => (id === delegator.id ? delegator : undefined),
                 listByRoot: () => [],
-                listProjectSessions: () => [],
-                listProjectWorkspaces: () => [],
+                listProjectSessions: async () => [],
+                listProjectWorkspaces: async () => [],
             },
         });
 
-        expect(() =>
+        await expect(
             manager.listWorkspaces(delegator.id, "project-2", { crossWorkspace: false }),
-        ).toThrow("features.cross_workspace");
-        expect(
+        ).rejects.toThrow("features.cross_workspace");
+        await expect(
             manager.listWorkspaces(delegator.id, "project-1", { crossWorkspace: false }),
-        ).toEqual([]);
-        expect(() =>
+        ).resolves.toEqual([]);
+        await expect(
             manager.listSessions(
                 delegator.id,
                 { projectId: "project-2" },
                 { crossWorkspace: false },
             ),
-        ).toThrow("features.cross_workspace");
-        expect(
+        ).rejects.toThrow("features.cross_workspace");
+        await expect(
             manager.listSessions(
                 delegator.id,
                 { projectId: "project-2" },
                 { crossWorkspace: true },
             ),
-        ).toEqual([]);
+        ).resolves.toEqual([]);
     });
 
-    it("marks a workspace ended as soon as archival begins", () => {
+    it("marks a workspace ended as soon as archival begins", async () => {
         const delegator = delegatorSession();
         const manager = new AgentSessionManager({
             repository: {
                 createSubagent: vi.fn(),
                 get: (id) => (id === delegator.id ? delegator : undefined),
                 listByRoot: () => [],
-                listProjectWorkspaces: () => [
+                listProjectWorkspaces: async () => [
                     {
                         id: "workspace-1",
                         name: "Finished work",
@@ -2684,7 +2688,9 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        expect(manager.listWorkspaces(delegator.id, undefined, { crossWorkspace: false })).toEqual([
+        await expect(
+            manager.listWorkspaces(delegator.id, undefined, { crossWorkspace: false }),
+        ).resolves.toEqual([
             {
                 archived: true,
                 id: "workspace-1",
@@ -2726,7 +2732,7 @@ describe("AgentSessionManager", () => {
             }),
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
-        const createSubagent = vi.fn(() => child);
+        const createSubagent = vi.fn(async () => child);
         let workspacePresence: ProjectWorkspace["presence"];
         let workspaceStatus: ProjectWorkspace["status"] = "initializing";
         const ready = deferred<ProjectWorkspace>();
@@ -2736,7 +2742,7 @@ describe("AgentSessionManager", () => {
                 createSubagent,
                 get: (id) => (id === parent.id ? parent : undefined),
                 listByRoot: () => [],
-                ownedWorkspace: () =>
+                ownedWorkspace: async () =>
                     ({
                         id: "workspace-1",
                         name: "Setup",

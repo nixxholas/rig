@@ -24,7 +24,7 @@ const secondaryConfigResponseSchema = Type.Object({
 });
 
 export interface P2pProfileReplicatorOptions {
-    listPeerIds: () => readonly string[];
+    listPeerIds: () => readonly string[] | Promise<readonly string[]>;
     localInstanceId: string;
     network: P2pNetwork;
     onError?: (peerId: string, error: unknown) => void;
@@ -40,7 +40,7 @@ export interface P2pProfileReplicatorOptions {
  */
 export class P2pProfileReplicator {
     readonly #abort = new AbortController();
-    readonly #listPeerIds: () => readonly string[];
+    readonly #listPeerIds: () => readonly string[] | Promise<readonly string[]>;
     readonly #localInstanceId: string;
     readonly #network: P2pNetwork;
     readonly #onError: ((peerId: string, error: unknown) => void) | undefined;
@@ -78,13 +78,17 @@ export class P2pProfileReplicator {
         this.#startNow();
     }
 
-    profileSynchronized(peerId: string, profileId: string, version: number): void {
+    async profileSynchronized(peerId: string, profileId: string, version: number): Promise<void> {
         if (this.#abort.signal.aborted) return;
         const key = `${peerId}:${profileId}`;
         this.#syncedVersions.set(key, Math.max(version, this.#syncedVersions.get(key) ?? 0));
         this.#reportedFailures.delete(peerId);
-        const latest = this.#profiles.get(profileId);
-        if (latest !== undefined && this.#profiles.isLocal(profileId) && latest.version > version) {
+        const latest = await this.#profiles.get(profileId);
+        if (
+            latest !== undefined &&
+            (await this.#profiles.isLocal(profileId)) &&
+            latest.version > version
+        ) {
             this.syncProfile(profileId, latest.version);
         }
     }
@@ -159,8 +163,8 @@ export class P2pProfileReplicator {
 
     async #pass(): Promise<void> {
         if (this.#syncAllRequested) {
-            for (const profile of this.#profiles.list()) {
-                if (this.#profiles.isLocal(profile.id)) {
+            for (const profile of await this.#profiles.list()) {
+                if (await this.#profiles.isLocal(profile.id)) {
                     this.#pendingProfileVersions.set(
                         profile.id,
                         Math.max(
@@ -172,7 +176,7 @@ export class P2pProfileReplicator {
             }
             this.#syncAllRequested = false;
         }
-        const peerIds = [...new Set(this.#listPeerIds())];
+        const peerIds = [...new Set(await this.#listPeerIds())];
         if (peerIds.length === 0) {
             this.#pendingProfileVersions.clear();
             return;
@@ -180,8 +184,8 @@ export class P2pProfileReplicator {
         const pending = new Map(this.#pendingProfileVersions);
         for (const [profileId] of pending) {
             if (this.#abort.signal.aborted) return;
-            const profile = this.#profiles.get(profileId);
-            if (profile === undefined || !this.#profiles.isLocal(profileId)) {
+            const profile = await this.#profiles.get(profileId);
+            if (profile === undefined || !(await this.#profiles.isLocal(profileId))) {
                 this.#pendingProfileVersions.delete(profileId);
                 this.#retryMissingProfileVersions.delete(profileId);
                 continue;

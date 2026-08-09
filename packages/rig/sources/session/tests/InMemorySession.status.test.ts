@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
 import { NativeProcessManager } from "../../processes/index.js";
@@ -32,7 +32,7 @@ describe("InMemorySession durable status", () => {
             if (event.type === "session_status_changed") observed.push(event.data.status);
         });
 
-        const submitted = session.submit({ text: "Say hello." });
+        const submitted = await session.submit({ text: "Say hello." });
         await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
             status: "completed",
         });
@@ -55,7 +55,7 @@ describe("InMemorySession durable status", () => {
             if (event.type === "session_status_changed") statuses.push(event.data.status);
         });
 
-        session.setArchived(true);
+        await session.setArchived(true);
         unsubscribe();
 
         // Archiving a session is its own durable flag with its own event. Only
@@ -74,10 +74,12 @@ describe("InMemorySession durable status", () => {
             if (event.type === "session_status_changed") observed.push(event.data.status);
         });
 
-        const first = session.submit({ text: "One." });
+        const first = await session.submit({ text: "One." });
         await session.waitForRun(first.runId);
-        const second = session.submit({ text: "Two." });
+        await vi.waitFor(() => expect(observed).toHaveLength(3));
+        const second = await session.submit({ text: "Two." });
         await session.waitForRun(second.runId);
+        await vi.waitFor(() => expect(observed).toHaveLength(6));
         unsubscribe();
 
         // Two runs, so the session goes busy and settles twice and no more. A
@@ -96,8 +98,19 @@ describe("InMemorySession durable status", () => {
 
     it("keeps status transitions durable, so a session list can follow them", async () => {
         const session = createSession();
-        const submitted = session.submit({ text: "Say hello." });
+        const submitted = await session.submit({ text: "Say hello." });
         await session.waitForRun(submitted.runId);
+        await vi.waitFor(() =>
+            expect(
+                session.events
+                    .since(undefined)
+                    ?.some(
+                        (event) =>
+                            event.type === "session_status_changed" &&
+                            event.data.status === "completed",
+                    ),
+            ).toBe(true),
+        );
 
         // Unlike activity, which changes constantly and is only ever the current
         // moment, a lifecycle status changes a handful of times per run. The
@@ -117,9 +130,9 @@ describe("InMemorySession durable status", () => {
 describe("reset and rewind transcripts", () => {
     it("carries the turns that survive a rewind", async () => {
         const session = createSession();
-        const first = session.submit({ text: "One." });
+        const first = await session.submit({ text: "One." });
         await session.waitForRun(first.runId);
-        const second = session.submit({ text: "Two." });
+        const second = await session.submit({ text: "Two." });
         await session.waitForRun(second.runId);
 
         const target = session
@@ -130,8 +143,10 @@ describe("reset and rewind transcripts", () => {
         expect(target).toBeDefined();
 
         const events: SessionEvent[] = [];
-        const unsubscribe = session.events.subscribe((event) => events.push(event));
-        session.rewind(session.snapshot().snapshot.messages[2]!.id);
+        const unsubscribe = session.events.subscribe((event) => {
+            events.push(event);
+        });
+        await session.rewind(session.snapshot().snapshot.messages[2]!.id);
         unsubscribe();
 
         const rewound = events.find((event) => event.type === "session_rewound");
@@ -151,11 +166,13 @@ describe("reset and rewind transcripts", () => {
 
     it("carries an empty transcript when a reset clears the conversation", async () => {
         const session = createSession();
-        const submitted = session.submit({ text: "One." });
+        const submitted = await session.submit({ text: "One." });
         await session.waitForRun(submitted.runId);
 
         const events: SessionEvent[] = [];
-        const unsubscribe = session.events.subscribe((event) => events.push(event));
+        const unsubscribe = session.events.subscribe((event) => {
+            events.push(event);
+        });
         await session.reset();
         unsubscribe();
 

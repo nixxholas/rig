@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function sharingSettings(database: SessionDatabase): void {
-    database.run(
+export async function sharingSettings(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
             CREATE TABLE sharing_settings (
                 singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),

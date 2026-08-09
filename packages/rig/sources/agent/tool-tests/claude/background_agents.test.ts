@@ -61,7 +61,7 @@ describe("Claude background-agent task tools", () => {
             path: "/root/inspect_tests",
             status: "running",
         };
-        const interrupt = vi.fn(() => ({ ...agent, status: "aborted" as const }));
+        const interrupt = vi.fn(async () => ({ ...agent, status: "aborted" as const }));
         harness.context.subagents = {
             canSpawn: true,
             depth: 0,

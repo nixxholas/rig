@@ -14,9 +14,9 @@ import { queryDocumentUpdates } from "../queryDocumentUpdates.js";
 const createdBy = { instanceId: "alocalinstance00000000001" };
 
 describe("document persistence", () => {
-    it("compares the version, preserves omitted fields, and appends one update", () => {
-        const opened = fixture();
-        documentCreate(opened.database, {
+    it("compares the version, preserves omitted fields, and appends one update", async () => {
+        const opened = await fixture();
+        await documentCreate(opened.database, {
             createdBy,
             fingerprint: "create",
             id: "document",
@@ -27,20 +27,22 @@ describe("document persistence", () => {
         });
 
         expect(
-            documentWrite(opened.database, {
-                expectedVersion: 9,
-                fingerprint: "stale",
-                id: "document",
-                mutationId: "write-stale",
-                now: 2,
-                stateJson: '{"cards":[1]}',
-                updateId: uuid(2),
-                updateJson: '{"insert":1}',
-                updateBytes: 12,
-            }).outcome,
+            (
+                await documentWrite(opened.database, {
+                    expectedVersion: 9,
+                    fingerprint: "stale",
+                    id: "document",
+                    mutationId: "write-stale",
+                    now: 2,
+                    stateJson: '{"cards":[1]}',
+                    updateId: uuid(2),
+                    updateJson: '{"insert":1}',
+                    updateBytes: 12,
+                })
+            ).outcome,
         ).toBe("version_conflict");
         expect(
-            documentWrite(opened.database, {
+            await documentWrite(opened.database, {
                 expectedVersion: 1,
                 fingerprint: "write",
                 id: "document",
@@ -52,13 +54,13 @@ describe("document persistence", () => {
                 updateBytes: 12,
             }),
         ).toEqual({ outcome: "written", version: 2 });
-        expect(queryDocument(opened.database, "document")).toMatchObject({
+        expect(await queryDocument(opened.database, "document")).toMatchObject({
             mimeType: "application/x-board",
             state: { cards: [1] },
             version: 2,
         });
-        expect(queryDocument(opened.database, "document")?.unreadCursor).toBeUndefined();
-        expect(queryDocumentUpdates(opened.database, "document", 1, 100)).toMatchObject({
+        expect((await queryDocument(opened.database, "document"))?.unreadCursor).toBeUndefined();
+        expect(await queryDocumentUpdates(opened.database, "document", 1, 100)).toMatchObject({
             currentVersion: 2,
             gap: false,
             updates: [{ documentId: "document", update: { insert: 1 }, version: 2 }],
@@ -66,9 +68,9 @@ describe("document persistence", () => {
         opened.client.close();
     });
 
-    it("makes an ambiguous retry append exactly one update and rejects conflicting reuse", () => {
-        const opened = fixture();
-        documentCreate(opened.database, {
+    it("makes an ambiguous retry append exactly one update and rejects conflicting reuse", async () => {
+        const opened = await fixture();
+        await documentCreate(opened.database, {
             createdBy,
             fingerprint: "create",
             id: "document",
@@ -89,10 +91,14 @@ describe("document persistence", () => {
             updateBytes: 3,
         };
 
-        expect(documentWrite(opened.database, input)).toEqual({ outcome: "written", version: 2 });
-        inTx(opened.database, (tx) => {
+        expect(await documentWrite(opened.database, input)).toEqual({
+            outcome: "written",
+            version: 2,
+        });
+        await inTx(opened.database, async (tx) => {
             for (let index = 0; index <= 10_000; index += 1) {
-                tx.insert(documentMutations)
+                await tx
+                    .insert(documentMutations)
                     .values({
                         action: "write",
                         createdAtMs: 10 + index,
@@ -103,18 +109,20 @@ describe("document persistence", () => {
                     })
                     .run();
             }
-            pruneReceipts(tx, "other-document");
+            await pruneReceipts(tx, "other-document");
         });
-        expect(documentWrite(opened.database, { ...input, updateId: uuid(3) })).toEqual({
+        expect(await documentWrite(opened.database, { ...input, updateId: uuid(3) })).toEqual({
             outcome: "applied",
             version: 2,
         });
-        expect(documentWrite(opened.database, { ...input, fingerprint: "different" }).outcome).toBe(
-            "mutation_conflict",
-        );
-        expect(queryDocumentUpdates(opened.database, "document", 1, 100)!.updates).toHaveLength(1);
         expect(
-            opened.database.get<{ count: number }>(
+            (await documentWrite(opened.database, { ...input, fingerprint: "different" })).outcome,
+        ).toBe("mutation_conflict");
+        expect(
+            (await queryDocumentUpdates(opened.database, "document", 1, 100))!.updates,
+        ).toHaveLength(1);
+        expect(
+            await opened.database.get<{ count: number }>(
                 sql.raw(
                     "SELECT COUNT(*) AS count FROM document_mutations WHERE document_id = 'other-document'",
                 ),
@@ -123,9 +131,9 @@ describe("document persistence", () => {
         opened.client.close();
     });
 
-    it("applies explicit MIME and UUIDv7 unread cursor changes, preserves omission, and clears null", () => {
-        const opened = fixture();
-        documentCreate(opened.database, {
+    it("applies explicit MIME and UUIDv7 unread cursor changes, preserves omission, and clears null", async () => {
+        const opened = await fixture();
+        await documentCreate(opened.database, {
             createdBy,
             fingerprint: "create",
             id: "document",
@@ -135,7 +143,7 @@ describe("document persistence", () => {
             stateJson: '"a"',
         });
         const unreadCursor = uuid(4);
-        documentWrite(opened.database, {
+        await documentWrite(opened.database, {
             expectedVersion: 1,
             fingerprint: "write",
             id: "document",
@@ -148,7 +156,7 @@ describe("document persistence", () => {
             updateJson: '"b"',
             updateBytes: 3,
         });
-        documentWrite(opened.database, {
+        await documentWrite(opened.database, {
             expectedVersion: 2,
             fingerprint: "write-again",
             id: "document",
@@ -159,8 +167,8 @@ describe("document persistence", () => {
             updateJson: '"c"',
             updateBytes: 3,
         });
-        expect(queryDocument(opened.database, "document")?.unreadCursor).toBe(unreadCursor);
-        documentWrite(opened.database, {
+        expect((await queryDocument(opened.database, "document"))?.unreadCursor).toBe(unreadCursor);
+        await documentWrite(opened.database, {
             expectedVersion: 3,
             fingerprint: "clear-unread",
             id: "document",
@@ -173,17 +181,17 @@ describe("document persistence", () => {
             updateBytes: 3,
         });
 
-        expect(queryDocument(opened.database, "document")).toMatchObject({
+        expect(await queryDocument(opened.database, "document")).toMatchObject({
             mimeType: "text/markdown",
             version: 4,
         });
-        expect(queryDocument(opened.database, "document")?.unreadCursor).toBeUndefined();
+        expect((await queryDocument(opened.database, "document"))?.unreadCursor).toBeUndefined();
         opened.client.close();
     });
 
-    it("clamps a future update cursor to the current document version", () => {
-        const opened = fixture();
-        documentCreate(opened.database, {
+    it("clamps a future update cursor to the current document version", async () => {
+        const opened = await fixture();
+        await documentCreate(opened.database, {
             createdBy,
             fingerprint: "create",
             id: "document",
@@ -192,7 +200,7 @@ describe("document persistence", () => {
             now: 1,
             stateJson: '"a"',
         });
-        documentWrite(opened.database, {
+        await documentWrite(opened.database, {
             expectedVersion: 1,
             fingerprint: "write",
             id: "document",
@@ -204,7 +212,7 @@ describe("document persistence", () => {
             updateBytes: 3,
         });
 
-        const future = queryDocumentUpdates(opened.database, "document", 999, 100)!;
+        const future = (await queryDocumentUpdates(opened.database, "document", 999, 100))!;
         expect(future).toMatchObject({
             currentVersion: 2,
             gap: false,
@@ -212,7 +220,7 @@ describe("document persistence", () => {
             updates: [],
         });
 
-        documentWrite(opened.database, {
+        await documentWrite(opened.database, {
             expectedVersion: 2,
             fingerprint: "later",
             id: "document",
@@ -224,19 +232,19 @@ describe("document persistence", () => {
             updateBytes: 3,
         });
         expect(
-            queryDocumentUpdates(
+            (await queryDocumentUpdates(
                 opened.database,
                 "document",
                 future.nextAfterVersion,
                 100,
-            )!.updates.map((update) => update.version),
+            ))!.updates.map((update) => update.version),
         ).toEqual([3]);
         opened.client.close();
     });
 
-    it("reports a gap after retained updates are trimmed", () => {
-        const opened = fixture();
-        documentCreate(opened.database, {
+    it("reports a gap after retained updates are trimmed", async () => {
+        const opened = await fixture();
+        await documentCreate(opened.database, {
             createdBy,
             fingerprint: "create",
             id: "document",
@@ -245,14 +253,14 @@ describe("document persistence", () => {
             now: 1,
             stateJson: '"a"',
         });
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 UPDATE documents SET version = 10002, first_retained_version = 2
                 WHERE id = 'document'
             `),
         );
         for (let version = 2; version <= 10_001; version += 1) {
-            opened.database.run(
+            await opened.database.run(
                 sql.raw(
                     `INSERT INTO document_updates
                     (id, document_id, version, update_json, byte_length, created_at_ms)
@@ -261,7 +269,7 @@ describe("document persistence", () => {
             );
         }
 
-        documentWrite(opened.database, {
+        await documentWrite(opened.database, {
             expectedVersion: 10_002,
             fingerprint: "trim",
             id: "document",
@@ -273,7 +281,7 @@ describe("document persistence", () => {
             updateBytes: 8,
         });
 
-        const page = queryDocumentUpdates(opened.database, "document", 1, 3);
+        const page = await queryDocumentUpdates(opened.database, "document", 1, 3);
         expect(page).toMatchObject({
             currentVersion: 10_003,
             firstRetainedVersion: 3,
@@ -285,9 +293,9 @@ describe("document persistence", () => {
     });
 });
 
-function fixture() {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
+async function fixture() {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
     return opened;
 }
 

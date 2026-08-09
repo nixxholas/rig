@@ -1,8 +1,8 @@
 # Persistence
 
-This module owns every synchronous SQLite read and mutation. Each operation receives `TX` first,
-so it works directly against the database or composes into the current transaction through
-`inTx`.
+This module owns every asynchronous SQLite read and mutation. Each operation receives
+`DatabaseScope` first,
+so it works through the database lock or composes into the current transaction through `inTx`.
 
 ```text
 domain model or repository
@@ -11,7 +11,10 @@ domain model or repository
   persistence operation
             |
             v
-       TX / inTx
+  DatabaseScope
+            |
+            v
+  inDatabase / inTx
             |
             v
           SQLite

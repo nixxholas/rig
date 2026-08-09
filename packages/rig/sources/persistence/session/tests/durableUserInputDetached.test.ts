@@ -9,10 +9,10 @@ import { durableUserInputSave } from "../durableUserInputSave.js";
 import { queryDurableUserInputs } from "../queryDurableUserInputs.js";
 import type { TX } from "../../Transaction.js";
 
-function createDatabase(): TX {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
-    opened.database
+async function createDatabase(): Promise<TX> {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
+    await opened.database
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -35,7 +35,7 @@ function createDatabase(): TX {
             worktreeSupport: "unknown",
         })
         .run();
-    opened.database
+    await opened.database
         .insert(sessions)
         .values({
             agentId: "agent-1",
@@ -103,20 +103,20 @@ function createQuestion(overrides: Partial<DurableUserInputCall>): DurableUserIn
 }
 
 describe("detached questions in storage", () => {
-    it("remembers that presence released the run, so a restart can still deliver the answer", () => {
-        const tx = createDatabase();
-        durableUserInputSave(tx, createQuestion({ consumed: true, detachedAt: 42 }));
+    it("remembers that presence released the run, so a restart can still deliver the answer", async () => {
+        const tx = await createDatabase();
+        await durableUserInputSave(tx, createQuestion({ consumed: true, detachedAt: 42 }));
 
-        const [reloaded] = queryDurableUserInputs(tx, "session-1");
+        const [reloaded] = await queryDurableUserInputs(tx, "session-1");
 
         expect(reloaded?.detachedAt).toBe(42);
         expect(reloaded?.status).toBe("pending");
     });
 
-    it("keeps a detached question the user has not answered yet while pruning answered ones", () => {
-        const tx = createDatabase();
-        durableUserInputSave(tx, createQuestion({ consumed: true, detachedAt: 42 }));
-        durableUserInputSave(
+    it("keeps a detached question the user has not answered yet while pruning answered ones", async () => {
+        const tx = await createDatabase();
+        await durableUserInputSave(tx, createQuestion({ consumed: true, detachedAt: 42 }));
+        await durableUserInputSave(
             tx,
             createQuestion({
                 consumed: true,
@@ -130,10 +130,10 @@ describe("detached questions in storage", () => {
             }),
         );
 
-        durableUserInputPrune(tx, "session-1", 0);
+        await durableUserInputPrune(tx, "session-1", 0);
 
         expect(
-            queryDurableUserInputs(tx, "session-1").map((call) => call.request.requestId),
+            (await queryDurableUserInputs(tx, "session-1")).map((call) => call.request.requestId),
         ).toEqual(["request-1"]);
     });
 });

@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     "ALTER TABLE sessions ADD COLUMN delegated_by_session_id TEXT",
@@ -12,6 +12,6 @@ const statements = [
  * place in the session list, so the delegator is recorded beside the session rather than as a
  * subagent parent.
  */
-export function delegatedSessions(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function delegatedSessions(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

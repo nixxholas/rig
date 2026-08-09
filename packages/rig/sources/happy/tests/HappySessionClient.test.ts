@@ -33,7 +33,7 @@ describe("HappySessionClient", () => {
         const { databasePath, repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        repository.ensureSession({
+        await repository.ensureSession({
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -96,7 +96,7 @@ describe("HappySessionClient", () => {
             session,
             socketFactory: () => socket,
         });
-        client.enqueue([
+        await client.enqueue([
             {
                 content: {
                     ev: { t: "text", text: "Hello" },
@@ -123,13 +123,13 @@ describe("HappySessionClient", () => {
                 text: "Continue from my phone.",
             },
         ]);
-        expect(repository.getSession("session-1")?.lastRemoteSeq).toBe(1);
+        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(1);
         expect(socket.emitted.find(([event]) => event === "session-alive")?.[1]).toMatchObject({
             activity: { kind: "idle", label: "Idle" },
             thinking: false,
         });
         await client.close();
-        repository.close();
+        await repository.close();
         expect(databasePath).toBeTruthy();
     });
 
@@ -137,7 +137,7 @@ describe("HappySessionClient", () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        repository.ensureSession({
+        await repository.ensureSession({
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -302,14 +302,14 @@ describe("HappySessionClient", () => {
         });
 
         await client.close();
-        repository.close();
+        await repository.close();
     });
 
     it("applies provider-qualified model and reasoning, decrypts attachments, and handles abort RPC", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        repository.ensureSession({
+        await repository.ensureSession({
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -394,7 +394,7 @@ describe("HappySessionClient", () => {
                 String(input).endsWith("/attachments/request-download"),
             ),
         );
-        expect(repository.getSession("session-1")?.lastRemoteSeq).toBe(0);
+        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(0);
         allowText = true;
         client.kick();
         await waitFor(() => submitted.length === 1);
@@ -411,7 +411,7 @@ describe("HappySessionClient", () => {
                 ],
             }),
         ]);
-        expect(repository.getSession("session-1")?.lastRemoteSeq).toBe(2);
+        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(2);
 
         harness.snapshot.status = "running";
         harness.snapshot.activeTurn = { runId: "run-1", startedAt: 1 };
@@ -474,7 +474,7 @@ describe("HappySessionClient", () => {
         expect(harness.snapshot.archived).toBe(true);
 
         await client.close();
-        repository.close();
+        await repository.close();
     });
 
     it("publishes a pending question to Happy and applies the answer that comes back", async () => {
@@ -483,7 +483,7 @@ describe("HappySessionClient", () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        repository.ensureSession({
+        await repository.ensureSession({
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -655,14 +655,14 @@ describe("HappySessionClient", () => {
         });
 
         await client.close();
-        repository.close();
+        await repository.close();
     });
 
     it("clears stale agent state when reconnecting an existing Happy session", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        repository.ensureSession({
+        await repository.ensureSession({
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -708,14 +708,14 @@ describe("HappySessionClient", () => {
         });
 
         await client.close();
-        repository.close();
+        await repository.close();
     });
 
     it("retries a versioned metadata update after a concurrent Happy update", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        repository.ensureSession({
+        await repository.ensureSession({
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -774,7 +774,7 @@ describe("HappySessionClient", () => {
         });
 
         await client.close();
-        repository.close();
+        await repository.close();
     });
 });
 
@@ -1009,8 +1009,8 @@ async function createRepository() {
     const directory = await mkdtemp(join(tmpdir(), "rig-happy-client-"));
     directories.push(directory);
     const databasePath = join(directory, "sessions.sqlite");
-    createSessionDatabaseFixture(databasePath);
-    return { databasePath, repository: new HappySyncRepository(databasePath) };
+    await createSessionDatabaseFixture(databasePath);
+    return { databasePath, repository: await HappySyncRepository.open(databasePath) };
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

@@ -344,7 +344,7 @@ Bubblewrap sandbox inside the container. Full details are in
 
 ## 7. Persistence
 
-Everything durable is one synchronous SQLite database, by default
+Everything durable is one asynchronous SQLite database, by default
 `~/.happy/rig/sessions.sqlite`. `RIG_HOME` moves the state directory;
 `RIG_SERVER_DIRECTORY` moves the daemon's control files, log, and database
 directory.
@@ -353,10 +353,12 @@ directory.
 
 One persistence layer owns every read and every mutation. No SQL — raw or
 through the query builder — exists anywhere else. Reads are operations prefixed
-with `query`. Every operation takes the transaction first and opens one when it
-needs it, which is a no-op inside an existing transaction, so each operation is a
-complete consistency boundary that still composes. A database failure is fatal by
-policy: Rig is local, and continuing after one is not an option.
+with `query`. Every operation takes the transaction first and awaits one when it
+needs it, which is a no-op inside an existing transaction, so each operation is
+a complete consistency boundary that still composes. Each connection serializes
+access through `asyncLock`; transaction-scoped work reuses its transaction
+without reacquiring the lock. A database failure is fatal by policy: Rig is
+local, and continuing after one is not an option.
 
 ### What is stored
 

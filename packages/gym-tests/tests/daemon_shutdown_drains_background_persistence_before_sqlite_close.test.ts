@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, waitForFile, type Gym } from "@slopus/rig-gym";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const execFileAsync = promisify(execFile);
@@ -175,7 +176,31 @@ describe("daemon shutdown persistence drain", () => {
         ]);
         const sqliteState = await gym.runInContainer("node", [
             "-e",
-            'const {DatabaseSync}=require("node:sqlite"); const db=new DatabaseSync("/home/rig/.local/state/rig/sessions.sqlite"); const session=db.prepare("SELECT status, active_run_id FROM sessions WHERE parent_session_id IS NULL ORDER BY updated_at_ms DESC LIMIT 1").get(); const rows=db.prepare("SELECT data_json FROM session_events WHERE type = ? ORDER BY seq").all("agent_event"); const backgroundCleanupPersisted=rows.some(({data_json})=>{const event=JSON.parse(data_json).event; return event?.type === "background_processes_changed" && event.running === 0;}); console.log(JSON.stringify({backgroundCleanupPersisted,session})); db.close()',
+            libsqlCommonJsScript(`
+const database = await openDatabase("/home/rig/.local/state/rig/sessions.sqlite", true);
+let result;
+try {
+    const session = (
+        await database.execute(
+            "SELECT status, active_run_id FROM sessions WHERE parent_session_id IS NULL ORDER BY updated_at_ms DESC LIMIT 1",
+        )
+    ).rows[0];
+    const rows = (
+        await database.execute({
+            sql: "SELECT data_json FROM session_events WHERE type = ? ORDER BY seq",
+            args: ["agent_event"],
+        })
+    ).rows;
+    const backgroundCleanupPersisted = rows.some(({ data_json }) => {
+        const event = JSON.parse(data_json).event;
+        return event?.type === "background_processes_changed" && event.running === 0;
+    });
+    result = { backgroundCleanupPersisted, session };
+} finally {
+    await database.close();
+}
+console.log(JSON.stringify(result));
+`),
         ]);
         expect(daemonStatus.stdout).toContain("Daemon is running");
         expect(sqliteState.stdout).toContain('"active_run_id":null');

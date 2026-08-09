@@ -259,7 +259,7 @@ async function createHarness(): Promise<{
         mkdir(pluginsDirectory, { recursive: true }),
         mkdir(workspace, { recursive: true }),
     ]);
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         modelCatalog: { defaultModelId: "", defaultProviderId: "", models: [], providers: [] },
     });
     cleanup.push(() => store.close());

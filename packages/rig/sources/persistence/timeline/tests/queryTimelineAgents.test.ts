@@ -8,23 +8,14 @@ import { queryTimelineAgents } from "../queryTimelineAgents.js";
 import { queryTimelineEvents } from "../queryTimelineEvents.js";
 
 describe("timeline persistence", () => {
-    it("covers every workspace and chat inside a project", () => {
-        const database = seed();
+    it("covers every workspace and chat inside a project", async () => {
+        const database = await seed();
 
-        const agents = queryTimelineAgents(database, { kind: "project", projectId: "p1" }, false);
-
-        expect(agents.map((agent) => agent.sessionId)).toEqual([
-            "root",
-            "child",
-            "grandchild",
-            "worktree",
-        ]);
-    });
-
-    it("covers every agent Rig knows about for a global scope", () => {
-        const database = seed();
-
-        const agents = queryTimelineAgents(database, { kind: "global" }, false);
+        const agents = await queryTimelineAgents(
+            database,
+            { kind: "project", projectId: "p1" },
+            false,
+        );
 
         expect(agents.map((agent) => agent.sessionId)).toEqual([
             "root",
@@ -34,32 +25,49 @@ describe("timeline persistence", () => {
         ]);
     });
 
-    it("reaches across projects, which is the point of a global scope", () => {
-        const database = seed();
-        insertProject(database, "p2", "/other");
-        insertSession(database, { createdAtMs: 60, id: "elsewhere", projectId: "p2" });
+    it("covers every agent Rig knows about for a global scope", async () => {
+        const database = await seed();
 
-        const global = queryTimelineAgents(database, { kind: "global" }, false);
-        const scoped = queryTimelineAgents(database, { kind: "project", projectId: "p1" }, false);
+        const agents = await queryTimelineAgents(database, { kind: "global" }, false);
+
+        expect(agents.map((agent) => agent.sessionId)).toEqual([
+            "root",
+            "child",
+            "grandchild",
+            "worktree",
+        ]);
+    });
+
+    it("reaches across projects, which is the point of a global scope", async () => {
+        const database = await seed();
+        await insertProject(database, "p2", "/other");
+        await insertSession(database, { createdAtMs: 60, id: "elsewhere", projectId: "p2" });
+
+        const global = await queryTimelineAgents(database, { kind: "global" }, false);
+        const scoped = await queryTimelineAgents(
+            database,
+            { kind: "project", projectId: "p1" },
+            false,
+        );
 
         expect(global.map((agent) => agent.sessionId)).toContain("elsewhere");
         expect(scoped.map((agent) => agent.sessionId)).not.toContain("elsewhere");
     });
 
-    it("still leaves archived chats out of a global scope", () => {
-        const database = seed();
+    it("still leaves archived chats out of a global scope", async () => {
+        const database = await seed();
 
-        const active = queryTimelineAgents(database, { kind: "global" }, false);
-        const all = queryTimelineAgents(database, { kind: "global" }, true);
+        const active = await queryTimelineAgents(database, { kind: "global" }, false);
+        const all = await queryTimelineAgents(database, { kind: "global" }, true);
 
         expect(active.some((agent) => agent.sessionId === "archived")).toBe(false);
         expect(all.some((agent) => agent.sessionId === "archived")).toBe(true);
     });
 
-    it("stops at the worktree for a workspace scope", () => {
-        const database = seed();
+    it("stops at the worktree for a workspace scope", async () => {
+        const database = await seed();
 
-        const agents = queryTimelineAgents(
+        const agents = await queryTimelineAgents(
             database,
             { kind: "workspace", projectId: "p1", workspaceId: "w1" },
             false,
@@ -68,18 +76,22 @@ describe("timeline persistence", () => {
         expect(agents.map((agent) => agent.sessionId)).toEqual(["worktree"]);
     });
 
-    it("follows a session's subagents to any depth", () => {
-        const database = seed();
+    it("follows a session's subagents to any depth", async () => {
+        const database = await seed();
 
-        const agents = queryTimelineAgents(database, { kind: "session", sessionId: "root" }, false);
+        const agents = await queryTimelineAgents(
+            database,
+            { kind: "session", sessionId: "root" },
+            false,
+        );
 
         expect(agents.map((agent) => agent.sessionId)).toEqual(["root", "child", "grandchild"]);
     });
 
-    it("starts from a subagent when that is the scope", () => {
-        const database = seed();
+    it("starts from a subagent when that is the scope", async () => {
+        const database = await seed();
 
-        const agents = queryTimelineAgents(
+        const agents = await queryTimelineAgents(
             database,
             { kind: "session", sessionId: "child" },
             false,
@@ -88,30 +100,38 @@ describe("timeline persistence", () => {
         expect(agents.map((agent) => agent.sessionId)).toEqual(["child", "grandchild"]);
     });
 
-    it("leaves archived chats out unless they are asked for", () => {
-        const database = seed();
+    it("leaves archived chats out unless they are asked for", async () => {
+        const database = await seed();
 
-        const active = queryTimelineAgents(database, { kind: "project", projectId: "p1" }, false);
-        const all = queryTimelineAgents(database, { kind: "project", projectId: "p1" }, true);
+        const active = await queryTimelineAgents(
+            database,
+            { kind: "project", projectId: "p1" },
+            false,
+        );
+        const all = await queryTimelineAgents(database, { kind: "project", projectId: "p1" }, true);
 
         expect(active.some((agent) => agent.sessionId === "archived")).toBe(false);
         expect(all.some((agent) => agent.sessionId === "archived")).toBe(true);
     });
 
-    it("reports whether each agent still has work in flight", () => {
-        const database = seed();
+    it("reports whether each agent still has work in flight", async () => {
+        const database = await seed();
 
-        const agents = queryTimelineAgents(database, { kind: "project", projectId: "p1" }, false);
+        const agents = await queryTimelineAgents(
+            database,
+            { kind: "project", projectId: "p1" },
+            false,
+        );
 
         expect(
             Object.fromEntries(agents.map((agent) => [agent.sessionId, agent.working])),
         ).toMatchObject({ child: false, root: true });
     });
 
-    it("reads only the lifecycle events a chart is drawn from", () => {
-        const database = seed();
+    it("reads only the lifecycle events a chart is drawn from", async () => {
+        const database = await seed();
 
-        const events = queryTimelineEvents(database, ["root"]);
+        const events = await queryTimelineEvents(database, ["root"]);
 
         expect(events.map((event) => event.type)).toEqual([
             "message_submitted",
@@ -120,10 +140,10 @@ describe("timeline persistence", () => {
         ]);
     });
 
-    it("keeps each session's events together and in order", () => {
-        const database = seed();
+    it("keeps each session's events together and in order", async () => {
+        const database = await seed();
 
-        const events = queryTimelineEvents(database, ["root", "child"]);
+        const events = await queryTimelineEvents(database, ["root", "child"]);
 
         expect(events.map((event) => `${event.sessionId}:${event.type}`)).toEqual([
             "child:run_started",
@@ -133,18 +153,18 @@ describe("timeline persistence", () => {
         ]);
     });
 
-    it("asks for nothing when the scope covers no agents", () => {
-        const database = seed();
+    it("asks for nothing when the scope covers no agents", async () => {
+        const database = await seed();
 
-        expect(queryTimelineEvents(database, [])).toEqual([]);
+        expect(await queryTimelineEvents(database, [])).toEqual([]);
     });
 });
 
-function seed(): SessionDatabase {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
-    insertProject(opened.database, "p1", "/rig");
-    opened.database
+async function seed(): Promise<SessionDatabase> {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
+    await insertProject(opened.database, "p1", "/rig");
+    await opened.database
         .insert(projectWorkspaces)
         .values({
             baseRef: "main",
@@ -169,34 +189,34 @@ function seed(): SessionDatabase {
             version: 1,
         })
         .run();
-    insertSession(opened.database, { id: "root", createdAtMs: 10, status: "running" });
-    insertSession(opened.database, {
+    await insertSession(opened.database, { id: "root", createdAtMs: 10, status: "running" });
+    await insertSession(opened.database, {
         id: "child",
         createdAtMs: 20,
         parentSessionId: "root",
         depth: 1,
         sessionKind: "subagent",
     });
-    insertSession(opened.database, {
+    await insertSession(opened.database, {
         id: "grandchild",
         createdAtMs: 30,
         parentSessionId: "child",
         depth: 2,
         sessionKind: "subagent",
     });
-    insertSession(opened.database, { id: "worktree", createdAtMs: 40, workspaceId: "w1" });
-    insertSession(opened.database, { id: "archived", archived: true, createdAtMs: 50 });
-    insertEvent(opened.database, "root", 1, "message_submitted", 100);
-    insertEvent(opened.database, "root", 2, "agent_message", 110);
-    insertEvent(opened.database, "root", 3, "run_started", 120);
-    insertEvent(opened.database, "root", 4, "session_title_changed", 130);
-    insertEvent(opened.database, "root", 5, "run_finished", 200);
-    insertEvent(opened.database, "child", 6, "run_started", 150);
+    await insertSession(opened.database, { id: "worktree", createdAtMs: 40, workspaceId: "w1" });
+    await insertSession(opened.database, { id: "archived", archived: true, createdAtMs: 50 });
+    await insertEvent(opened.database, "root", 1, "message_submitted", 100);
+    await insertEvent(opened.database, "root", 2, "agent_message", 110);
+    await insertEvent(opened.database, "root", 3, "run_started", 120);
+    await insertEvent(opened.database, "root", 4, "session_title_changed", 130);
+    await insertEvent(opened.database, "root", 5, "run_finished", 200);
+    await insertEvent(opened.database, "child", 6, "run_started", 150);
     return opened.database;
 }
 
-function insertProject(database: SessionDatabase, id: string, path: string): void {
-    database
+async function insertProject(database: SessionDatabase, id: string, path: string): Promise<void> {
+    await database
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -221,7 +241,7 @@ function insertProject(database: SessionDatabase, id: string, path: string): voi
         .run();
 }
 
-function insertSession(
+async function insertSession(
     database: SessionDatabase,
     overrides: {
         archived?: boolean;
@@ -234,8 +254,8 @@ function insertSession(
         status?: string;
         workspaceId?: string;
     },
-): void {
-    database
+): Promise<void> {
+    await database
         .insert(sessions)
         .values({
             agentId: `agent-${overrides.id}`,
@@ -277,14 +297,14 @@ function insertSession(
         .run();
 }
 
-function insertEvent(
+async function insertEvent(
     database: SessionDatabase,
     sessionId: string,
     seq: number,
     type: string,
     createdAtMs: number,
-): void {
-    database
+): Promise<void> {
+    await database
         .insert(sessionEvents)
         .values({
             createdAtMs,

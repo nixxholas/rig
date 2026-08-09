@@ -46,7 +46,7 @@ export interface GitStateTrackerOptions {
     onLiveEvent?: (event: GitLiveEvent) => boolean;
     /** Reports an observer failure so it can be logged instead of vanishing. */
     onObserverError?: (error: unknown, entity: GitTrackedEntity) => void;
-    onSnapshot?: (entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void;
+    onSnapshot?: (entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void | Promise<void>;
     /** Test seam for raw Git reads used to locate a repository's control directories. */
     runGit?: typeof runScanGit;
     /** Test seam for the scanner. */
@@ -450,7 +450,7 @@ export class GitStateTracker {
                         ? tracker.snapshot
                         : this.#stampFor(tracker, state);
                 tracker.snapshot = snapshot;
-                tracker.snapshotDelivered = this.#deliver(tracker.entity, snapshot);
+                tracker.snapshotDelivered = await this.#deliver(tracker.entity, snapshot);
             }
             tracker.backoffMs = BACKOFF_START_MS;
             tracker.backoffUntil = 0;
@@ -460,7 +460,10 @@ export class GitStateTracker {
         } catch (error) {
             // Backoff answers a repository that cannot be read. A database failure is neither
             // repository state nor something a later scan can repair, so it is not retried.
-            if (isDatabaseFailure(error)) throw error;
+            if (isDatabaseFailure(error)) {
+                if (this.#disposed || this.#taskDrain?.closing === true) return;
+                throw error;
+            }
             if (this.#disposed || tracker.generation !== generation) return;
             // A repository that keeps failing backs off instead of spinning on every dirty signal.
             const delay = tracker.backoffMs;
@@ -490,17 +493,18 @@ export class GitStateTracker {
     /**
      * Hands one snapshot to the observers and reports whether clients actually received it.
      *
-     * Each observer is isolated: persisting Git facts and publishing the live event are independent,
-     * and a failure in either is a local problem rather than evidence that the repository could not
-     * be scanned — letting it reach the scan's failure path would back off scanning for a reason
-     * that has nothing to do with Git.
+     * Each observer is isolated in failure handling: persistence is awaited so the task drain keeps
+     * the database work inside the scan lifecycle, while live delivery remains independently
+     * decided. A non-database observer failure is a local problem rather than evidence that the
+     * repository could not be scanned — letting it reach the scan's failure path would back off
+     * scanning for a reason that has nothing to do with Git.
      *
      * Only the live delivery decides the return value. Persistence is enrichment that the next scan
      * repeats anyway, while a lost live event is what leaves a client showing stale counts.
      */
-    #deliver(entity: GitTrackedEntity, snapshot: GitChangeSnapshot): boolean {
+    async #deliver(entity: GitTrackedEntity, snapshot: GitChangeSnapshot): Promise<boolean> {
         try {
-            this.#onSnapshot?.(entity, snapshot);
+            await this.#onSnapshot?.(entity, snapshot);
         } catch (error) {
             // A broken database is not enrichment a later scan can repeat, so it leaves the
             // tracker entirely instead of being reported and retried.

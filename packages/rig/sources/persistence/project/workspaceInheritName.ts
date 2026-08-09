@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { projectWorkspaces } from "../database/schema.js";
 import { projectNameKey, workspaceBranchName } from "../../project/projectIdentity.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
 import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
 import { workspaceScope } from "./workspaceScope.js";
@@ -21,8 +21,8 @@ export interface WorkspaceInheritNameResult {
  * name was already chosen deliberately — by the person, or by the agent that asked for the
  * workspace — and it makes this a no-op rather than a correction.
  */
-export function workspaceInheritName(
-    tx: TX,
+export async function workspaceInheritName(
+    tx: DatabaseScope,
     input: {
         id: string;
         isBranchUnavailable?: (branch: string) => boolean;
@@ -30,14 +30,14 @@ export function workspaceInheritName(
         now: number;
         projectId: string;
     },
-): WorkspaceInheritNameResult {
-    return inTx(tx, (tx) => {
-        const name = reserveUniqueWorkspaceName(tx, {
+): Promise<WorkspaceInheritNameResult> {
+    return await inTx(tx, async (tx) => {
+        const name = await reserveUniqueWorkspaceName(tx, {
             excludeWorkspaceId: input.id,
             name: input.name,
             projectId: input.projectId,
         });
-        const branch = reserveUniqueBranch(tx, {
+        const branch = await reserveUniqueBranch(tx, {
             branch: workspaceBranchName(name),
             excludeWorkspaceId: input.id,
             ...(input.isBranchUnavailable === undefined
@@ -46,22 +46,24 @@ export function workspaceInheritName(
             projectId: input.projectId,
         });
         const changed = Number(
-            tx
-                .update(projectWorkspaces)
-                .set({
-                    branch,
-                    name,
-                    nameKey: projectNameKey(name),
-                    updatedAtMs: input.now,
-                    version: sql`${projectWorkspaces.version} + 1`,
-                })
-                .where(
-                    and(
-                        workspaceScope(input.projectId, input.id),
-                        eq(projectWorkspaces.nameConfigured, false),
-                    ),
-                )
-                .run().changes,
+            (
+                await tx
+                    .update(projectWorkspaces)
+                    .set({
+                        branch,
+                        name,
+                        nameKey: projectNameKey(name),
+                        updatedAtMs: input.now,
+                        version: sql`${projectWorkspaces.version} + 1`,
+                    })
+                    .where(
+                        and(
+                            workspaceScope(input.projectId, input.id),
+                            eq(projectWorkspaces.nameConfigured, false),
+                        ),
+                    )
+                    .run()
+            ).rowsAffected,
         );
         return { ...(changed === 0 ? {} : { branch }), changed };
     });

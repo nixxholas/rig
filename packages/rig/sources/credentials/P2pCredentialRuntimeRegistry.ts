@@ -19,7 +19,7 @@ export interface P2pCredentialRuntimeRegistryOptions {
     localInstanceId: string;
     localName: () => string;
     localProviders: ConfigProviders;
-    peers: () => readonly P2pTrustedPeer[];
+    peers: () => readonly P2pTrustedPeer[] | Promise<readonly P2pTrustedPeer[]>;
     runtimeDirectory: string;
     store: P2pCredentialStore;
 }
@@ -40,11 +40,18 @@ export class P2pCredentialRuntimeRegistry {
         this.#options = options;
         mkdirSync(options.runtimeDirectory, { mode: 0o700, recursive: true });
         chmodSync(options.runtimeDirectory, 0o700);
-        this.refresh();
     }
 
-    refresh(): boolean {
-        const snapshots = this.#options.store.listAll();
+    static async open(
+        options: P2pCredentialRuntimeRegistryOptions,
+    ): Promise<P2pCredentialRuntimeRegistry> {
+        const registry = new P2pCredentialRuntimeRegistry(options);
+        await registry.refresh();
+        return registry;
+    }
+
+    async refresh(): Promise<boolean> {
+        const snapshots = await this.#options.store.listAll();
         const retainedCredentialDirectories = new Set<string>();
         for (const [ownerInstanceId, snapshot] of snapshots) {
             for (const provider of snapshot) {
@@ -64,7 +71,7 @@ export class P2pCredentialRuntimeRegistry {
         }
         this.#removeStaleCredentialDirectories(retainedCredentialDirectories);
         const peers = new Map(
-            this.#options.peers().map((peer) => [peer.instanceId, peer] as const),
+            (await this.#options.peers()).map((peer) => [peer.instanceId, peer] as const),
         );
         const sources: ProviderCredentialSource[] = [
             {
@@ -111,9 +118,10 @@ export class P2pCredentialRuntimeRegistry {
         const revision = createHash("sha256")
             .update(
                 JSON.stringify({
-                    peers: this.#options
-                        .peers()
-                        .map((peer) => ({ instanceId: peer.instanceId, name: peer.name })),
+                    peers: (await this.#options.peers()).map((peer) => ({
+                        instanceId: peer.instanceId,
+                        name: peer.name,
+                    })),
                     snapshots: [...snapshots],
                 }),
             )

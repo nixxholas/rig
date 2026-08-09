@@ -5,6 +5,7 @@ import {
     decryptHappyPayload,
     encryptHappyPayload,
 } from "../../rig/sources/happy/happyEncryption.js";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -132,13 +133,18 @@ describe("Happy mobile input", () => {
         });
         const stored = await gym.runInContainer("node", [
             "-e",
-            [
-                'const {DatabaseSync}=require("node:sqlite")',
-                'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
-                'const row=db.prepare("select permission_mode from sessions limit 1").get()',
-                "db.close()",
-                "process.stdout.write(row.permission_mode)",
-            ].join(";"),
+            libsqlCommonJsScript(`
+const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
+let permissionMode;
+try {
+    permissionMode = (
+        await database.execute("select permission_mode from sessions limit 1")
+    ).rows[0].permission_mode;
+} finally {
+    await database.close();
+}
+process.stdout.write(permissionMode);
+`),
         ]);
         expect(stored.stdout).toBe("read_only");
     }, 60_000);

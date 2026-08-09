@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql, type SQL } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -7,7 +8,7 @@ import {
     type SlotEntry,
     type SlotEntryFilter,
 } from "../../protocol/SlotProtocol.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 
 /**
@@ -15,29 +16,35 @@ import { readNumber, readOptionalString, readString } from "../session/impl/sqli
  * entries scoped to each provided project, workspace, or session; without context ids every entry
  * is returned. The filtering happens in SQL before any content payload is deserialized.
  */
-export function querySlotEntries(tx: TX, filter: SlotEntryFilter = {}): readonly SlotEntry[] {
-    const conditions: SQL[] = [];
-    if (filter.slot !== undefined) conditions.push(sql`slot = ${filter.slot}`);
-    const scopeClauses: SQL[] = [];
-    if (filter.projectId !== undefined) {
-        scopeClauses.push(sql`(scope = 'project' AND project_id = ${filter.projectId})`);
-    }
-    if (filter.workspaceId !== undefined) {
-        scopeClauses.push(sql`(scope = 'workspace' AND workspace_id = ${filter.workspaceId})`);
-    }
-    if (filter.sessionId !== undefined) {
-        scopeClauses.push(sql`(scope = 'session' AND session_id = ${filter.sessionId})`);
-    }
-    if (scopeClauses.length > 0) {
-        scopeClauses.unshift(sql`scope = 'everywhere'`);
-        conditions.push(sql`(${sql.join(scopeClauses, sql` OR `)})`);
-    }
-    const where = conditions.length === 0 ? sql`` : sql` WHERE ${sql.join(conditions, sql` AND `)}`;
-    return tx
-        .all<Record<string, unknown>>(
-            sql`SELECT * FROM slot_entries${where} ORDER BY created_at_ms ASC, id ASC`,
-        )
-        .map(readSlotEntryRow);
+export async function querySlotEntries(
+    tx: DatabaseScope,
+    filter: SlotEntryFilter = {},
+): Promise<readonly SlotEntry[]> {
+    return await inDatabase(tx, async (tx) => {
+        const conditions: SQL[] = [];
+        if (filter.slot !== undefined) conditions.push(sql`slot = ${filter.slot}`);
+        const scopeClauses: SQL[] = [];
+        if (filter.projectId !== undefined) {
+            scopeClauses.push(sql`(scope = 'project' AND project_id = ${filter.projectId})`);
+        }
+        if (filter.workspaceId !== undefined) {
+            scopeClauses.push(sql`(scope = 'workspace' AND workspace_id = ${filter.workspaceId})`);
+        }
+        if (filter.sessionId !== undefined) {
+            scopeClauses.push(sql`(scope = 'session' AND session_id = ${filter.sessionId})`);
+        }
+        if (scopeClauses.length > 0) {
+            scopeClauses.unshift(sql`scope = 'everywhere'`);
+            conditions.push(sql`(${sql.join(scopeClauses, sql` OR `)})`);
+        }
+        const where =
+            conditions.length === 0 ? sql`` : sql` WHERE ${sql.join(conditions, sql` AND `)}`;
+        return (
+            await tx.all<Record<string, unknown>>(
+                sql`SELECT * FROM slot_entries${where} ORDER BY created_at_ms ASC, id ASC`,
+            )
+        ).map(readSlotEntryRow);
+    });
 }
 
 export function readSlotEntryRow(row: Record<string, unknown>): SlotEntry {

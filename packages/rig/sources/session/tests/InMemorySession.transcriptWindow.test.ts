@@ -23,12 +23,16 @@ describe("InMemorySession transcript window", () => {
     it("reports each real run as one turn with its own outcome", async () => {
         const session = createSession();
 
-        const first = session.submit({ text: "First ask." });
-        await expect(session.waitForRun(first.runId)).resolves.toEqual({ status: "completed" });
-        const second = session.submit({ text: "Second ask." });
-        await expect(session.waitForRun(second.runId)).resolves.toEqual({ status: "completed" });
+        const first = await session.submit({ text: "First ask." });
+        await expect(waitForDurableRun(session, first.runId)).resolves.toEqual({
+            status: "completed",
+        });
+        const second = await session.submit({ text: "Second ask." });
+        await expect(waitForDurableRun(session, second.runId)).resolves.toEqual({
+            status: "completed",
+        });
 
-        const window = session.transcriptWindow();
+        const window = await session.transcriptWindow();
 
         expect(window.turns.map((turn) => turn.runId)).toEqual([first.runId, second.runId]);
         expect(window.complete).toBe(true);
@@ -47,7 +51,7 @@ describe("InMemorySession transcript window", () => {
         let now = 1_000;
         const session = createSession({ now: () => (now += 10) });
 
-        const submitted = session.submit({ text: "Measure from here." });
+        const submitted = await session.submit({ text: "Measure from here." });
         const events = session.events.since(undefined) ?? [];
         const messageSubmitted = events.find(
             (event) => event.type === "message_submitted" && event.data.runId === submitted.runId,
@@ -57,14 +61,14 @@ describe("InMemorySession transcript window", () => {
             startedAt: messageSubmitted?.createdAt,
         });
 
-        await session.waitForRun(submitted.runId);
+        await waitForDurableRun(session, submitted.runId);
 
         const runStarted = (session.events.since(undefined) ?? []).find(
             (event) => event.type === "run_started" && event.data.runId === submitted.runId,
         );
-        const turn = session
-            .transcriptWindow()
-            .turns.find((candidate) => candidate.runId === submitted.runId);
+        const turn = (await session.transcriptWindow()).turns.find(
+            (candidate) => candidate.runId === submitted.runId,
+        );
 
         expect(messageSubmitted).toBeDefined();
         expect(runStarted).toBeDefined();
@@ -76,11 +80,11 @@ describe("InMemorySession transcript window", () => {
 
     it("rebuilds authoritative turn timing from durable events after restart", async () => {
         const session = createSession();
-        const submitted = session.submit({ text: "Survive restart." });
-        await session.waitForRun(submitted.runId);
-        const expected = session
-            .transcriptWindow()
-            .turns.find((turn) => turn.runId === submitted.runId);
+        const submitted = await session.submit({ text: "Survive restart." });
+        await waitForDurableRun(session, submitted.runId);
+        const expected = (await session.transcriptWindow()).turns.find(
+            (turn) => turn.runId === submitted.runId,
+        );
 
         const restored = createSession({
             events: session.events.since(undefined) ?? [],
@@ -88,7 +92,9 @@ describe("InMemorySession transcript window", () => {
         });
 
         expect(
-            restored.transcriptWindow().turns.find((turn) => turn.runId === submitted.runId),
+            (await restored.transcriptWindow()).turns.find(
+                (turn) => turn.runId === submitted.runId,
+            ),
         ).toEqual(expected);
 
         await restored.beginShutdown();
@@ -97,8 +103,8 @@ describe("InMemorySession transcript window", () => {
 
     it("says the same thing as the reducer that rebuilds a paged turn", async () => {
         const session = createSession({ retry: true });
-        const submitted = session.submit({ text: "Retry once." });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit({ text: "Retry once." });
+        await waitForDurableRun(session, submitted.runId);
 
         // The session keeps these facts as it goes; the reducer derives them
         // from the durable log for history a reader pages back into. Where the
@@ -106,9 +112,9 @@ describe("InMemorySession transcript window", () => {
         const derived = transcriptRunFacts(session.events.since(undefined) ?? []).get(
             submitted.runId,
         );
-        const turn = session
-            .transcriptWindow()
-            .turns.find((candidate) => candidate.runId === submitted.runId);
+        const turn = (await session.transcriptWindow()).turns.find(
+            (candidate) => candidate.runId === submitted.runId,
+        );
         expect(turn?.groups).toEqual(derived?.groups);
 
         await session.beginShutdown();
@@ -116,12 +122,12 @@ describe("InMemorySession transcript window", () => {
 
     it("persists provider retries as messages inside their transcript turn", async () => {
         const session = createSession({ retry: true });
-        const submitted = session.submit({ text: "Retry if needed." });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit({ text: "Retry if needed." });
+        await waitForDurableRun(session, submitted.runId);
 
-        const retry = session
-            .transcriptWindow()
-            .messages.find((message) => message.role === "error");
+        const retry = (await session.transcriptWindow()).messages.find(
+            (message) => message.role === "error",
+        );
         expect(retry).toMatchObject({
             blocks: [{ text: "Connection lost", type: "text" }],
             outcome: "retried",
@@ -134,10 +140,10 @@ describe("InMemorySession transcript window", () => {
             ),
         ).toBe(false);
         expect(
-            session.transcriptWindow().turns.find((turn) => turn.runId === submitted.runId)
+            (await session.transcriptWindow()).turns.find((turn) => turn.runId === submitted.runId)
                 ?.messageIds,
         ).toContain(retry?.id);
-        expect(session.transcriptWindow().messageGroupId?.[retry?.id ?? ""]).toEqual(
+        expect((await session.transcriptWindow()).messageGroupId?.[retry?.id ?? ""]).toEqual(
             expect.any(String),
         );
         expect(
@@ -149,18 +155,20 @@ describe("InMemorySession transcript window", () => {
 
     it("rebuilds provider retry messages from durable transcript rows after restart", async () => {
         const session = createSession({ retry: true });
-        const submitted = session.submit({ text: "Retry and restart." });
-        await session.waitForRun(submitted.runId);
-        const expected = session
-            .transcriptWindow()
-            .messages.find((message) => message.role === "error");
+        const submitted = await session.submit({ text: "Retry and restart." });
+        await waitForDurableRun(session, submitted.runId);
+        const expected = (await session.transcriptWindow()).messages.find(
+            (message) => message.role === "error",
+        );
         const restored = createSession({
             events: session.events.since(undefined) ?? [],
             restore: session.state(),
         });
 
         expect(
-            restored.transcriptWindow().messages.find((message) => message.role === "error"),
+            (await restored.transcriptWindow()).messages.find(
+                (message) => message.role === "error",
+            ),
         ).toEqual(expected);
 
         await restored.beginShutdown();
@@ -170,12 +178,12 @@ describe("InMemorySession transcript window", () => {
     it("keeps a turn's messages together under that turn", async () => {
         const session = createSession();
 
-        const submitted = session.submit({ text: "Say hello." });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        const submitted = await session.submit({ text: "Say hello." });
+        await expect(waitForDurableRun(session, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
 
-        const window = session.transcriptWindow();
+        const window = await session.transcriptWindow();
         const ids = window.turns.flatMap((turn) => turn.messageIds);
 
         // Every message in the window belongs to exactly one reported turn, so a
@@ -189,12 +197,12 @@ describe("InMemorySession transcript window", () => {
     it("drops whole turns rather than splitting one when the window is full", async () => {
         const session = createSession();
 
-        const first = session.submit({ text: "First ask." });
-        await session.waitForRun(first.runId);
-        const second = session.submit({ text: "Second ask." });
-        await session.waitForRun(second.runId);
+        const first = await session.submit({ text: "First ask." });
+        await waitForDurableRun(session, first.runId);
+        const second = await session.submit({ text: "Second ask." });
+        await waitForDurableRun(session, second.runId);
 
-        const window = session.transcriptWindow(1);
+        const window = await session.transcriptWindow(1);
 
         expect(window.turns).toHaveLength(1);
         expect(window.turns[0]?.runId).toBe(second.runId);
@@ -211,23 +219,34 @@ describe("InMemorySession transcript window", () => {
         const session = createSession();
 
         for (let index = 0; index < 6; index += 1) {
-            const submitted = session.submit({ text: `Ask ${index}.` });
-            await session.waitForRun(submitted.runId);
+            const submitted = await session.submit({ text: `Ask ${index}.` });
+            await waitForDurableRun(session, submitted.runId);
         }
 
         // The cost of attaching has to follow recent activity, not the age of
         // the session, which is the whole reason the window exists.
         const messageTime = vi.spyOn(session.events, "messageCreatedAt");
-        const window = session.transcriptWindow(2);
+        const window = await session.transcriptWindow(2);
         expect(window.turns).toHaveLength(2);
         expect(messageTime).toHaveBeenCalledTimes(window.messages.length);
         expect(JSON.stringify(window).length).toBeLessThan(
-            JSON.stringify(session.transcriptWindow(6)).length,
+            JSON.stringify(await session.transcriptWindow(6)).length,
         );
 
         await session.beginShutdown();
     });
 });
+
+async function waitForDurableRun(session: InMemorySession, runId: string) {
+    const completion = await session.waitForRun(runId);
+    await vi.waitFor(async () => {
+        const turn = (await session.transcriptWindow()).turns.find(
+            (candidate) => candidate.runId === runId,
+        );
+        expect(turn?.outcome).toBeDefined();
+    });
+    return completion;
+}
 
 function createSession(
     options: Partial<Pick<InMemorySessionOptions, "events" | "now" | "restore">> & {

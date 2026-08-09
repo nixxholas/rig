@@ -48,7 +48,7 @@ export interface AppletStoreOptions {
     environment?: NodeJS.ProcessEnv;
     now?: () => number;
     /** Delivers a change to the live global stream after the database write committed. */
-    publish: (event: AppletsChangedEvent) => void;
+    publish: (event: AppletsChangedEvent) => void | Promise<void>;
     tx: () => TX;
 }
 
@@ -65,7 +65,7 @@ export class AppletStore {
     readonly #createEventId = createEventIdFactory();
     readonly #environment: NodeJS.ProcessEnv;
     readonly #now: () => number;
-    readonly #publish: (event: AppletsChangedEvent) => void;
+    readonly #publish: (event: AppletsChangedEvent) => void | Promise<void>;
     readonly #tx: () => TX;
     readonly #mutationByName = new Map<string, Promise<void>>();
 
@@ -95,7 +95,7 @@ export class AppletStore {
                 `An applet name must be kebab-case, such as "usage-dashboard". Got ${JSON.stringify(request.name)}.`,
             );
         }
-        if (queryApplet(this.#tx(), request.name) !== undefined) {
+        if ((await queryApplet(this.#tx(), request.name)) !== undefined) {
             throw new AppletInvalidError(
                 `An applet named ${JSON.stringify(request.name)} already exists. Update it to import a new version.`,
             );
@@ -105,13 +105,13 @@ export class AppletStore {
         const files = await this.#createFiles(request.name, request.path, icon, sourceReader);
         let created;
         try {
-            created = inTx(this.#tx(), (tx) => {
-                if (queryApplet(tx, request.name) !== undefined) {
+            created = await inTx(this.#tx(), async (tx) => {
+                if ((await queryApplet(tx, request.name)) !== undefined) {
                     throw new AppletInvalidError(
                         `An applet named ${JSON.stringify(request.name)} already exists. Update it to import a new version.`,
                     );
                 }
-                appletCreate(tx, {
+                await appletCreate(tx, {
                     allowedScopes: request.allowedScopes ?? [...defaultAppletAllowedScopes],
                     authorSessionId: request.authorSessionId,
                     changeDescription: "Initial import",
@@ -130,25 +130,25 @@ export class AppletStore {
             await files.rollback();
             throw error;
         }
-        this.#publishChanged();
+        await this.#publishChanged();
         if (created === undefined) throw new Error("The applet was not stored.");
         return created;
     }
 
-    get(name: string): Applet | undefined {
+    async get(name: string): Promise<Applet | undefined> {
         return queryApplet(this.#tx(), name);
     }
 
-    list(): readonly Applet[] {
+    async list(): Promise<readonly Applet[]> {
         return queryApplets(this.#tx());
     }
 
-    revert(name: string, request: RevertAppletRequest): Applet {
+    async revert(name: string, request: RevertAppletRequest): Promise<Applet> {
         if (!Value.Check(revertAppletRequestSchema, request)) {
             throw new AppletInvalidError("The applet revert request is invalid.");
         }
-        const reverted = inTx(this.#tx(), (tx) => {
-            const applet = queryApplet(tx, name);
+        const reverted = await inTx(this.#tx(), async (tx) => {
+            const applet = await queryApplet(tx, name);
             if (applet === undefined) {
                 throw new AppletNotFoundError(`No applet named ${JSON.stringify(name)} exists.`);
             }
@@ -157,10 +157,10 @@ export class AppletStore {
                     `The applet ${JSON.stringify(name)} has no version ${String(request.version)}.`,
                 );
             }
-            appletSetCurrentVersion(tx, name, request.version, this.#now());
+            await appletSetCurrentVersion(tx, name, request.version, this.#now());
             return queryApplet(tx, name);
         });
-        this.#publishChanged();
+        await this.#publishChanged();
         if (reverted === undefined) throw new Error("The applet was not stored.");
         return reverted;
     }
@@ -183,7 +183,7 @@ export class AppletStore {
                 "An applet update needs the source folder path and a description of the change.",
             );
         }
-        const existing = queryApplet(this.#tx(), name);
+        const existing = await queryApplet(this.#tx(), name);
         if (existing === undefined) {
             throw new AppletNotFoundError(`No applet named ${JSON.stringify(name)} exists.`);
         }
@@ -196,8 +196,8 @@ export class AppletStore {
             request.path,
             resolveAppletSourceReader(sourceFileSystem),
         );
-        const updated = inTx(this.#tx(), (tx) => {
-            appletAddVersion(
+        const updated = await inTx(this.#tx(), async (tx) => {
+            await appletAddVersion(
                 tx,
                 name,
                 nextVersion,
@@ -207,7 +207,7 @@ export class AppletStore {
             );
             return queryApplet(tx, name);
         });
-        this.#publishChanged();
+        await this.#publishChanged();
         if (updated === undefined) throw new Error("The applet was not stored.");
         return updated;
     }
@@ -371,10 +371,11 @@ export class AppletStore {
         }
     }
 
-    #publishChanged(): void {
-        this.#publish({
+    async #publishChanged(): Promise<void> {
+        const applets = await this.list();
+        await this.#publish({
             createdAt: this.#now(),
-            data: { applets: this.list() },
+            data: { applets },
             id: this.#createEventId(),
             type: "applets_changed",
         });

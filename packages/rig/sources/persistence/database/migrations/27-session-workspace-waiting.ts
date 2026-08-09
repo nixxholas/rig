@@ -1,17 +1,19 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function sessionWorkspaceWaiting(database: SessionDatabase): void {
-    const sessions = database.get<{ name: string }>(
-        sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
-    );
+export async function sessionWorkspaceWaiting(database: SessionDatabase): Promise<void> {
+    const sessions = (
+        await database.all<{ name: string }>(
+            sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
+        )
+    )[0];
     if (sessions === undefined) return;
-    const alreadyPresent = database
-        .all<{ name: string }>(sql.raw("PRAGMA table_info(sessions)"))
-        .some((column) => column.name === "workspace_queue_waiting");
+    const alreadyPresent = (
+        await database.all<{ name: string }>(sql.raw("PRAGMA table_info(sessions)"))
+    ).some((column) => column.name === "workspace_queue_waiting");
     if (alreadyPresent) return;
-    database.run(
+    await database.run(
         sql.raw(
             "ALTER TABLE sessions ADD COLUMN workspace_queue_waiting INTEGER NOT NULL DEFAULT 0",
         ),

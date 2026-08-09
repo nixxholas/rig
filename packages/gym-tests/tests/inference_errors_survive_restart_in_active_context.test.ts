@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const RETRY_ERROR = "DURABLE_RETRY_CONNECTION_LOST";
@@ -135,50 +136,60 @@ function submit(gym: Gym, text: string): void {
     gym.terminal.press("enter");
 }
 
-const inspectInferenceErrorsScript = String.raw`
-import { writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite", { readOnly: true });
-const sessionId = database
-    .prepare("SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1")
-    .get().id;
-const transcriptErrors = database
-    .prepare("SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND role = 'error'")
-    .get(sessionId).count;
-const contextErrors = database
-    .prepare("SELECT COUNT(*) AS count FROM session_context_messages WHERE session_id = ? AND role = 'error'")
-    .get(sessionId).count;
-const durableEvents = database
-    .prepare("SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq")
-    .all(sessionId);
-const durableErrorEvents = durableEvents.filter((event) => {
-    if (event.type !== "agent_message") return false;
-    return JSON.parse(event.data_json).message?.role === "error";
-}).length;
-const obsoleteRetryEvents = durableEvents.filter((event) => event.type === "inference_retry").length;
-const terminalMessage = JSON.parse(
-    database
-        .prepare(
-            "SELECT message_json FROM session_messages WHERE session_id = ? AND role = 'error' ORDER BY position DESC LIMIT 1",
+const inspectInferenceErrorsScript = libsqlEsmScript(
+    String.raw`
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite", true);
+let persistence;
+try {
+    const sessionId = (
+        await database.execute(
+            "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
         )
-        .get(sessionId).message_json,
-);
-const terminalEvent = durableEvents
-    .filter((event) => event.type === "run_finished")
-    .map((event) => JSON.parse(event.data_json))
-    .find((data) => data.stopReason === "error");
-const sessionColumns = database
-    .prepare("PRAGMA table_info(sessions)")
-    .all()
-    .map((column) => column.name);
-if (sessionColumns.includes("context_messages_json")) {
-    throw new Error("The obsolete sessions context column still exists.");
-}
-database.close();
-writeFileSync(
-    "/workspace/inference-errors-persistence.json",
-    JSON.stringify({
+    ).rows[0].id;
+    const transcriptErrors = (
+        await database.execute({
+            sql: "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND role = 'error'",
+            args: [sessionId],
+        })
+    ).rows[0].count;
+    const contextErrors = (
+        await database.execute({
+            sql: "SELECT COUNT(*) AS count FROM session_context_messages WHERE session_id = ? AND role = 'error'",
+            args: [sessionId],
+        })
+    ).rows[0].count;
+    const durableEvents = (
+        await database.execute({
+            sql: "SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq",
+            args: [sessionId],
+        })
+    ).rows;
+    const durableErrorEvents = durableEvents.filter((event) => {
+        if (event.type !== "agent_message") return false;
+        return JSON.parse(event.data_json).message?.role === "error";
+    }).length;
+    const obsoleteRetryEvents = durableEvents.filter(
+        (event) => event.type === "inference_retry",
+    ).length;
+    const terminalMessage = JSON.parse(
+        (
+            await database.execute({
+                sql: "SELECT message_json FROM session_messages WHERE session_id = ? AND role = 'error' ORDER BY position DESC LIMIT 1",
+                args: [sessionId],
+            })
+        ).rows[0].message_json,
+    );
+    const terminalEvent = durableEvents
+        .filter((event) => event.type === "run_finished")
+        .map((event) => JSON.parse(event.data_json))
+        .find((data) => data.stopReason === "error");
+    const sessionColumns = (await database.execute("PRAGMA table_info(sessions)")).rows.map(
+        (column) => column.name,
+    );
+    if (sessionColumns.includes("context_messages_json")) {
+        throw new Error("The obsolete sessions context column still exists.");
+    }
+    persistence = {
         contextErrors,
         durableErrorEvents,
         obsoleteRetryEvents,
@@ -187,6 +198,14 @@ writeFileSync(
         terminalProviderId: terminalMessage.providerId,
         terminalRequestedModelId: terminalMessage.requestedModelId,
         transcriptErrors,
-    }),
+    };
+} finally {
+    await database.close();
+}
+writeFileSync(
+    "/workspace/inference-errors-persistence.json",
+    JSON.stringify(persistence),
 );
-`;
+`,
+    'import { writeFileSync } from "node:fs";',
+);

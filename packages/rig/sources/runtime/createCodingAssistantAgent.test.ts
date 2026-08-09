@@ -80,9 +80,9 @@ describe("createCodingAssistantAgent", () => {
                 delegate: async () => {
                     throw new Error("unused");
                 },
-                listProjects: () => [],
-                listSessions: () => [],
-                listWorkspaces: () => [],
+                listProjects: async () => [],
+                listSessions: async () => [],
+                listWorkspaces: async () => [],
                 spawn: async () => {
                     throw new Error("unused");
                 },
@@ -243,9 +243,9 @@ describe("createCodingAssistantAgent", () => {
                 delegate: async () => {
                     throw new Error("unused");
                 },
-                listProjects: () => [],
-                listSessions: () => [],
-                listWorkspaces: () => [],
+                listProjects: async () => [],
+                listSessions: async () => [],
+                listWorkspaces: async () => [],
                 spawn: async () => {
                     throw new Error("unused");
                 },
@@ -514,9 +514,9 @@ describe("createCodingAssistantAgent", () => {
         const runtime = createCodingAssistantAgent({
             cwd: "/tmp/rig-app-test",
             goals: {
-                create: () => currentGoal,
+                create: async () => currentGoal,
                 get: () => currentGoal,
-                update: (status) => ({ ...currentGoal, status }),
+                update: async (status) => ({ ...currentGoal, status }),
             },
             modelId: modelAnthropicFable5.id,
         });
@@ -837,9 +837,9 @@ describe("createCodingAssistantAgent", () => {
             delegate: async () => {
                 throw new Error("unused");
             },
-            listProjects: () => [],
-            listSessions: () => [],
-            listWorkspaces: () => [],
+            listProjects: async () => [],
+            listSessions: async () => [],
+            listWorkspaces: async () => [],
             spawn: async () => {
                 throw new Error("unused");
             },
@@ -888,8 +888,8 @@ describe("createCodingAssistantAgent", () => {
         };
         const controls = {
             depth: 3,
-            followUp: () => managed,
-            interrupt: () => managed,
+            followUp: async () => managed,
+            interrupt: async () => managed,
             list: () => [managed],
             maxActive: 4,
             maxDepth: 3,
@@ -1013,8 +1013,8 @@ describe("createCodingAssistantAgent", () => {
             subagents: {
                 canSpawn: true,
                 depth: 0,
-                followUp: () => managed,
-                interrupt: () => managed,
+                followUp: async () => managed,
+                interrupt: async () => managed,
                 list: () => [managed],
                 maxDepth: 3,
                 spawn: async () => ({ ...managed, output: "done" }),

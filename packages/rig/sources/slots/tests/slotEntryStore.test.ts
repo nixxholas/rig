@@ -22,9 +22,9 @@ afterEach(async () => {
 describe("slot entry store", () => {
     it("persists entries across a store restart", async () => {
         const databasePath = await createDatabasePath();
-        let store = new PersistentSessionStore({ databasePath });
+        let store = await PersistentSessionStore.open({ databasePath });
         cleanups.push(() => store.close());
-        const entry = store.slots.create({
+        const entry = await store.slots.create({
             author: { type: "agent", sessionId: "session-1" },
             content: {
                 action: {
@@ -42,10 +42,10 @@ describe("slot entry store", () => {
             slot: "status-line",
         });
         expect(entry.id).toBeTruthy();
-        store.close();
+        await store.close();
 
-        store = new PersistentSessionStore({ databasePath });
-        const restored = store.slots.list();
+        store = await PersistentSessionStore.open({ databasePath });
+        const restored = await store.slots.list();
         expect(restored).toHaveLength(1);
         expect(restored[0]).toMatchObject({
             author: { type: "agent", sessionId: "session-1" },
@@ -68,7 +68,7 @@ describe("slot entry store", () => {
     });
 
     it("rejects unknown slots, scopes, content types, and malformed actions", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         cleanups.push(() => store.close());
         const valid = {
             author: { type: "agent", sessionId: "session-1" },
@@ -78,16 +78,16 @@ describe("slot entry store", () => {
             scope: "everywhere",
             slot: "status-line",
         } as const;
-        expect(() => store.slots.create({ ...valid, slot: "footer" as never })).toThrow(
+        await expect(store.slots.create({ ...valid, slot: "footer" as never })).rejects.toThrow(
             SlotEntryInvalidError,
         );
-        expect(() => store.slots.create({ ...valid, scope: "galaxy" as never })).toThrow(
+        await expect(store.slots.create({ ...valid, scope: "galaxy" as never })).rejects.toThrow(
             SlotEntryInvalidError,
         );
-        expect(() =>
+        await expect(
             store.slots.create({ ...valid, content: { type: "video", url: "x" } as never }),
-        ).toThrow(SlotEntryInvalidError);
-        expect(() =>
+        ).rejects.toThrow(SlotEntryInvalidError);
+        await expect(
             store.slots.create({
                 ...valid,
                 content: {
@@ -96,8 +96,8 @@ describe("slot entry store", () => {
                     type: "button",
                 } as never,
             }),
-        ).toThrow(SlotEntryInvalidError);
-        expect(() =>
+        ).rejects.toThrow(SlotEntryInvalidError);
+        await expect(
             store.slots.create({
                 ...valid,
                 content: {
@@ -110,12 +110,12 @@ describe("slot entry store", () => {
                     type: "button",
                 } as never,
             }),
-        ).toThrow(SlotEntryInvalidError);
-        expect(store.slots.list()).toHaveLength(0);
+        ).rejects.toThrow(SlotEntryInvalidError);
+        expect(await store.slots.list()).toHaveLength(0);
     });
 
     it("requires exactly the scope reference matching the scope, pointing at a real target", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         cleanups.push(() => store.close());
         const valid = {
             author: { type: "agent", sessionId: "session-1" },
@@ -123,31 +123,31 @@ describe("slot entry store", () => {
             description: "d",
             purpose: "p",
         } as const;
-        expect(() => store.slots.create({ ...valid, scope: "project", slot: "title" })).toThrow(
-            SlotEntryInvalidError,
-        );
-        expect(() =>
+        await expect(
+            store.slots.create({ ...valid, scope: "project", slot: "title" }),
+        ).rejects.toThrow(SlotEntryInvalidError);
+        await expect(
             store.slots.create({
                 ...valid,
                 projectId: "missing-project",
                 scope: "project",
                 slot: "title",
             }),
-        ).toThrow(SlotEntryInvalidError);
-        expect(() =>
+        ).rejects.toThrow(SlotEntryInvalidError);
+        await expect(
             store.slots.create({
                 ...valid,
                 scope: "everywhere",
                 sessionId: "some-session",
                 slot: "status-line",
             }),
-        ).toThrow(SlotEntryInvalidError);
+        ).rejects.toThrow(SlotEntryInvalidError);
     });
 
     it("accepts and rejects representative slot and scope combinations", async () => {
         const databasePath = await createDatabasePath();
-        createSessionDatabaseFixture(databasePath);
-        const store = new PersistentSessionStore({ databasePath });
+        await createSessionDatabaseFixture(databasePath);
+        const store = await PersistentSessionStore.open({ databasePath });
         cleanups.push(() => store.close());
         const common = {
             author: { type: "agent", sessionId: "session-1" },
@@ -157,14 +157,14 @@ describe("slot entry store", () => {
         } as const;
 
         expect(
-            store.slots.create({
+            await store.slots.create({
                 ...common,
                 scope: "everywhere",
                 slot: "sidebar",
             }),
         ).toMatchObject({ scope: "everywhere", slot: "sidebar" });
         expect(
-            store.slots.create({
+            await store.slots.create({
                 ...common,
                 projectId: "project-1",
                 scope: "project",
@@ -172,7 +172,7 @@ describe("slot entry store", () => {
             }),
         ).toMatchObject({ scope: "project", slot: "title" });
         expect(
-            store.slots.create({
+            await store.slots.create({
                 ...common,
                 scope: "session",
                 sessionId: "session-1",
@@ -180,7 +180,7 @@ describe("slot entry store", () => {
             }),
         ).toMatchObject({ scope: "session", slot: "status-line" });
         expect(
-            store.slots.create({
+            await store.slots.create({
                 ...common,
                 projectId: "project-1",
                 scope: "project",
@@ -188,29 +188,29 @@ describe("slot entry store", () => {
             }),
         ).toMatchObject({ scope: "project", slot: "above-composer" });
 
-        expect(() =>
+        await expect(
             store.slots.create({
                 ...common,
                 scope: "session",
                 sessionId: "session-1",
                 slot: "sidebar",
             }),
-        ).toThrow("The sidebar slot allows only the everywhere scope.");
-        expect(() =>
+        ).rejects.toThrow("The sidebar slot allows only the everywhere scope.");
+        await expect(
             store.slots.create({
                 ...common,
                 scope: "everywhere",
                 slot: "title",
             }),
-        ).toThrow("The title slot allows only the project and workspace scopes.");
+        ).rejects.toThrow("The title slot allows only the project and workspace scopes.");
     });
 
     it("rejects moving an entry to a slot incompatible with its fixed scope", async () => {
         const databasePath = await createDatabasePath();
-        createSessionDatabaseFixture(databasePath);
-        const store = new PersistentSessionStore({ databasePath });
+        await createSessionDatabaseFixture(databasePath);
+        const store = await PersistentSessionStore.open({ databasePath });
         cleanups.push(() => store.close());
-        const entry = store.slots.create({
+        const entry = await store.slots.create({
             author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
@@ -220,17 +220,17 @@ describe("slot entry store", () => {
             slot: "status-line",
         });
 
-        expect(() => store.slots.update(entry.id, { slot: "sidebar" })).toThrow(
+        await expect(store.slots.update(entry.id, { slot: "sidebar" })).rejects.toThrow(
             "The sidebar slot allows only the everywhere scope.",
         );
-        expect(store.slots.list()).toEqual([entry]);
+        expect(await store.slots.list()).toEqual([entry]);
     });
 
     it("rejects creating or updating an applet button whose scope the applet disallows", async () => {
         const databasePath = await createDatabasePath();
-        createSessionDatabaseFixture(databasePath);
-        const opened = openSessionDatabase(databasePath);
-        appletCreate(opened.database, {
+        await createSessionDatabaseFixture(databasePath);
+        const opened = await openSessionDatabase(databasePath);
+        await appletCreate(opened.database, {
             allowedScopes: ["session"],
             authorSessionId: "session-1",
             changeDescription: "Initial import",
@@ -240,8 +240,8 @@ describe("slot entry store", () => {
             name: "dashboard",
             purpose: "Track work",
         });
-        opened.client.close();
-        const store = new PersistentSessionStore({ databasePath });
+        await opened.client.close();
+        const store = await PersistentSessionStore.open({ databasePath });
         cleanups.push(() => store.close());
         const appletButton = {
             action: { type: "open-applet", applet: "dashboard" },
@@ -249,7 +249,7 @@ describe("slot entry store", () => {
             type: "button",
         } as const;
 
-        expect(() =>
+        await expect(
             store.slots.create({
                 author: { type: "agent", sessionId: "session-1" },
                 content: appletButton,
@@ -258,11 +258,11 @@ describe("slot entry store", () => {
                 scope: "everywhere",
                 slot: "status-line",
             }),
-        ).toThrow(
+        ).rejects.toThrow(
             'The applet "dashboard" does not allow the everywhere scope. It allows only the session scope.',
         );
 
-        const entry = store.slots.create({
+        const entry = await store.slots.create({
             author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "Dashboard",
@@ -270,16 +270,16 @@ describe("slot entry store", () => {
             scope: "everywhere",
             slot: "status-line",
         });
-        expect(() => store.slots.update(entry.id, { content: appletButton })).toThrow(
+        await expect(store.slots.update(entry.id, { content: appletButton })).rejects.toThrow(
             SlotEntryInvalidError,
         );
     });
 
     it("allows description-only updates of legacy entries with incompatible slot scopes", async () => {
         const databasePath = await createDatabasePath();
-        createSessionDatabaseFixture(databasePath);
-        const opened = openSessionDatabase(databasePath);
-        slotEntryCreate(opened.database, {
+        await createSessionDatabaseFixture(databasePath);
+        const opened = await openSessionDatabase(databasePath);
+        await slotEntryCreate(opened.database, {
             author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             createdAt: 1,
@@ -291,12 +291,12 @@ describe("slot entry store", () => {
             slot: "sidebar",
             updatedAt: 1,
         });
-        opened.client.close();
-        const store = new PersistentSessionStore({ databasePath });
+        await opened.client.close();
+        const store = await PersistentSessionStore.open({ databasePath });
         cleanups.push(() => store.close());
 
         expect(
-            store.slots.update("legacy-entry", { description: "new description" }),
+            await store.slots.update("legacy-entry", { description: "new description" }),
         ).toMatchObject({
             description: "new description",
             id: "legacy-entry",
@@ -306,13 +306,13 @@ describe("slot entry store", () => {
     });
 
     it("updates and removes entries and publishes the whole set on every change", async () => {
-        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
         cleanups.push(() => store.close());
         const events: GlobalLiveEvent[] = [];
         store.liveEvents.subscribe((delivery) => {
             if (delivery.event.type === "slots_changed") events.push(delivery.event);
         });
-        const entry = store.slots.create({
+        const entry = await store.slots.create({
             author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
@@ -320,7 +320,7 @@ describe("slot entry store", () => {
             scope: "everywhere",
             slot: "above-composer",
         });
-        const updated = store.slots.update(entry.id, {
+        const updated = await store.slots.update(entry.id, {
             content: {
                 action: { message: "Run the checks", type: "send-current-chat" },
                 label: "Run checks",
@@ -328,12 +328,12 @@ describe("slot entry store", () => {
             },
         });
         expect(updated.content.type).toBe("button");
-        expect(() => store.slots.update("missing", { description: "x" })).toThrow(
+        await expect(store.slots.update("missing", { description: "x" })).rejects.toThrow(
             SlotEntryNotFoundError,
         );
-        store.slots.remove(entry.id);
-        expect(() => store.slots.remove(entry.id)).toThrow(SlotEntryNotFoundError);
-        expect(store.slots.list()).toHaveLength(0);
+        await store.slots.remove(entry.id);
+        await expect(store.slots.remove(entry.id)).rejects.toThrow(SlotEntryNotFoundError);
+        expect(await store.slots.list()).toHaveLength(0);
         expect(events).toHaveLength(3);
         expect(events.at(-1)?.data).toEqual({ entries: [] });
     });

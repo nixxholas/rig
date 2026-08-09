@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * Worklets: background compute installed as versioned source folders.
@@ -12,8 +12,8 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * arrived with, so they sit on the version row. Reverting therefore restores the older manifest
  * along with the older code, and never leaves a newer grant in force.
  */
-export function worklets(database: SessionDatabase): void {
-    database.run(
+export async function worklets(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE worklets (
             name TEXT NOT NULL PRIMARY KEY,
@@ -26,7 +26,7 @@ export function worklets(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE worklet_versions (
             worklet_name TEXT NOT NULL REFERENCES worklets(name) ON DELETE CASCADE,

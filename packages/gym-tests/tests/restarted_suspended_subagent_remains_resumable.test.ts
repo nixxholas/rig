@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -203,34 +204,44 @@ function messageText(content: unknown): string {
 // Escape stops delegated work, so a goal-paused suspension interrupted by a server
 // restart is reproduced directly in the database: the subagent is marked suspended
 // with a stale active run that never reached a terminal event.
-const markSuspendedActiveRunScript = `
-import { DatabaseSync } from "node:sqlite";
-
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
-const result = database
-    .prepare("UPDATE sessions SET status = 'suspended', active_run_id = 'stale-suspended-run' WHERE parent_session_id IS NOT NULL")
-    .run();
-database.close();
-if (result.changes !== 1) {
-    throw new Error("Expected exactly one subagent, updated " + result.changes);
-}
-`;
-
-const inspectRepairedSubagentScript = `
-import { writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
+const markSuspendedActiveRunScript = libsqlEsmScript(`
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite");
+let result;
 try {
-    const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
-    const child = database
-        .prepare("SELECT status, active_run_id FROM sessions WHERE parent_session_id IS NOT NULL")
-        .get();
-    const parentEvent = database
-        .prepare("SELECT type, data_json FROM session_events WHERE session_id = (SELECT id FROM sessions WHERE parent_session_id IS NULL LIMIT 1) ORDER BY seq DESC LIMIT 1")
-        .get();
-    database.close();
-    writeFileSync("/workspace/repaired-subagent-state.json", JSON.stringify({ child, parentEvent }));
-} catch (error) {
-    writeFileSync("/workspace/repaired-subagent-state.json", String(error?.stack ?? error));
+    result = await database.execute(
+        "UPDATE sessions SET status = 'suspended', active_run_id = 'stale-suspended-run' WHERE parent_session_id IS NOT NULL",
+    );
+} finally {
+    await database.close();
 }
-`;
+if (result.rowsAffected !== 1) {
+    throw new Error("Expected exactly one subagent, updated " + result.rowsAffected);
+}
+`);
+
+const inspectRepairedSubagentScript = libsqlEsmScript(
+    `
+let database;
+let output;
+try {
+    database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite");
+    const child = (
+        await database.execute(
+            "SELECT status, active_run_id FROM sessions WHERE parent_session_id IS NOT NULL",
+        )
+    ).rows[0];
+    const parentEvent = (
+        await database.execute(
+            "SELECT type, data_json FROM session_events WHERE session_id = (SELECT id FROM sessions WHERE parent_session_id IS NULL LIMIT 1) ORDER BY seq DESC LIMIT 1",
+        )
+    ).rows[0];
+    output = JSON.stringify({ child, parentEvent });
+} catch (error) {
+    output = String(error?.stack ?? error);
+} finally {
+    await database?.close();
+}
+writeFileSync("/workspace/repaired-subagent-state.json", output);
+`,
+    'import { writeFileSync } from "node:fs";',
+);

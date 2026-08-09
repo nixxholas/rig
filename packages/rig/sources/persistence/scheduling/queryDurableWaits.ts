@@ -1,18 +1,23 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { DurableWait } from "../../scheduling/index.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 
-export function queryDurableWaits(tx: TX, sessionId: string): readonly DurableWait[] {
-    return tx
-        .all<Record<string, unknown>>(sql`
+export async function queryDurableWaits(
+    tx: DatabaseScope,
+    sessionId: string,
+): Promise<readonly DurableWait[]> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx.all<Record<string, unknown>>(sql`
             SELECT *
             FROM durable_waits
             WHERE session_id = ${sessionId}
             ORDER BY created_at_ms ASC, tool_call_index ASC
         `)
-        .map((row) => {
+        ).map((row) => {
             const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
             const resultJson = readOptionalString(row, "result_json");
             const resultBlockJson = readOptionalString(row, "result_block_json");
@@ -37,4 +42,5 @@ export function queryDurableWaits(tx: TX, sessionId: string): readonly DurableWa
                 toolName: readString(row, "tool_name") as DurableWait["toolName"],
             };
         });
+    });
 }

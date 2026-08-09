@@ -95,7 +95,7 @@ describe("plugin installation request identity", () => {
         const requests = new PluginInstallationRequests();
         const install = () => new Promise<InstalledPlugin>(() => {});
         for (let index = 0; index < 256; index += 1) {
-            requests.run(`request-${String(index)}`, `source-${String(index)}`, install);
+            void requests.run(`request-${String(index)}`, `source-${String(index)}`, install);
         }
         expect(() => requests.run("request-over-limit", "source", install)).toThrow(
             "maximum number of retained plugin installation requests",

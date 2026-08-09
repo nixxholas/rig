@@ -14,16 +14,16 @@ export interface OnboardingServiceContract {
 }
 
 export interface OnboardingPersistence {
-    query<T>(operation: (tx: TX) => T): T;
-    transaction<T>(operation: (tx: TX) => T): T;
+    query<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
+    transaction<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
 }
 
 export interface OnboardingServiceOptions {
     currentVersion?: number;
-    murmurConfigured: () => boolean;
+    murmurConfigured: () => boolean | Promise<boolean>;
     onboardMurmur: (request: OnboardMurmurRequest) => Promise<OnboardMurmurResponse>;
     persistence: OnboardingPersistence;
-    profileComplete: () => boolean;
+    profileComplete: () => boolean | Promise<boolean>;
     /** Whether the daemon's current model catalog exposes at least one available model. */
     providersConfigured: () => boolean | Promise<boolean>;
 }
@@ -36,10 +36,10 @@ export interface OnboardingServiceOptions {
  */
 export class OnboardingService implements OnboardingServiceContract {
     readonly #currentVersion: number;
-    readonly #murmurConfigured: () => boolean;
+    readonly #murmurConfigured: () => boolean | Promise<boolean>;
     readonly #onboardMurmur: (request: OnboardMurmurRequest) => Promise<OnboardMurmurResponse>;
     readonly #persistence: OnboardingPersistence;
-    readonly #profileComplete: () => boolean;
+    readonly #profileComplete: () => boolean | Promise<boolean>;
     readonly #providersConfigured: () => boolean | Promise<boolean>;
 
     constructor(options: OnboardingServiceOptions) {
@@ -52,43 +52,48 @@ export class OnboardingService implements OnboardingServiceContract {
     }
 
     async status(): Promise<OnboardingStatus> {
-        if (this.#completed()) return this.#status("complete");
+        if (await this.#completed()) return this.#status("complete");
         if (!(await this.#providersConfigured())) {
             // Configuration may have changed while the check ran; completion stays authoritative.
-            return this.#completed() ? this.#status("complete") : this.#status("provider_setup");
+            return (await this.#completed())
+                ? this.#status("complete")
+                : this.#status("provider_setup");
         }
-        if (this.#completed()) return this.#status("complete");
-        if (!this.#profileComplete()) return this.#status("profile_required");
-        if (!this.#murmurConfigured()) return this.#status("murmur_setup");
-        this.#markCompleted();
+        if (await this.#completed()) return this.#status("complete");
+        if (!(await this.#profileComplete())) return this.#status("profile_required");
+        if (!(await this.#murmurConfigured())) return this.#status("murmur_setup");
+        await this.#markCompleted();
         return this.#status("complete");
     }
 
     async onboardMurmur(request: OnboardMurmurRequest): Promise<OnboardMurmurResponse> {
-        if (!this.#completed()) {
+        if (!(await this.#completed())) {
             if (!(await this.#providersConfigured())) {
                 throw new Error("Configure a provider before setting up Murmur.");
             }
-            if (!this.#profileComplete()) {
+            if (!(await this.#profileComplete())) {
                 throw new Error("Create a human profile before setting up Murmur.");
             }
         }
         const result = await this.#onboardMurmur(request);
-        if (!this.#murmurConfigured()) {
+        if (!(await this.#murmurConfigured())) {
             throw new Error("Murmur onboarding did not persist a choice.");
         }
-        this.#markCompleted();
+        await this.#markCompleted();
         return result;
     }
 
-    #completed(): boolean {
+    async #completed(): Promise<boolean> {
         return (
-            this.#persistence.query(queryOnboardingState).completedVersion >= this.#currentVersion
+            (await this.#persistence.query(async (tx) => queryOnboardingState(tx)))
+                .completedVersion >= this.#currentVersion
         );
     }
 
-    #markCompleted(): void {
-        this.#persistence.transaction((tx) => onboardingMarkCompleted(tx, this.#currentVersion));
+    async #markCompleted(): Promise<void> {
+        await this.#persistence.transaction(async (tx) =>
+            onboardingMarkCompleted(tx, this.#currentVersion),
+        );
     }
 
     #status(state: OnboardingStatus["state"]): OnboardingStatus {

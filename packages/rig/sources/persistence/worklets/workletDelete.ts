@@ -2,12 +2,15 @@ import { eq } from "drizzle-orm";
 
 import { worklets, workletVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 /** Removes a worklet and its whole version history. Its `Data` folder is not touched here. */
-export function workletDelete(tx: TX, name: string): void {
-    inTx(tx, (transaction) => {
-        transaction.delete(workletVersions).where(eq(workletVersions.workletName, name)).run();
-        transaction.delete(worklets).where(eq(worklets.name, name)).run();
+export async function workletDelete(tx: DatabaseScope, name: string): Promise<void> {
+    await inTx(tx, async (transaction) => {
+        await transaction
+            .delete(workletVersions)
+            .where(eq(workletVersions.workletName, name))
+            .run();
+        await transaction.delete(worklets).where(eq(worklets.name, name)).run();
     });
 }

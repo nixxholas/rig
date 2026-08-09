@@ -88,7 +88,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
     let nextSessionId = 1;
     let pendingSessionStarts = 0;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
-    let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
+    let onSessionExit: ((exit: BashSessionExit) => void | Promise<void>) | undefined;
     const activeSessionCount = () =>
         [...sessions.values()].filter((session) => session.result === undefined && !session.evicted)
             .length;
@@ -582,7 +582,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     // Nobody was waiting on this command, so nobody is about to
                     // learn that it ended. Say so, without the output.
                     if (!awaited && !session.exitObserved) {
-                        onSessionExit?.({
+                        await onSessionExit?.({
                             command: session.command,
                             exitCode: session.result.exitCode,
                             sessionId,

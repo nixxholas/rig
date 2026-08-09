@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { p2pProvisionedProviders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import { p2pInstanceIdSchema } from "../../protocol/P2pIdentityProtocol.js";
@@ -17,11 +17,11 @@ import { queryP2pProvisionedProviders } from "./queryP2pProvisionedProviders.js"
  * The owner predicate is present on the delete, so a successful replacement
  * cannot remove credentials supplied by another trusted Rig.
  */
-export function p2pProvisionedProvidersReplace(
-    tx: TX,
+export async function p2pProvisionedProvidersReplace(
+    tx: DatabaseScope,
     ownerInstanceId: string,
     providers: readonly P2pProvisionedProviderRecord[],
-): boolean {
+): Promise<boolean> {
     if (!Value.Check(p2pInstanceIdSchema, ownerInstanceId)) {
         throw new Error("The authenticated P2P credential owner is invalid.");
     }
@@ -42,8 +42,8 @@ export function p2pProvisionedProvidersReplace(
     ) {
         throw new Error("A P2P credential snapshot must use one source digest.");
     }
-    return inTx(tx, (transaction) => {
-        const current = queryP2pProvisionedProviders(transaction, ownerInstanceId);
+    return await inTx(tx, async (transaction) => {
+        const current = await queryP2pProvisionedProviders(transaction, ownerInstanceId);
         if (
             current.length === providers.length &&
             current.length > 0 &&
@@ -52,12 +52,12 @@ export function p2pProvisionedProvidersReplace(
             return false;
         }
         if (current.length === 0 && providers.length === 0) return false;
-        transaction
+        await transaction
             .delete(p2pProvisionedProviders)
             .where(eq(p2pProvisionedProviders.ownerInstanceId, ownerInstanceId))
             .run();
         if (providers.length > 0) {
-            transaction
+            await transaction
                 .insert(p2pProvisionedProviders)
                 .values(
                     providers.map((provider) => ({

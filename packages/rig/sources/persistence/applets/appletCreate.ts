@@ -1,6 +1,6 @@
 import { applets, appletVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import type { AppletAllowedScopes } from "../../protocol/AppletProtocol.js";
 
 export interface AppletCreateRecord {
@@ -16,9 +16,9 @@ export interface AppletCreateRecord {
 }
 
 /** Writes the applet identity together with its first version so neither exists alone. */
-export function appletCreate(tx: TX, record: AppletCreateRecord): void {
-    inTx(tx, (transaction) => {
-        transaction
+export async function appletCreate(tx: DatabaseScope, record: AppletCreateRecord): Promise<void> {
+    await inTx(tx, async (transaction) => {
+        await transaction
             .insert(applets)
             .values({
                 allowedScopesJson: JSON.stringify(record.allowedScopes),
@@ -33,7 +33,7 @@ export function appletCreate(tx: TX, record: AppletCreateRecord): void {
                 updatedAtMs: record.createdAt,
             })
             .run();
-        transaction
+        await transaction
             .insert(appletVersions)
             .values({
                 changeDescription: record.changeDescription,

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const PENDING_MESSAGE = "Preserve this direction after the provider error.";
@@ -85,11 +86,8 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
     };
 }
 
-const providerErrorSteeringScript = String.raw`
-import { readFile } from "node:fs/promises";
-import { request } from "node:http";
-import { DatabaseSync } from "node:sqlite";
-
+const providerErrorSteeringScript = libsqlEsmScript(
+    String.raw`
 const action = process.argv[2];
 const message = process.argv[3];
 const directory = "/tmp/rig-" + process.getuid();
@@ -109,13 +107,20 @@ if (action === "steer") {
     );
     process.stdout.write("steered\n");
 } else if (action === "inspect") {
-    const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
-    const sessionId = database
-        .prepare("SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1")
-        .get().id;
-    const events = database
-        .prepare("SELECT seq, type, data_json FROM session_events WHERE session_id = ? ORDER BY seq")
-        .all(sessionId)
+    const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite");
+    let output;
+    try {
+    const sessionId = (
+        await database.execute(
+            "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1",
+        )
+    ).rows[0].id;
+    const events = (
+        await database.execute({
+            sql: "SELECT seq, type, data_json FROM session_events WHERE session_id = ? ORDER BY seq",
+            args: [sessionId],
+        })
+    ).rows
         .map((event) => ({ ...event, data: JSON.parse(event.data_json) }));
     const submitted = events.filter(
         (event) =>
@@ -139,17 +144,23 @@ if (action === "steer") {
     const storedCount =
         messageId === undefined
             ? 0
-            : database
-                  .prepare("SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?")
-                  .get(sessionId, messageId).count;
-    database.close();
+            : (
+                  await database.execute({
+                      sql: "SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND message_id = ?",
+                      args: [sessionId, messageId],
+                  })
+              ).rows[0].count;
+    output = {
+        appliedCount: applied.length,
+        finishedStopReason: finished?.data.stopReason,
+        storedCount,
+        submittedCount: submitted.length,
+    };
+    } finally {
+        await database.close();
+    }
     process.stdout.write(
-        JSON.stringify({
-            appliedCount: applied.length,
-            finishedStopReason: finished?.data.stopReason,
-            storedCount,
-            submittedCount: submitted.length,
-        }),
+        JSON.stringify(output),
     );
 } else {
     throw new Error("Unknown action: " + action);
@@ -192,4 +203,6 @@ function requestJson(socketPath, token, method, path, body) {
         outgoing.end();
     });
 }
-`;
+`,
+    'import { readFile } from "node:fs/promises"; import { request } from "node:http";',
+);

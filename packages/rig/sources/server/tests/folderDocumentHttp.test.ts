@@ -220,11 +220,11 @@ async function startServer(): Promise<{
     const root = await createTestFixtureDirectory();
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         homeDirectory: root,
         localInstanceId: LOCAL_INSTANCE_ID,
     });
-    const server: Server = createProtocolHttpServer({ store, token: "t" });
+    const server: Server = await createProtocolHttpServer({ store, token: "t" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {

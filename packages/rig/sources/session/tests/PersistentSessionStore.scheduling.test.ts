@@ -42,26 +42,26 @@ describe("persistent scheduling", () => {
                 : { content: [{ text: "WAIT_RESUMED", type: "text" }] };
         });
 
-        let store = new PersistentSessionStore({
+        let store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
-        const session = store.create(gymSessionRequest("/tmp/rig-durable-wait"));
-        const submitted = session.submit({ text: "Wait ten seconds." });
+        const session = await store.create(gymSessionRequest("/tmp/rig-durable-wait"));
+        const submitted = await session.submit({ text: "Wait ten seconds." });
         await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
 
         await store.prepareForShutdown("shutdown");
-        store.close();
+        await store.close();
         now += 11_000;
 
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
         try {
-            const restored = store.get(session.id);
+            const restored = await store.get(session.id);
             if (restored === undefined) throw new Error("Expected the waiting session.");
             await expect(restored.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
@@ -79,7 +79,7 @@ describe("persistent scheduling", () => {
                 ]),
             );
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
@@ -96,23 +96,23 @@ describe("persistent scheduling", () => {
             ],
         }));
 
-        let store = new PersistentSessionStore({
+        let store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
         });
-        const session = store.create(gymSessionRequest("/tmp/rig-restart-abort-wait"));
-        const submitted = session.submit({ text: "Wait until I stop this run." });
+        const session = await store.create(gymSessionRequest("/tmp/rig-restart-abort-wait"));
+        const submitted = await session.submit({ text: "Wait until I stop this run." });
         await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
 
         await store.prepareForShutdown("shutdown");
-        store.close();
+        await store.close();
 
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
         });
         try {
-            const restored = store.get(session.id);
+            const restored = await store.get(session.id);
             if (restored === undefined) throw new Error("Expected the waiting session.");
             await expect(restored.abort({ expectedRunId: submitted.runId })).resolves.toMatchObject(
                 {
@@ -123,7 +123,7 @@ describe("persistent scheduling", () => {
             expect(restored.state().activeRunId).toBeUndefined();
         } finally {
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 
@@ -145,18 +145,18 @@ describe("persistent scheduling", () => {
                   }
                 : { content: [{ text: "WAIT_INTERRUPTED", type: "text" }] };
         });
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             modelCatalog: gymCatalog(),
             now: () => now,
         });
         try {
-            const session = store.create(gymSessionRequest("/tmp/rig-interrupted-wait"));
-            const submitted = session.submit({ text: "Wait for twelve hours." });
+            const session = await store.create(gymSessionRequest("/tmp/rig-interrupted-wait"));
+            const submitted = await session.submit({ text: "Wait for twelve hours." });
             await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
 
             now += 3_250;
-            session.steer({ expectedRunId: submitted.runId, text: "Stop waiting now." });
+            await session.steer({ expectedRunId: submitted.runId, text: "Stop waiting now." });
 
             await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
@@ -170,7 +170,7 @@ describe("persistent scheduling", () => {
             expect(session.activity().kind).toBe("idle");
         } finally {
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 
@@ -192,37 +192,37 @@ describe("persistent scheduling", () => {
                   }
                 : { content: [{ text: "CATALOG_WAIT_DONE", type: "text" }] };
         });
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             modelCatalog: gymCatalog(),
             now: () => now,
         });
         try {
-            const session = store.create(gymSessionRequest("/tmp/rig-catalog-wait"));
-            const submitted = session.submit({ text: "Wait for twelve hours." });
+            const session = await store.create(gymSessionRequest("/tmp/rig-catalog-wait"));
+            const submitted = await session.submit({ text: "Wait for twelve hours." });
             await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
 
             // Activity is live-only, so the catalog summary is what tells a
             // client connecting mid-wait that the session is waiting. It must
             // state the same span the live activity reports.
-            const waiting = store.listActive().find((summary) => summary.id === session.id);
+            const waiting = (await store.listActive()).find((summary) => summary.id === session.id);
             const wait = waiting?.wait;
             if (wait === undefined) throw new Error("Expected the summary to carry the wait.");
             expect(wait).toEqual(session.activity().wait);
             expect(wait.dueAt - wait.startedAt).toBe(12 * 60 * 60 * 1000);
 
             now += 3_000;
-            session.steer({ expectedRunId: submitted.runId, text: "Stop waiting now." });
+            await session.steer({ expectedRunId: submitted.runId, text: "Stop waiting now." });
             await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
             });
 
-            const settled = store.listActive().find((summary) => summary.id === session.id);
+            const settled = (await store.listActive()).find((summary) => summary.id === session.id);
             expect(settled).toBeDefined();
             expect(settled?.wait).toBeUndefined();
         } finally {
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 
@@ -253,30 +253,32 @@ describe("persistent scheduling", () => {
             return { content: [{ text: "INTERRUPTING_MESSAGE_COMPLETED", type: "text" }] };
         });
 
-        let store = new PersistentSessionStore({
+        let store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
-        const session = store.create(gymSessionRequest("/tmp/rig-restored-wait-interruption"));
-        const waitingRun = session.submit({ text: "Wait for twelve hours." });
+        const session = await store.create(
+            gymSessionRequest("/tmp/rig-restored-wait-interruption"),
+        );
+        const waitingRun = await session.submit({ text: "Wait for twelve hours." });
         await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
         await store.prepareForShutdown("shutdown");
-        store.close();
+        await store.close();
 
         now += 2_000;
         const taskDrain = new TrackedTaskDrain();
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
             taskDrain,
         });
         try {
-            const restored = store.get(session.id);
+            const restored = await store.get(session.id);
             if (restored === undefined) throw new Error("Expected the restored waiting session.");
             expect(restored.activity().kind).toBe("waiting");
-            const interruptingRun = restored.submit({ text: "Stop waiting after restart." });
+            const interruptingRun = await restored.submit({ text: "Stop waiting after restart." });
 
             await expect(restored.waitForRun(waitingRun.runId)).resolves.toEqual({
                 status: "completed",
@@ -299,25 +301,25 @@ describe("persistent scheduling", () => {
             );
         } finally {
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 
     it("delivers scheduled messages by Agent ID and retains failed delivery", async () => {
         installGymInference(() => ({ content: [{ text: "MESSAGE_RECEIVED", type: "text" }] }));
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             modelCatalog: gymCatalog(),
         });
         try {
-            const sender = store.create(gymSessionRequest("/tmp/rig-schedule-sender"));
-            const target = store.create(gymSessionRequest("/tmp/rig-schedule-target"));
-            const delivered = sender.scheduleMessage({
+            const sender = await store.create(gymSessionRequest("/tmp/rig-schedule-sender"));
+            const target = await store.create(gymSessionRequest("/tmp/rig-schedule-target"));
+            const delivered = await sender.scheduleMessage({
                 dueAt: Date.now(),
                 message: "Run the scheduled check.",
                 targetAgentId: target.snapshot().agentId,
             });
-            const retained = sender.scheduleMessage({
+            const retained = await sender.scheduleMessage({
                 dueAt: Date.now(),
                 message: "This target is unavailable.",
                 targetAgentId: "unknown-agent-id",
@@ -346,40 +348,46 @@ describe("persistent scheduling", () => {
             ).toContain("No available agent");
         } finally {
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 
-    it("persists scheduled messages across trusted peer owners", () => {
+    it("persists scheduled messages across trusted peer owners", async () => {
         const localInstanceId = "alocalinstance00000000001";
         const peerAInstanceId = "apeerainstance000000001";
         const peerBInstanceId = "apeerbinstance000000001";
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             localInstanceId,
             modelCatalog: gymCatalog(),
         });
         try {
-            const sender = store.create(gymSessionRequest("/tmp/rig-schedule-peer-a"), {
+            const sender = await store.create(gymSessionRequest("/tmp/rig-schedule-peer-a"), {
                 ownerInstanceId: peerAInstanceId,
             });
-            const sameOwner = store.create(gymSessionRequest("/tmp/rig-schedule-peer-a-target"), {
-                ownerInstanceId: peerAInstanceId,
-            });
-            const otherOwner = store.create(gymSessionRequest("/tmp/rig-schedule-peer-b-target"), {
-                ownerInstanceId: peerBInstanceId,
-            });
-            const local = store.create(gymSessionRequest("/tmp/rig-schedule-local"));
+            const sameOwner = await store.create(
+                gymSessionRequest("/tmp/rig-schedule-peer-a-target"),
+                {
+                    ownerInstanceId: peerAInstanceId,
+                },
+            );
+            const otherOwner = await store.create(
+                gymSessionRequest("/tmp/rig-schedule-peer-b-target"),
+                {
+                    ownerInstanceId: peerBInstanceId,
+                },
+            );
+            const local = await store.create(gymSessionRequest("/tmp/rig-schedule-local"));
             const dueAt = Date.now() + 60_000;
 
-            const crossOwner = sender.scheduleMessage({
+            const crossOwner = await sender.scheduleMessage({
                 dueAt,
                 message: "Continue the other peer's work.",
                 targetAgentId: otherOwner.snapshot().agentId,
             });
             expect(crossOwner).toMatchObject({ status: "pending" });
 
-            const samePeer = sender.scheduleMessage({
+            const samePeer = await sender.scheduleMessage({
                 dueAt,
                 message: "Same peer.",
                 targetAgentId: sameOwner.snapshot().agentId,
@@ -392,42 +400,44 @@ describe("persistent scheduling", () => {
                 ]),
             );
             expect(
-                local.scheduleMessage({
+                await local.scheduleMessage({
                     dueAt,
                     message: "Local operator.",
                     targetAgentId: otherOwner.snapshot().agentId,
                 }),
             ).toMatchObject({ status: "pending" });
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("keeps cancelled scheduled messages across restart without delivering them", async () => {
         const databasePath = await createDatabasePath();
         let now = 1_700_000_000_000;
-        let store = new PersistentSessionStore({
+        let store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
-        const sender = store.create(gymSessionRequest("/tmp/rig-schedule-cancel"));
-        const scheduled = sender.scheduleMessage({
+        const sender = await store.create(gymSessionRequest("/tmp/rig-schedule-cancel"));
+        const scheduled = await sender.scheduleMessage({
             dueAt: now + 60_000,
             message: "Do not deliver this.",
             targetAgentId: sender.snapshot().agentId,
         });
-        expect(sender.cancelScheduledMessage(scheduled.id)).toMatchObject({ cancelled: true });
-        store.close();
+        expect(await sender.cancelScheduledMessage(scheduled.id)).toMatchObject({
+            cancelled: true,
+        });
+        await store.close();
         now += 120_000;
 
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
         try {
-            const restored = store.get(sender.id);
+            const restored = await store.get(sender.id);
             expect(restored?.scheduledMessages()).toEqual([
                 expect.objectContaining({ id: scheduled.id, status: "cancelled" }),
             ]);
@@ -437,30 +447,30 @@ describe("persistent scheduling", () => {
                     .snapshot.messages.some((message) => message.id === scheduled.id),
             ).toBe(false);
         } finally {
-            store.close();
+            await store.close();
         }
     });
 
     it("bounds settled schedule history while retaining pending and failed deliveries", async () => {
         const databasePath = await createDatabasePath();
         let now = 1_700_000_000_000;
-        let store = new PersistentSessionStore({
+        let store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
-        const sender = store.create(gymSessionRequest("/tmp/rig-schedule-retention"));
-        const pending = sender.scheduleMessage({
+        const sender = await store.create(gymSessionRequest("/tmp/rig-schedule-retention"));
+        const pending = await sender.scheduleMessage({
             dueAt: now + 86_400_000,
             message: "Keep this pending.",
             targetAgentId: sender.snapshot().agentId,
         });
-        const failed = sender.scheduleMessage({
+        const failed = await sender.scheduleMessage({
             dueAt: now + 86_400_000,
             message: "Keep this failed delivery.",
             targetAgentId: "unavailable-agent",
         });
-        sender.deliverScheduledMessage(failed.id);
+        await sender.deliverScheduledMessage(failed.id);
 
         const scheduleEvents: unknown[] = [];
         const unsubscribe = sender.events.subscribe((event) => {
@@ -469,12 +479,12 @@ describe("persistent scheduling", () => {
             }
         });
         for (let index = 0; index <= 1_000; index += 1) {
-            const scheduled = sender.scheduleMessage({
+            const scheduled = await sender.scheduleMessage({
                 dueAt: now + 86_400_000,
                 message: `Settled message ${String(index)}`,
                 targetAgentId: sender.snapshot().agentId,
             });
-            sender.cancelScheduledMessage(scheduled.id);
+            await sender.cancelScheduledMessage(scheduled.id);
         }
         unsubscribe();
 
@@ -490,15 +500,15 @@ describe("persistent scheduling", () => {
             },
         ]);
         const beforeRestart = sender.scheduledMessages();
-        store.close();
+        await store.close();
 
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
         try {
-            const restored = store.get(sender.id);
+            const restored = await store.get(sender.id);
             expect(restored?.scheduledMessages()).toHaveLength(1_002);
             expect(restored?.scheduledMessages()).toEqual(
                 expect.arrayContaining([
@@ -508,7 +518,7 @@ describe("persistent scheduling", () => {
             );
             expect(restored?.scheduledMessages()).toEqual(beforeRestart);
         } finally {
-            store.close();
+            await store.close();
         }
         // A thousand settled schedules are a thousand committed writes, and a
         // loaded CI machine flushes them far more slowly than a local disk.
@@ -518,31 +528,31 @@ describe("persistent scheduling", () => {
         installGymInference(() => ({ content: [{ text: "RESTARTED_DELIVERY", type: "text" }] }));
         const databasePath = await createDatabasePath();
         let now = 1_700_000_000_000;
-        let store = new PersistentSessionStore({
+        let store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
-        const sender = store.create(gymSessionRequest("/tmp/rig-schedule-restart-sender"));
-        const target = store.create(gymSessionRequest("/tmp/rig-schedule-restart-target"));
-        const scheduled = sender.scheduleMessage({
+        const sender = await store.create(gymSessionRequest("/tmp/rig-schedule-restart-sender"));
+        const target = await store.create(gymSessionRequest("/tmp/rig-schedule-restart-target"));
+        const scheduled = await sender.scheduleMessage({
             dueAt: now + 60_000,
             message: "Deliver after restart.",
             targetAgentId: target.snapshot().agentId,
         });
 
         await store.prepareForShutdown("shutdown");
-        store.close();
+        await store.close();
         now += 120_000;
 
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             databasePath,
             modelCatalog: gymCatalog(),
             now: () => now,
         });
         try {
-            const restoredSender = store.get(sender.id);
-            const restoredTarget = store.get(target.id);
+            const restoredSender = await store.get(sender.id);
+            const restoredTarget = await store.get(target.id);
             if (restoredSender === undefined || restoredTarget === undefined) {
                 throw new Error("Expected both scheduled sessions after restart.");
             }
@@ -558,7 +568,7 @@ describe("persistent scheduling", () => {
             ).toBe(true);
         } finally {
             await store.prepareForShutdown("shutdown");
-            store.close();
+            await store.close();
         }
     });
 });

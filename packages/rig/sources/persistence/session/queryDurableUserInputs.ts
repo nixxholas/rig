@@ -1,7 +1,8 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { DurableUserInputCall } from "../../user-input/index.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import {
     readNumber,
     readOptionalNumber,
@@ -9,18 +10,19 @@ import {
     readString,
 } from "./impl/sqliteRow.js";
 
-export function queryDurableUserInputs(
-    tx: TX,
+export async function queryDurableUserInputs(
+    tx: DatabaseScope,
     sessionId?: string,
-): readonly DurableUserInputCall[] {
-    return tx
-        .all<Record<string, unknown>>(sql`
+): Promise<readonly DurableUserInputCall[]> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx.all<Record<string, unknown>>(sql`
             SELECT *
             FROM durable_user_inputs
             ${sessionId === undefined ? sql`` : sql`WHERE session_id = ${sessionId}`}
             ORDER BY created_at_ms ASC, tool_call_index ASC
         `)
-        .map((row) => {
+        ).map((row) => {
             const answerDueAt = readOptionalNumber(row, "answer_due_at_ms");
             const answerWaitStartedAt = readOptionalNumber(row, "answer_wait_started_at_ms");
             const permissionJson = readOptionalString(row, "permission_json");
@@ -52,4 +54,5 @@ export function queryDurableUserInputs(
                 toolName: readString(row, "tool_name"),
             };
         });
+    });
 }

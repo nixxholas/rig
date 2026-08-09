@@ -128,7 +128,7 @@ describe("plugin registration", () => {
         });
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
-        harness.store.slots.create({
+        await harness.store.slots.create({
             author: { folder: "clock", name: "Clock", type: "plugin" },
             content: { markdown: "Tick", type: "text" },
             description: "Clock status",
@@ -136,7 +136,7 @@ describe("plugin registration", () => {
             scope: "everywhere",
             slot: "status-line",
         });
-        const retainedEntry = harness.store.slots.create({
+        const retainedEntry = await harness.store.slots.create({
             author: { folder: "calendar", name: "Calendar", type: "plugin" },
             content: { markdown: "Today", type: "text" },
             description: "Calendar status",
@@ -144,7 +144,7 @@ describe("plugin registration", () => {
             scope: "everywhere",
             slot: "status-line",
         });
-        expect(harness.store.slots.list()).toHaveLength(2);
+        expect(await harness.store.slots.list()).toHaveLength(2);
         await expect(harness.manager.readLog("Clock")).resolves.toMatchObject({
             source: "current_run",
             status: "running",
@@ -167,7 +167,7 @@ describe("plugin registration", () => {
         // The process stops before its code is removed, and is not started again.
         expect(harness.stopped).toEqual(["Clock"]);
         expect(harness.started).toEqual(["Clock"]);
-        expect(harness.store.slots.list()).toEqual([retainedEntry]);
+        expect(await harness.store.slots.list()).toEqual([retainedEntry]);
     });
 
     it("announces every registration change on the live event stream", async () => {
@@ -329,8 +329,7 @@ describe("plugin registration", () => {
             "failed",
         ]);
         expect(
-            harness.store.globalEventQueue
-                .list()
+            (await harness.store.globalEventQueue.list())
                 ?.filter((entry) => entry.event.type === "compute_preparation")
                 .map((entry) => entry.event.id),
         ).toEqual(harness.computeEvents.map((event) => event.id));
@@ -354,7 +353,7 @@ describe("plugin registration", () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
         await harness.manager.start();
-        const rejected = harness.store.create({ cwd: harness.workspace });
+        const rejected = await harness.store.create({ cwd: harness.workspace });
         const recordRejectedNotice = rejected.recordSystemNotice.bind(rejected);
         let rejectedWaitingNotice = false;
         const rejectNotice = vi
@@ -366,8 +365,8 @@ describe("plugin registration", () => {
                 }
                 return recordRejectedNotice(payload, options);
             });
-        const attributed = harness.store.create({ cwd: harness.workspace });
-        const unrelated = harness.store.create({ cwd: harness.dataRoot });
+        const attributed = await harness.store.create({ cwd: harness.workspace });
+        const unrelated = await harness.store.create({ cwd: harness.dataRoot });
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -491,11 +490,9 @@ describe("plugin registration", () => {
             ["ready", undefined],
         ]);
         expect(
-            harness.store.globalEventQueue
-                .list()
-                ?.flatMap((entry) =>
-                    entry.event.type === "compute_preparation" ? [entry.event.id] : [],
-                ),
+            (await harness.store.globalEventQueue.list())?.flatMap((entry) =>
+                entry.event.type === "compute_preparation" ? [entry.event.id] : [],
+            ),
         ).toEqual(
             harness.computeEvents
                 .filter((event) => event.computeInstanceId === instance.instanceId)
@@ -592,7 +589,7 @@ describe("plugin registration", () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
         await harness.manager.start();
-        const session = harness.store.create({ cwd: harness.workspace });
+        const session = await harness.store.create({ cwd: harness.workspace });
         let appendAttempts = 0;
         const append = vi.spyOn(harness.store.globalEventQueue, "append").mockImplementation(() => {
             appendAttempts += 1;
@@ -646,11 +643,11 @@ describe("plugin registration", () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
         await harness.manager.start();
-        const subagent = harness.store.create({ cwd: harness.workspace });
+        const subagent = await harness.store.create({ cwd: harness.workspace });
         vi.spyOn(subagent, "isSubagent").mockReturnValue(true);
-        const archivedDuringPreparation = harness.store.create({ cwd: harness.workspace });
-        const alreadyArchived = harness.store.create({ cwd: harness.workspace });
-        alreadyArchived.setArchived(true);
+        const archivedDuringPreparation = await harness.store.create({ cwd: harness.workspace });
+        const alreadyArchived = await harness.store.create({ cwd: harness.workspace });
+        await alreadyArchived.setArchived(true);
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -715,7 +712,7 @@ describe("plugin registration", () => {
         expect(noticePhases(archivedDuringPreparation)).toEqual(["preparing_compute"]);
         expect(noticePhases(alreadyArchived)).toEqual([]);
 
-        archivedDuringPreparation.setArchived(true);
+        await archivedDuringPreparation.setArchived(true);
         provider.complete(registrationId, startCallId!, {
             error: {
                 code: "invalid_response",
@@ -733,7 +730,7 @@ describe("plugin registration", () => {
         expect(noticePhases(subagent)).toEqual(["preparing_compute", "failed"]);
         expect(noticePhases(alreadyArchived)).toEqual([]);
 
-        const archivedDuringSuccessfulPreparation = harness.store.create({
+        const archivedDuringSuccessfulPreparation = await harness.store.create({
             cwd: harness.workspace,
         });
         startCallId = undefined;
@@ -755,7 +752,7 @@ describe("plugin registration", () => {
         ).rejects.toMatchObject({ code: "preparing_compute" });
         await vi.waitFor(() => expect(startCallId).toBeDefined());
         expect(noticePhases(archivedDuringSuccessfulPreparation)).toEqual(["preparing_compute"]);
-        archivedDuringSuccessfulPreparation.setArchived(true);
+        await archivedDuringSuccessfulPreparation.setArchived(true);
         provider.complete(registrationId, startCallId!, {
             operation: "start",
             result: { instanceId: "provider-instance-ready" },
@@ -781,8 +778,8 @@ describe("plugin registration", () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
         await harness.manager.start();
-        const active = harness.store.create({ cwd: harness.workspace });
-        const archivedAfterUnavailable = harness.store.create({ cwd: harness.workspace });
+        const active = await harness.store.create({ cwd: harness.workspace });
+        const archivedAfterUnavailable = await harness.store.create({ cwd: harness.workspace });
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -875,7 +872,7 @@ describe("plugin registration", () => {
             });
         }
         await vi.waitFor(() => expect(states(active).at(-1)).toBe("unavailable"));
-        archivedAfterUnavailable.setArchived(true);
+        await archivedAfterUnavailable.setArchived(true);
         providerRecovered = true;
 
         await expect(
@@ -896,8 +893,8 @@ describe("plugin registration", () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
         await harness.manager.start();
-        const active = harness.store.create({ cwd: harness.workspace });
-        const archivedAfterUnavailable = harness.store.create({ cwd: harness.workspace });
+        const active = await harness.store.create({ cwd: harness.workspace });
+        const archivedAfterUnavailable = await harness.store.create({ cwd: harness.workspace });
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -991,7 +988,7 @@ describe("plugin registration", () => {
             });
         }
         await vi.waitFor(() => expect(states(archivedAfterUnavailable).at(-1)).toBe("unavailable"));
-        archivedAfterUnavailable.setArchived(true);
+        await archivedAfterUnavailable.setArchived(true);
         failRecovery = true;
 
         await expect(
@@ -1053,8 +1050,7 @@ describe("plugin registration", () => {
             state: "stopped",
         });
         expect(
-            harness.store.globalEventQueue
-                .list()
+            (await harness.store.globalEventQueue.list())
                 ?.filter((entry) => entry.event.type === "compute_preparation")
                 .map((entry) => entry.event.id),
         ).toEqual(harness.computeEvents.map((event) => event.id));
@@ -1441,7 +1437,7 @@ async function createHarness(
     const dataRoot = join(root, "data");
     await mkdir(workspace, { recursive: true });
 
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         modelCatalog: {
             defaultModelId: TEST_MODEL.id,
             defaultProviderId: "test",

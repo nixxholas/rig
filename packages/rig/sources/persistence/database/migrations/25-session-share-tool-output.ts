@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * How much of each tool's work a share replicates.
@@ -9,8 +9,8 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * the default is deliberately the private setting rather than the behavior they
  * had: an owner who never asked for full output should stop sending it.
  */
-export function sessionShareToolOutput(database: SessionDatabase): void {
-    database.run(
+export async function sessionShareToolOutput(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(
             `ALTER TABLE session_shares
              ADD COLUMN tool_output TEXT NOT NULL DEFAULT 'summaries'`,

@@ -95,7 +95,7 @@ async function startServer(): Promise<{
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
     const instructionsPath = join(directory, "AGENTS.md");
-    const server = createProtocolHttpServer({
+    const server = await createProtocolHttpServer({
         globalInstructionsPath: instructionsPath,
         token: "secret",
     });

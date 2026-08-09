@@ -42,7 +42,7 @@ export const grokKillCommandOrSubagentTool = defineTool({
             return { task_id, outcome: "not_found", message: `Task ${task_id} was not found.` };
         }
         try {
-            const stopped = context.subagents.interrupt(task_id);
+            const stopped = await context.subagents.interrupt(task_id);
             return {
                 agent_id: stopped.agentId,
                 path: stopped.path,

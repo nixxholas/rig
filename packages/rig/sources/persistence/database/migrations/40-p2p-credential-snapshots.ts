@@ -1,10 +1,10 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /** Monotonic owner state survives empty snapshots so credential revocation cannot be replayed. */
-export function p2pCredentialSnapshots(database: SessionDatabase): void {
-    database.run(
+export async function p2pCredentialSnapshots(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
             CREATE TABLE IF NOT EXISTS p2p_credential_snapshots (
                 owner_instance_id TEXT PRIMARY KEY NOT NULL,

@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function p2pPeerTrust(database: SessionDatabase): void {
-    database.run(
+export async function p2pPeerTrust(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`CREATE TABLE p2p_peers (
             instance_id TEXT NOT NULL PRIMARY KEY,
             public_key TEXT NOT NULL UNIQUE,
@@ -14,7 +14,7 @@ export function p2pPeerTrust(database: SessionDatabase): void {
             updated_at_ms INTEGER NOT NULL
         )`),
     );
-    database.run(
+    await database.run(
         sql.raw(`CREATE TABLE p2p_peer_pairings (
             pairing_id TEXT NOT NULL PRIMARY KEY,
             instance_id TEXT NOT NULL,

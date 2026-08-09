@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
-export function happyCloudEnrollment(database: SessionDatabase): void {
-    database.run(
+export async function happyCloudEnrollment(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`CREATE TABLE happy_cloud_enrollment (
             singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
             contract_version INTEGER NOT NULL,
@@ -28,7 +28,7 @@ export function happyCloudEnrollment(database: SessionDatabase): void {
             updated_at_ms INTEGER NOT NULL
         )`),
     );
-    database.run(
+    await database.run(
         sql.raw(`CREATE TABLE happy_cloud_session_blobs (
             session_id TEXT NOT NULL PRIMARY KEY,
             ciphertext TEXT NOT NULL,
@@ -36,7 +36,7 @@ export function happyCloudEnrollment(database: SessionDatabase): void {
             updated_at_ms INTEGER NOT NULL
         )`),
     );
-    database.run(
+    await database.run(
         sql.raw(`CREATE TABLE happy_cloud_mutation_receipts (
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             mutation_id TEXT NOT NULL UNIQUE,

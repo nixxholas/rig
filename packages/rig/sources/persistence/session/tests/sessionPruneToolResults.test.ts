@@ -12,7 +12,7 @@ import { sessionContextMessages, sessionMessages, sessions } from "../../databas
 import { sessionPruneToolResults } from "../sessionPruneToolResults.js";
 
 describe("sessionPruneToolResults", () => {
-    let opened: ReturnType<typeof openSessionDatabase> | undefined;
+    let opened: Awaited<Awaited<ReturnType<typeof openSessionDatabase>>> | undefined;
     let directory: string | undefined;
 
     afterEach(async () => {
@@ -25,10 +25,10 @@ describe("sessionPruneToolResults", () => {
     it("removes only stale durable-history payloads and leaves provider context untouched", async () => {
         directory = await mkdtemp(join(tmpdir(), "rig-tool-result-retention-"));
         const path = join(directory, "sessions.sqlite");
-        createSessionDatabaseFixture(path);
-        opened = openSessionDatabase(path);
+        await createSessionDatabaseFixture(path);
+        opened = await openSessionDatabase(path);
         const message = toolResultMessage("result-1", "large-output");
-        opened.database
+        await opened.database
             .insert(sessionMessages)
             .values({
                 isPartial: false,
@@ -41,7 +41,7 @@ describe("sessionPruneToolResults", () => {
                 updatedAtMs: 1,
             })
             .run();
-        opened.database
+        await opened.database
             .insert(sessionContextMessages)
             .values({
                 messageId: message.id,
@@ -52,22 +52,30 @@ describe("sessionPruneToolResults", () => {
             })
             .run();
 
-        opened.database.update(sessions).set({ lastMessageAtMs: 150, updatedAtMs: 1 }).run();
-        expect(sessionPruneToolResults(opened.database, { before: 100, limit: 10 }).pruned).toBe(1);
+        await opened.database.update(sessions).set({ lastMessageAtMs: 150, updatedAtMs: 1 }).run();
+        expect(
+            (await sessionPruneToolResults(opened.database, { before: 100, limit: 10 })).pruned,
+        ).toBe(1);
 
-        opened.database.update(sessions).set({ lastMessageAtMs: 1, updatedAtMs: 150 }).run();
-        expect(sessionPruneToolResults(opened.database, { before: 100, limit: 10 }).pruned).toBe(0);
+        await opened.database.update(sessions).set({ lastMessageAtMs: 1, updatedAtMs: 150 }).run();
+        expect(
+            (await sessionPruneToolResults(opened.database, { before: 100, limit: 10 })).pruned,
+        ).toBe(0);
 
-        opened.database
+        await opened.database
             .update(sessions)
             .set({ lastMessageAtMs: 1, status: "running", updatedAtMs: 1 })
             .run();
-        expect(sessionPruneToolResults(opened.database, { before: 100, limit: 10 }).pruned).toBe(0);
+        expect(
+            (await sessionPruneToolResults(opened.database, { before: 100, limit: 10 })).pruned,
+        ).toBe(0);
 
-        opened.database.update(sessions).set({ status: "idle" }).run();
-        expect(sessionPruneToolResults(opened.database, { before: 100, limit: 10 }).pruned).toBe(1);
+        await opened.database.update(sessions).set({ status: "idle" }).run();
+        expect(
+            (await sessionPruneToolResults(opened.database, { before: 100, limit: 10 })).pruned,
+        ).toBe(1);
 
-        const history = readMessage(opened.database, "session_messages");
+        const history = await readMessage(opened.database, "session_messages");
         expect(history.blocks).toHaveLength(1);
         const block = history.blocks[0];
         expect(block).toMatchObject({
@@ -87,9 +95,9 @@ describe("sessionPruneToolResults", () => {
         expect(block.presentation.output).toMatch(/^HEAD_/u);
         expect(block.presentation.output).toContain("truncated");
         expect(block.presentation.output).toMatch(/_TAIL$/u);
-        expect(readMessage(opened.database, "session_context_messages")).toEqual(message);
+        expect(await readMessage(opened.database, "session_context_messages")).toEqual(message);
         expect(
-            opened.database.get<{ message_updated: number; session_updated: number }>(sql`
+            await opened.database.get<{ message_updated: number; session_updated: number }>(sql`
                 SELECT
                     message.updated_at_ms AS message_updated,
                     session.updated_at_ms AS session_updated
@@ -98,21 +106,23 @@ describe("sessionPruneToolResults", () => {
                 WHERE message.session_id = 'session-1'
             `),
         ).toEqual({ message_updated: 1, session_updated: 1 });
-        expect(sessionPruneToolResults(opened.database, { before: 100, limit: 10 }).pruned).toBe(0);
+        expect(
+            (await sessionPruneToolResults(opened.database, { before: 100, limit: 10 })).pruned,
+        ).toBe(0);
     });
 
     it("advances through bounded pages even when messages need no changes", async () => {
         directory = await mkdtemp(join(tmpdir(), "rig-tool-result-retention-page-"));
         const path = join(directory, "sessions.sqlite");
-        createSessionDatabaseFixture(path);
-        opened = openSessionDatabase(path);
+        await createSessionDatabaseFixture(path);
+        opened = await openSessionDatabase(path);
         for (let position = 0; position < 3; position += 1) {
             const message = {
                 blocks: [{ text: `message-${position}`, type: "text" as const }],
                 id: `message-${position}`,
                 role: "agent" as const,
             };
-            opened.database
+            await opened.database
                 .insert(sessionMessages)
                 .values({
                     isPartial: false,
@@ -127,7 +137,7 @@ describe("sessionPruneToolResults", () => {
                 .run();
         }
 
-        const first = sessionPruneToolResults(opened.database, { before: 100, limit: 2 });
+        const first = await sessionPruneToolResults(opened.database, { before: 100, limit: 2 });
         expect(first).toEqual({
             complete: false,
             cursor: { position: 1, sessionId: "session-1" },
@@ -135,7 +145,7 @@ describe("sessionPruneToolResults", () => {
         });
         if (first.complete) throw new Error("Expected another page.");
         expect(
-            sessionPruneToolResults(opened.database, {
+            await sessionPruneToolResults(opened.database, {
                 after: first.cursor,
                 before: 100,
                 limit: 2,
@@ -171,11 +181,11 @@ function toolResultMessage(id: string, output: string): AgentMessage {
     };
 }
 
-function readMessage(
+async function readMessage(
     database: SessionDatabase,
     table: "session_context_messages" | "session_messages",
-): AgentMessage {
-    const row = database.get<{ message_json: string }>(
+): Promise<AgentMessage> {
+    const row = await database.get<{ message_json: string }>(
         sql.raw(`SELECT message_json FROM ${table} WHERE session_id = 'session-1'`),
     );
     if (row === undefined) throw new Error(`Expected a row in ${table}.`);

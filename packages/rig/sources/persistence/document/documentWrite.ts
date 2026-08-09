@@ -6,7 +6,7 @@ import {
 } from "../../protocol/index.js";
 import { documentMutations, documents, documentUpdates } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope, TX } from "../Transaction.js";
 import { pruneReceipts } from "./documentCreate.js";
 
 export type DocumentWriteResult =
@@ -16,8 +16,8 @@ export type DocumentWriteResult =
     | { outcome: "version_conflict"; version: number }
     | { outcome: "written"; version: number };
 
-export function documentWrite(
-    tx: TX,
+export async function documentWrite(
+    tx: DatabaseScope,
     input: {
         expectedVersion: number;
         fingerprint: string;
@@ -31,10 +31,10 @@ export function documentWrite(
         updateId: string;
         updateJson: string;
     },
-): DocumentWriteResult {
-    return inTx(tx, (tx) => {
+): Promise<DocumentWriteResult> {
+    return await inTx(tx, async (tx) => {
         if (input.mutationId !== undefined) {
-            const receipt = tx
+            const receipt = await tx
                 .select()
                 .from(documentMutations)
                 .where(eq(documentMutations.mutationId, input.mutationId))
@@ -47,7 +47,7 @@ export function documentWrite(
                     : { outcome: "mutation_conflict" };
             }
         }
-        const current = tx
+        const current = await tx
             .select({ version: documents.version })
             .from(documents)
             .where(eq(documents.id, input.id))
@@ -57,19 +57,25 @@ export function documentWrite(
             return { outcome: "version_conflict", version: current.version };
         }
         const version = current.version + 1;
-        const changed = tx
-            .update(documents)
-            .set({
-                ...(input.mimeType === undefined ? {} : { mimeType: input.mimeType }),
-                stateJson: input.stateJson,
-                ...(input.unreadCursor === undefined ? {} : { unreadCursor: input.unreadCursor }),
-                updatedAtMs: input.now,
-                version,
-            })
-            .where(and(eq(documents.id, input.id), eq(documents.version, input.expectedVersion)))
-            .run().changes;
+        const changed = (
+            await tx
+                .update(documents)
+                .set({
+                    ...(input.mimeType === undefined ? {} : { mimeType: input.mimeType }),
+                    stateJson: input.stateJson,
+                    ...(input.unreadCursor === undefined
+                        ? {}
+                        : { unreadCursor: input.unreadCursor }),
+                    updatedAtMs: input.now,
+                    version,
+                })
+                .where(
+                    and(eq(documents.id, input.id), eq(documents.version, input.expectedVersion)),
+                )
+                .run()
+        ).rowsAffected;
         if (changed !== 1) {
-            const latest = tx
+            const latest = await tx
                 .select({ version: documents.version })
                 .from(documents)
                 .where(eq(documents.id, input.id))
@@ -78,7 +84,8 @@ export function documentWrite(
                 ? { outcome: "document_not_found" }
                 : { outcome: "version_conflict", version: latest.version };
         }
-        tx.insert(documentUpdates)
+        await tx
+            .insert(documentUpdates)
             .values({
                 byteLength: input.updateBytes,
                 createdAtMs: input.now,
@@ -88,9 +95,10 @@ export function documentWrite(
                 version,
             })
             .run();
-        trimUpdates(tx, input.id);
+        await trimUpdates(tx, input.id);
         if (input.mutationId !== undefined) {
-            tx.insert(documentMutations)
+            await tx
+                .insert(documentMutations)
                 .values({
                     action: "write",
                     createdAtMs: input.now,
@@ -100,14 +108,14 @@ export function documentWrite(
                     resultVersion: version,
                 })
                 .run();
-            pruneReceipts(tx, input.id);
+            await pruneReceipts(tx, input.id);
         }
         return { outcome: "written", version };
     });
 }
 
-function trimUpdates(tx: TX, documentId: string): void {
-    const rows = tx
+async function trimUpdates(tx: TX, documentId: string): Promise<void> {
+    const rows = await tx
         .select({ byteLength: documentUpdates.byteLength, version: documentUpdates.version })
         .from(documentUpdates)
         .where(eq(documentUpdates.documentId, documentId))
@@ -128,7 +136,8 @@ function trimUpdates(tx: TX, documentId: string): void {
     }
     const firstRetainedVersion = rows[firstIndex]?.version ?? rows.at(-1)!.version + 1;
     if (firstIndex > 0) {
-        tx.delete(documentUpdates)
+        await tx
+            .delete(documentUpdates)
             .where(
                 sql`${documentUpdates.documentId} = ${documentId} AND ${lt(
                     documentUpdates.version,
@@ -137,5 +146,9 @@ function trimUpdates(tx: TX, documentId: string): void {
             )
             .run();
     }
-    tx.update(documents).set({ firstRetainedVersion }).where(eq(documents.id, documentId)).run();
+    await tx
+        .update(documents)
+        .set({ firstRetainedVersion })
+        .where(eq(documents.id, documentId))
+        .run();
 }

@@ -1,10 +1,10 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /** Ordered folder links plus opaque, CAS-written live documents. */
-export function folderItemsAndDocuments(database: SessionDatabase): void {
-    database.run(
+export async function folderItemsAndDocuments(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE documents (
             id TEXT NOT NULL PRIMARY KEY,
@@ -20,7 +20,7 @@ export function folderItemsAndDocuments(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE document_updates (
             id TEXT NOT NULL PRIMARY KEY,
@@ -33,12 +33,12 @@ export function folderItemsAndDocuments(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX document_updates_document_version ON document_updates(document_id, version)",
         ),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE document_mutations (
             mutation_id TEXT NOT NULL PRIMARY KEY,
@@ -50,12 +50,12 @@ export function folderItemsAndDocuments(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX document_mutations_created ON document_mutations(created_at_ms, mutation_id)",
         ),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE folder_items (
             id TEXT NOT NULL PRIMARY KEY,
@@ -76,12 +76,12 @@ export function folderItemsAndDocuments(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX folder_items_folder_order ON folder_items(folder_id, archived_at_ms, order_key, id)",
         ),
     );
-    database.run(
+    await database.run(
         sql.raw(`
         CREATE TABLE folder_item_mutations (
             mutation_id TEXT NOT NULL PRIMARY KEY,
@@ -92,7 +92,7 @@ export function folderItemsAndDocuments(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(
+    await database.run(
         sql.raw(
             "CREATE INDEX folder_item_mutations_created ON folder_item_mutations(created_at_ms, mutation_id)",
         ),

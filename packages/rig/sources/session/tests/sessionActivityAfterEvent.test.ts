@@ -33,7 +33,7 @@ function toolCall(id: string, name: string) {
 }
 
 describe("sessionActivityAfterEvent", () => {
-    it("leaves activity unchanged for background context", () => {
+    it("leaves activity unchanged for background context", async () => {
         const previous: SessionActivity = {
             kind: "waiting",
             label: "Waiting",
@@ -60,7 +60,7 @@ describe("sessionActivityAfterEvent", () => {
         ).toBe(previous);
     });
 
-    it("reports thinking once a run starts", () => {
+    it("reports thinking once a run starts", async () => {
         const activity = apply([event("run_started", { runId: "run-1" })]);
 
         expect(activity.kind).toBe("thinking");
@@ -68,7 +68,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(activity.runId).toBe("run-1");
     });
 
-    it("distinguishes writing a reply from preparing a tool call", () => {
+    it("distinguishes writing a reply from preparing a tool call", async () => {
         const start = event("run_started", { runId: "run-1" });
 
         expect(
@@ -83,7 +83,7 @@ describe("sessionActivityAfterEvent", () => {
         ).toBe("generating_tool_call");
     });
 
-    it("names the tool it is running", () => {
+    it("names the tool it is running", async () => {
         const activity = apply([
             event("run_started", { runId: "run-1" }),
             agentEvent({ toolCall: toolCall("call-1", "Bash"), type: "tool_execution_start" }),
@@ -96,7 +96,7 @@ describe("sessionActivityAfterEvent", () => {
         ]);
     });
 
-    it("reports tools while Auto reviews them and clears the review before execution", () => {
+    it("reports tools while Auto reviews them and clears the review before execution", async () => {
         const reviewing = [
             event("run_started", { runId: "run-1" }),
             agentEvent({
@@ -145,7 +145,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(recovered.reviewingToolCalls).toBeUndefined();
     });
 
-    it("prefers a tool's own reported status over the tool name", () => {
+    it("prefers a tool's own reported status over the tool name", async () => {
         const activity = apply([
             event("run_started", { runId: "run-1" }),
             agentEvent({ toolCall: toolCall("call-1", "Bash"), type: "tool_execution_start" }),
@@ -159,7 +159,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(activity.label).toBe("Running the test suite");
     });
 
-    it("counts concurrent tools and returns to thinking when they all finish", () => {
+    it("counts concurrent tools and returns to thinking when they all finish", async () => {
         const running = [
             event("run_started", { runId: "run-1" }),
             agentEvent({ toolCall: toolCall("call-1", "Bash"), type: "tool_execution_start" }),
@@ -184,7 +184,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(finished.toolCalls).toBeUndefined();
     });
 
-    it("keeps reporting a running tool while the model streams its next block", () => {
+    it("keeps reporting a running tool while the model streams its next block", async () => {
         const activity = apply([
             event("run_started", { runId: "run-1" }),
             agentEvent({ toolCall: toolCall("call-1", "Bash"), type: "tool_execution_start" }),
@@ -194,7 +194,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(activity.kind).toBe("executing_tool_call");
     });
 
-    it("reports compaction until it finishes", () => {
+    it("reports compaction until it finishes", async () => {
         const compacting = [
             event("run_started", { runId: "run-1" }),
             agentEvent({
@@ -222,7 +222,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(finished.compaction).toBeUndefined();
     });
 
-    it("reports a retry and clears it when the next iteration starts", () => {
+    it("reports a retry and clears it when the next iteration starts", async () => {
         const retrying = [
             event("run_started", { runId: "run-1" }),
             agentEvent({
@@ -246,7 +246,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(recovered.retry).toBeUndefined();
     });
 
-    it("reports waiting for an answer while an input request is open", () => {
+    it("reports waiting for an answer while an input request is open", async () => {
         const asked = [
             event("run_started", { runId: "run-1" }),
             agentEvent({ toolCall: toolCall("call-1", "Bash"), type: "tool_execution_start" }),
@@ -265,7 +265,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(answered.pendingInputRequestIds).toBeUndefined();
     });
 
-    it("stops reporting a question once presence detaches it", () => {
+    it("stops reporting a question once presence detaches it", async () => {
         const activity = apply([
             event("run_started", { runId: "run-1" }),
             event("user_input_requested", { questions: [], requestId: "question-1" }),
@@ -280,7 +280,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(activity.pendingInputRequestIds).toBeUndefined();
     });
 
-    it("reports how a run ended", () => {
+    it("reports how a run ended", async () => {
         const started = event("run_started", { runId: "run-1" });
 
         expect(
@@ -311,7 +311,7 @@ describe("sessionActivityAfterEvent", () => {
         ).toBe("error");
     });
 
-    it("stays active across the technical abort used to continue steering", () => {
+    it("stays active across the technical abort used to continue steering", async () => {
         const before = apply([event("run_started", { runId: "run-1" })]);
         const after = sessionActivityAfterEvent(
             before,
@@ -324,7 +324,7 @@ describe("sessionActivityAfterEvent", () => {
         expect(after).toBe(before);
     });
 
-    it("returns the same activity when an event says nothing about current work", () => {
+    it("returns the same activity when an event says nothing about current work", async () => {
         const before = apply([event("run_started", { runId: "run-1" })]);
         const after = sessionActivityAfterEvent(
             before,

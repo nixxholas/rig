@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { SessionDatabase } from "../SessionDatabase.js";
 import { agentSessionSharing } from "../migrations/18-agent-session-sharing.js";
 import { sessionShareEntryLog } from "../migrations/19-session-share-entry-log.js";
 
@@ -12,13 +12,15 @@ import { sessionShareEntryLog } from "../migrations/19-session-share-entry-log.j
  * database at that schema version never has it. Without this, a replayed
  * `CREATE TABLE` or `ADD COLUMN` meets its own output and the rewind fails.
  */
-export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase): void {
-    database.run(sql.raw("DROP TRIGGER IF EXISTS folders_shared_subtree_contents_update"));
-    dropFolderItemsAndDocumentsSchema(database);
-    dropSessionScopeSchema(database);
-    database.run(sql.raw("DROP TABLE IF EXISTS sharing_settings"));
-    database.run(sql.raw("DROP TABLE IF EXISTS sharing_profile_binding"));
-    for (const table of database.all<{ name: string }>(
+export async function dropSchemaAddedAfterIdentityMigrations(
+    database: SessionDatabase,
+): Promise<void> {
+    await database.run(sql.raw("DROP TRIGGER IF EXISTS folders_shared_subtree_contents_update"));
+    await dropFolderItemsAndDocumentsSchema(database);
+    await dropSessionScopeSchema(database);
+    await database.run(sql.raw("DROP TABLE IF EXISTS sharing_settings"));
+    await database.run(sql.raw("DROP TABLE IF EXISTS sharing_profile_binding"));
+    for (const table of await database.all<{ name: string }>(
         sql.raw(
             `SELECT name FROM sqlite_master
              WHERE type = 'table'
@@ -30,20 +32,20 @@ export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase
                )`,
         ),
     )) {
-        database.run(sql.raw(`DROP TABLE "${table.name}"`));
+        await database.run(sql.raw(`DROP TABLE "${table.name}"`));
     }
-    database.run(sql.raw("DROP INDEX IF EXISTS sessions_unsorted"));
-    database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
-    database.run(sql.raw("DROP INDEX IF EXISTS sessions_folder"));
-    database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
-    database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
-    database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
-    database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
-    agentSessionSharing(database);
-    sessionShareEntryLog(database);
+    await database.run(sql.raw("DROP INDEX IF EXISTS sessions_unsorted"));
+    await database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
+    await database.run(sql.raw("DROP INDEX IF EXISTS sessions_folder"));
+    await database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
+    await database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
+    await database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
+    await database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
+    await agentSessionSharing(database);
+    await sessionShareEntryLog(database);
 }
 
-export function dropFolderItemsAndDocumentsSchema(database: SessionDatabase): void {
+export async function dropFolderItemsAndDocumentsSchema(database: SessionDatabase): Promise<void> {
     for (const table of [
         "folder_item_mutations",
         "folder_items",
@@ -51,14 +53,14 @@ export function dropFolderItemsAndDocumentsSchema(database: SessionDatabase): vo
         "document_updates",
         "documents",
     ]) {
-        database.run(sql.raw(`DROP TABLE IF EXISTS "${table}"`));
+        await database.run(sql.raw(`DROP TABLE IF EXISTS "${table}"`));
     }
 }
 
 /** Rebuilds migration 36's checked table into the migration 35 shape before older rewinds. */
-export function dropSessionScopeSchema(database: SessionDatabase): void {
-    database.run(sql.raw("DROP TRIGGER IF EXISTS folders_shared_subtree_contents_update"));
-    const stored = database.get<{ sql: string }>(
+export async function dropSessionScopeSchema(database: SessionDatabase): Promise<void> {
+    await database.run(sql.raw("DROP TRIGGER IF EXISTS folders_shared_subtree_contents_update"));
+    const stored = await database.get<{ sql: string }>(
         sql.raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
     );
     if (stored === undefined || !stored.sql.includes("scope_kind")) return;
@@ -72,22 +74,21 @@ export function dropSessionScopeSchema(database: SessionDatabase): void {
             "project_id TEXT REFERENCES projects(id)",
             "project_id TEXT NOT NULL REFERENCES projects(id)",
         )}\n        )`;
-    const columns = database
-        .all<{ name: string }>(sql.raw("PRAGMA table_info(sessions)"))
+    const columns = (await database.all<{ name: string }>(sql.raw("PRAGMA table_info(sessions)")))
         .map((column) => column.name)
         .filter((name) => name !== "scope_kind");
     const selected = columns.map((name) => `"${name.replaceAll('"', '""')}"`).join(", ");
-    database.run(sql.raw("PRAGMA foreign_keys = OFF"));
+    await database.run(sql.raw("PRAGMA foreign_keys = OFF"));
     try {
-        database.run(sql.raw(definition));
-        database.run(
+        await database.run(sql.raw(definition));
+        await database.run(
             sql.raw(
                 `INSERT INTO sessions_before_scope (${selected}) SELECT ${selected} FROM sessions`,
             ),
         );
-        database.run(sql.raw("DROP TABLE sessions"));
-        database.run(sql.raw("ALTER TABLE sessions_before_scope RENAME TO sessions"));
+        await database.run(sql.raw("DROP TABLE sessions"));
+        await database.run(sql.raw("ALTER TABLE sessions_before_scope RENAME TO sessions"));
     } finally {
-        database.run(sql.raw("PRAGMA foreign_keys = ON"));
+        await database.run(sql.raw("PRAGMA foreign_keys = ON"));
     }
 }

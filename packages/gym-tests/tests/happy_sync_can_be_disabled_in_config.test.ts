@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -33,15 +34,20 @@ describe("Happy configuration", () => {
 
         const inspection = await gym.runInContainer("node", [
             "-e",
-            [
-                'const fs=require("node:fs")',
-                'const {DatabaseSync}=require("node:sqlite")',
-                'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
-                'const sessions=db.prepare("select count(*) as count from happy_sessions").get().count',
-                "db.close()",
-                'const copied=fs.existsSync("/home/rig/.happy/rig/happy/access.key")',
-                "process.stdout.write(JSON.stringify({copied,sessions}))",
-            ].join(";"),
+            libsqlCommonJsScript(`
+const fs = require("node:fs");
+const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
+let sessions;
+try {
+    sessions = (
+        await database.execute("select count(*) as count from happy_sessions")
+    ).rows[0].count;
+} finally {
+    await database.close();
+}
+const copied = fs.existsSync("/home/rig/.happy/rig/happy/access.key");
+process.stdout.write(JSON.stringify({ copied, sessions }));
+`),
         ]);
 
         expect(JSON.parse(inspection.stdout)).toEqual({ copied: false, sessions: 0 });
@@ -70,15 +76,20 @@ describe("Happy configuration", () => {
 
         const inspection = await gym.runInContainer("node", [
             "-e",
-            [
-                'const fs=require("node:fs")',
-                'const {DatabaseSync}=require("node:sqlite")',
-                'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
-                'const sessions=db.prepare("select count(*) as count from happy_sessions").get().count',
-                "db.close()",
-                'const copied=fs.existsSync("/home/rig/.happy/rig/happy/access.key")',
-                "process.stdout.write(JSON.stringify({copied,sessions}))",
-            ].join(";"),
+            libsqlCommonJsScript(`
+const fs = require("node:fs");
+const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
+let sessions;
+try {
+    sessions = (
+        await database.execute("select count(*) as count from happy_sessions")
+    ).rows[0].count;
+} finally {
+    await database.close();
+}
+const copied = fs.existsSync("/home/rig/.happy/rig/happy/access.key");
+process.stdout.write(JSON.stringify({ copied, sessions }));
+`),
         ]);
 
         expect(JSON.parse(inspection.stdout)).toEqual({ copied: false, sessions: 0 });

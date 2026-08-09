@@ -1,10 +1,16 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { folderItems, folders, sessions } from "../database/schema.js";
-import type { TX } from "../Transaction.js";
+import { inDatabase } from "../database/inDatabase.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function queryFolderSharedGroup(tx: TX, folderId: string): string | undefined {
-    return tx.get<{ groupId: string }>(sql`
+export async function queryFolderSharedGroup(
+    tx: DatabaseScope,
+    folderId: string,
+): Promise<string | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx.get<{ groupId: string }>(sql`
         WITH RECURSIVE ancestors(id, parent_id, shared_group_id) AS (
             SELECT id, parent_id, shared_group_id
             FROM folders
@@ -19,58 +25,73 @@ export function queryFolderSharedGroup(tx: TX, folderId: string): string | undef
         FROM ancestors
         WHERE shared_group_id IS NOT NULL
         LIMIT 1
-    `)?.groupId;
+    `)
+        )?.groupId;
+    });
 }
 
-export function querySharedFolderRoot(tx: TX, groupId: string): string | undefined {
-    return tx
-        .select({ id: folders.id })
-        .from(folders)
-        .where(eq(folders.sharedGroupId, groupId))
-        .get()?.id;
+export async function querySharedFolderRoot(
+    tx: DatabaseScope,
+    groupId: string,
+): Promise<string | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx
+                .select({ id: folders.id })
+                .from(folders)
+                .where(eq(folders.sharedGroupId, groupId))
+                .get()
+        )?.id;
+    });
 }
 
-export function queryFolderShareRootProblem(
-    tx: TX,
+export async function queryFolderShareRootProblem(
+    tx: DatabaseScope,
     folderId: string,
-): "contents" | "missing" | "not_root" | "shared" | undefined {
-    const folder = tx
-        .select({
-            archivedAtMs: folders.archivedAtMs,
-            parentId: folders.parentId,
-            sharedGroupId: folders.sharedGroupId,
-        })
-        .from(folders)
-        .where(eq(folders.id, folderId))
-        .get();
-    if (folder === undefined || folder.archivedAtMs !== null) return "missing";
-    if (folder.sharedGroupId !== null) return "shared";
-    if (
-        tx
-            .select({ id: folderItems.id })
-            .from(folderItems)
-            .where(and(eq(folderItems.folderId, folderId), isNull(folderItems.archivedAtMs)))
-            .get() !== undefined ||
-        tx
-            .select({ id: sessions.id })
-            .from(sessions)
-            .where(
-                and(
-                    eq(sessions.folderId, folderId),
-                    eq(sessions.scopeKind, "folder"),
-                    eq(sessions.archived, false),
-                ),
-            )
-            .get() !== undefined
-    ) {
-        return "contents";
-    }
-    return folder.parentId === null ? undefined : "not_root";
+): Promise<"contents" | "missing" | "not_root" | "shared" | undefined> {
+    return await inDatabase(tx, async (tx) => {
+        const folder = await tx
+            .select({
+                archivedAtMs: folders.archivedAtMs,
+                parentId: folders.parentId,
+                sharedGroupId: folders.sharedGroupId,
+            })
+            .from(folders)
+            .where(eq(folders.id, folderId))
+            .get();
+        if (folder === undefined || folder.archivedAtMs !== null) return "missing";
+        if (folder.sharedGroupId !== null) return "shared";
+        if (
+            (await tx
+                .select({ id: folderItems.id })
+                .from(folderItems)
+                .where(and(eq(folderItems.folderId, folderId), isNull(folderItems.archivedAtMs)))
+                .get()) !== undefined ||
+            (await tx
+                .select({ id: sessions.id })
+                .from(sessions)
+                .where(
+                    and(
+                        eq(sessions.folderId, folderId),
+                        eq(sessions.scopeKind, "folder"),
+                        eq(sessions.archived, false),
+                    ),
+                )
+                .get()) !== undefined
+        ) {
+            return "contents";
+        }
+        return folder.parentId === null ? undefined : "not_root";
+    });
 }
 
-export function queryFolderSubtreeHasContents(tx: TX, folderId: string): boolean {
-    return (
-        tx.get<{ found: number }>(sql`
+export async function queryFolderSubtreeHasContents(
+    tx: DatabaseScope,
+    folderId: string,
+): Promise<boolean> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            (await tx.get<{ found: number }>(sql`
             WITH RECURSIVE subtree(id) AS (
                 SELECT id
                 FROM folders
@@ -96,6 +117,7 @@ export function queryFolderSubtreeHasContents(tx: TX, folderId: string): boolean
                   AND sessions.archived = 0
             )
             LIMIT 1
-        `) !== undefined
-    );
+        `)) !== undefined
+        );
+    });
 }

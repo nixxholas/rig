@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const scale = readScale(process.env.RIG_GYM_HEAVY_SESSION_SCALE);
@@ -170,44 +171,43 @@ echo HEAVY_RESUME_STARTED
 exec node /app/packages/rig/dist/main.js resume "$(cat /workspace/heavy-session-id)"
 `;
 
-const createHeavySessionScript = String.raw`
-import { writeFileSync } from "node:fs";
-import { stat } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
-
-import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js";
-import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";
-
+const createHeavySessionScript = libsqlEsmScript(
+    String.raw`
 const databasePath = "/home/rig/.happy/rig/sessions.sqlite";
 const semanticMessageCount = requiredEvenCount("HEAVY_SEMANTIC_MESSAGES");
 const transientEventCount = requiredCount("HEAVY_TRANSIENT_EVENTS");
 const contextMessageCount = Math.min(requiredCount("HEAVY_CONTEXT_MESSAGES"), semanticMessageCount);
 const createdAt = Date.now() - 86_400_000;
-const store = new PersistentSessionStore({ databasePath, now: () => createdAt });
-const session = store.create({
+const store = await PersistentSessionStore.open({ databasePath, now: () => createdAt });
+const session = await store.create({
     cwd: "/workspace",
     modelId: "openai/gym",
     permissionMode: "full_access",
     providerId: "gym",
 });
 const sessionId = session.id;
-store.close();
+await store.close();
 
-const database = new DatabaseSync(databasePath);
-database.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY");
-const sessionRow = database
-    .prepare("SELECT last_event_id FROM sessions WHERE id = ?")
-    .get(sessionId);
+const database = await openDatabase(databasePath);
+let counts;
+try {
+await database.execute("PRAGMA journal_mode = DELETE");
+await database.execute("PRAGMA synchronous = OFF");
+await database.execute("PRAGMA temp_store = MEMORY");
+const sessionRow = (
+    await database.execute({
+        sql: "SELECT last_event_id FROM sessions WHERE id = ?",
+        args: [sessionId],
+    })
+).rows[0];
 const createEventId = createEventIdFactory({
     after: sessionRow.last_event_id,
     now: () => createdAt + 1_000,
 });
-const insertEvent = database.prepare(
-    "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, ?, ?, ?)",
-);
-const insertMessage = database.prepare(
-    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
-);
+const insertEventSql =
+    "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, ?, ?, ?)";
+const insertMessageSql =
+    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, ?, ?, ?, 0, ?, ?, ?)";
 const transientPayload = JSON.stringify({
     event: {
         contentIndex: 0,
@@ -219,17 +219,14 @@ const transientPayload = JSON.stringify({
 const messages = [];
 let lastEventId = sessionRow.last_event_id;
 
-database.exec("BEGIN IMMEDIATE");
+const transaction = await database.transaction("write");
 try {
     for (let index = 0; index < transientEventCount; index += 1) {
         lastEventId = createEventId();
-        insertEvent.run(
-            sessionId,
-            lastEventId,
-            "agent_event",
-            createdAt + index,
-            transientPayload,
-        );
+        await transaction.execute({
+            sql: insertEventSql,
+            args: [sessionId, lastEventId, "agent_event", createdAt + index, transientPayload],
+        });
     }
 
     for (let position = 0; position < semanticMessageCount; position += 1) {
@@ -244,66 +241,72 @@ try {
                 ? { blocks: [{ text, type: "text" }], id: "user-" + position, role: "user" }
                 : { blocks: [{ text, type: "text" }], id: "agent-" + position, role: "agent" };
         messages.push(message);
-        insertMessage.run(
-            sessionId,
-            position,
-            message.id,
-            message.role,
-            runId,
-            JSON.stringify(message),
-            createdAt + transientEventCount + position,
-        );
+        await transaction.execute({
+            sql: insertMessageSql,
+            args: [
+                sessionId,
+                position,
+                message.id,
+                message.role,
+                runId,
+                JSON.stringify(message),
+                createdAt + transientEventCount + position,
+            ],
+        });
         lastEventId = createEventId();
         const data =
             message.role === "user"
                 ? { delivery: "run", displayText: text, message, runId }
                 : { message, runId };
-        insertEvent.run(
-            sessionId,
-            lastEventId,
-            message.role === "user" ? "message_submitted" : "agent_message",
-            createdAt + transientEventCount + position,
-            JSON.stringify(data),
-        );
+        await transaction.execute({
+            sql: insertEventSql,
+            args: [
+                sessionId,
+                lastEventId,
+                message.role === "user" ? "message_submitted" : "agent_message",
+                createdAt + transientEventCount + position,
+                JSON.stringify(data),
+            ],
+        });
     }
 
     const contextMessages = messages.slice(-contextMessageCount);
-    const insertContextMessage = database.prepare(
-        "INSERT INTO session_context_messages (session_id, position, message_id, role, message_json) VALUES (?, ?, ?, ?, ?)",
-    );
+    const insertContextMessageSql =
+        "INSERT INTO session_context_messages (session_id, position, message_id, role, message_json) VALUES (?, ?, ?, ?, ?)";
     for (const [position, message] of contextMessages.entries()) {
-        insertContextMessage.run(
-            sessionId,
-            position,
-            message.id,
-            message.role,
-            JSON.stringify(message),
-        );
+        await transaction.execute({
+            sql: insertContextMessageSql,
+            args: [sessionId, position, message.id, message.role, JSON.stringify(message)],
+        });
     }
-    database
-        .prepare(
-            "UPDATE sessions SET status = 'completed', active_run_id = NULL, last_event_id = ?, last_message_at_ms = ?, title = ?, title_status = 'ready', recap = ?, updated_at_ms = ? WHERE id = ?",
-        )
-        .run(
+    await transaction.execute({
+        sql: "UPDATE sessions SET status = 'completed', active_run_id = NULL, last_event_id = ?, last_message_at_ms = ?, title = ?, title_status = 'ready', recap = ?, updated_at_ms = ? WHERE id = ?",
+        args: [
             lastEventId,
             createdAt + transientEventCount + semanticMessageCount,
             "Very large historical Gym session",
             "A real-world-scale generated session used for startup and resume performance coverage.",
             createdAt + transientEventCount + semanticMessageCount,
             sessionId,
-        );
-    database.exec("COMMIT");
+        ],
+    });
+    await transaction.commit();
 } catch (error) {
-    database.exec("ROLLBACK");
+    await transaction.rollback();
     throw error;
+} finally {
+    await transaction.close();
 }
 
-const counts = database
-    .prepare(
-        "SELECT (SELECT COUNT(*) FROM session_events WHERE session_id = ?) AS eventRows, (SELECT COALESCE(SUM(LENGTH(data_json)), 0) FROM session_events WHERE session_id = ?) AS eventBytes, (SELECT COUNT(*) FROM session_messages WHERE session_id = ?) AS messageRows, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_messages WHERE session_id = ?) AS messageBytes, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_context_messages WHERE session_id = ?) AS contextBytes",
-    )
-    .get(sessionId, sessionId, sessionId, sessionId, sessionId);
-database.close();
+counts = (
+    await database.execute({
+        sql: "SELECT (SELECT COUNT(*) FROM session_events WHERE session_id = ?) AS eventRows, (SELECT COALESCE(SUM(LENGTH(data_json)), 0) FROM session_events WHERE session_id = ?) AS eventBytes, (SELECT COUNT(*) FROM session_messages WHERE session_id = ?) AS messageRows, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_messages WHERE session_id = ?) AS messageBytes, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_context_messages WHERE session_id = ?) AS contextBytes",
+        args: [sessionId, sessionId, sessionId, sessionId, sessionId],
+    })
+).rows[0];
+} finally {
+    await database.close();
+}
 const databaseBytes = (await stat(databasePath)).size;
 writeFileSync("/workspace/heavy-session-id", sessionId);
 writeFileSync(
@@ -322,4 +325,6 @@ function requiredEvenCount(name) {
     if (value % 2 !== 0) throw new Error(name + " must be even");
     return value;
 }
-`;
+`,
+    'import { writeFileSync } from "node:fs"; import { stat } from "node:fs/promises"; import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js"; import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";',
+);

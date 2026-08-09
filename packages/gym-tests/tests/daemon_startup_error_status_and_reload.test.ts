@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
+import { libsqlEsmScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 const COMPLETED_MARKER = "DAEMON_STARTUP_ERROR_STATUS_AND_RELOAD_COMPLETE";
@@ -39,24 +40,29 @@ describe("daemon startup failure handling", () => {
     }, 120_000);
 });
 
-const createNewerDatabaseScript = String.raw`
-import { mkdirSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
+const createNewerDatabaseScript = libsqlEsmScript(
+    String.raw`
 const databasePath = "/home/rig/.happy/rig/sessions.sqlite";
+const { mkdirSync } = await import("node:fs");
 mkdirSync("/home/rig/.happy/rig", { recursive: true });
-const database = new DatabaseSync(databasePath);
-database.exec("PRAGMA application_id = 1380534066; PRAGMA user_version = 5");
-database.close();
-`;
+const database = await openDatabase(databasePath);
+try {
+    await database.execute("PRAGMA application_id = 1380534066");
+    await database.execute("PRAGMA user_version = 5");
+} finally {
+    await database.close();
+}
+`,
+);
 
-const makeDatabaseCompatibleScript = String.raw`
-import { DatabaseSync } from "node:sqlite";
-
-const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
-database.exec("PRAGMA user_version = 0");
-database.close();
-`;
+const makeDatabaseCompatibleScript = libsqlEsmScript(String.raw`
+const database = await openDatabase("/home/rig/.happy/rig/sessions.sqlite");
+try {
+    await database.execute("PRAGMA user_version = 0");
+} finally {
+    await database.close();
+}
+`);
 
 const exerciseDaemonStartupErrorScript = String.raw`#!/usr/bin/env bash
 set -euo pipefail

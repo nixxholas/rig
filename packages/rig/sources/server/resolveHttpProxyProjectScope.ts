@@ -5,11 +5,11 @@ export type HttpProxyProjectScopeResolution =
     | { allowed: true }
     | { allowed: false; message: string; statusCode: number; statusText: string };
 
-export function resolveHttpProxyProjectScope(
+export async function resolveHttpProxyProjectScope(
     scope: ProjectScope,
     store: SessionStore,
-): HttpProxyProjectScopeResolution {
-    if (store.getProject(scope.projectId) === undefined) {
+): Promise<HttpProxyProjectScopeResolution> {
+    if ((await store.getProject(scope.projectId)) === undefined) {
         return {
             allowed: false,
             message: "The requested Rig project was not found.",
@@ -19,7 +19,7 @@ export function resolveHttpProxyProjectScope(
     }
     if (
         scope.workspaceId !== undefined &&
-        store.getWorkspace(scope.projectId, scope.workspaceId) === undefined
+        (await store.getWorkspace(scope.projectId, scope.workspaceId)) === undefined
     ) {
         return {
             allowed: false,

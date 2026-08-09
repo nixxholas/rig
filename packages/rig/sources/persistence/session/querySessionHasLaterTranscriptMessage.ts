@@ -1,13 +1,15 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function querySessionHasLaterTranscriptMessage(
-    tx: TX,
+export async function querySessionHasLaterTranscriptMessage(
+    tx: DatabaseScope,
     sessionId: string,
     position: number,
-): boolean {
-    return (
-        tx.get(sql`
+): Promise<boolean> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            (await tx.get(sql`
             SELECT 1 FROM session_messages
             WHERE session_id = ${sessionId}
               AND position > ${position}
@@ -15,6 +17,7 @@ export function querySessionHasLaterTranscriptMessage(
               AND run_id IS NOT NULL
               AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
             LIMIT 1
-        `) !== undefined
-    );
+        `)) !== undefined
+        );
+    });
 }

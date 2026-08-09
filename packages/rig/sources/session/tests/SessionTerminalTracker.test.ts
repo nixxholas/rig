@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SessionTerminalTracker } from "../SessionTerminalTracker.js";
 
 describe("SessionTerminalTracker", () => {
-    it("tracks heartbeats and explicit disconnects independently per terminal", () => {
+    it("tracks heartbeats and explicit disconnects independently per terminal", async () => {
         const tracker = new SessionTerminalTracker({
             isTargetAlive: () => true,
             sweepIntervalMs: 60_000,
@@ -32,7 +32,7 @@ describe("SessionTerminalTracker", () => {
         }
     });
 
-    it("drops terminals after missed heartbeats or target process exit", () => {
+    it("drops terminals after missed heartbeats or target process exit", async () => {
         let now = 1_000;
         const alive = new Set([101, 102]);
         const tracker = new SessionTerminalTracker({

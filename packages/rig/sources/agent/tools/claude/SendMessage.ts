@@ -44,7 +44,7 @@ export const claudeSendMessageTool = defineTool({
             throw new Error("Subagent management is unavailable in this session.");
         }
         await applySubagentReadOnlyOverride(context.subagents, to, read_only);
-        const target = context.subagents.followUp(to, message, effort);
+        const target = await context.subagents.followUp(to, message, effort);
         return {
             agentId: target.agentId,
             message:

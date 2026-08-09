@@ -1,21 +1,22 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import { sessionContextMessages, sessionCredentialBindings, sessions } from "../database/schema.js";
 import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { sessionScopeValues } from "./impl/sessionScope.js";
 
-export function sessionSave(
-    tx: TX,
+export async function sessionSave(
+    tx: DatabaseScope,
     state: PersistedSessionState,
     input: {
         contextMessages: readonly Message[];
         now: number;
     },
-): void {
-    inTx(tx, (tx) => {
+): Promise<void> {
+    await inTx(tx, async (tx) => {
         const values = {
             ...sessionScopeValues(state.scope),
             activeRunId: state.activeRunId ?? null,
@@ -103,58 +104,64 @@ export function sessionSave(
             profileId: _profileId,
             ...updates
         } = values;
-        tx.insert(sessions)
+        await tx
+            .insert(sessions)
             .values(values)
             .onConflictDoUpdate({ set: updates, target: sessions.id })
             .run();
         const credentialBindingId =
             state.credentialBindingId ?? `${state.ownerInstanceId}:${state.providerId}`;
-        tx.insert(sessionCredentialBindings)
+        await tx
+            .insert(sessionCredentialBindings)
             .values({ bindingId: credentialBindingId, sessionId: state.id })
             .onConflictDoUpdate({
                 set: { bindingId: credentialBindingId },
                 target: sessionCredentialBindings.sessionId,
             })
             .run();
-        replaceContextMessages(tx, state.id, input.contextMessages);
+        await replaceContextMessages(tx, state.id, input.contextMessages);
     });
 }
 
-export function replaceContextMessages(
-    tx: TX,
+export async function replaceContextMessages(
+    tx: DatabaseScope,
     sessionId: string,
     messages: readonly Message[],
-): void {
-    tx.delete(sessionContextMessages)
-        .where(
-            and(
-                eq(sessionContextMessages.sessionId, sessionId),
-                gte(sessionContextMessages.position, messages.length),
-            ),
-        )
-        .run();
-    messages.forEach((message, position) => {
-        tx.insert(sessionContextMessages)
-            .values({
-                messageId: message.id,
-                messageJson: JSON.stringify(message),
-                position,
-                role: message.role,
-                sessionId,
-            })
-            .onConflictDoUpdate({
-                set: {
-                    messageId: sql`excluded.message_id`,
-                    messageJson: sql`excluded.message_json`,
-                    role: sql`excluded.role`,
-                },
-                setWhere: sql`
+): Promise<void> {
+    return await inDatabase(tx, async (tx) => {
+        await tx
+            .delete(sessionContextMessages)
+            .where(
+                and(
+                    eq(sessionContextMessages.sessionId, sessionId),
+                    gte(sessionContextMessages.position, messages.length),
+                ),
+            )
+            .run();
+        for (const [position, message] of messages.entries()) {
+            await tx
+                .insert(sessionContextMessages)
+                .values({
+                    messageId: message.id,
+                    messageJson: JSON.stringify(message),
+                    position,
+                    role: message.role,
+                    sessionId,
+                })
+                .onConflictDoUpdate({
+                    set: {
+                        messageId: sql`excluded.message_id`,
+                        messageJson: sql`excluded.message_json`,
+                        role: sql`excluded.role`,
+                    },
+                    setWhere: sql`
                     ${sessionContextMessages.messageId} != excluded.message_id
                     OR ${sessionContextMessages.role} != excluded.role
                     OR ${sessionContextMessages.messageJson} != excluded.message_json
                 `,
-                target: [sessionContextMessages.sessionId, sessionContextMessages.position],
-            })
-            .run();
+                    target: [sessionContextMessages.sessionId, sessionContextMessages.position],
+                })
+                .run();
+        }
     });
 }

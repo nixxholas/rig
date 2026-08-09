@@ -9,20 +9,23 @@ type WorkspaceWaiter = {
 };
 
 export function createWorkspaceReadyWaiters(
-    workspace: (projectId: string, workspaceId: string) => ProjectWorkspace | undefined,
+    workspace: (
+        projectId: string,
+        workspaceId: string,
+    ) => ProjectWorkspace | undefined | Promise<ProjectWorkspace | undefined>,
 ): {
-    changed(projectId: string, workspaceId: string): void;
+    changed(projectId: string, workspaceId: string): Promise<void>;
     close(): void;
     wait(projectId: string, workspaceId: string, signal?: AbortSignal): Promise<ProjectWorkspace>;
 } {
     const waiters = new Map<string, Set<WorkspaceWaiter>>();
     const keyFor = (projectId: string, workspaceId: string) => `${projectId}\u0000${workspaceId}`;
 
-    const result = (
+    const result = async (
         projectId: string,
         workspaceId: string,
-    ): ProjectWorkspace | Error | undefined => {
-        const current = workspace(projectId, workspaceId);
+    ): Promise<ProjectWorkspace | Error | undefined> => {
+        const current = await workspace(projectId, workspaceId);
         if (current === undefined)
             return new Error("That workspace was not found in that project.");
         if (current.status === "initializing") return undefined;
@@ -37,11 +40,21 @@ export function createWorkspaceReadyWaiters(
         return current;
     };
 
-    const settle = (projectId: string, workspaceId: string) => {
+    const settle = async (projectId: string, workspaceId: string): Promise<void> => {
         const key = keyFor(projectId, workspaceId);
         const pending = waiters.get(key);
         if (pending === undefined) return;
-        const current = result(projectId, workspaceId);
+        let current: ProjectWorkspace | Error | undefined;
+        try {
+            current = await result(projectId, workspaceId);
+        } catch (error) {
+            waiters.delete(key);
+            for (const waiter of pending) {
+                waiter.signal?.removeEventListener("abort", waiter.abort);
+                waiter.reject(error instanceof Error ? error : new Error(String(error)));
+            }
+            throw error;
+        }
         if (current === undefined) return;
         waiters.delete(key);
         for (const waiter of pending) {
@@ -62,9 +75,9 @@ export function createWorkspaceReadyWaiters(
             }
             waiters.clear();
         },
-        wait: (projectId, workspaceId, signal) => {
+        wait: async (projectId, workspaceId, signal) => {
             throwIfAborted(signal);
-            const current = result(projectId, workspaceId);
+            const current = await result(projectId, workspaceId);
             if (current instanceof Error) return Promise.reject(current);
             if (current !== undefined) return Promise.resolve(current);
             return new Promise<ProjectWorkspace>((resolve, reject) => {
@@ -84,7 +97,7 @@ export function createWorkspaceReadyWaiters(
                 };
                 pending.add(waiter);
                 signal?.addEventListener("abort", waiter.abort, { once: true });
-                settle(projectId, workspaceId);
+                void settle(projectId, workspaceId).catch(() => undefined);
             });
         },
     };

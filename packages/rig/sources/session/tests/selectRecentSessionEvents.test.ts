@@ -4,7 +4,7 @@ import type { SessionEvent } from "../../protocol/index.js";
 import { selectRecentSessionEvents } from "../selectRecentSessionEvents.js";
 
 describe("selectRecentSessionEvents", () => {
-    it("starts at the oldest of the requested recent transcript messages", () => {
+    it("starts at the oldest of the requested recent transcript messages", async () => {
         const events = Array.from({ length: 32 }, (_, index) => event(index));
 
         const selected = selectRecentSessionEvents(events, 30);
@@ -14,7 +14,7 @@ describe("selectRecentSessionEvents", () => {
         );
     });
 
-    it("retains follow-up non-message events after the transcript boundary", () => {
+    it("retains follow-up non-message events after the transcript boundary", async () => {
         const events = [event(0), event(1), event(2), statusEvent("finished")];
 
         expect(selectRecentSessionEvents(events, 2).map((entry) => entry.id)).toEqual([

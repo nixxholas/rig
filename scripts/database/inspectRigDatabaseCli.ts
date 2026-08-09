@@ -28,7 +28,7 @@ if (isMain) {
         const options = parseArguments(process.argv.slice(2));
         console.log(
             JSON.stringify(
-                inspectRigDatabase(resolve(options.sourcePath), {
+                await inspectRigDatabase(resolve(options.sourcePath), {
                     fullIntegrityCheck: options.fullIntegrityCheck,
                 }),
                 null,

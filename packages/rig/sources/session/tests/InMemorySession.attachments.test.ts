@@ -16,8 +16,9 @@ import { InMemorySession } from "../InMemorySession.js";
 describe("InMemorySession final attachments", () => {
     it("atomically commits pending attachments to the last message on success", async () => {
         const session = createSession("stop");
-        const attachments = session.externalControlContext().attachments!;
-        await attachments.add("/workspace/result.txt", async (id) => ({
+        const attachments = await runtimeContext(session);
+        const attachmentContext = attachments.attachments!;
+        await attachmentContext.add("/workspace/result.txt", async (id) => ({
             bytes: 4,
             id,
             kind: "file",
@@ -25,7 +26,7 @@ describe("InMemorySession final attachments", () => {
             source: "/workspace/result.txt",
         }));
 
-        const run = session.submit({ text: "Show the result." });
+        const run = await session.submit({ text: "Show the result." });
         await session.waitForRun(run.runId);
 
         const message = session
@@ -44,12 +45,14 @@ describe("InMemorySession final attachments", () => {
             attachmentMessageId: message?.id,
             attachments: [{ kind: "file", name: "result.txt" }],
         });
+        await session.beginShutdown();
     });
 
     it("discards pending attachments when the turn errors", async () => {
         const session = createSession("error");
-        const attachments = session.externalControlContext().attachments!;
-        await attachments.add("/workspace/result.txt", async (id) => ({
+        const attachments = await runtimeContext(session);
+        const attachmentContext = attachments.attachments!;
+        await attachmentContext.add("/workspace/result.txt", async (id) => ({
             bytes: 4,
             id,
             kind: "file",
@@ -57,10 +60,10 @@ describe("InMemorySession final attachments", () => {
             source: "/workspace/result.txt",
         }));
 
-        const run = session.submit({ text: "Fail." });
+        const run = await session.submit({ text: "Fail." });
         await session.waitForRun(run.runId);
 
-        expect(attachments.pending()).toEqual([]);
+        expect(attachmentContext.pending()).toEqual([]);
         expect(
             session
                 .state()
@@ -70,6 +73,7 @@ describe("InMemorySession final attachments", () => {
                         (entry.message.attachments?.length ?? 0) > 0,
                 ),
         ).toBe(false);
+        await session.beginShutdown();
     });
 });
 
@@ -125,6 +129,12 @@ function createSession(stopReason: "error" | "stop"): InMemorySession {
         modelCatalog: catalog,
         request: { cwd: "/tmp/rig-attachments", modelId: model.id, providerId: provider.id },
     });
+}
+
+async function runtimeContext(
+    session: InMemorySession,
+): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
+    return await session.externalControlContext();
 }
 
 function assistantMessage(model: string, stopReason: "error" | "stop"): AssistantMessage {

@@ -1,6 +1,7 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
 /**
@@ -14,14 +15,15 @@ import { readString } from "./impl/sqliteRow.js";
  * delegated chat to the agent that opened it, so neither is ever a candidate. The batch is bounded
  * so one sweep cannot load the whole history.
  */
-export function queryExpiredUnsortedSessions(
-    tx: TX,
+export async function queryExpiredUnsortedSessions(
+    tx: DatabaseScope,
     unsortedBefore: number,
     limit: number,
-): readonly string[] {
-    return tx
-        .all<Record<string, unknown>>(
-            sql`
+): Promise<readonly string[]> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            await tx.all<Record<string, unknown>>(
+                sql`
                 SELECT id FROM sessions
                 WHERE unsorted_since_ms IS NOT NULL
                     AND scope_kind = 'unsorted'
@@ -36,6 +38,7 @@ export function queryExpiredUnsortedSessions(
                 ORDER BY unsorted_since_ms ASC, id ASC
                 LIMIT ${limit}
             `,
-        )
-        .map((row) => readString(row, "id"));
+            )
+        ).map((row) => readString(row, "id"));
+    });
 }

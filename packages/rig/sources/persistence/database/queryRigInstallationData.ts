@@ -1,6 +1,5 @@
 import { lstatSync } from "node:fs";
 
-import Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
 import { TransformDecodeCheckError } from "@sinclair/typebox/value";
 
@@ -10,20 +9,22 @@ import {
     RIG_DATA_IDENTITY_SCHEMA_VERSION,
     SESSION_DATABASE_APPLICATION_ID,
 } from "./migrateSessionDatabase.js";
+import { inDatabase } from "./inDatabase.js";
 import { openSessionDatabase } from "./openSessionDatabase.js";
-import { queryRigDataEpochIfPresent } from "./queryRigDataEpoch.js";
+import { queryRigDataEpochIfPresentInTx } from "./queryRigDataEpoch.js";
+import type { DrizzleSessionTx } from "./SessionDatabase.js";
 
 /**
  * Queries the authoritative initialization marker without creating or migrating the database.
  * SQLite may create or retain transient `-wal` and `-shm` bookkeeping beside an existing
  * WAL-mode database even though the database connection itself is read-only.
  */
-export function queryRigInstallationData(
+export async function queryRigInstallationData(
     path: string,
     options: {
         openDatabase?: typeof openSessionDatabase;
     } = {},
-): RigInstallationData {
+): Promise<RigInstallationData> {
     try {
         lstatSync(path);
     } catch (error) {
@@ -31,64 +32,76 @@ export function queryRigInstallationData(
         return unavailable("unreadable", "Rig data exists but cannot be inspected.");
     }
 
-    let opened: ReturnType<typeof openSessionDatabase>;
+    let opened: Awaited<ReturnType<typeof openSessionDatabase>>;
     try {
-        opened = (options.openDatabase ?? openSessionDatabase)(path, { readOnly: true });
+        opened = await (options.openDatabase ?? openSessionDatabase)(path, { readOnly: true });
     } catch (error) {
         return classifyInspectionError(error);
     }
     try {
-        const applicationId = opened.client.pragma("application_id", { simple: true }) as number;
-        const schemaVersion = opened.client.pragma("user_version", { simple: true }) as number;
-        if (applicationId !== SESSION_DATABASE_APPLICATION_ID) return { status: "uninitialized" };
-        if (schemaVersion > 0 && schemaVersion < RIG_DATA_IDENTITY_SCHEMA_VERSION) {
-            return {
-                message:
-                    "Existing Rig data needs an upgrade before its stable data identity is available.",
-                reason: "pre_identity",
-                schemaVersion,
-                status: "upgrade_required",
-            };
-        }
-        if (schemaVersion < RIG_DATA_IDENTITY_SCHEMA_VERSION) {
-            return { status: "uninitialized" };
-        }
+        return await inDatabase(opened.database, async (database) => {
+            const applicationId =
+                (await database.get<{ application_id: number }>(sql.raw("PRAGMA application_id")))
+                    ?.application_id ?? 0;
+            const schemaVersion =
+                (await database.get<{ user_version: number }>(sql.raw("PRAGMA user_version")))
+                    ?.user_version ?? 0;
+            if (applicationId !== SESSION_DATABASE_APPLICATION_ID) {
+                return { status: "uninitialized" };
+            }
+            if (schemaVersion > 0 && schemaVersion < RIG_DATA_IDENTITY_SCHEMA_VERSION) {
+                return {
+                    message:
+                        "Existing Rig data needs an upgrade before its stable data identity is available.",
+                    reason: "pre_identity",
+                    schemaVersion,
+                    status: "upgrade_required",
+                };
+            }
+            if (schemaVersion < RIG_DATA_IDENTITY_SCHEMA_VERSION) {
+                return { status: "uninitialized" };
+            }
 
-        if (schemaVersion > CURRENT_SESSION_DATABASE_VERSION) {
-            return {
-                ...queryFutureEpoch(opened.database),
-                message: `Rig data uses newer schema version ${String(schemaVersion)}; this CLI supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}. Install a compatible Rig version before starting the daemon.`,
-                reason: "newer_schema",
-                schemaVersion,
-                status: "incompatible",
-            };
-        }
+            if (schemaVersion > CURRENT_SESSION_DATABASE_VERSION) {
+                return {
+                    ...(await queryFutureEpoch(database)),
+                    message: `Rig data uses newer schema version ${String(schemaVersion)}; this CLI supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}. Install a compatible Rig version before starting the daemon.`,
+                    reason: "newer_schema",
+                    schemaVersion,
+                    status: "incompatible",
+                };
+            }
 
-        const identityTable = opened.database.get(
-            sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rig_data_identity'`,
-        );
-        if (identityTable === undefined) return damagedData();
-        const epoch = queryRigDataEpochIfPresent(opened.database);
-        if (epoch === undefined) return damagedData();
-        return {
-            epoch,
-            schemaCompatibility:
-                schemaVersion === CURRENT_SESSION_DATABASE_VERSION ? "current" : "upgrade_required",
-            schemaVersion,
-            status: "initialized",
-        };
+            const identityTable = (
+                await database.all(
+                    sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rig_data_identity'`,
+                )
+            )[0];
+            if (identityTable === undefined) return damagedData();
+            const epoch = await queryRigDataEpochIfPresentInTx(database);
+            if (epoch === undefined) return damagedData();
+            return {
+                epoch,
+                schemaCompatibility:
+                    schemaVersion === CURRENT_SESSION_DATABASE_VERSION
+                        ? "current"
+                        : "upgrade_required",
+                schemaVersion,
+                status: "initialized",
+            };
+        });
     } catch (error) {
         return classifyInspectionError(error);
     } finally {
-        opened.client.close();
+        await opened.database.close();
     }
 }
 
-function queryFutureEpoch(database: Parameters<typeof queryRigDataEpochIfPresent>[0]): {
+async function queryFutureEpoch(database: DrizzleSessionTx): Promise<{
     epoch?: string;
-} {
+}> {
     try {
-        const epoch = queryRigDataEpochIfPresent(database);
+        const epoch = await queryRigDataEpochIfPresentInTx(database);
         return epoch === undefined ? {} : { epoch };
     } catch {
         return {};
@@ -97,10 +110,10 @@ function queryFutureEpoch(database: Parameters<typeof queryRigDataEpochIfPresent
 
 function classifyInspectionError(error: unknown): RigInstallationData {
     if (error instanceof TransformDecodeCheckError) return damagedData();
-    if (!(error instanceof Database.SqliteError)) {
+    const code = sqliteErrorCode(error);
+    if (code === undefined) {
         return unavailable("unreadable", "Rig data exists but cannot be inspected.");
     }
-    const code = error.code;
     if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED")) {
         return unavailable(
             "busy",
@@ -151,4 +164,13 @@ function unavailable(
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
     return error instanceof Error && "code" in error;
+}
+
+function sqliteErrorCode(error: unknown): string | undefined {
+    if (typeof error !== "object" || error === null) return undefined;
+    if ("code" in error && typeof (error as { code?: unknown }).code === "string") {
+        return (error as { code: string }).code;
+    }
+    if ("cause" in error) return sqliteErrorCode((error as { cause?: unknown }).cause);
+    return undefined;
 }

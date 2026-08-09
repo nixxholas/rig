@@ -96,11 +96,11 @@ export class WorkletStore {
         return join(this.directory, name, `v${String(version)}`);
     }
 
-    get(name: string): StoredWorklet | undefined {
+    async get(name: string): Promise<StoredWorklet | undefined> {
         return queryWorklet(this.#tx(), name);
     }
 
-    list(): readonly StoredWorklet[] {
+    async list(): Promise<readonly StoredWorklet[]> {
         return queryWorklets(this.#tx());
     }
 
@@ -156,7 +156,7 @@ export class WorkletStore {
                 "A worklet update needs the source folder path and a description of the change.",
             );
         }
-        if (queryWorklet(this.#tx(), name) === undefined) {
+        if ((await queryWorklet(this.#tx(), name)) === undefined) {
             throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
         }
         const sourceReader = resolveWorkletSourceReader(sourceFileSystem);
@@ -176,16 +176,16 @@ export class WorkletStore {
         }
     }
 
-    revert(
+    async revert(
         name: string,
         request: RevertWorkletRequest,
         expected: ExpectedWorkletDeclaration = {},
-    ): StoredWorklet {
+    ): Promise<StoredWorklet> {
         if (!Value.Check(revertWorkletRequestSchema, request)) {
             throw new WorkletInvalidError("The worklet revert request is invalid.");
         }
-        const reverted = inTx(this.#tx(), (tx) => {
-            const worklet = queryWorklet(tx, name);
+        const reverted = await inTx(this.#tx(), async (tx) => {
+            const worklet = await queryWorklet(tx, name);
             if (worklet === undefined) {
                 throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
             }
@@ -203,7 +203,7 @@ export class WorkletStore {
                     "The permissions supplied for review do not match that stored worklet version.",
                 );
             }
-            workletSetCurrentVersion(tx, name, request.version, this.#now());
+            await workletSetCurrentVersion(tx, name, request.version, this.#now());
             return queryWorklet(tx, name);
         });
         if (reverted === undefined) throw new Error("The worklet was not stored.");
@@ -216,11 +216,11 @@ export class WorkletStore {
      */
     async remove(name: string): Promise<void> {
         return this.#serializeMutation(name, async () => {
-            const existing = queryWorklet(this.#tx(), name);
+            const existing = await queryWorklet(this.#tx(), name);
             if (existing === undefined) {
                 throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
             }
-            inTx(this.#tx(), (tx) => workletDelete(tx, name));
+            await inTx(this.#tx(), async (tx) => workletDelete(tx, name));
             await this.#removeCodeKeepingData(name);
         });
     }
@@ -247,7 +247,7 @@ export class WorkletStore {
         icon: WorkletIconArtifacts,
         stagedSourcePath: string,
     ): Promise<StoredWorklet> {
-        if (queryWorklet(this.#tx(), manifest.name) !== undefined) {
+        if ((await queryWorklet(this.#tx(), manifest.name)) !== undefined) {
             throw new WorkletInvalidError(
                 `A worklet named ${JSON.stringify(manifest.name)} already exists. Update it to import a new version.`,
             );
@@ -255,13 +255,13 @@ export class WorkletStore {
         await this.#installFiles(manifest.name, stagedSourcePath, icon);
         let created;
         try {
-            created = inTx(this.#tx(), (tx) => {
-                if (queryWorklet(tx, manifest.name) !== undefined) {
+            created = await inTx(this.#tx(), async (tx) => {
+                if ((await queryWorklet(tx, manifest.name)) !== undefined) {
                     throw new WorkletInvalidError(
                         `A worklet named ${JSON.stringify(manifest.name)} already exists. Update it to import a new version.`,
                     );
                 }
-                workletCreate(tx, {
+                await workletCreate(tx, {
                     authorSessionId: request.authorSessionId,
                     changeDescription: "Initial import",
                     createdAt: this.#now(),
@@ -289,7 +289,7 @@ export class WorkletStore {
         manifest: WorkletManifest,
         stagedSourcePath: string,
     ): Promise<StoredWorklet> {
-        const existing = queryWorklet(this.#tx(), name);
+        const existing = await queryWorklet(this.#tx(), name);
         if (existing === undefined) {
             throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
         }
@@ -308,8 +308,8 @@ export class WorkletStore {
         // with it, so a failed write takes the folder it just landed with it.
         let updated;
         try {
-            updated = inTx(this.#tx(), (tx) => {
-                workletAddVersion(tx, name, {
+            updated = await inTx(this.#tx(), async (tx) => {
+                await workletAddVersion(tx, name, {
                     changeDescription: request.changeDescription,
                     createdAt: this.#now(),
                     description: manifest.description,

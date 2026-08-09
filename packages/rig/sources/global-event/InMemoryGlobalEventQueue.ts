@@ -31,7 +31,7 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         this.#trimmedThrough = this.#head;
     }
 
-    append(event: GlobalEvent): GlobalEventQueueEntry {
+    async append(event: GlobalEvent): Promise<GlobalEventQueueEntry> {
         const entry = { cursor: this.#createCursor(), event };
         this.#head = entry.cursor;
         this.#entries.push(entry);
@@ -42,7 +42,7 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         return entry;
     }
 
-    appendReplaySafe(event: GlobalEvent): GlobalEventQueueEntry | undefined {
+    async appendReplaySafe(event: GlobalEvent): Promise<GlobalEventQueueEntry | undefined> {
         const existing = this.#entries.find((entry) => entry.event.id === event.id);
         if (existing === undefined) return this.append(event);
         if (JSON.stringify(existing.event) !== JSON.stringify(event)) {
@@ -61,7 +61,9 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         this.#listeners.clear();
     }
 
-    list(options: ListGlobalEventQueueOptions = {}): readonly GlobalEventQueueEntry[] | undefined {
+    async list(
+        options: ListGlobalEventQueueOptions = {},
+    ): Promise<readonly GlobalEventQueueEntry[] | undefined> {
         const after = options.after?.toLowerCase() ?? this.#trimmedThrough;
         if (
             !eventIdsShareScope(after, this.#head) ||
@@ -108,7 +110,7 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         };
     }
 
-    trim(through: string): TrimGlobalEventsResponse | undefined {
+    async trim(through: string): Promise<TrimGlobalEventsResponse | undefined> {
         const normalized = through.toLowerCase();
         if (!eventIdsShareScope(normalized, this.#head) || normalized > this.#head)
             return undefined;

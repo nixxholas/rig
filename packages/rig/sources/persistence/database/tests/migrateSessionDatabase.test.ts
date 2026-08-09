@@ -32,59 +32,59 @@ afterEach(() => {
 });
 
 describe("migrateSessionDatabase", () => {
-    it("creates the complete schema from the init migration", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
+    it("creates the complete schema from the init migration", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
 
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
         expect(
-            opened.database
-                .all<{ name: string }>(
+            (
+                await opened.database.all<{ name: string }>(
                     sql.raw(
                         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
                     ),
                 )
-                .map((row) => row.name),
+            ).map((row) => row.name),
         ).toEqual(
             Object.values(schema)
                 .map((table) => getTableConfig(table).name)
                 .sort(),
         );
         expect(
-            opened.database.get<{ workspaceQueueWaiting: number }>(
+            await opened.database.get<{ workspaceQueueWaiting: number }>(
                 sql.raw(
                     "SELECT workspace_queue_waiting AS workspaceQueueWaiting FROM sessions LIMIT 1",
                 ),
             ),
         ).toBeUndefined();
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(sessions)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(sql.raw("PRAGMA table_info(sessions)"))
+            ).map((column) => column.name),
         ).toContain("workspace_queue_waiting");
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("keeps an initialized database unchanged on later starts", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
-        migrateSessionDatabase(opened.database);
+    it("keeps an initialized database unchanged on later starts", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.database);
 
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("normalizes folder and item keys into one space per parent", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
-        opened.client.pragma("foreign_keys = OFF");
-        opened.database.run(
+    it("normalizes folder and item keys into one space per parent", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
+        await opened.client.execute("PRAGMA foreign_keys = OFF");
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO folders
                     (id, parent_id, name, order_key, path, version, created_at_ms, updated_at_ms)
@@ -95,7 +95,7 @@ describe("migrateSessionDatabase", () => {
                     ('child-b', 'parent-folder', 'Child B', 'a1', '/child-b', 1, 1, 1)
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO folder_items
                     (id, folder_id, project_id, order_key, version, created_at_ms, updated_at_ms)
@@ -105,15 +105,15 @@ describe("migrateSessionDatabase", () => {
             `),
         );
 
-        opened.database.run(sql.raw("PRAGMA user_version = 50"));
-        migrateSessionDatabase(opened.database);
+        await opened.database.run(sql.raw("PRAGMA user_version = 50"));
+        await migrateSessionDatabase(opened.database);
 
-        const folders = opened.database.all<{ id: string; order_key: string }>(
+        const folders = await opened.database.all<{ id: string; order_key: string }>(
             sql.raw(
                 "SELECT id, order_key FROM folders WHERE parent_id = 'parent-folder' ORDER BY order_key",
             ),
         );
-        const items = opened.database.all<{ id: string; order_key: string }>(
+        const items = await opened.database.all<{ id: string; order_key: string }>(
             sql.raw(
                 "SELECT id, order_key FROM folder_items WHERE folder_id = 'parent-folder' ORDER BY order_key",
             ),
@@ -123,14 +123,14 @@ describe("migrateSessionDatabase", () => {
         expect(new Set([...folders, ...items].map((row) => row.order_key)).size).toBe(4);
         expect(folders.at(-1)!.order_key < items[0]!.order_key).toBe(true);
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("rejects legacy folder and item ID collisions before enabling shared anchors", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
-        opened.client.pragma("foreign_keys = OFF");
-        opened.database.run(
+    it("rejects legacy folder and item ID collisions before enabling shared anchors", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
+        await opened.client.execute("PRAGMA foreign_keys = OFF");
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO folders
                     (id, parent_id, name, order_key, path, version, created_at_ms, updated_at_ms)
@@ -139,73 +139,75 @@ describe("migrateSessionDatabase", () => {
                     ('parent-for-item', NULL, 'Parent', 'a1', '/parent-for-item', 1, 1, 1)
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO folder_items
                     (id, folder_id, project_id, order_key, version, created_at_ms, updated_at_ms)
                 VALUES ('collision', 'parent-for-item', 'missing-project', 'a0', 1, 1, 1)
             `),
         );
-        opened.database.run(sql.raw("PRAGMA user_version = 50"));
+        await opened.database.run(sql.raw("PRAGMA user_version = 50"));
 
-        expect(() => migrateSessionDatabase(opened.database)).toThrow(
+        await expect(migrateSessionDatabase(opened.database)).rejects.toThrow(
             "Cannot enable shared folder ordering because a folder and folder item have the same ID.",
         );
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({ user_version: 50 });
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+            user_version: 50,
+        });
         expect(
-            opened.database.get<{ order_key: string }>(
+            await opened.database.get<{ order_key: string }>(
                 sql.raw("SELECT order_key FROM folder_items WHERE id = 'collision'"),
             ),
         ).toEqual({ order_key: "a0" });
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("seeds one singleton onboarding state row", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
+    it("seeds one singleton onboarding state row", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
 
-        expect(opened.database.select().from(schema.onboardingState).all()).toEqual([
+        expect(await opened.database.select().from(schema.onboardingState).all()).toEqual([
             {
                 completedVersion: 0,
                 singleton: 1,
             },
         ]);
-        expect(() =>
+        await expect(
             opened.database.update(schema.onboardingState).set({ completedVersion: -1 }).run(),
-        ).toThrow(/CHECK constraint failed/u);
+        ).rejects.toThrow(/CHECK constraint failed|Failed query/u);
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("attributes pre-owner sessions to the local Rig while advancing to session owner schema", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
-        opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN owner_instance_id"));
-        opened.database.run(sql.raw("DROP TABLE sharing_settings"));
-        opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
-        dropFolderItemsAndDocumentsSchema(opened.database);
-        opened.database.run(sql.raw("PRAGMA user_version = 38"));
+    it("attributes pre-owner sessions to the local Rig while advancing to session owner schema", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
+        await opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN owner_instance_id"));
+        await opened.database.run(sql.raw("DROP TABLE sharing_settings"));
+        await opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
+        await dropFolderItemsAndDocumentsSchema(opened.database);
+        await opened.database.run(sql.raw("PRAGMA user_version = 38"));
 
-        migrateSessionDatabase(opened.database, {
+        await migrateSessionDatabase(opened.database, {
             localInstanceId: "alocalinstance00000000001",
         });
 
         expect(
-            opened.database
-                .all<{ dflt_value: string | null; name: string }>(
+            (
+                await opened.database.all<{ dflt_value: string | null; name: string }>(
                     sql.raw("PRAGMA table_info(sessions)"),
                 )
-                .find((column) => column.name === "owner_instance_id"),
+            ).find((column) => column.name === "owner_instance_id"),
         ).toMatchObject({ dflt_value: "'alocalinstance00000000001'" });
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("removes sharing data without removing trusted P2P peers", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
+    it("removes sharing data without removing trusted P2P peers", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
 
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`INSERT INTO p2p_peers (
                 instance_id,
                 public_key,
@@ -216,7 +218,7 @@ describe("migrateSessionDatabase", () => {
                 updated_at_ms
             ) VALUES ('peer-1', 'public-key-1', 'Remote Rig', '[]', '[]', 1, 1)`),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`INSERT INTO p2p_peer_pairings (
                 pairing_id,
                 instance_id,
@@ -230,44 +232,46 @@ describe("migrateSessionDatabase", () => {
             ) VALUES ('pairing-1', 'peer-1', 'public-key-1', 'Remote Rig', '[]', '[]', 0, 'prepared', 2)`),
         );
         for (const table of removedSharingTables) {
-            opened.database.run(sql.raw(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`));
+            await opened.database.run(sql.raw(`CREATE TABLE ${table} (id TEXT PRIMARY KEY)`));
         }
-        opened.database.run(
+        await opened.database.run(
             sql.raw(
                 "ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_consent TEXT NOT NULL DEFAULT 'denied'",
             ),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(
                 "ALTER TABLE happy_cloud_enrollment ADD COLUMN friends_changed_at_ms INTEGER NOT NULL DEFAULT 0",
             ),
         );
-        opened.database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
-        opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"));
-        opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
-        dropSessionScopeSchema(opened.database);
-        opened.database.run(sql.raw("DROP INDEX IF EXISTS sessions_unsorted"));
-        opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
-        opened.database.run(sql.raw("DROP INDEX IF EXISTS sessions_folder"));
-        opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
-        opened.database.run(sql.raw("DROP TABLE folders"));
+        await opened.database.run(sql.raw("ALTER TABLE project_workspaces ADD COLUMN title TEXT"));
+        await opened.database.run(
+            sql.raw("ALTER TABLE project_workspaces DROP COLUMN name_configured"),
+        );
+        await opened.database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
+        await dropSessionScopeSchema(opened.database);
+        await opened.database.run(sql.raw("DROP INDEX IF EXISTS sessions_unsorted"));
+        await opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN unsorted_since_ms"));
+        await opened.database.run(sql.raw("DROP INDEX IF EXISTS sessions_folder"));
+        await opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN folder_id"));
+        await opened.database.run(sql.raw("DROP TABLE folders"));
         // A real database at version 28 predates worklets, so rewinding to it takes their schema
         // with it rather than letting its later migration replay into tables it already created.
-        opened.database.run(sql.raw("DROP TABLE worklet_versions"));
-        opened.database.run(sql.raw("DROP TABLE worklets"));
-        opened.database.run(sql.raw("DROP TABLE sharing_settings"));
-        opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
-        opened.database.run(sql.raw("DROP TABLE rig_profiles"));
-        opened.database.run(sql.raw("DROP TABLE session_mutations"));
-        opened.database.run(sql.raw("DROP TABLE folder_mutations"));
-        opened.database.run(sql.raw("DROP TABLE folder_catalog"));
-        dropFolderItemsAndDocumentsSchema(opened.database);
-        opened.database.run(sql.raw("PRAGMA user_version = 28"));
+        await opened.database.run(sql.raw("DROP TABLE worklet_versions"));
+        await opened.database.run(sql.raw("DROP TABLE worklets"));
+        await opened.database.run(sql.raw("DROP TABLE sharing_settings"));
+        await opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
+        await opened.database.run(sql.raw("DROP TABLE rig_profiles"));
+        await opened.database.run(sql.raw("DROP TABLE session_mutations"));
+        await opened.database.run(sql.raw("DROP TABLE folder_mutations"));
+        await opened.database.run(sql.raw("DROP TABLE folder_catalog"));
+        await dropFolderItemsAndDocumentsSchema(opened.database);
+        await opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
-        migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.database);
 
         expect(
-            opened.database.all<{ name: string }>(
+            await opened.database.all<{ name: string }>(
                 sql.raw(
                     `SELECT name FROM sqlite_master
                      WHERE type = 'table' AND name IN (${removedSharingTables.map((table) => `'${table}'`).join(", ")})`,
@@ -275,120 +279,138 @@ describe("migrateSessionDatabase", () => {
             ),
         ).toEqual([]);
         expect(
-            opened.database.get(
+            await opened.database.get(
                 sql.raw("SELECT instance_id, name FROM p2p_peers WHERE instance_id = 'peer-1'"),
             ),
         ).toEqual({ instance_id: "peer-1", name: "Remote Rig" });
         expect(
-            opened.database.get(
+            await opened.database.get(
                 sql.raw(
                     "SELECT pairing_id, instance_id FROM p2p_peer_pairings WHERE pairing_id = 'pairing-1'",
                 ),
             ),
         ).toEqual({ instance_id: "peer-1", pairing_id: "pairing-1" });
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(
+                    sql.raw("PRAGMA table_info(happy_cloud_enrollment)"),
+                )
+            ).map((column) => column.name),
         ).not.toContain("friends_consent");
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(
+                    sql.raw("PRAGMA table_info(happy_cloud_enrollment)"),
+                )
+            ).map((column) => column.name),
         ).not.toContain("friends_changed_at_ms");
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(
+                    sql.raw("PRAGMA table_info(happy_cloud_enrollment)"),
+                )
+            ).map((column) => column.name),
         ).not.toContain("live_session_sharing_consent");
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(happy_cloud_enrollment)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(
+                    sql.raw("PRAGMA table_info(happy_cloud_enrollment)"),
+                )
+            ).map((column) => column.name),
         ).not.toContain("live_session_sharing_changed_at_ms");
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("does not replay the identity migration when the following migration runs", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database, { createDataEpoch: () => "stable-epoch" });
-        dropSchemaAddedAfterIdentityMigrations(opened.database);
-        opened.database.run(sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"));
-        opened.database.run(
+    it("does not replay the identity migration when the following migration runs", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "stable-epoch" });
+        await dropSchemaAddedAfterIdentityMigrations(opened.database);
+        await opened.database.run(
+            sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"),
+        );
+        await opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_SCHEMA_VERSION)}`),
         );
 
-        migrateSessionDatabase(opened.database, {
+        await migrateSessionDatabase(opened.database, {
             createDataEpoch: () => {
                 throw new Error("The identity migration was replayed.");
             },
         });
 
         expect(
-            opened.database.get(sql.raw("SELECT epoch, format_version FROM rig_data_identity")),
+            await opened.database.get(
+                sql.raw("SELECT epoch, format_version FROM rig_data_identity"),
+            ),
         ).toEqual({ epoch: "stable-epoch", format_version: 1 });
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("pins the data identity migration at index 19", () => {
+    it("pins the data identity migration at index 19", async () => {
         expect(RIG_DATA_IDENTITY_MIGRATION_INDEX).toBe(19);
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded" });
-        dropSchemaAddedAfterIdentityMigrations(opened.database);
-        opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
-        opened.database.run(
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded" });
+        await dropSchemaAddedAfterIdentityMigrations(opened.database);
+        await opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
+        await opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
         );
 
-        migrateSessionDatabase(opened.database, { createDataEpoch: () => "pinned-epoch" });
+        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "pinned-epoch" });
 
         expect(
-            opened.database.get(sql.raw("SELECT epoch, format_version FROM rig_data_identity")),
+            await opened.database.get(
+                sql.raw("SELECT epoch, format_version FROM rig_data_identity"),
+            ),
         ).toEqual({ epoch: "pinned-epoch", format_version: 1 });
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("creates and enforces the named identity constraints", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database, { createDataEpoch: () => "checked-epoch" });
-        const tableSql = opened.database.get<{ sql: string }>(
-            sql.raw("SELECT sql FROM sqlite_master WHERE name = 'rig_data_identity'"),
+    it("creates and enforces the named identity constraints", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "checked-epoch" });
+        const tableSql = (
+            await opened.database.get<{ sql: string }>(
+                sql.raw("SELECT sql FROM sqlite_master WHERE name = 'rig_data_identity'"),
+            )
         )?.sql;
 
         expect(tableSql).toContain("CONSTRAINT rig_data_identity_singleton");
         expect(tableSql).toContain("CONSTRAINT rig_data_identity_format_version");
-        expect(() =>
+        await expect(
             opened.database.run(sql.raw("UPDATE rig_data_identity SET format_version = 2")),
-        ).toThrow();
-        expect(() =>
+        ).rejects.toThrow();
+        await expect(
             opened.database.run(
                 sql.raw(
                     "INSERT INTO rig_data_identity (singleton, epoch, format_version) VALUES (2, 'other', 1)",
                 ),
             ),
-        ).toThrow();
+        ).rejects.toThrow();
         expect(
-            opened.database.get(sql.raw("SELECT singleton, format_version FROM rig_data_identity")),
+            await opened.database.get(
+                sql.raw("SELECT singleton, format_version FROM rig_data_identity"),
+            ),
         ).toEqual({ format_version: 1, singleton: 1 });
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("discards only pre-icon applets while preserving legacy slot entries", () => {
-        const opened = openTestDatabase();
-        opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
-        opened.database.run(sql.raw("PRAGMA user_version = 9"));
-        opened.database.run(sql.raw("CREATE TABLE unrelated_data (value TEXT NOT NULL)"));
-        opened.database.run(sql.raw("INSERT INTO unrelated_data (value) VALUES ('keep me')"));
-        opened.database.run(
+    it("discards only pre-icon applets while preserving legacy slot entries", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
+        await opened.database.run(sql.raw("PRAGMA user_version = 9"));
+        await opened.database.run(sql.raw("CREATE TABLE unrelated_data (value TEXT NOT NULL)"));
+        await opened.database.run(sql.raw("INSERT INTO unrelated_data (value) VALUES ('keep me')"));
+        await opened.database.run(
             sql.raw(
                 "CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1)",
             ),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 CREATE TABLE project_workspaces (
                     id TEXT NOT NULL PRIMARY KEY,
@@ -397,7 +419,7 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 CREATE TABLE slot_entries (
                     id TEXT NOT NULL PRIMARY KEY,
@@ -415,7 +437,7 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO slot_entries (
                     id,
@@ -440,7 +462,7 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 CREATE TABLE webapps (
                     name TEXT NOT NULL PRIMARY KEY,
@@ -454,7 +476,7 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 CREATE TABLE webapp_versions (
                     webapp_name TEXT NOT NULL,
@@ -465,7 +487,7 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO webapps (
                     name,
@@ -478,7 +500,7 @@ describe("migrateSessionDatabase", () => {
                 ) VALUES ('old-dashboard', 'Old', 'Old', 'session-1', 1, 1, 1)
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO webapp_versions (
                     webapp_name,
@@ -489,12 +511,12 @@ describe("migrateSessionDatabase", () => {
             `),
         );
 
-        migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.database);
 
-        expect(opened.database.all(sql.raw("SELECT * FROM applets"))).toEqual([]);
-        expect(opened.database.all(sql.raw("SELECT * FROM applet_versions"))).toEqual([]);
+        expect(await opened.database.all(sql.raw("SELECT * FROM applets"))).toEqual([]);
+        expect(await opened.database.all(sql.raw("SELECT * FROM applet_versions"))).toEqual([]);
         expect(
-            opened.database.get(
+            await opened.database.get(
                 sql.raw(`
                     SELECT author_type, author_id, author_name
                     FROM slot_entries
@@ -506,84 +528,90 @@ describe("migrateSessionDatabase", () => {
             author_id: "session-1",
             author_name: null,
         });
-        expect(opened.database.get(sql.raw("SELECT value FROM unrelated_data"))).toEqual({
+        expect(await opened.database.get(sql.raw("SELECT value FROM unrelated_data"))).toEqual({
             value: "keep me",
         });
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(applets)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(sql.raw("PRAGMA table_info(applets)"))
+            ).map((column) => column.name),
         ).toContain("icon_thumbhash");
         expect(
-            opened.database
-                .all<{ name: string }>(sql.raw("PRAGMA table_info(applet_versions)"))
-                .map((column) => column.name),
+            (
+                await opened.database.all<{ name: string }>(
+                    sql.raw("PRAGMA table_info(applet_versions)"),
+                )
+            ).map((column) => column.name),
         ).toContain("applet_name");
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("atomically replaces a database from the previous migration generation", () => {
-        const opened = openTestDatabase();
-        opened.database.run(sql.raw("CREATE TABLE legacy_data (value TEXT NOT NULL)"));
-        opened.database.run(sql.raw("INSERT INTO legacy_data (value) VALUES ('discard me')"));
-        opened.database.run(sql.raw("PRAGMA user_version = 13"));
+    it("atomically replaces a database from the previous migration generation", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(sql.raw("CREATE TABLE legacy_data (value TEXT NOT NULL)"));
+        await opened.database.run(sql.raw("INSERT INTO legacy_data (value) VALUES ('discard me')"));
+        await opened.database.run(sql.raw("PRAGMA user_version = 13"));
 
-        migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.database);
 
         expect(
-            opened.database.get(
+            await opened.database.get(
                 sql.raw("SELECT name FROM sqlite_master WHERE name = 'legacy_data'"),
             ),
         ).toBeUndefined();
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("keeps the init migration atomic", () => {
-        const opened = openTestDatabase();
-        opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
-        opened.database.run(sql.raw("CREATE TABLE project_avatar_assets (hash TEXT PRIMARY KEY)"));
+    it("keeps the init migration atomic", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
+        await opened.database.run(
+            sql.raw("CREATE TABLE project_avatar_assets (hash TEXT PRIMARY KEY)"),
+        );
 
-        expect(() => migrateSessionDatabase(opened.database)).toThrow();
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({ user_version: 0 });
+        await expect(migrateSessionDatabase(opened.database)).rejects.toThrow();
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+            user_version: 0,
+        });
         expect(
-            opened.database
-                .all<{ name: string }>(
+            (
+                await opened.database.all<{ name: string }>(
                     sql.raw(
                         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
                     ),
                 )
-                .map((row) => row.name),
+            ).map((row) => row.name),
         ).toEqual(["project_avatar_assets"]);
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("rejects a database created by an unknown future schema", () => {
-        const opened = openTestDatabase();
-        opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
-        opened.database.run(
+    it("rejects a database created by an unknown future schema", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
+        await opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(CURRENT_SESSION_DATABASE_VERSION + 1)}`),
         );
 
-        expect(() => migrateSessionDatabase(opened.database)).toThrow(
+        await expect(migrateSessionDatabase(opened.database)).rejects.toThrow(
             new RegExp(`supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}`, "u"),
         );
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("keeps the Drizzle schema identical to the applied migrations", () => {
-        const opened = openTestDatabase();
-        migrateSessionDatabase(opened.database);
+    it("keeps the Drizzle schema identical to the applied migrations", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.database);
 
         for (const table of Object.values(schema)) {
             const config = getTableConfig(table);
-            const actualColumns = opened.database.all<{
+            const actualColumns = await opened.database.all<{
                 name: string;
                 notnull: number;
                 pk: number;
@@ -604,12 +632,12 @@ describe("migrateSessionDatabase", () => {
             }
         }
 
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("starts existing project compute settings at generation one", () => {
-        const opened = openTestDatabase();
-        opened.database.run(
+    it("starts existing project compute settings at generation one", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(
             sql.raw(`
                 CREATE TABLE projects (
                     id TEXT NOT NULL PRIMARY KEY,
@@ -618,7 +646,7 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO projects (id, default_compute, default_docker_image)
                 VALUES
@@ -628,10 +656,10 @@ describe("migrateSessionDatabase", () => {
             `),
         );
 
-        projectComputeGeneration(opened.database);
+        await projectComputeGeneration(opened.database);
 
         expect(
-            opened.database.all<{ default_compute_generation: number; id: string }>(
+            await opened.database.all<{ default_compute_generation: number; id: string }>(
                 sql.raw("SELECT id, default_compute_generation FROM projects ORDER BY id"),
             ),
         ).toEqual([
@@ -639,12 +667,12 @@ describe("migrateSessionDatabase", () => {
             { default_compute_generation: 1, id: "local" },
             { default_compute_generation: 0, id: "unset" },
         ]);
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("starts existing project user mutation versions at their current versions", () => {
-        const opened = openTestDatabase();
-        opened.database.run(
+    it("starts existing project user mutation versions at their current versions", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(
             sql.raw(`
                 CREATE TABLE projects (
                     id TEXT NOT NULL PRIMARY KEY,
@@ -652,17 +680,17 @@ describe("migrateSessionDatabase", () => {
                 )
             `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
                 INSERT INTO projects (id, version)
                 VALUES ('first', 4), ('second', 9)
             `),
         );
 
-        projectUserMutationVersion(opened.database);
+        await projectUserMutationVersion(opened.database);
 
         expect(
-            opened.database.all<{
+            await opened.database.all<{
                 id: string;
                 user_mutation_version: number;
             }>(sql.raw("SELECT id, user_mutation_version FROM projects ORDER BY id")),
@@ -670,12 +698,12 @@ describe("migrateSessionDatabase", () => {
             { id: "first", user_mutation_version: 4 },
             { id: "second", user_mutation_version: 9 },
         ]);
-        opened.client.close();
+        await opened.database.close();
     });
 
-    it("backfills exact committed lifetime usage and adds the delegated traversal index", () => {
-        const opened = openTestDatabase();
-        opened.database.run(
+    it("backfills exact committed lifetime usage and adds the delegated traversal index", async () => {
+        const opened = await openTestDatabase();
+        await opened.database.run(
             sql.raw(`
             CREATE TABLE sessions (
                 id TEXT NOT NULL PRIMARY KEY,
@@ -685,7 +713,7 @@ describe("migrateSessionDatabase", () => {
             )
         `),
         );
-        opened.database.run(
+        await opened.database.run(
             sql.raw(`
             INSERT INTO sessions (id, delegated_by_session_id, created_at_ms, usage_json)
             VALUES
@@ -701,10 +729,10 @@ describe("migrateSessionDatabase", () => {
         `),
         );
 
-        agentTreeUsage(opened.database);
+        await agentTreeUsage(opened.database);
 
         expect(
-            opened.database.all<{ id: string; lifetime_total_tokens: number }>(
+            await opened.database.all<{ id: string; lifetime_total_tokens: number }>(
                 sql.raw(
                     "SELECT id, lifetime_total_tokens FROM sessions ORDER BY created_at_ms, id",
                 ),
@@ -716,8 +744,8 @@ describe("migrateSessionDatabase", () => {
             { id: "missing", lifetime_total_tokens: 0 },
         ]);
         expect(
-            opened.database
-                .all<{ detail: string }>(
+            (
+                await opened.database.all<{ detail: string }>(
                     sql.raw(`
                         EXPLAIN QUERY PLAN
                         SELECT id
@@ -726,10 +754,10 @@ describe("migrateSessionDatabase", () => {
                         ORDER BY created_at_ms, id
                     `),
                 )
-                .some((row) => row.detail.includes("sessions_delegated_created")),
+            ).some((row) => row.detail.includes("sessions_delegated_created")),
         ).toBe(true);
 
-        opened.client.close();
+        await opened.database.close();
     });
 });
 
@@ -756,8 +784,8 @@ const removedSharingTables = [
     "scope_shares",
 ] as const;
 
-function openTestDatabase() {
+async function openTestDatabase() {
     const directory = mkdtempSync(join(tmpdir(), "rig-database-init-"));
     directories.push(directory);
-    return openSessionDatabase(join(directory, "sessions.sqlite"));
+    return await openSessionDatabase(join(directory, "sessions.sqlite"));
 }

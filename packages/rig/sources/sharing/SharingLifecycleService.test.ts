@@ -12,27 +12,27 @@ const LOCAL_INSTANCE_ID = "alocalinstance00000000001";
 
 describe("SharingLifecycleService", () => {
     it("does not open Murmur until onboarding enables it", async () => {
-        const fixture = createFixture();
+        const fixture = await createFixture();
         try {
             await fixture.lifecycle.start();
             expect(fixture.open).not.toHaveBeenCalled();
-            expect(fixture.lifecycle.configured()).toBe(false);
+            expect(await fixture.lifecycle.configured()).toBe(false);
 
             await expect(fixture.lifecycle.onboardMurmur({ enabled: false })).resolves.toEqual({
                 enabled: false,
             });
             expect(fixture.open).not.toHaveBeenCalled();
-            expect(fixture.lifecycle.configured()).toBe(true);
-            expect(fixture.lifecycle.enabled()).toBe(false);
+            expect(await fixture.lifecycle.configured()).toBe(true);
+            expect(await fixture.lifecycle.enabled()).toBe(false);
         } finally {
             await fixture.lifecycle.close();
-            fixture.database.close();
+            await fixture.database.close();
         }
     });
 
     it("opens Murmur, binds the canonical profile, and returns its public identity", async () => {
-        const fixture = createFixture();
-        const profile = fixture.profiles.create({
+        const fixture = await createFixture();
+        const profile = await fixture.profiles.create({
             email: "steve@example.test",
             name: "Steve",
         });
@@ -47,16 +47,16 @@ describe("SharingLifecycleService", () => {
             expect(fixture.open).toHaveBeenCalledOnce();
             expect(fixture.service.bindProfile).toHaveBeenCalledWith(profile.id);
             expect(fixture.service.start).toHaveBeenCalledOnce();
-            expect(fixture.lifecycle.enabled()).toBe(true);
+            expect(await fixture.lifecycle.enabled()).toBe(true);
         } finally {
             await fixture.lifecycle.close();
-            fixture.database.close();
+            await fixture.database.close();
         }
     });
 
     it("restores enabled Murmur on restart and keeps disabled restarts offline", async () => {
-        const fixture = createFixture();
-        const profile = fixture.profiles.create({
+        const fixture = await createFixture();
+        const profile = await fixture.profiles.create({
             email: "steve@example.test",
             name: "Steve",
         });
@@ -91,12 +91,12 @@ describe("SharingLifecycleService", () => {
             await disabled.close();
         } finally {
             await restored.close();
-            fixture.database.close();
+            await fixture.database.close();
         }
     });
 
     it("rejects a nonlocal profile before opening Murmur", async () => {
-        const fixture = createFixture();
+        const fixture = await createFixture();
         try {
             await expect(
                 fixture.lifecycle.onboardMurmur({
@@ -105,21 +105,21 @@ describe("SharingLifecycleService", () => {
                 }),
             ).rejects.toThrow("profile owned by this Rig");
             expect(fixture.open).not.toHaveBeenCalled();
-            expect(fixture.lifecycle.configured()).toBe(false);
+            expect(await fixture.lifecycle.configured()).toBe(false);
         } finally {
             await fixture.lifecycle.close();
-            fixture.database.close();
+            await fixture.database.close();
         }
     });
 
     it("closes and clears Murmur before reopening the same profile with a new identity", async () => {
-        const fixture = createFixture();
-        const profile = fixture.profiles.create({
+        const fixture = await createFixture();
+        const profile = await fixture.profiles.create({
             email: "steve@example.test",
             name: "Steve",
         });
         await fixture.lifecycle.onboardMurmur({ enabled: true, profileId: profile.id });
-        const replacement = fakeService(profile.id, () => undefined, REPLACEMENT_IDENTITY);
+        const replacement = fakeService(profile.id, async () => undefined, REPLACEMENT_IDENTITY);
         fixture.open.mockResolvedValueOnce(replacement);
         try {
             await expect(fixture.lifecycle.reset()).resolves.toMatchObject({
@@ -134,13 +134,13 @@ describe("SharingLifecycleService", () => {
             expect(replacement.start).toHaveBeenCalledOnce();
         } finally {
             await fixture.lifecycle.close();
-            fixture.database.close();
+            await fixture.database.close();
         }
     });
 });
 
-function createFixture() {
-    const database = new PersistentSessionStore({
+async function createFixture() {
+    const database = await PersistentSessionStore.open({
         databasePath: ":memory:",
         localInstanceId: LOCAL_INSTANCE_ID,
     });
@@ -149,8 +149,8 @@ function createFixture() {
         localInstanceId: LOCAL_INSTANCE_ID,
         publish: () => undefined,
     });
-    const service = fakeService(null, (profileId) => {
-        database.transaction((tx) => sharingProfileBind(tx, profileId, IDENTITY, 1));
+    const service = fakeService(null, async (profileId) => {
+        await database.transaction((tx) => sharingProfileBind(tx, profileId, IDENTITY, 1));
     });
     const open = vi.fn(async () => service);
     const resetState = vi.fn(async () => undefined);
@@ -171,7 +171,7 @@ function createFixture() {
 
 function fakeService(
     profileId: string | null,
-    onBind: (profileId: string) => void = () => undefined,
+    onBind: (profileId: string) => Promise<void> = async () => undefined,
     identity = IDENTITY,
 ): ManagedSharingService & {
     bindProfile: ReturnType<typeof vi.fn>;

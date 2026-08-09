@@ -51,7 +51,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
                 hint: "Usage: rig inspect [--json]",
             });
         }
-        const inspection = runRigInspection({ json: commandArgs[0] === "--json" });
+        const inspection = await runRigInspection({ json: commandArgs[0] === "--json" });
         return rigInspectionExitCode(inspection);
     }
     if (command === "upgrade") {

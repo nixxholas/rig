@@ -4,7 +4,7 @@ import { projects } from "../database/schema.js";
 import { projectNameKey, projectStorageKey } from "../../project/projectIdentity.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import type { ProjectCreator, ProjectRemoteSource } from "../../protocol/index.js";
 
 export interface ProjectCreateInput {
@@ -18,36 +18,37 @@ export interface ProjectCreateInput {
     requiredSecretKind?: "github";
 }
 
-export function projectCreate(tx: TX, input: ProjectCreateInput): void {
-    inTx(tx, (tx) => {
-        const name = reserveUnique(input.baseName, (candidate) => {
+export async function projectCreate(tx: DatabaseScope, input: ProjectCreateInput): Promise<void> {
+    await inTx(tx, async (tx) => {
+        const name = await reserveUnique(input.baseName, async (candidate) => {
             return (
-                tx
+                (await tx
                     .select({ id: projects.id })
                     .from(projects)
                     .where(eq(projects.nameKey, projectNameKey(candidate)))
-                    .get() !== undefined
+                    .get()) !== undefined
             );
         });
-        const storageKey = reserveUniqueKey(
+        const storageKey = await reserveUniqueKey(
             input.kind === "home" ? "home" : projectStorageKey(input.baseName),
-            (candidate) => {
+            async (candidate) => {
                 return (
-                    tx
+                    (await tx
                         .select({ id: projects.id })
                         .from(projects)
                         .where(sql`${projects.storageKey} = ${candidate} COLLATE NOCASE`)
-                        .get() !== undefined
+                        .get()) !== undefined
                 );
             },
         );
-        const first = tx
+        const first = await tx
             .select({ orderKey: projects.orderKey })
             .from(projects)
             .orderBy(asc(projects.orderKey))
             .limit(1)
             .get();
-        tx.insert(projects)
+        await tx
+            .insert(projects)
             .values({
                 createdAtMs: input.now,
                 gitAhead: 0,
@@ -85,18 +86,24 @@ export function projectCreate(tx: TX, input: ProjectCreateInput): void {
     });
 }
 
-function reserveUnique(base: string, taken: (candidate: string) => boolean): string {
-    if (!taken(base)) return base;
+async function reserveUnique(
+    base: string,
+    taken: (candidate: string) => Promise<boolean>,
+): Promise<string> {
+    if (!(await taken(base))) return base;
     for (let suffix = 2; ; suffix += 1) {
         const candidate = `${base} (${String(suffix)})`;
-        if (!taken(candidate)) return candidate;
+        if (!(await taken(candidate))) return candidate;
     }
 }
 
-function reserveUniqueKey(base: string, taken: (candidate: string) => boolean): string {
-    if (!taken(base)) return base;
+async function reserveUniqueKey(
+    base: string,
+    taken: (candidate: string) => Promise<boolean>,
+): Promise<string> {
+    if (!(await taken(base))) return base;
     for (let suffix = 2; ; suffix += 1) {
         const candidate = `${base}-${String(suffix)}`;
-        if (!taken(candidate)) return candidate;
+        if (!(await taken(candidate))) return candidate;
     }
 }

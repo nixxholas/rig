@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     // `scope_kind` is present from the start: a project share is the same machinery
@@ -134,6 +134,6 @@ const statements = [
     "CREATE INDEX scope_share_replica_entries_session ON scope_share_replica_entries(share_id, subject_kind, subject_id, sequence)",
 ] as const;
 
-export function scopeSharing(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function scopeSharing(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

@@ -1,26 +1,29 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function querySessionHasEarlierStoredMessage(
-    tx: TX,
+export async function querySessionHasEarlierStoredMessage(
+    tx: DatabaseScope,
     sessionId: string,
     earliestPosition: number | undefined,
-): boolean {
-    return (
-        tx.get(
-            earliestPosition === undefined
-                ? sql`
+): Promise<boolean> {
+    return await inDatabase(tx, async (tx) => {
+        return (
+            (await tx.get(
+                earliestPosition === undefined
+                    ? sql`
                       SELECT 1 FROM session_messages
                       WHERE session_id = ${sessionId} AND is_partial = 0
                       LIMIT 1
                   `
-                : sql`
+                    : sql`
                       SELECT 1 FROM session_messages
                       WHERE session_id = ${sessionId}
                         AND is_partial = 0
                         AND position < ${earliestPosition}
                       LIMIT 1
                   `,
-        ) !== undefined
-    );
+            )) !== undefined
+        );
+    });
 }

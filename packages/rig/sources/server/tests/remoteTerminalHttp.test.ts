@@ -198,7 +198,7 @@ async function startServer(): Promise<{
     const directory = await mkdtemp(join(tmpdir(), "rig-remote-terminal-"));
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "daemon.sock");
-    const server = createProtocolHttpServer({ token: "test-token" });
+    const server = await createProtocolHttpServer({ token: "test-token" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, resolve);

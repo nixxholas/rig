@@ -228,7 +228,7 @@ describe("grokSpawnSubagentTool", () => {
 
     it("returns an Agent ID and canonical path when stopping a subagent", async () => {
         const harness = createJustBashToolHarness();
-        const interrupt = vi.fn(() => ({
+        const interrupt = vi.fn(async () => ({
             agentId: "unguessable-agent-1",
             description: "Inspect code",
             path: "/root/inspect_code",
@@ -262,7 +262,7 @@ describe("grokSpawnSubagentTool", () => {
 
     it("follows up a retained subagent at the requested effort", async () => {
         const harness = createJustBashToolHarness();
-        const followUp = vi.fn(() => ({
+        const followUp = vi.fn(async () => ({
             agentId: "unguessable-agent-1",
             description: "Inspect code",
             path: "/root/inspect_code",

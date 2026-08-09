@@ -34,8 +34,8 @@ import { createModelCatalog } from "/app/packages/rig/dist/model-catalog/index.j
 import { InMemorySessionStore } from "/app/packages/rig/dist/session/index.js";
 
 const modelCatalog = createModelCatalog();
-const store = new InMemorySessionStore({ modelCatalog });
-store.registerSecret({
+const store = await InMemorySessionStore.open({ modelCatalog });
+await store.registerSecret({
     description: "Service API credentials",
     environment: {
         INJECTED_SERVICE_REGION: process.env.RIG_TEST_REGISTERED_REGION ?? "",
@@ -43,7 +43,7 @@ store.registerSecret({
     },
     id: "service",
 });
-store.registerSecret({
+await store.registerSecret({
     description: "Database credentials",
     environment: {
         INJECTED_DATABASE_TOKEN: process.env.RIG_TEST_DATABASE_TOKEN ?? "",
@@ -51,8 +51,8 @@ store.registerSecret({
     id: "database",
 });
 const create = store.create.bind(store);
-store.create = (request) => create({ ...request, secretIds: ["service", "database"] });
-const server = createProtocolHttpServer({ modelCatalog, store, token: "secret-test-token" });
+store.create = async (request) => await create({ ...request, secretIds: ["service", "database"] });
+const server = await createProtocolHttpServer({ modelCatalog, store, token: "secret-test-token" });
 server.listen(process.env.RIG_SERVER_SOCKET_PATH);
 `,
                 "start-secret-server.sh": `#!/usr/bin/env bash

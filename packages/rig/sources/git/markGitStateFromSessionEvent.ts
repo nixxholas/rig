@@ -16,7 +16,7 @@ import type { SessionStore } from "../session/SessionStore.js";
  * the tracker debounces, and a scan that finds nothing different publishes nothing, so an extra
  * signal costs one coalesced scan and never a wrong answer.
  */
-export function markGitStateFromSessionEvent(
+export async function markGitStateFromSessionEvent(
     event: SessionEvent,
     store: SessionStore,
     tracker: GitStateTracker,
@@ -26,16 +26,16 @@ export function markGitStateFromSessionEvent(
      * fire session-access notifications, on every tool execution.
      */
     live?: { projectId: string; workspaceId?: string },
-): void {
+): Promise<void> {
     if (!isWorkSignal(event)) return;
-    const loaded = live ?? store.get(event.sessionId)?.projectIdentity();
+    const loaded = live ?? (await store.get(event.sessionId))?.projectIdentity();
     if (loaded === undefined) return;
-    const project = store.getProject(loaded.projectId);
+    const project = await store.getProject(loaded.projectId);
     if (project === undefined) return;
     const workspace =
         loaded.workspaceId === undefined
             ? undefined
-            : store.getWorkspace(loaded.projectId, loaded.workspaceId);
+            : await store.getWorkspace(loaded.projectId, loaded.workspaceId);
     const entity = resolveGitTrackedEntity(project, workspace);
     if (entity === undefined) return;
     tracker.markChanged(entity);

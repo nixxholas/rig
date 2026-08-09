@@ -1,11 +1,11 @@
 import { folderShareNodes, folderShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import type { SharedFolderState } from "../../protocol/FolderSharingProtocol.js";
 import { queryFolderShare } from "./queryFolderShares.js";
 
-export function folderShareCreate(
-    tx: TX,
+export async function folderShareCreate(
+    tx: DatabaseScope,
     input: {
         groupId: string;
         now: number;
@@ -15,16 +15,17 @@ export function folderShareCreate(
         state: SharedFolderState;
         status: "synced" | "syncing";
     },
-): "created" | "existing" {
-    return inTx(tx, (tx) => {
-        const existing = queryFolderShare(tx, input.groupId);
+): Promise<"created" | "existing"> {
+    return await inTx(tx, async (tx) => {
+        const existing = await queryFolderShare(tx, input.groupId);
         if (existing !== undefined) {
             if (existing.rootFolderId !== input.rootFolderId) {
                 throw new Error("A Murmur folder group cannot change its root.");
             }
             return "existing";
         }
-        tx.insert(folderShares)
+        await tx
+            .insert(folderShares)
             .values({
                 createdAtMs: input.now,
                 groupId: input.groupId,
@@ -37,7 +38,8 @@ export function folderShareCreate(
                 updatedAtMs: input.now,
             })
             .run();
-        tx.insert(folderShareNodes)
+        await tx
+            .insert(folderShareNodes)
             .values(
                 input.state.folders.map((node) => ({
                     folderId: node.id,

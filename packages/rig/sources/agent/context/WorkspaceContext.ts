@@ -85,12 +85,12 @@ export interface WorkspaceContext {
     addProject(path: string): Promise<AgentProject>;
     create(input: { baseRef?: string; name: string }): Promise<AgentWorkspace>;
     delegate(request: DelegatedSessionRequest, signal?: AbortSignal): Promise<DelegatedSession>;
-    listProjects(): readonly AgentProject[];
+    listProjects(): Promise<readonly AgentProject[]>;
     listSessions(target: {
         projectId?: string;
         workspaceId?: string;
-    }): readonly AgentWorkspaceSession[];
-    listWorkspaces(projectId?: string): readonly AgentWorkspace[];
+    }): Promise<readonly AgentWorkspaceSession[]>;
+    listWorkspaces(projectId?: string): Promise<readonly AgentWorkspace[]>;
     spawn(request: WorkspaceAgentRequest, signal?: AbortSignal): Promise<SpawnSubagentResult>;
     transfer(targetWorkspaceId: string): Promise<AgentSessionTransferSchedule>;
 }

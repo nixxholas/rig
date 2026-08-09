@@ -25,14 +25,14 @@ const INVITATION = new Uint8Array(32).fill(4);
 
 describe("SharingService", () => {
     it("binds the Murmur identity to the same local Rig profile and manages contacts", async () => {
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const events: string[] = [];
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = profiles.create({
+        const profile = await profiles.create({
             email: "steve@example.test",
             name: "Steve",
             photo: {
@@ -76,16 +76,13 @@ describe("SharingService", () => {
         sharing.start();
         try {
             await expect(sharing.createInvitation()).rejects.toThrow("Choose a local Rig profile");
-            sharing.bindProfile(profile.id);
+            await sharing.bindProfile(profile.id);
             expect((await sharing.snapshot()).profileId).toBe(profile.id);
-            expect(() =>
-                sharing.bindProfile(
-                    profiles.create({
-                        email: "other@example.test",
-                        name: "Other",
-                    }).id,
-                ),
-            ).toThrow("already bound");
+            const otherProfile = await profiles.create({
+                email: "other@example.test",
+                name: "Other",
+            });
+            await expect(sharing.bindProfile(otherProfile.id)).rejects.toThrow("already bound");
 
             await expect(sharing.createInvitation()).resolves.toEqual({
                 expiresAt: 301_000,
@@ -124,38 +121,39 @@ describe("SharingService", () => {
             expect(events).toContain("sharing_changed");
         } finally {
             await sharing.close();
-            database.close();
+            await database.close();
         }
     });
 
     it("refuses to attach a persisted profile binding to a different Murmur identity", async () => {
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
         const sharing = new SharingService({
             client: new FakeMurmurClient(),
             database,
             profiles,
             publish: () => undefined,
         });
-        sharing.bindProfile(profile.id);
+        await sharing.bindProfile(profile.id);
         await sharing.close();
+        const remoteSharing = new SharingService({
+            client: new FakeMurmurClient({ identity: REMOTE }),
+            database,
+            profiles,
+            publish: () => undefined,
+        });
         try {
-            expect(
-                () =>
-                    new SharingService({
-                        client: new FakeMurmurClient({ identity: REMOTE }),
-                        database,
-                        profiles,
-                        publish: () => undefined,
-                    }),
-            ).toThrow("stored Murmur identity does not match");
+            await expect(remoteSharing.bindProfile(profile.id)).rejects.toThrow(
+                "stored Murmur identity does not match",
+            );
         } finally {
-            database.close();
+            await remoteSharing.close();
+            await database.close();
         }
     });
 
@@ -164,7 +162,7 @@ describe("SharingService", () => {
         const contactsGate = new Promise<void>((resolve) => {
             releaseContacts = resolve;
         });
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
@@ -184,17 +182,17 @@ describe("SharingService", () => {
         await snapshot;
         await closing;
         expect(client.closed).toBe(true);
-        database.close();
+        await database.close();
     });
 
     it("aborts an active Murmur invitation upload while closing", async () => {
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
         const client = new FakeMurmurClient({ invitationWaitsForAbort: true });
         const sharing = new SharingService({
             client,
@@ -202,24 +200,24 @@ describe("SharingService", () => {
             profiles,
             publish: () => undefined,
         });
-        sharing.bindProfile(profile.id);
+        await sharing.bindProfile(profile.id);
         const invitation = sharing.createInvitation();
         const aborted = expect(invitation).rejects.toThrow("invitation aborted");
-        await Promise.resolve();
+        await vi.waitFor(() => expect(client.invitationSignal).toBeDefined());
         await sharing.close();
         await aborted;
         expect(client.invitationSignal?.aborted).toBe(true);
-        database.close();
+        await database.close();
     });
 
     it("does not accept a contact request whose Murmur profile is not a Rig profile", async () => {
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
         const client = new FakeMurmurClient({
             incoming: [
                 {
@@ -236,7 +234,7 @@ describe("SharingService", () => {
             profiles,
             publish: () => undefined,
         });
-        sharing.bindProfile(profile.id);
+        await sharing.bindProfile(profile.id);
         try {
             expect((await sharing.snapshot()).incomingRequests[0]?.profile).toBeNull();
             await expect(sharing.acceptContact("invalid")).rejects.toThrow(
@@ -244,13 +242,13 @@ describe("SharingService", () => {
             );
         } finally {
             await sharing.close();
-            database.close();
+            await database.close();
         }
     });
 
     it("restarts Murmur synchronization after an unexpected failure", async () => {
         vi.useFakeTimers();
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
@@ -278,13 +276,13 @@ describe("SharingService", () => {
             expect((await sharing.snapshot()).connection).toBe("connected");
         } finally {
             await sharing.close();
-            database.close();
+            await database.close();
             vi.useRealTimers();
         }
     });
 
     it("drains queued folder work before closing Murmur", async () => {
-        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
@@ -323,7 +321,7 @@ describe("SharingService", () => {
             expect(client.closed).toBe(true);
         } finally {
             await sharing.close();
-            database.close();
+            await database.close();
         }
     });
 });

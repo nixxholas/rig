@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { SessionEvent } from "../../protocol/index.js";
 import { sessionEvents, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export interface SessionEventIndexFacts {
     messageId?: string;
@@ -11,30 +11,32 @@ export interface SessionEventIndexFacts {
     toolCallId?: string;
 }
 
-export function sessionAppendEvent(
-    tx: TX,
+export async function sessionAppendEvent(
+    tx: DatabaseScope,
     event: SessionEvent,
     facts: SessionEventIndexFacts,
     updatedAt: number,
-): "existing" | "inserted" {
-    return inTx(tx, (tx) => {
+): Promise<"existing" | "inserted"> {
+    return await inTx(tx, async (tx) => {
         const inserted =
-            tx
-                .insert(sessionEvents)
-                .values({
-                    createdAtMs: event.createdAt,
-                    dataJson: JSON.stringify(event.data),
-                    eventId: event.id,
-                    messageId: facts.messageId ?? null,
-                    runId: facts.runId ?? null,
-                    sessionId: event.sessionId,
-                    toolCallId: facts.toolCallId ?? null,
-                    type: event.type,
-                })
-                .onConflictDoNothing({ target: sessionEvents.eventId })
-                .run().changes > 0;
+            (
+                await tx
+                    .insert(sessionEvents)
+                    .values({
+                        createdAtMs: event.createdAt,
+                        dataJson: JSON.stringify(event.data),
+                        eventId: event.id,
+                        messageId: facts.messageId ?? null,
+                        runId: facts.runId ?? null,
+                        sessionId: event.sessionId,
+                        toolCallId: facts.toolCallId ?? null,
+                        type: event.type,
+                    })
+                    .onConflictDoNothing({ target: sessionEvents.eventId })
+                    .run()
+            ).rowsAffected > 0;
         if (!inserted) {
-            const existing = tx
+            const existing = await tx
                 .select({
                     createdAtMs: sessionEvents.createdAtMs,
                     dataJson: sessionEvents.dataJson,
@@ -60,7 +62,8 @@ export function sessionAppendEvent(
             }
             return "existing";
         }
-        tx.update(sessions)
+        await tx
+            .update(sessions)
             .set({ lastEventId: event.id, updatedAtMs: updatedAt })
             .where(eq(sessions.id, event.sessionId))
             .run();

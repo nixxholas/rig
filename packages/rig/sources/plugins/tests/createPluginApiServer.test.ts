@@ -37,7 +37,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -88,7 +88,7 @@ describe("plugin API server", () => {
         await execFile("git", ["-C", directory, "config", "user.name", "Rig Test"]);
         await execFile("git", ["-C", directory, "add", "README.md"]);
         await execFile("git", ["-C", directory, "commit", "-m", "Initial"]);
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -130,7 +130,9 @@ describe("plugin API server", () => {
         });
 
         expect(retry).toEqual(first);
-        expect(store.listWorkspaces(project.id)).toEqual([expect.objectContaining({ id })]);
+        await expect(store.listWorkspaces(project.id)).resolves.toEqual([
+            expect.objectContaining({ id }),
+        ]);
         await expect(
             client.workspaces.create({
                 baseRef: "different-base",
@@ -147,7 +149,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -197,7 +199,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -243,7 +245,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -553,7 +555,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -682,7 +684,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -783,7 +785,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -837,7 +839,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -882,7 +884,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -967,7 +969,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = new InMemorySessionStore({
+        const store = await InMemorySessionStore.open({
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -1053,7 +1055,7 @@ async function createWorkspaceApiFixture(
     const workspacePath = join(directory, "workspace");
     await mkdir(workspacePath);
     const socketPath = join(directory, "api.sock");
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         modelCatalog: {
             defaultModelId: "",
             defaultProviderId: "",
@@ -1063,7 +1065,7 @@ async function createWorkspaceApiFixture(
     });
     cleanup.push(() => store.close());
     const workspaceId = "workspace-1";
-    vi.spyOn(store, "listWorkspaces").mockReturnValue([
+    vi.spyOn(store, "listWorkspaces").mockResolvedValue([
         {
             branch: "worktree/plugin-work",
             createdAt: 1,
@@ -1109,7 +1111,7 @@ async function createPluginApiFixture() {
     const generatedDirectory = join(directory, "generated");
     await mkdir(pluginDataDirectory);
     const socketPath = join(directory, "api.sock");
-    const store = new InMemorySessionStore({
+    const store = await InMemorySessionStore.open({
         modelCatalog: {
             defaultModelId: "",
             defaultProviderId: "",

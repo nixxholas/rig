@@ -30,13 +30,13 @@ afterEach(() => {
 });
 
 describe("runRigInspection", () => {
-    it("prints stable machine-readable clean-install facts without creating daemon state", () => {
+    it("prints stable machine-readable clean-install facts without creating daemon state", async () => {
         const root = testDirectory();
         const daemonDirectory = join(root, "daemon");
         const databasePath = join(daemonDirectory, "sessions.sqlite");
         const output: string[] = [];
 
-        const inspection = runRigInspection({
+        const inspection = await runRigInspection({
             databasePath,
             json: true,
             log: (line) => output.push(line),
@@ -54,15 +54,15 @@ describe("runRigInspection", () => {
         expect(existsSync(daemonDirectory)).toBe(false);
     });
 
-    it("prints initialized data and its stable epoch in human-readable English", () => {
+    it("prints initialized data and its stable epoch in human-readable English", async () => {
         const root = testDirectory();
         const databasePath = join(root, "sessions.sqlite");
-        const database = openSessionDatabase(databasePath);
-        migrateSessionDatabase(database.database, { createDataEpoch: () => "epoch-one" });
-        database.client.close();
+        const database = await openSessionDatabase(databasePath);
+        await migrateSessionDatabase(database.database, { createDataEpoch: () => "epoch-one" });
+        await database.client.close();
         const output: string[] = [];
 
-        runRigInspection({
+        await runRigInspection({
             databasePath,
             log: (line) => output.push(line),
             rigVersion: "1.2.3",
@@ -77,26 +77,26 @@ describe("runRigInspection", () => {
         ]);
     });
 
-    it("reports a populated released v16 database as a recognized epoch-less upgrade", () => {
+    it("reports a populated released v16 database as a recognized epoch-less upgrade", async () => {
         const root = testDirectory();
         const databasePath = join(root, "sessions.sqlite");
-        const store = new PersistentSessionStore({ databasePath });
-        store.create({ cwd: root });
-        store.close();
-        const database = openSessionDatabase(databasePath);
+        const store = await PersistentSessionStore.open({ databasePath });
+        await store.create({ cwd: root });
+        await store.close();
+        const database = await openSessionDatabase(databasePath);
         expect(
-            database.database.get<{ count: number }>(
+            await database.database.get<{ count: number }>(
                 sql.raw("SELECT COUNT(*) AS count FROM sessions"),
             ),
         ).toEqual({ count: 1 });
-        database.database.run(sql.raw("DROP TABLE rig_data_identity"));
-        database.database.run(
+        await database.database.run(sql.raw("DROP TABLE rig_data_identity"));
+        await database.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
         );
-        database.client.close();
+        await database.client.close();
         const output: string[] = [];
 
-        const result = runRigInspection({
+        const result = await runRigInspection({
             databasePath,
             log: (line) => output.push(line),
             rigVersion: "1.2.3",

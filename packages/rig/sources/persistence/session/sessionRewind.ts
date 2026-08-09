@@ -2,11 +2,16 @@ import { and, eq, gte, sql } from "drizzle-orm";
 
 import { pendingContextMessages, sessionMessages, sessionTurns } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
-export function sessionRewind(tx: TX, sessionId: string, position: number): void {
-    inTx(tx, (tx) => {
-        tx.delete(pendingContextMessages)
+export async function sessionRewind(
+    tx: DatabaseScope,
+    sessionId: string,
+    position: number,
+): Promise<void> {
+    await inTx(tx, async (tx) => {
+        await tx
+            .delete(pendingContextMessages)
             .where(
                 and(
                     eq(pendingContextMessages.sessionId, sessionId),
@@ -14,7 +19,8 @@ export function sessionRewind(tx: TX, sessionId: string, position: number): void
                 ),
             )
             .run();
-        tx.delete(sessionMessages)
+        await tx
+            .delete(sessionMessages)
             .where(
                 and(
                     eq(sessionMessages.sessionId, sessionId),
@@ -22,8 +28,8 @@ export function sessionRewind(tx: TX, sessionId: string, position: number): void
                 ),
             )
             .run();
-        tx.delete(sessionTurns).where(eq(sessionTurns.sessionId, sessionId)).run();
-        tx.run(sql`
+        await tx.delete(sessionTurns).where(eq(sessionTurns.sessionId, sessionId)).run();
+        await tx.run(sql`
             INSERT INTO session_turns (session_id, run_id, first_position)
             SELECT session_id, run_id, MIN(position)
             FROM session_messages

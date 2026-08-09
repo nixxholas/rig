@@ -1,7 +1,12 @@
 import { sql } from "drizzle-orm";
 import { createId } from "@paralleldrive/cuid2";
 
-import type { SessionDatabase } from "./openSessionDatabase.js";
+import { inDatabase } from "./inDatabase.js";
+import type {
+    DrizzleSessionDatabase,
+    DrizzleSessionTx,
+    SessionDatabase,
+} from "./SessionDatabase.js";
 import { init } from "./migrations/01-init.js";
 import { delegatedSessions } from "./migrations/02-delegated-sessions.js";
 import { timelineIndex } from "./migrations/03-timeline-index.js";
@@ -60,7 +65,10 @@ interface MigrationContext {
     localInstanceId: string;
 }
 
-type SessionDatabaseMigration = (database: SessionDatabase, context: MigrationContext) => void;
+type SessionDatabaseMigration = (
+    database: DrizzleSessionTx,
+    context: MigrationContext,
+) => Promise<void>;
 
 const migrations: readonly SessionDatabaseMigration[] = [
     init,
@@ -82,7 +90,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     pendingContextMessages,
     agentSessionSharing,
     sessionShareEntryLog,
-    (database, context) => rigDataIdentity(database, context.createDataEpoch()),
+    async (database, context) => rigDataIdentity(database, context.createDataEpoch()),
     rigDataIdentityFormat,
     rigDataIdentityNamedChecks,
     createHappyCloudEnrollmentTables,
@@ -101,7 +109,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     sessionScopes,
     sessionMutations,
     p2pProvisionedProviders,
-    (database, context) => sessionOwner(database, context.localInstanceId),
+    async (database, context) => sessionOwner(database, context.localInstanceId),
     p2pCredentialSnapshots,
     sessionCredentialBinding,
     remoteProjects,
@@ -123,60 +131,75 @@ export const RIG_DATA_IDENTITY_SCHEMA_VERSION = RIG_DATA_IDENTITY_MIGRATION_INDE
 
 export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;
 
-export function migrateSessionDatabase(
-    database: SessionDatabase,
+export async function migrateSessionDatabase(
+    database: SessionDatabase | DrizzleSessionDatabase,
     options: { createDataEpoch?: () => string; localInstanceId?: string } = {},
-): void {
+): Promise<void> {
     const createDataEpoch = options.createDataEpoch ?? createId;
     const localInstanceId = options.localInstanceId ?? createId();
-    database.run(sql.raw("PRAGMA journal_mode = WAL"));
-    database.run(sql.raw("PRAGMA synchronous = FULL"));
-    database.run(sql.raw("PRAGMA busy_timeout = 5000"));
-    database.run(sql.raw("PRAGMA foreign_keys = OFF"));
-    try {
-        database.transaction(
-            (transaction) => {
-                const applicationId =
-                    transaction.get<{ application_id: number }>(sql.raw("PRAGMA application_id"))
-                        ?.application_id ?? 0;
-                let currentVersion =
-                    transaction.get<{ user_version: number }>(sql.raw("PRAGMA user_version"))
-                        ?.user_version ?? 0;
-                if (applicationId !== SESSION_DATABASE_APPLICATION_ID) {
-                    resetDatabase(transaction);
-                    currentVersion = 0;
-                } else if (currentVersion > CURRENT_SESSION_DATABASE_VERSION) {
-                    throw new Error(
-                        `The session database uses schema version ${String(currentVersion)}, but this Rig version supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}.`,
+    await inDatabase(database, async (plainDatabase) => {
+        await plainDatabase.run(sql.raw("PRAGMA journal_mode = WAL"));
+        await plainDatabase.run(sql.raw("PRAGMA synchronous = FULL"));
+        await plainDatabase.run(sql.raw("PRAGMA busy_timeout = 5000"));
+        await plainDatabase.run(sql.raw("PRAGMA foreign_keys = OFF"));
+        try {
+            await plainDatabase.transaction(
+                async (transaction) => {
+                    const applicationId =
+                        (
+                            await transaction.get<{ application_id: number }>(
+                                sql.raw("PRAGMA application_id"),
+                            )
+                        )?.application_id ?? 0;
+                    let currentVersion =
+                        (
+                            await transaction.get<{ user_version: number }>(
+                                sql.raw("PRAGMA user_version"),
+                            )
+                        )?.user_version ?? 0;
+                    if (applicationId !== SESSION_DATABASE_APPLICATION_ID) {
+                        await resetDatabase(transaction);
+                        currentVersion = 0;
+                    } else if (currentVersion > CURRENT_SESSION_DATABASE_VERSION) {
+                        throw new Error(
+                            `The session database uses schema version ${String(currentVersion)}, but this Rig version supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}.`,
+                        );
+                    }
+                    for (
+                        let version = currentVersion;
+                        version < CURRENT_SESSION_DATABASE_VERSION;
+                        version += 1
+                    ) {
+                        await migrations[version]!(transaction, {
+                            createDataEpoch,
+                            localInstanceId,
+                        });
+                        await transaction.run(
+                            sql.raw(`PRAGMA user_version = ${String(version + 1)}`),
+                        );
+                    }
+                    await transaction.run(
+                        sql.raw(
+                            `PRAGMA application_id = ${String(SESSION_DATABASE_APPLICATION_ID)}`,
+                        ),
                     );
-                }
-                for (
-                    let version = currentVersion;
-                    version < CURRENT_SESSION_DATABASE_VERSION;
-                    version += 1
-                ) {
-                    migrations[version]!(transaction, { createDataEpoch, localInstanceId });
-                    transaction.run(sql.raw(`PRAGMA user_version = ${String(version + 1)}`));
-                }
-                transaction.run(
-                    sql.raw(`PRAGMA application_id = ${String(SESSION_DATABASE_APPLICATION_ID)}`),
-                );
-            },
-            { behavior: "immediate" },
-        );
-    } finally {
-        database.run(sql.raw("PRAGMA foreign_keys = ON"));
-    }
+                },
+                { behavior: "immediate" },
+            );
+        } finally {
+            await plainDatabase.run(sql.raw("PRAGMA foreign_keys = ON"));
+        }
+    });
 }
 
-function resetDatabase(database: SessionDatabase): void {
-    const tables = database.all<{ name: string }>(
+async function resetDatabase(database: DrizzleSessionTx): Promise<void> {
+    const tables = await database.all<{ name: string }>(
         sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"),
     );
     for (const table of tables) {
-        database.run(sql.raw(`DROP TABLE ${quoteIdentifier(table.name)}`));
+        await database.run(sql.raw(`DROP TABLE ${quoteIdentifier(table.name)}`));
     }
-    database.run(sql.raw("PRAGMA user_version = 0"));
+    await database.run(sql.raw("PRAGMA user_version = 0"));
 }
 
 function quoteIdentifier(value: string): string {

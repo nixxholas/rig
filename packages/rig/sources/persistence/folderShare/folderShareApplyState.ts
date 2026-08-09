@@ -10,7 +10,8 @@ import {
 } from "../../protocol/index.js";
 import { folderShareNodes, folderShareUpdates, folderShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import { inDatabase } from "../database/inDatabase.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderShare } from "./queryFolderShares.js";
 
 const MAX_FOLDER_SHARE_UPDATE_RECEIPTS = 10_000;
@@ -22,26 +23,28 @@ export class FolderShareSemanticError extends Error {
     }
 }
 
-export function folderShareShouldApplyState(
-    tx: TX,
+export async function folderShareShouldApplyState(
+    tx: DatabaseScope,
     groupId: string,
     deliveryId: string,
     packet: FolderSharePacket,
-): "apply" | "duplicate" {
-    const duplicate = tx
-        .select({ deliveryId: folderShareUpdates.deliveryId })
-        .from(folderShareUpdates)
-        .where(
-            and(
-                eq(folderShareUpdates.groupId, groupId),
-                or(
-                    eq(folderShareUpdates.operationId, packet.operationId),
-                    eq(folderShareUpdates.deliveryId, deliveryId),
+): Promise<"apply" | "duplicate"> {
+    return await inDatabase(tx, async (tx) => {
+        const duplicate = await tx
+            .select({ deliveryId: folderShareUpdates.deliveryId })
+            .from(folderShareUpdates)
+            .where(
+                and(
+                    eq(folderShareUpdates.groupId, groupId),
+                    or(
+                        eq(folderShareUpdates.operationId, packet.operationId),
+                        eq(folderShareUpdates.deliveryId, deliveryId),
+                    ),
                 ),
-            ),
-        )
-        .get();
-    return duplicate === undefined ? "apply" : "duplicate";
+            )
+            .get();
+        return duplicate === undefined ? "apply" : "duplicate";
+    });
 }
 
 /**
@@ -50,8 +53,8 @@ export function folderShareShouldApplyState(
  * Each folder is an independent LWW register. A missing/tombstoned parent makes descendants
  * temporarily unreachable without erasing their registers, so later parent restoration converges.
  */
-export function folderShareRecordAppliedState(
-    tx: TX,
+export async function folderShareRecordAppliedState(
+    tx: DatabaseScope,
     input: {
         deliveryId: string;
         groupId: string;
@@ -59,9 +62,9 @@ export function folderShareRecordAppliedState(
         packet: FolderSharePacket;
         sender: string;
     },
-): SharedFolderState {
-    return inTx(tx, (tx) => {
-        const share = queryFolderShare(tx, input.groupId);
+): Promise<SharedFolderState> {
+    return await inTx(tx, async (tx) => {
+        const share = await queryFolderShare(tx, input.groupId);
         if (share === undefined) throw new Error("The shared folder group is unknown.");
         validateOperations(share.rootFolderId, input.packet);
         if (input.packet.clock > share.logicalClock + 1) {
@@ -70,12 +73,13 @@ export function folderShareRecordAppliedState(
             );
         }
         const knownFolderIds = new Set(
-            tx
-                .select({ folderId: folderShareNodes.folderId })
-                .from(folderShareNodes)
-                .where(eq(folderShareNodes.groupId, input.groupId))
-                .all()
-                .map((row) => row.folderId),
+            (
+                await tx
+                    .select({ folderId: folderShareNodes.folderId })
+                    .from(folderShareNodes)
+                    .where(eq(folderShareNodes.groupId, input.groupId))
+                    .all()
+            ).map((row) => row.folderId),
         );
         for (const operation of input.packet.operations) {
             const folderId = operation.type === "upsert" ? operation.node.id : operation.folderId;
@@ -88,7 +92,7 @@ export function folderShareRecordAppliedState(
         }
         for (const operation of input.packet.operations) {
             const folderId = operation.type === "upsert" ? operation.node.id : operation.folderId;
-            const current = tx
+            const current = await tx
                 .select({
                     logicalClock: folderShareNodes.logicalClock,
                     sender: folderShareNodes.sender,
@@ -113,7 +117,8 @@ export function folderShareRecordAppliedState(
                 continue;
             }
             const nodeJson = operation.type === "upsert" ? JSON.stringify(operation.node) : null;
-            tx.insert(folderShareNodes)
+            await tx
+                .insert(folderShareNodes)
                 .values({
                     folderId,
                     groupId: input.groupId,
@@ -133,9 +138,10 @@ export function folderShareRecordAppliedState(
                 })
                 .run();
         }
-        const state = materializeState(tx, input.groupId, share.rootFolderId);
-        recordReceipt(tx, input);
-        tx.update(folderShares)
+        const state = await materializeState(tx, input.groupId, share.rootFolderId);
+        await recordReceipt(tx, input);
+        await tx
+            .update(folderShares)
             .set({
                 error: null,
                 lastSyncedAtMs: input.now,
@@ -151,8 +157,8 @@ export function folderShareRecordAppliedState(
 }
 
 /** Durably consumes a validly encoded but semantically unusable authenticated update. */
-export function folderShareRecordRejectedState(
-    tx: TX,
+export async function folderShareRecordRejectedState(
+    tx: DatabaseScope,
     input: {
         deliveryId: string;
         error: string;
@@ -161,18 +167,19 @@ export function folderShareRecordRejectedState(
         packet: FolderSharePacket;
         sender: string;
     },
-): void {
-    inTx(tx, (tx) => {
-        recordReceipt(tx, input);
-        tx.update(folderShares)
+): Promise<void> {
+    await inTx(tx, async (tx) => {
+        await recordReceipt(tx, input);
+        await tx
+            .update(folderShares)
             .set({ error: input.error, status: "error", updatedAtMs: input.now })
             .where(eq(folderShares.groupId, input.groupId))
             .run();
     });
 }
 
-function recordReceipt(
-    tx: TX,
+async function recordReceipt(
+    tx: DatabaseScope,
     input: {
         deliveryId: string;
         groupId: string;
@@ -180,8 +187,9 @@ function recordReceipt(
         packet: FolderSharePacket;
         sender: string;
     },
-): void {
-    tx.insert(folderShareUpdates)
+): Promise<void> {
+    await tx
+        .insert(folderShareUpdates)
         .values({
             createdAtMs: input.now,
             deliveryId: input.deliveryId,
@@ -192,7 +200,7 @@ function recordReceipt(
         })
         .onConflictDoNothing()
         .run();
-    tx.run(sql`
+    await tx.run(sql`
         DELETE FROM folder_share_updates
         WHERE delivery_id IN (
             SELECT delivery_id
@@ -225,9 +233,13 @@ function validateOperations(rootFolderId: string, packet: FolderSharePacket): vo
     }
 }
 
-function materializeState(tx: TX, groupId: string, rootId: string): SharedFolderState {
+async function materializeState(
+    tx: DatabaseScope,
+    groupId: string,
+    rootId: string,
+): Promise<SharedFolderState> {
     const live = new Map<string, SharedFolderNode>();
-    for (const row of tx
+    for (const row of await tx
         .select({ folderId: folderShareNodes.folderId, nodeJson: folderShareNodes.nodeJson })
         .from(folderShareNodes)
         .where(eq(folderShareNodes.groupId, groupId))

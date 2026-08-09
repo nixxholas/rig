@@ -1,3 +1,4 @@
+import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -6,7 +7,7 @@ import {
     type WorkletPermissions,
     type WorkletVersion,
 } from "../../protocol/WorkletProtocol.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 import { workletIconUrl } from "../../worklets/readWorkletIcon.js";
 
@@ -32,23 +33,25 @@ export interface StoredWorklet {
 }
 
 /** Lists every worklet with its complete version history, alphabetically by name. */
-export function queryWorklets(tx: TX): readonly StoredWorklet[] {
-    const workletRows = tx.all<Record<string, unknown>>(
-        sql`SELECT * FROM worklets ORDER BY name ASC`,
-    );
-    const versionRows = tx.all<Record<string, unknown>>(
-        sql`SELECT * FROM worklet_versions ORDER BY worklet_name ASC, version ASC`,
-    );
-    const versionsByName = new Map<string, WorkletVersion[]>();
-    for (const row of versionRows) {
-        const name = readString(row, "worklet_name");
-        const versions = versionsByName.get(name) ?? [];
-        versions.push(readWorkletVersionRow(row));
-        versionsByName.set(name, versions);
-    }
-    return workletRows.map((row) =>
-        readWorkletRow(row, versionsByName.get(readString(row, "name")) ?? []),
-    );
+export async function queryWorklets(tx: DatabaseScope): Promise<readonly StoredWorklet[]> {
+    return await inDatabase(tx, async (tx) => {
+        const workletRows = await tx.all<Record<string, unknown>>(
+            sql`SELECT * FROM worklets ORDER BY name ASC`,
+        );
+        const versionRows = await tx.all<Record<string, unknown>>(
+            sql`SELECT * FROM worklet_versions ORDER BY worklet_name ASC, version ASC`,
+        );
+        const versionsByName = new Map<string, WorkletVersion[]>();
+        for (const row of versionRows) {
+            const name = readString(row, "worklet_name");
+            const versions = versionsByName.get(name) ?? [];
+            versions.push(readWorkletVersionRow(row));
+            versionsByName.set(name, versions);
+        }
+        return workletRows.map((row) =>
+            readWorkletRow(row, versionsByName.get(readString(row, "name")) ?? []),
+        );
+    });
 }
 
 export function readWorkletRow(

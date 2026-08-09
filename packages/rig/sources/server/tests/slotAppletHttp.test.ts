@@ -9,7 +9,7 @@ import sharp from "sharp";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
-const servers: ReturnType<typeof createProtocolHttpServer>[] = [];
+const servers: Awaited<ReturnType<typeof createProtocolHttpServer>>[] = [];
 const cleanups: (() => Promise<void> | void)[] = [];
 const originalAppletsDirectory = process.env.HAPPY_APPLETS_DIRECTORY;
 
@@ -479,10 +479,10 @@ describe("applet HTTP protocol", () => {
 
 async function startServer(): Promise<number> {
     process.env.HAPPY_APPLETS_DIRECTORY = await createTempDirectory("rig-applets-test-");
-    const store = new InMemorySessionStore();
-    store.createWithId("session-1", { cwd: "/tmp/rig-applet-context-test" });
+    const store = await InMemorySessionStore.open();
+    await store.createWithId("session-1", { cwd: "/tmp/rig-applet-context-test" });
     cleanups.push(() => store.close());
-    const server = createProtocolHttpServer({ store, token: "secret" });
+    const server = await createProtocolHttpServer({ store, token: "secret" });
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();

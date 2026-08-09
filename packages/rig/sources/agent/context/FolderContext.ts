@@ -12,11 +12,11 @@ import type {
  * files this one: a tool can never move somebody else's conversation through its arguments.
  */
 export interface FolderContext {
-    create(request: CreateFolderRequest): Folder;
+    create(request: CreateFolderRequest): Promise<Folder>;
     /** The whole tree, parents before their children. */
-    list(): readonly Folder[];
-    move(folderId: string, request: MoveFolderRequest): Folder;
+    list(): Promise<readonly Folder[]>;
+    move(folderId: string, request: MoveFolderRequest): Promise<Folder>;
     /** Files this chat into a folder, or returns it to Unsorted with `null`. */
-    setCurrentChatFolder(folderId: string | null): Folder | undefined;
-    update(folderId: string, request: UpdateFolderRequest): Folder;
+    setCurrentChatFolder(folderId: string | null): Promise<Folder | undefined>;
+    update(folderId: string, request: UpdateFolderRequest): Promise<Folder>;
 }

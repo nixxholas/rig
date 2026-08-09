@@ -1,5 +1,18 @@
-import type { SessionDatabase } from "./database/openSessionDatabase.js";
+import type {
+    DrizzleSessionDatabase,
+    DrizzleSessionTransaction,
+    SessionDatabase,
+} from "./database/SessionDatabase.js";
 
-type DrizzleTransaction = Parameters<Parameters<SessionDatabase["transaction"]>[0]>[0];
+export type { DrizzleSessionDatabase, DrizzleSessionTransaction };
 
-export type TX = SessionDatabase | DrizzleTransaction;
+/**
+ * The one database scope accepted by persistence operations.
+ *
+ * A scope may be the owning wrapper, its Drizzle database facade, or an active transaction.
+ * `inDatabase` and `inTx` distinguish those cases at runtime and preserve transaction reuse.
+ */
+export type DatabaseScope = SessionDatabase | DrizzleSessionDatabase | DrizzleSessionTransaction;
+
+/** Compatibility name for persistence helpers that still call their scope `TX`. */
+export type TX = DatabaseScope;

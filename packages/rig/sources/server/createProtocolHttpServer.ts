@@ -361,7 +361,7 @@ export interface ProtocolHttpServerOptions {
     replaceP2pCredentials?: (
         authenticatedOwnerId: string,
         envelope: P2pEncryptedCredentialSnapshot,
-    ) => P2pCredentialReplaceResult;
+    ) => Promise<P2pCredentialReplaceResult>;
     prepareP2pRequest?: PrepareP2pHttpRequest;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
@@ -405,20 +405,20 @@ export interface ProtocolHttpServerOptions {
     token: string;
 }
 
-export function createProtocolHttpServer(
+export async function createProtocolHttpServer(
     options: ProtocolHttpServerOptions,
     server: Server = createServer(),
-): Server {
+): Promise<Server> {
     const modelCatalog = options.modelCatalog ?? createModelCatalog();
     const store =
         options.store ??
-        new InMemorySessionStore({
+        (await InMemorySessionStore.open({
             ...(options.defaultDocker === undefined
                 ? {}
                 : { defaultDocker: options.defaultDocker }),
             modelCatalog,
             ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
-        });
+        }));
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
     const appletContextTokens = new AppletContextTokenStore();
@@ -470,9 +470,6 @@ export function createProtocolHttpServer(
     });
     attachP2pSshBridge(server, options.token, acceptSshBridge);
     attachHttpConnectProxy(server, options.token, store);
-    server.once("close", () => {
-        void store.remoteTerminals.close();
-    });
 
     server.on("request", (request, response) => {
         const mutating = isMutatingProtocolRequest(request);
@@ -762,7 +759,7 @@ async function handleRequest(
             sendJson(
                 response,
                 200,
-                runtimeConfig.replaceP2pCredentials(authenticatedOwnerId, body),
+                await runtimeConfig.replaceP2pCredentials(authenticatedOwnerId, body),
             );
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -892,11 +889,13 @@ async function handleRequest(
             return;
         }
         if (request.method === "GET" && route.name === "profiles") {
-            sendJson<ListRigProfilesResponse>(response, 200, { profiles: [...profiles.list()] });
+            sendJson<ListRigProfilesResponse>(response, 200, {
+                profiles: [...(await profiles.list())],
+            });
             return;
         }
         if (request.method === "GET" && route.name === "profile") {
-            const profile = profiles.get(route.profileId);
+            const profile = await profiles.get(route.profileId);
             if (profile === undefined) {
                 sendJson(response, 404, { error: "Rig profile not found." });
                 return;
@@ -926,7 +925,7 @@ async function handleRequest(
                         ? undefined
                         : await normalizeRigProfilePhoto(input.photo);
                 sendJson<RigProfileResponse>(response, 201, {
-                    profile: profiles.create({
+                    profile: await profiles.create({
                         email: input.email,
                         name: input.name,
                         ...(photo === undefined ? {} : { photo }),
@@ -959,7 +958,7 @@ async function handleRequest(
                     input.photo === undefined || input.photo === null
                         ? input.photo
                         : await normalizeRigProfilePhoto(input.photo);
-                const profile = profiles.update(route.profileId, {
+                const profile = await profiles.update(route.profileId, {
                     ...(input.email === undefined ? {} : { email: input.email }),
                     ...(input.name === undefined ? {} : { name: input.name }),
                     ...(photo === undefined ? {} : { photo }),
@@ -1006,7 +1005,7 @@ async function handleRequest(
             }
             try {
                 sendJson<RigProfileResponse>(response, 200, {
-                    profile: profiles.replicate(input.profile, authenticatedPeerId),
+                    profile: await profiles.replicate(input.profile, authenticatedPeerId),
                 });
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
@@ -1117,7 +1116,7 @@ async function handleRequest(
             return;
         }
         if (route.name === "happy-cloud-status") {
-            sendJson<HappyCloudStatus>(response, 200, happyCloud.status());
+            sendJson<HappyCloudStatus>(response, 200, await happyCloud.status());
             return;
         }
         if (route.name === "happy-cloud-commands") {
@@ -1145,7 +1144,7 @@ async function handleRequest(
                 return;
             }
             try {
-                sendJson<HappyCloudCommandResponse>(response, 200, happyCloud.apply(command));
+                sendJson<HappyCloudCommandResponse>(response, 200, await happyCloud.apply(command));
                 return;
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
@@ -1155,7 +1154,7 @@ async function handleRequest(
                     sendJson(response, conflict ? 409 : 403, {
                         code: error.code,
                         error: error.message,
-                        status: happyCloud.status(),
+                        status: await happyCloud.status(),
                     });
                     return;
                 }
@@ -1163,7 +1162,7 @@ async function handleRequest(
             }
         }
         if (route.name === "happy-cloud-profile") {
-            const profile = happyCloud.getProfile();
+            const profile = await happyCloud.getProfile();
             if (profile === undefined) {
                 sendJson(response, 404, { error: "No encrypted Happy Profile is stored." });
                 return;
@@ -1181,7 +1180,7 @@ async function handleRequest(
                 });
                 return;
             }
-            const blob = happyCloud.getSessionBlob(cloudSessionId);
+            const blob = await happyCloud.getSessionBlob(cloudSessionId);
             if (blob === undefined) {
                 sendJson(response, 404, {
                     error: "No encrypted mobile session blob is stored.",
@@ -1586,7 +1585,7 @@ async function handleRequest(
             const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
             const sessionId = url.searchParams.get("sessionId") ?? undefined;
             sendJson<ListSlotEntriesResponse>(response, 200, {
-                entries: store.slots.list({
+                entries: await store.slots.list({
                     ...(slot === undefined ? {} : { slot }),
                     ...(projectId === undefined ? {} : { projectId }),
                     ...(workspaceId === undefined ? {} : { workspaceId }),
@@ -1605,7 +1604,7 @@ async function handleRequest(
             }
             try {
                 sendJson<SlotEntryResponse>(response, 201, {
-                    entry: store.slots.create(body as CreateSlotEntryRequest),
+                    entry: await store.slots.create(body as CreateSlotEntryRequest),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryInvalidError) {
@@ -1630,7 +1629,10 @@ async function handleRequest(
             }
             try {
                 sendJson<SlotEntryResponse>(response, 200, {
-                    entry: store.slots.update(route.slotEntryId, body as UpdateSlotEntryRequest),
+                    entry: await store.slots.update(
+                        route.slotEntryId,
+                        body as UpdateSlotEntryRequest,
+                    ),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryInvalidError) {
@@ -1648,7 +1650,7 @@ async function handleRequest(
         if (request.method === "DELETE") {
             try {
                 sendJson<SlotEntryResponse>(response, 200, {
-                    entry: store.slots.remove(route.slotEntryId),
+                    entry: await store.slots.remove(route.slotEntryId),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryNotFoundError) {
@@ -1664,7 +1666,9 @@ async function handleRequest(
     }
     if (route.name === "applets") {
         if (request.method === "GET") {
-            sendJson<ListAppletsResponse>(response, 200, { applets: store.applets.list() });
+            sendJson<ListAppletsResponse>(response, 200, {
+                applets: await store.applets.list(),
+            });
             return;
         }
         if (request.method === "POST") {
@@ -1716,7 +1720,7 @@ async function handleRequest(
             const applet =
                 route.name === "applet-versions"
                     ? await store.applets.update(route.appletName, body as UpdateAppletRequest)
-                    : store.applets.revert(route.appletName, body as RevertAppletRequest);
+                    : await store.applets.revert(route.appletName, body as RevertAppletRequest);
             sendJson<AppletResponse>(response, 200, { applet });
         } catch (error) {
             if (error instanceof AppletInvalidError) {
@@ -1752,7 +1756,7 @@ async function handleRequest(
             );
             return;
         }
-        const applet = store.applets.get(route.appletName);
+        const applet = await store.applets.get(route.appletName);
         if (applet === undefined) {
             sendAppletManagementError(
                 response,
@@ -1762,7 +1766,7 @@ async function handleRequest(
             );
             return;
         }
-        const resolution = resolveAppletContext(store, applet, body);
+        const resolution = await resolveAppletContext(store, applet, body);
         if (resolution.type === "error") {
             sendAppletManagementError(response, 400, resolution.code, resolution.message);
             return;
@@ -1777,7 +1781,7 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if (store.applets.get(route.appletName) === undefined) {
+        if ((await store.applets.get(route.appletName)) === undefined) {
             sendAppletManagementError(
                 response,
                 404,
@@ -1805,7 +1809,7 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const applet = store.applets.get(route.appletName);
+        const applet = await store.applets.get(route.appletName);
         if (applet === undefined) {
             sendAppletManagementError(
                 response,
@@ -1988,11 +1992,11 @@ async function handleRequest(
             response,
             url.searchParams,
             (limitBytes) => readJson<unknown>(request, limitBytes),
-            (profileId) => {
+            async (profileId) => {
                 if (
-                    !authorizeMessageProfile(request, response, runtimeConfig, {
+                    !(await authorizeMessageProfile(request, response, runtimeConfig, {
                         identity: profileId ?? null,
-                    })
+                    }))
                 ) {
                     return undefined;
                 }
@@ -2007,7 +2011,9 @@ async function handleRequest(
 
     if (route.name === "projects") {
         if (request.method === "GET") {
-            sendJson<ListProjectsResponse>(response, 200, { projects: store.listProjects() });
+            sendJson<ListProjectsResponse>(response, 200, {
+                projects: await store.listProjects(),
+            });
             return;
         }
         if (request.method !== "POST") {
@@ -2064,7 +2070,14 @@ async function handleRequest(
             );
             return;
         }
-        if (!authorizeRemoteProjectCreator(request, response, runtimeConfig, decoded.request)) {
+        if (
+            !(await authorizeRemoteProjectCreator(
+                request,
+                response,
+                runtimeConfig,
+                decoded.request,
+            ))
+        ) {
             return;
         }
         let githubToken = decoded.githubToken;
@@ -2072,7 +2085,7 @@ async function handleRequest(
             const existing =
                 decoded.request.projectId === undefined
                     ? undefined
-                    : store.getProject(decoded.request.projectId);
+                    : await store.getProject(decoded.request.projectId);
             if (peerId !== undefined && existing === undefined) {
                 sendProjectRegistrationError(
                     response,
@@ -2104,7 +2117,7 @@ async function handleRequest(
                           createdBy: {
                               instanceId:
                                   peerId ??
-                                  runtimeConfig.profiles!.get(decoded.request.identity)!
+                                  (await runtimeConfig.profiles!.get(decoded.request.identity))!
                                       .parentInstanceId,
                               profileId: decoded.request.identity,
                           },
@@ -2139,7 +2152,7 @@ async function handleRequest(
         route.name === "project-file-tree" ||
         route.name === "project-files"
     ) {
-        const directory = resolveProjectScopeDirectory(store, route);
+        const directory = await resolveProjectScopeDirectory(store, route);
         if (!directory.ok) {
             sendJson(response, directory.status, { error: directory.error });
             return;
@@ -2295,14 +2308,14 @@ async function handleRequest(
             projectId: route.projectId,
             ...(route.workspaceId === undefined ? {} : { workspaceId: route.workspaceId }),
         };
-        const project = store.getProject(route.projectId);
+        const project = await store.getProject(route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         if (
             route.workspaceId !== undefined &&
-            store.getWorkspace(route.projectId, route.workspaceId) === undefined
+            (await store.getWorkspace(route.projectId, route.workspaceId)) === undefined
         ) {
             sendJson(response, 404, { error: "Workspace not found" });
             return;
@@ -2380,7 +2393,7 @@ async function handleRequest(
     }
 
     if (route.name === "project") {
-        const project = store.getProject(route.projectId);
+        const project = await store.getProject(route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
@@ -2403,17 +2416,15 @@ async function handleRequest(
             const completed =
                 body.mutationId === undefined
                     ? undefined
-                    : store.globalEventQueue
-                          .list()
-                          ?.find(
-                              (entry) =>
-                                  entry.event.type === "project_updated" &&
-                                  entry.event.projectId === project.id &&
-                                  entry.event.data.mutationId === body.mutationId,
-                          );
+                    : (await store.globalEventQueue.list())?.find(
+                          (entry) =>
+                              entry.event.type === "project_updated" &&
+                              entry.event.projectId === project.id &&
+                              entry.event.data.mutationId === body.mutationId,
+                      );
             if (completed !== undefined) {
                 sendJson<ProjectResponse>(response, 200, {
-                    project: store.getProject(project.id)!,
+                    project: (await store.getProject(project.id))!,
                 });
                 return;
             }
@@ -2424,18 +2435,18 @@ async function handleRequest(
             }
             try {
                 sendJson<ProjectResponse>(response, 200, {
-                    project: store.renameProject(
+                    project: (await store.renameProject(
                         project.id,
                         body.name,
                         expectedVersion,
                         body.mutationId,
-                    )!,
+                    ))!,
                 });
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
-                    project: store.getProject(project.id),
+                    project: await store.getProject(project.id),
                 });
             }
             return;
@@ -2443,7 +2454,7 @@ async function handleRequest(
     }
 
     if (route.name === "project-settings" && request.method === "PUT") {
-        const project = store.getProject(route.projectId);
+        const project = await store.getProject(route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
@@ -2458,17 +2469,15 @@ async function handleRequest(
         const completed =
             body.mutationId === undefined
                 ? undefined
-                : store.globalEventQueue
-                      .list()
-                      ?.find(
-                          (entry) =>
-                              entry.event.type === "project_updated" &&
-                              entry.event.projectId === project.id &&
-                              entry.event.data.mutationId === body.mutationId,
-                      );
+                : (await store.globalEventQueue.list())?.find(
+                      (entry) =>
+                          entry.event.type === "project_updated" &&
+                          entry.event.projectId === project.id &&
+                          entry.event.data.mutationId === body.mutationId,
+                  );
         if (completed !== undefined) {
             sendJson<ProjectResponse>(response, 200, {
-                project: store.getProject(project.id)!,
+                project: (await store.getProject(project.id))!,
             });
             return;
         }
@@ -2479,19 +2488,22 @@ async function handleRequest(
         }
         try {
             const { mutationId, ...settings } = body;
-            sendJson<ProjectResponse>(response, 200, {
-                project: store.setProjectSettings(
-                    project.id,
-                    settings,
-                    expectedVersion,
-                    mutationId,
-                )!,
-            });
+            const updated = await store.setProjectSettings(
+                project.id,
+                settings,
+                expectedVersion,
+                mutationId,
+            );
+            if (updated === undefined) {
+                sendJson(response, 404, { error: "Project not found." });
+                return;
+            }
+            sendJson<ProjectResponse>(response, 200, { project: updated });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: errorToMessage(error),
-                project: store.getProject(project.id),
+                project: await store.getProject(project.id),
             });
         }
         return;
@@ -2510,11 +2522,11 @@ async function handleRequest(
         }
         for (const requested of body.entities as { projectId?: unknown; workspaceId?: unknown }[]) {
             if (typeof requested?.projectId !== "string") continue;
-            const project = store.getProject(requested.projectId);
+            const project = await store.getProject(requested.projectId);
             if (project === undefined) continue;
             const workspace =
                 typeof requested.workspaceId === "string"
-                    ? store.getWorkspace(requested.projectId, requested.workspaceId)
+                    ? await store.getWorkspace(requested.projectId, requested.workspaceId)
                     : undefined;
             if (typeof requested.workspaceId === "string" && workspace === undefined) continue;
             const entity = resolveGitTrackedEntity(project, workspace);
@@ -2532,14 +2544,14 @@ async function handleRequest(
             sendJson(response, 503, { error: "Git tracking is unavailable." });
             return;
         }
-        const project = store.getProject(route.projectId);
+        const project = await store.getProject(route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         const workspace =
             route.name === "project-workspace-git"
-                ? store.getWorkspace(route.projectId, route.workspaceId)
+                ? await store.getWorkspace(route.projectId, route.workspaceId)
                 : undefined;
         if (route.name === "project-workspace-git" && workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found" });
@@ -2572,7 +2584,7 @@ async function handleRequest(
 
     if (route.name === "project-refresh" && request.method === "POST") {
         try {
-            const project = store.refreshProject(route.projectId);
+            const project = await store.refreshProject(route.projectId);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2599,7 +2611,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = store.reorderProject(route.projectId, body, expectedVersion);
+            const project = await store.reorderProject(route.projectId, body, expectedVersion);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2679,7 +2691,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            const project = store.clearProjectAvatar(route.projectId);
+            const project = await store.clearProjectAvatar(route.projectId);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2690,13 +2702,13 @@ async function handleRequest(
     }
 
     if (route.name === "project-workspaces") {
-        if (store.getProject(route.projectId) === undefined) {
+        if ((await store.getProject(route.projectId)) === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         if (request.method === "GET") {
             sendJson<ListProjectWorkspacesResponse>(response, 200, {
-                workspaces: store.listWorkspaces(route.projectId),
+                workspaces: await store.listWorkspaces(route.projectId),
             });
             return;
         }
@@ -2732,7 +2744,7 @@ async function handleRequest(
                 sendJson(response, 400, { error: "Workspace settings are invalid." });
                 return;
             }
-            if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+            if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
             try {
                 const peerId = p2pPeerId(request);
                 const createdBy =
@@ -2741,7 +2753,8 @@ async function handleRequest(
                         : {
                               instanceId:
                                   peerId ??
-                                  runtimeConfig.profiles!.get(body.identity)!.parentInstanceId,
+                                  (await runtimeConfig.profiles!.get(body.identity))!
+                                      .parentInstanceId,
                               profileId: body.identity,
                           };
                 let githubToken = transport.githubToken;
@@ -2796,7 +2809,7 @@ async function handleRequest(
     }
 
     if (route.name === "project-workspace") {
-        const workspace = store.getWorkspace(route.projectId, route.workspaceId);
+        const workspace = await store.getWorkspace(route.projectId, route.workspaceId);
         if (workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found" });
             return;
@@ -2815,17 +2828,15 @@ async function handleRequest(
             const completed =
                 body.mutationId === undefined
                     ? undefined
-                    : store.globalEventQueue
-                          .list()
-                          ?.find(
-                              (entry) =>
-                                  entry.event.type === "workspace_updated" &&
-                                  entry.event.workspaceId === route.workspaceId &&
-                                  entry.event.data.mutationId === body.mutationId,
-                          );
+                    : (await store.globalEventQueue.list())?.find(
+                          (entry) =>
+                              entry.event.type === "workspace_updated" &&
+                              entry.event.workspaceId === route.workspaceId &&
+                              entry.event.data.mutationId === body.mutationId,
+                      );
             if (completed !== undefined) {
                 sendJson<ProjectWorkspaceResponse>(response, 200, {
-                    workspace: store.getWorkspace(route.projectId, route.workspaceId)!,
+                    workspace: (await store.getWorkspace(route.projectId, route.workspaceId))!,
                 });
                 return;
             }
@@ -2835,7 +2846,7 @@ async function handleRequest(
                     sendJson(response, 400, { error: "The workspace version is invalid." });
                     return;
                 }
-                const renamed = store.renameWorkspace(
+                const renamed = await store.renameWorkspace(
                     route.projectId,
                     route.workspaceId,
                     body.name,
@@ -2853,7 +2864,7 @@ async function handleRequest(
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
-                    workspace: store.getWorkspace(route.projectId, route.workspaceId),
+                    workspace: await store.getWorkspace(route.projectId, route.workspaceId),
                 });
             }
             return;
@@ -2898,7 +2909,7 @@ async function handleRequest(
             return;
         }
         try {
-            const workspace = store.reorderWorkspace(
+            const workspace = await store.reorderWorkspace(
                 route.projectId,
                 route.workspaceId,
                 body,
@@ -2933,10 +2944,10 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message settings are invalid." });
             return;
         }
-        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
         const broadcast = body as BroadcastMessageRequest;
         const authenticatedOwnerId = p2pPeerId(request);
-        const allTargets = broadcast.all === true ? store.list({ limit: 501 }) : undefined;
+        const allTargets = broadcast.all === true ? await store.list({ limit: 501 }) : undefined;
         if (allTargets !== undefined && allTargets.length > 500) {
             sendJson(response, 409, {
                 error: "A single broadcast can target at most 500 sessions.",
@@ -2966,7 +2977,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session IDs must be unique." });
             return;
         }
-        const sessions = targets.map((id) => store.get(id));
+        const sessions = await Promise.all(targets.map((id) => store.get(id)));
         if (sessions.some((candidate) => candidate === undefined)) {
             sendJson(response, 404, { error: "One or more sessions were not found." });
             return;
@@ -3007,7 +3018,7 @@ async function handleRequest(
             );
         }
         sendJson<BroadcastMessageResponse>(response, 202, {
-            submissions: sessions.map((candidate) => candidate!.submit(message)),
+            submissions: await Promise.all(sessions.map((candidate) => candidate!.submit(message))),
         });
         return;
     }
@@ -3153,7 +3164,7 @@ async function handleRequest(
                 : (runtimeConfig.resolveModelCatalog?.(ownerInstanceId) ?? modelCatalog);
         sendJson<GlobalStreamHello>(response, 200, {
             cursor: store.liveEvents.cursor(),
-            ...buildGroupCatalog(store, scopedCatalog, identity, sessionTerminals),
+            ...(await buildGroupCatalog(store, scopedCatalog, identity, sessionTerminals)),
         });
         return;
     }
@@ -3168,7 +3179,7 @@ async function handleRequest(
         // agents, so a client can tell whether a later event is already included.
         const cursor = store.liveEvents.cursor();
         sendJson<GetTimelineResponse>(response, 200, {
-            agents: store.timeline(parsed.request),
+            agents: await store.timeline(parsed.request),
             cursor,
             scope: parsed.request.scope,
         });
@@ -3202,7 +3213,7 @@ async function handleRequest(
                 sendJson(response, 400, { error: "The event limit must be a positive number." });
                 return;
             }
-            const events = globalEventQueue.list({
+            const events = await globalEventQueue.list({
                 ...(after === undefined ? {} : { after }),
                 limit: limit ?? 100,
             });
@@ -3230,7 +3241,7 @@ async function handleRequest(
                 sendJson(response, 400, { error: "The trim cursor is invalid." });
                 return;
             }
-            const result = globalEventQueue.trim(body.through);
+            const result = await globalEventQueue.trim(body.through);
             if (result === undefined) {
                 sendJson(response, 409, { error: "The global event cursor is not available." });
                 return;
@@ -3259,7 +3270,7 @@ async function handleRequest(
             return;
         }
         sendJson<ListExternalToolCallsResponse>(response, 200, {
-            calls: store.listExternalToolCalls({
+            calls: await store.listExternalToolCalls({
                 limit: limit ?? 100,
                 status: status as import("../external-tools/index.js").ExternalToolCall["status"],
             }),
@@ -3268,7 +3279,7 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "secret-registrations") {
-        sendJson<ListSecretsResponse>(response, 200, { secrets: store.listSecrets() });
+        sendJson<ListSecretsResponse>(response, 200, { secrets: await store.listSecrets() });
         return;
     }
 
@@ -3282,7 +3293,7 @@ async function handleRequest(
         }
         try {
             sendJson<RegisterSecretResponse>(response, 200, {
-                secret: store.registerSecret(body),
+                secret: await store.registerSecret(body),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3295,7 +3306,7 @@ async function handleRequest(
 
     if (request.method === "DELETE" && route.name === "secret-registration") {
         sendJson<UnregisterSecretResponse>(response, 200, {
-            removed: store.unregisterSecret(route.secretId),
+            removed: await store.unregisterSecret(route.secretId),
         });
         return;
     }
@@ -3309,7 +3320,7 @@ async function handleRequest(
             return;
         }
         try {
-            const secret = store.updateSecret(route.secretId, body);
+            const secret = await store.updateSecret(route.secretId, body);
             if (secret === undefined) {
                 sendJson(response, 404, { error: "Secret not found." });
                 return;
@@ -3394,8 +3405,8 @@ async function handleRequest(
             });
             return;
         }
-        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
-        if (!authorizeRemoteSessionTarget(request, response, store, body)) return;
+        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
+        if (!(await authorizeRemoteSessionTarget(request, response, store, body))) return;
         try {
             const effectiveBody =
                 authenticatedPeerId !== undefined &&
@@ -3406,7 +3417,7 @@ async function handleRequest(
                     : body;
             const sessionRequest =
                 effectiveBody.scope === undefined
-                    ? configureSessionRequest(effectiveBody, defaultDocker, () =>
+                    ? await configureSessionRequest(effectiveBody, defaultDocker, () =>
                           store.queryProjectSettings(effectiveBody.cwd),
                       )
                     : (() => {
@@ -3425,7 +3436,7 @@ async function handleRequest(
                 ...(body.identity === undefined ? {} : { profileId: body.identity }),
             };
             const githubToken = transport.githubToken;
-            const existingSession = body.id === undefined ? undefined : store.get(body.id);
+            const existingSession = body.id === undefined ? undefined : await store.get(body.id);
             if (
                 authenticatedOwnerId !== undefined &&
                 transport.gitSecretRequested &&
@@ -3439,8 +3450,8 @@ async function handleRequest(
             }
             const session =
                 body.id === undefined
-                    ? store.create(sessionRequest, creationOptions)
-                    : store.createWithId(body.id, sessionRequest, creationOptions);
+                    ? await store.create(sessionRequest, creationOptions)
+                    : await store.createWithId(body.id, sessionRequest, creationOptions);
             if (
                 githubToken !== undefined &&
                 authenticatedOwnerId !== undefined &&
@@ -3471,7 +3482,7 @@ async function handleRequest(
             });
             return;
         }
-        const summaries = store.list();
+        const summaries = await store.list();
         const filtered =
             archived === "all"
                 ? summaries
@@ -3491,7 +3502,7 @@ async function handleRequest(
         return;
     }
 
-    const session = store.get(sessionId);
+    const session = await store.get(sessionId);
     if (session === undefined) {
         sendJson(response, 404, { error: "Session not found" });
         return;
@@ -3505,7 +3516,7 @@ async function handleRequest(
             return;
         }
         try {
-            const attachment = store.attachment(sessionId, route.attachmentId);
+            const attachment = await store.attachment(sessionId, route.attachmentId);
             const file =
                 attachment === undefined
                     ? undefined
@@ -3555,7 +3566,7 @@ async function handleRequest(
                 const hadFocusedTerminal = sessionTerminals.hasFocusedTerminal(sessionId);
                 sessionTerminals.heartbeat(sessionId, body);
                 if (hadFocusedTerminal || sessionTerminals.hasFocusedTerminal(sessionId)) {
-                    session.markRead();
+                    await session.markRead();
                 }
                 sendJson<SessionTerminalHeartbeatResponse>(response, 200, { connected: true });
             } catch (error) {
@@ -3565,7 +3576,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            if (sessionTerminals.hasFocusedTerminal(sessionId)) session.markRead();
+            if (sessionTerminals.hasFocusedTerminal(sessionId)) await session.markRead();
             sendJson<DisconnectSessionTerminalResponse>(response, 200, {
                 disconnected: sessionTerminals.disconnect(sessionId, route.connectionId),
             });
@@ -3612,7 +3623,7 @@ async function handleRequest(
             if (
                 sessionMutationCompleted(session, mutationId) ||
                 (mutationId !== undefined &&
-                    store.sessionScopeMutationApplied(sessionId, mutationId))
+                    (await store.sessionScopeMutationApplied(sessionId, mutationId)))
             ) {
                 sendJson(response, 200, { session: session.snapshot() });
                 return;
@@ -3624,7 +3635,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const filed = store.setSessionFolder(
+            const filed = await store.setSessionFolder(
                 sessionId,
                 body.scope.kind === "folder" ? body.scope.folderId : null,
                 body.afterId,
@@ -3634,7 +3645,7 @@ async function handleRequest(
                 sendJson(response, 404, { error: "That chat is gone." });
                 return;
             }
-            filed.recordMutationApplied(mutationId);
+            await filed.recordMutationApplied(mutationId);
             sendJson(response, 200, { session: filed.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3665,7 +3676,7 @@ async function handleRequest(
         }
         try {
             sendJson(response, 200, {
-                session: store.reorderSession(sessionId, body)!.snapshot(),
+                session: (await store.reorderSession(sessionId, body))!.snapshot(),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3687,7 +3698,7 @@ async function handleRequest(
          * answers with its current state rather than failing, so a repeated
          * request after a retry is harmless.
          */
-        session.markRead();
+        await session.markRead();
         sendJson<SessionReadResponse>(response, 200, { session: session.snapshot() });
         return;
     }
@@ -3732,7 +3743,7 @@ async function handleRequest(
                 return;
             }
             if (snapshot.scope.kind === "folder") {
-                const folder = store.getFolder(snapshot.scope.folderId);
+                const folder = await store.getFolder(snapshot.scope.folderId);
                 if (folder === undefined || folder.archivedAt !== undefined) {
                     sendJson(response, 409, {
                         error: "A chat cannot be restored while its folder is archived.",
@@ -3762,11 +3773,11 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        const archived = session.setArchived(route.name === "archive", mutationId);
+        const archived = await session.setArchived(route.name === "archive", mutationId);
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
             if (archived.scope.kind === "project" || archived.scope.kind === "workspace") {
-                store.unarchiveProject(archived.scope.projectId);
+                await store.unarchiveProject(archived.scope.projectId);
             }
         }
         sendJson<SessionArchiveResponse>(response, 200, { session: archived });
@@ -3793,7 +3804,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: session.update({
+            session: await session.update({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -3822,7 +3833,11 @@ async function handleRequest(
         // position arrives on the global stream and is replayed on top of this.
         const cursor = store.liveEvents.cursor();
         const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
-        const baseHello = sessionStateHello(session, turnLimit, store.listSubagents(sessionId));
+        const baseHello = await sessionStateHello(
+            session,
+            turnLimit,
+            await store.listSubagents(sessionId),
+        );
         const hello = baseHello;
         // A client catching up says which message it already holds, and receives
         // only the turns from there on. It still gets the whole current session,
@@ -3830,7 +3845,8 @@ async function handleRequest(
         // conversation itself, which is the part that can be colossal, is sent
         // incrementally rather than from the beginning.
         const after = url.searchParams.get("after") ?? undefined;
-        const forward = after === undefined ? undefined : session.transcriptSince(after, turnLimit);
+        const forward =
+            after === undefined ? undefined : await session.transcriptSince(after, turnLimit);
         if (after !== undefined && forward !== undefined) {
             sendJson<SessionStateResponse>(response, 200, {
                 ...hello,
@@ -3851,7 +3867,7 @@ async function handleRequest(
         // backward is how it reads further into the past.
         const after = url.searchParams.get("after") ?? undefined;
         if (after !== undefined) {
-            const forward = session.transcriptSince(after, SESSION_STREAM_TURN_LIMIT);
+            const forward = await session.transcriptSince(after, SESSION_STREAM_TURN_LIMIT);
             if (forward === undefined) {
                 sendJson(response, 409, {
                     error: "That part of the conversation is no longer available.",
@@ -3862,7 +3878,7 @@ async function handleRequest(
             return;
         }
         const before = url.searchParams.get("before") ?? undefined;
-        const page = session.transcriptPage(SESSION_STREAM_TURN_LIMIT, before);
+        const page = await session.transcriptPage(SESSION_STREAM_TURN_LIMIT, before);
         if (page === undefined) {
             // The anchor turn is gone, so the reader's view of the conversation
             // is stale and paging from it would duplicate or misplace content.
@@ -3922,7 +3938,7 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "subagents") {
         sendJson<ListSubagentsResponse>(response, 200, {
-            subagents: store.listSubagents(sessionId),
+            subagents: await store.listSubagents(sessionId),
         });
         return;
     }
@@ -3946,7 +3962,7 @@ async function handleRequest(
             sendJson(response, 404, { error: "Workflow not found" });
             return;
         }
-        session.recordMutationApplied(mutationId);
+        await session.recordMutationApplied(mutationId);
         sendJson<StopWorkflowResponse>(response, 200, { workflow });
         return;
     }
@@ -3959,7 +3975,7 @@ async function handleRequest(
         const targetSessionId = requestMutationId(request);
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const forked = store.fork(sessionId, targetSessionId);
+            const forked = await store.fork(sessionId, targetSessionId);
             if (forked === undefined) {
                 sendJson(response, 404, { error: "Session not found" });
                 return;
@@ -3996,7 +4012,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
-        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -4026,7 +4042,7 @@ async function handleRequest(
         sendJson<SubmitMessageResponse>(
             response,
             202,
-            session.submit({
+            await session.submit({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4047,7 +4063,7 @@ async function handleRequest(
             });
             return;
         }
-        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted?.data.delivery === "context") {
@@ -4077,7 +4093,7 @@ async function handleRequest(
         sendJson<SubmitContextMessageResponse>(
             response,
             202,
-            session.submitContext({
+            await session.submitContext({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4097,7 +4113,7 @@ async function handleRequest(
             return;
         }
         try {
-            const result = session.resolveExternalToolCall(
+            const result = await session.resolveExternalToolCall(
                 route.externalToolCallId,
                 body as ResolveExternalToolCallRequest,
             );
@@ -4115,7 +4131,7 @@ async function handleRequest(
 
     if (request.method === "POST" && route.name === "scheduled-message-cancel") {
         const mutationId = requestMutationId(request);
-        const result = session.cancelScheduledMessage(route.scheduledMessageId, mutationId);
+        const result = await session.cancelScheduledMessage(route.scheduledMessageId, mutationId);
         if (result.message === undefined) {
             sendJson(response, 404, { error: "Scheduled message not found." });
             return;
@@ -4141,7 +4157,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
-        if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
+        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -4167,7 +4183,7 @@ async function handleRequest(
             return;
         }
         try {
-            sendJson<SteerMessageResponse>(response, 202, session.steer(body));
+            sendJson<SteerMessageResponse>(response, 202, await session.steer(body));
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
@@ -4274,7 +4290,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         const result = await session.runShellCommand(candidate as RunShellCommandRequest);
-        session.recordMutationApplied(mutationId);
+        await session.recordMutationApplied(mutationId);
         sendJson<RunShellCommandResponse>(response, 200, result);
         return;
     }
@@ -4287,7 +4303,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         await session.reset();
-        session.recordMutationApplied(mutationId);
+        await session.recordMutationApplied(mutationId);
         sendJson(response, 200, { session: session.snapshot() });
         return;
     }
@@ -4305,8 +4321,8 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const result = session.rewind(body.messageId);
-            session.recordMutationApplied(mutationId);
+            const result = await session.rewind(body.messageId);
+            await session.recordMutationApplied(mutationId);
             sendJson<RewindSessionResponse>(response, 200, {
                 ...result,
                 session: session.snapshot(),
@@ -4328,7 +4344,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         const result = await session.compact();
-        session.recordMutationApplied(mutationId);
+        await session.recordMutationApplied(mutationId);
         sendJson<CompactSessionResponse>(response, 200, {
             result,
             session: session.snapshot(),
@@ -4345,7 +4361,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: session.changeEffort({
+            session: await session.changeEffort({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4362,7 +4378,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: session.changeServiceTier({
+            session: await session.changeServiceTier({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4390,7 +4406,7 @@ async function handleRequest(
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
             sendJson(response, 200, {
-                session: session.changeModel({
+                session: await session.changeModel({
                     ...body,
                     ...(mutationId === undefined ? {} : { mutationId }),
                 }),
@@ -4452,7 +4468,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: session.setDraft({
+            session: await session.setDraft({
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4485,8 +4501,9 @@ async function handleRequest(
         try {
             sendJson<SecretSessionResponse>(response, 200, {
                 session:
-                    store.attachSecret(session.id, body.secretId, scope, mutationId)?.snapshot() ??
-                    session.snapshot(),
+                    (
+                        await store.attachSecret(session.id, body.secretId, scope, mutationId)
+                    )?.snapshot() ?? session.snapshot(),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -4511,8 +4528,9 @@ async function handleRequest(
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson<SecretSessionResponse>(response, 200, {
             session:
-                store.detachSecret(session.id, route.secretId, scope, mutationId)?.snapshot() ??
-                session.snapshot(),
+                (
+                    await store.detachSecret(session.id, route.secretId, scope, mutationId)
+                )?.snapshot() ?? session.snapshot(),
         });
         return;
     }
@@ -4530,7 +4548,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            session.setGoal(body, mutationId);
+            await session.setGoal(body, mutationId);
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -4556,7 +4574,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            session.changeGoalStatus(body, mutationId === undefined ? {} : { mutationId });
+            await session.changeGoalStatus(body, mutationId === undefined ? {} : { mutationId });
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -4574,7 +4592,7 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        session.clearGoal(mutationId);
+        await session.clearGoal(mutationId);
         sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         return;
     }
@@ -4588,7 +4606,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const snapshot = session.answerUserInput(route.requestId, {
+            const snapshot = await session.answerUserInput(route.requestId, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
@@ -4638,14 +4656,14 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "stream") {
-        streamEvents(
+        await streamEvents(
             request,
             response,
             session,
             url.searchParams.get("after") ?? undefined,
             sessionEventStreamLeases,
             parseTurnLimit(url.searchParams.get("turns")),
-            store.listSubagents(sessionId),
+            await store.listSubagents(sessionId),
         );
         return;
     }
@@ -4660,14 +4678,14 @@ function providerCredential(
     return catalog.providers.find((provider) => provider.providerId === providerId)?.credential;
 }
 
-function resolveProjectScopeDirectory(
+async function resolveProjectScopeDirectory(
     store: SessionStore,
     scope: ProjectScope,
-): { ok: true; path: string } | { error: string; ok: false; status: 404 | 409 } {
-    const project = store.getProject(scope.projectId);
+): Promise<{ ok: true; path: string } | { error: string; ok: false; status: 404 | 409 }> {
+    const project = await store.getProject(scope.projectId);
     if (project === undefined) return { error: "Project not found", ok: false, status: 404 };
     if (scope.workspaceId === undefined) return { ok: true, path: project.path };
-    const workspace = store.getWorkspace(scope.projectId, scope.workspaceId);
+    const workspace = await store.getWorkspace(scope.projectId, scope.workspaceId);
     if (workspace === undefined) {
         return { error: "Workspace not found", ok: false, status: 404 };
     }
@@ -4716,21 +4734,22 @@ function parseArchivedFilter(value: string | null): boolean | "all" | undefined 
     return undefined;
 }
 
-function resolveAppletContext(
+async function resolveAppletContext(
     store: SessionStore,
     applet: Applet,
     request: ResolveAppletOpenRequest,
-):
+): Promise<
     | { context: AppletContext; type: "context" }
     | {
           code: "invalid_request" | "invalid_applet";
           message: string;
           type: "error";
-      } {
+      }
+> {
     let context: AppletContext;
     let scope: SlotScope;
     if (request.sessionId !== undefined) {
-        const session = store.get(request.sessionId);
+        const session = await store.get(request.sessionId);
         if (session === undefined) {
             return {
                 code: "invalid_request",
@@ -4775,7 +4794,10 @@ function resolveAppletContext(
                 type: "error",
             };
         }
-        if (request.projectId !== undefined && store.getProject(request.projectId) === undefined) {
+        if (
+            request.projectId !== undefined &&
+            (await store.getProject(request.projectId)) === undefined
+        ) {
             return {
                 code: "invalid_request",
                 message: `No project with the id ${request.projectId} exists.`,
@@ -4785,7 +4807,7 @@ function resolveAppletContext(
         if (
             request.projectId !== undefined &&
             request.workspaceId !== undefined &&
-            store.getWorkspace(request.projectId, request.workspaceId) === undefined
+            (await store.getWorkspace(request.projectId, request.workspaceId)) === undefined
         ) {
             return {
                 code: "invalid_request",
@@ -5755,7 +5777,7 @@ async function handleWorkletRequest(
     }
     if (route.name === "worklets") {
         if (request.method === "GET") {
-            sendJson<ListWorkletsResponse>(response, 200, worklets.catalog());
+            sendJson<ListWorkletsResponse>(response, 200, await worklets.catalog());
             return;
         }
         if (request.method !== "POST") {
@@ -5824,7 +5846,7 @@ async function handleWorkletRequest(
     }
     if (route.name === "worklet") {
         if (request.method === "GET") {
-            const worklet = worklets.get(route.workletName);
+            const worklet = await worklets.get(route.workletName);
             if (worklet === undefined) {
                 sendWorkletManagementError(
                     response,
@@ -6282,7 +6304,7 @@ function isExternalToolCallResolution(value: unknown): value is ResolveExternalT
     );
 }
 
-function streamEvents(
+async function streamEvents(
     request: IncomingMessage,
     response: ServerResponse,
     session: SessionEventSource,
@@ -6290,7 +6312,7 @@ function streamEvents(
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
-): void {
+): Promise<void> {
     const cursor = request.headers["last-event-id"];
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
     const resumeFrom = eventId ?? after;
@@ -6312,7 +6334,7 @@ function streamEvents(
     });
     // The hello frame is written before the catch-up batch so a client can apply
     // everything that follows without asking the daemon anything else.
-    const hello = sessionStreamHello(session, resumed, turnLimit, subagents);
+    const hello = await sessionStreamHello(session, resumed, turnLimit, subagents);
 
     // A resumed client applies durable history first, then the current overlay.
     // If the connection drops mid-catch-up, its cursor advances only through
@@ -6344,7 +6366,7 @@ interface SessionEventSource {
     activity: () => SessionActivity;
     partialMessage: () => SessionPartialMessage | undefined;
     snapshot: () => ProtocolSession;
-    transcriptWindow: (turnLimit?: number) => SessionTranscriptWindow;
+    transcriptWindow: (turnLimit?: number) => Promise<SessionTranscriptWindow>;
     usage: (events?: readonly SessionEvent[]) => SessionUsageSummary;
 }
 
@@ -6386,19 +6408,21 @@ function parseTurnLimit(value: string | null): number | undefined {
  * first and loads this second, so anything that changes while it loads still
  * arrives on the stream with a cursor that says whether it is newer.
  */
-function buildGroupCatalog(
+async function buildGroupCatalog(
     store: SessionStore,
     modelCatalog: ModelCatalog,
     identity: DaemonIdentity,
     sessionTerminals: SessionTerminalTracker,
-): Omit<GlobalStreamHello, "cursor"> {
-    const inboxItems = new Map<string, ReturnType<SessionStore["listDurableUserInputs"]>>();
-    for (const call of store.listDurableUserInputs()) {
+): Promise<Omit<GlobalStreamHello, "cursor">> {
+    const inboxItems = new Map<
+        string,
+        Awaited<ReturnType<SessionStore["listDurableUserInputs"]>>
+    >();
+    for (const call of await store.listDurableUserInputs()) {
         if (!isOpenQuestion(call) && call.response === undefined) continue;
         inboxItems.set(call.sessionId, [...(inboxItems.get(call.sessionId) ?? []), call]);
     }
-    const sessions = store
-        .listActive()
+    const sessions = (await store.listActive())
         .map((summary) => ({
             ...summary,
             inboxItems: (inboxItems.get(summary.id) ?? []).map((call) => ({
@@ -6412,22 +6436,24 @@ function buildGroupCatalog(
         }))
         .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
         .filter((summary) => !summary.archived);
-    const projects = store.listProjects().filter((project) => project.archivedAt === undefined);
+    const projects = (await store.listProjects()).filter(
+        (project) => project.archivedAt === undefined,
+    );
     const projectIds = new Set(projects.map((project) => project.id));
-    const workspaces = store
-        .listWorkspaces()
-        .filter(
-            (workspace) =>
-                projectIds.has(workspace.projectId) &&
-                workspace.archivedAt === undefined &&
-                workspace.status !== "archiving" &&
-                workspace.status !== "archived",
-        );
+    const workspaces = (await store.listWorkspaces()).filter(
+        (workspace) =>
+            projectIds.has(workspace.projectId) &&
+            workspace.archivedAt === undefined &&
+            workspace.status !== "archiving" &&
+            workspace.status !== "archived",
+    );
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
     return {
         catalog: modelCatalog,
-        folders: store.listFolders().filter((folder) => folder.archivedAt === undefined),
-        folderItems: store.folderCatalog().items.filter((item) => item.archivedAt === undefined),
+        folders: (await store.listFolders()).filter((folder) => folder.archivedAt === undefined),
+        folderItems: (await store.folderCatalog()).items.filter(
+            (item) => item.archivedAt === undefined,
+        ),
         identity,
         presence: store.presence.state(),
         protocolVersion: RIG_PROTOCOL_VERSION,
@@ -6460,18 +6486,18 @@ function buildGroupCatalog(
  * builder serves both the stream and the request-response bootstrap, so the two
  * cannot drift into describing the same session differently.
  */
-function sessionStreamHello(
+async function sessionStreamHello(
     session: SessionEventSource,
     resumed: boolean,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
-): SessionStreamHello {
+): Promise<SessionStreamHello> {
     const lastEventId = session.events.lastEventId();
     const partial = session.partialMessage();
     // A resuming client already holds the transcript, so it is sent only to a
     // client attaching fresh. The window is cut on turn boundaries so a tool
     // result never arrives without the call it belongs to.
-    const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
+    const transcript = resumed ? undefined : await session.transcriptWindow(turnLimit);
     const currentSession = session.snapshot();
     const full = resumed ? undefined : currentSession;
     // Materialise the durable log once. A long-running session may have many
@@ -6575,12 +6601,12 @@ function sessionStreamHello(
  * which still carries its transcript; this projection is only for the
  * `GET /sessions/{sessionId}/state` bootstrap.
  */
-function sessionStateHello(
+async function sessionStateHello(
     session: SessionEventSource,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
-): SessionStreamHello {
-    const hello = sessionStreamHello(session, false, turnLimit, subagents);
+): Promise<SessionStreamHello> {
+    const hello = await sessionStreamHello(session, false, turnLimit, subagents);
     if (hello.session === undefined) return hello;
     const { contextMessages: _contextMessages, ...agentSnapshot } = hello.session.snapshot;
     return {
@@ -6653,12 +6679,12 @@ function decodeTemporaryGitCredential(value: unknown):
     return { body, githubToken: temporaryGitSecret.token, gitSecretRequested };
 }
 
-function authorizeRemoteProjectCreator(
+async function authorizeRemoteProjectCreator(
     request: IncomingMessage,
     response: ServerResponse,
     runtimeConfig: ProtocolServerRuntimeConfig,
     body: CreateRemoteProjectRequest,
-): boolean {
+): Promise<boolean> {
     const peerId = p2pPeerId(request);
     if (peerId !== undefined) {
         if (body.identity === undefined) {
@@ -6669,7 +6695,7 @@ function authorizeRemoteProjectCreator(
             return false;
         }
         if (!authorizeP2pRemoteWork(peerId, response, runtimeConfig)) return false;
-        if (runtimeConfig.profiles?.owns(body.identity, peerId) !== true) {
+        if ((await runtimeConfig.profiles?.owns(body.identity, peerId)) !== true) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
                 error: "That human profile is not owned by the authenticated peer Rig.",
@@ -6679,7 +6705,7 @@ function authorizeRemoteProjectCreator(
         return true;
     }
     if (body.identity === undefined) return true;
-    if (runtimeConfig.profiles?.isLocal(body.identity) === true) return true;
+    if ((await runtimeConfig.profiles?.isLocal(body.identity)) === true) return true;
     sendJson(response, 403, {
         code: "profile_not_owned",
         error: "That human profile is not owned by this Rig.",
@@ -6687,21 +6713,21 @@ function authorizeRemoteProjectCreator(
     return false;
 }
 
-function authorizeRemoteSessionTarget(
+async function authorizeRemoteSessionTarget(
     request: IncomingMessage,
     response: ServerResponse,
     store: SessionStore,
     body: CreateSessionRequest,
-): boolean {
+): Promise<boolean> {
     const peerId = p2pPeerId(request);
     if (peerId === undefined) return true;
     if (body.projectId === undefined && body.workspaceId === undefined) return true;
     const workspace =
         body.workspaceId === undefined
             ? undefined
-            : store.listWorkspaces().find((candidate) => candidate.id === body.workspaceId);
+            : (await store.listWorkspaces()).find((candidate) => candidate.id === body.workspaceId);
     const projectId = body.projectId ?? workspace?.projectId;
-    const project = projectId === undefined ? undefined : store.getProject(projectId);
+    const project = projectId === undefined ? undefined : await store.getProject(projectId);
     if (
         project === undefined ||
         (body.workspaceId !== undefined && workspace === undefined) ||
@@ -6718,12 +6744,12 @@ function authorizeRemoteSessionTarget(
     return true;
 }
 
-function authorizeMessageProfile(
+async function authorizeMessageProfile(
     request: IncomingMessage,
     response: ServerResponse,
     runtimeConfig: ProtocolServerRuntimeConfig,
     body: Pick<SubmitMessageRequest, "identity">,
-): boolean {
+): Promise<boolean> {
     const peerId = p2pPeerId(request);
     const profileId = body.identity ?? null;
     if (peerId !== undefined) {
@@ -6735,7 +6761,7 @@ function authorizeMessageProfile(
             return false;
         }
         if (!authorizeP2pRemoteWork(peerId, response, runtimeConfig)) return false;
-        if (runtimeConfig.profiles?.owns(profileId, peerId) !== true) {
+        if ((await runtimeConfig.profiles?.owns(profileId, peerId)) !== true) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
                 error: "That human profile is not registered to the authenticated peer Rig.",
@@ -6745,7 +6771,7 @@ function authorizeMessageProfile(
         return true;
     }
     if (profileId === null) return true;
-    if (runtimeConfig.profiles?.isLocal(profileId) !== true) {
+    if ((await runtimeConfig.profiles?.isLocal(profileId)) !== true) {
         sendJson(response, 403, {
             code: "profile_not_owned",
             error: "That human profile is not owned by this Rig.",

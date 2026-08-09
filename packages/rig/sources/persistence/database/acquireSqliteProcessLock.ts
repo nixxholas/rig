@@ -1,7 +1,8 @@
 import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import Database from "better-sqlite3";
+import { createClient, type Client, type Transaction } from "@libsql/client";
 
 const DEFAULT_RETRY_INTERVAL_MS = 25;
 
@@ -26,7 +27,8 @@ export class SqliteProcessLockUnavailableError extends Error {
 }
 
 /**
- * Holds an OS-backed SQLite EXCLUSIVE transaction for the lifetime of the returned handle.
+ * Holds an OS-backed SQLite write transaction (BEGIN IMMEDIATE) for the lifetime of the returned
+ * handle.
  * The kernel releases the lock when the process exits, including after SIGKILL, so ownership
  * never depends on a heartbeat, a PID probe, or deleting a stale marker.
  */
@@ -40,7 +42,7 @@ export async function acquireSqliteProcessLock(
     const deadline = Date.now() + timeoutMs;
 
     for (;;) {
-        const lock = tryAcquireSqliteProcessLock(path);
+        const lock = await tryAcquireSqliteProcessLock(path);
         if (lock !== undefined) return lock;
 
         const remainingMs = deadline - Date.now();
@@ -49,18 +51,23 @@ export async function acquireSqliteProcessLock(
     }
 }
 
-function tryAcquireSqliteProcessLock(path: string): SqliteProcessLock | undefined {
-    let client: Database.Database | undefined;
+async function tryAcquireSqliteProcessLock(path: string): Promise<SqliteProcessLock | undefined> {
+    let client: Client | undefined;
+    let transaction: Transaction | undefined;
     try {
         const previousUmask = process.umask(0o077);
         try {
-            client = new Database(path, { timeout: 0 });
+            client = createClient({
+                intMode: "number",
+                url: pathToFileURL(path).href,
+                timeout: 0,
+            });
         } finally {
             process.umask(previousUmask);
         }
         chmodSync(path, 0o600);
-        client.pragma("journal_mode = DELETE");
-        client.exec("BEGIN EXCLUSIVE");
+        await client.execute("PRAGMA journal_mode = DELETE");
+        transaction = await client.transaction("write");
     } catch (error) {
         try {
             client?.close();
@@ -77,7 +84,11 @@ function tryAcquireSqliteProcessLock(path: string): SqliteProcessLock | undefine
         release() {
             if (released) return;
             released = true;
-            client.close();
+            try {
+                transaction?.close();
+            } finally {
+                client?.close();
+            }
         },
     };
 }

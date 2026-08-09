@@ -83,20 +83,29 @@ export interface SessionStore {
         secretId: string,
         scope: SecretAttachmentScope,
         mutationId?: string,
-    ): InMemorySession | undefined;
-    attachment(sessionId: string, attachmentId: string): Attachment | undefined;
-    changeEffort(sessionId: string, request: ChangeEffortRequest): InMemorySession | undefined;
-    changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined;
+    ): Promise<InMemorySession | undefined>;
+    attachment(sessionId: string, attachmentId: string): Promise<Attachment | undefined>;
+    changeEffort(
+        sessionId: string,
+        request: ChangeEffortRequest,
+    ): Promise<InMemorySession | undefined>;
+    changeModel(
+        sessionId: string,
+        request: ChangeModelRequest,
+    ): Promise<InMemorySession | undefined>;
     changeServiceTier(
         sessionId: string,
         request: ChangeServiceTierRequest,
-    ): InMemorySession | undefined;
-    create(request: CreateSessionRequest, options?: SessionCreationOptions): InMemorySession;
+    ): Promise<InMemorySession | undefined>;
+    create(
+        request: CreateSessionRequest,
+        options?: SessionCreationOptions,
+    ): Promise<InMemorySession>;
     createWithId(
         id: string,
         request: CreateSessionRequest,
         options?: SessionCreationOptions,
-    ): InMemorySession;
+    ): Promise<InMemorySession>;
     createWorkspace(
         projectId: string,
         request: CreateProjectWorkspaceRequest,
@@ -111,120 +120,123 @@ export interface SessionStore {
         secretId: string,
         scope: SecretAttachmentScope,
         mutationId?: string,
-    ): InMemorySession | undefined;
-    fork(sessionId: string, targetSessionId?: string): InMemorySession | undefined;
-    findByAgentId(agentId: string): InMemorySession | undefined;
-    get(sessionId: string): InMemorySession | undefined;
-    getProject(projectId: string): Project | undefined;
+    ): Promise<InMemorySession | undefined>;
+    fork(sessionId: string, targetSessionId?: string): Promise<InMemorySession | undefined>;
+    findByAgentId(agentId: string): Promise<InMemorySession | undefined>;
+    get(sessionId: string): Promise<InMemorySession | undefined>;
+    getProject(projectId: string): Promise<Project | undefined>;
     getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined>;
-    getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined;
-    list(options?: { limit?: number }): readonly SessionSummary[];
+    getWorkspace(projectId: string, workspaceId: string): Promise<ProjectWorkspace | undefined>;
+    list(options?: { limit?: number }): Promise<readonly SessionSummary[]>;
     /** Every explicitly unarchived primary session, with no default limit. */
-    listActive(options?: { limit?: number }): readonly SessionSummary[];
+    listActive(options?: { limit?: number }): Promise<readonly SessionSummary[]>;
     /** Sessions already resident in memory; implementations must not hydrate storage to answer. */
     loadedSessions(): readonly InMemorySession[];
     listExternalToolCalls(options?: {
         limit?: number;
         status?: ExternalToolCall["status"];
-    }): readonly ExternalToolCall[];
-    listDurableUserInputs(): readonly DurableUserInputCall[];
-    listSubagents(parentSessionId: string): readonly SubagentSummary[];
-    queryAgentTreeUsage(sessionId: string): AgentTreeUsage | undefined;
-    listSecrets(): readonly SecretSummary[];
+    }): Promise<readonly ExternalToolCall[]>;
+    listDurableUserInputs(): Promise<readonly DurableUserInputCall[]>;
+    listSubagents(parentSessionId: string): Promise<readonly SubagentSummary[]>;
+    queryAgentTreeUsage(sessionId: string): Promise<AgentTreeUsage | undefined>;
+    listSecrets(): Promise<readonly SecretSummary[]>;
     applyGitFacts(
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
-    ): void;
+    ): Promise<void>;
     /** The whole folder tree, every parent ahead of what is nested under it. */
-    listFolders(): readonly Folder[];
-    folderCatalog(): ListFoldersResponse;
-    getFolder(folderId: string): Folder | undefined;
-    getFolderItem(itemId: string): FolderItem | undefined;
-    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem;
+    listFolders(): Promise<readonly Folder[]>;
+    folderCatalog(): Promise<ListFoldersResponse>;
+    getFolder(folderId: string): Promise<Folder | undefined>;
+    getFolderItem(itemId: string): Promise<FolderItem | undefined>;
+    createFolderItem(folderId: string, request: CreateFolderItemRequest): Promise<FolderItem>;
     moveFolderItem(
         itemId: string,
         request: MoveFolderItemRequest,
         expectedVersion?: number,
-    ): FolderItem | undefined;
+    ): Promise<FolderItem | undefined>;
     archiveFolderItem(
         itemId: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): FolderItem | undefined;
-    createFolder(request: CreateFolderRequest): Folder;
+    ): Promise<FolderItem | undefined>;
+    createFolder(request: CreateFolderRequest): Promise<Folder>;
     updateFolder(
         folderId: string,
         request: UpdateFolderRequest,
         expectedVersion?: number,
-    ): Folder | undefined;
+    ): Promise<Folder | undefined>;
     moveFolder(
         folderId: string,
         request: MoveFolderRequest,
         expectedVersion?: number,
-    ): Folder | undefined;
+    ): Promise<Folder | undefined>;
     /** Puts a folder away together with everything nested under it. */
     archiveFolder(
         folderId: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): Folder | undefined;
-    sharedFolderState(rootFolderId: string): SharedFolderState;
-    sharedFolderGroup(folderId: string): string | undefined;
-    sharedFolderRoot(groupId: string): string | undefined;
-    assertFolderShareable(folderId: string): void;
-    markFolderShared(folderId: string, groupId: string): Folder;
-    applySharedFolderState(groupId: string, state: SharedFolderState): Folder;
-    getDocument(documentId: string): Document | undefined;
-    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document;
+    ): Promise<Folder | undefined>;
+    sharedFolderState(rootFolderId: string): Promise<SharedFolderState>;
+    sharedFolderGroup(folderId: string): Promise<string | undefined>;
+    sharedFolderRoot(groupId: string): Promise<string | undefined>;
+    assertFolderShareable(folderId: string): Promise<void>;
+    markFolderShared(folderId: string, groupId: string): Promise<Folder>;
+    applySharedFolderState(groupId: string, state: SharedFolderState): Promise<Folder>;
+    getDocument(documentId: string): Promise<Document | undefined>;
+    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Promise<Document>;
     writeDocument(
         documentId: string,
         request: WriteDocumentRequest,
         expectedVersion: number,
-    ): Document | undefined;
+    ): Promise<Document | undefined>;
     documentUpdates(
         documentId: string,
         request: ListDocumentUpdatesRequest,
-    ): DocumentUpdatePage | undefined;
+    ): Promise<DocumentUpdatePage | undefined>;
     /** Files one chat into a folder, or takes it back out into Unsorted with `null`. */
     setSessionFolder(
         sessionId: string,
         folderId: string | null,
         afterId?: string | null,
         mutationId?: string,
-    ): InMemorySession | undefined;
-    sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean;
-    listProjects(): readonly Project[];
-    listWorkspaces(projectId?: string): readonly ProjectWorkspace[];
+    ): Promise<InMemorySession | undefined>;
+    sessionScopeMutationApplied(sessionId: string, mutationId: string): Promise<boolean>;
+    listProjects(): Promise<readonly Project[]>;
+    listWorkspaces(projectId?: string): Promise<readonly ProjectWorkspace[]>;
     registerProject(request: RegisterProjectRequest): Promise<Project>;
     renameProject(
         projectId: string,
         name: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): Project | undefined;
-    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined;
+    ): Promise<Project | undefined>;
+    queryProjectSettings(cwd: string): Promise<ProjectSessionSettings | undefined>;
     renameWorkspace(
         projectId: string,
         workspaceId: string,
         name: string,
         expectedVersion?: number,
         mutationId?: string,
-    ): ProjectWorkspace | undefined;
-    refreshProject(projectId: string): Project | undefined;
+    ): Promise<ProjectWorkspace | undefined>;
+    refreshProject(projectId: string): Promise<Project | undefined>;
     reorderProject(
         projectId: string,
         request: ReorderRequest,
         expectedVersion?: number,
-    ): Project | undefined;
-    reorderSession(sessionId: string, request: ReorderRequest): InMemorySession | undefined;
+    ): Promise<Project | undefined>;
+    reorderSession(
+        sessionId: string,
+        request: ReorderRequest,
+    ): Promise<InMemorySession | undefined>;
     reorderWorkspace(
         projectId: string,
         workspaceId: string,
         request: ReorderRequest,
         expectedVersion?: number,
-    ): ProjectWorkspace | undefined;
+    ): Promise<ProjectWorkspace | undefined>;
     archiveProject(projectId: string, expectedVersion?: number): Promise<Project | undefined>;
-    unarchiveProject(projectId: string): Project | undefined;
+    unarchiveProject(projectId: string): Promise<Project | undefined>;
     archiveWorkspace(
         projectId: string,
         workspaceId: string,
@@ -240,10 +252,10 @@ export interface SessionStore {
         settings: ProjectSettingsUpdate,
         expectedVersion?: number,
         mutationId?: string,
-    ): Project | undefined;
-    clearProjectAvatar(projectId: string): Project | undefined;
-    registerSecret(request: RegisterSecretRequest): SecretSummary;
-    registerSpecialSecret(request: SpecialSecretRegistration): SecretSummary;
+    ): Promise<Project | undefined>;
+    clearProjectAvatar(projectId: string): Promise<Project | undefined>;
+    registerSecret(request: RegisterSecretRequest): Promise<SecretSummary>;
+    registerSpecialSecret(request: SpecialSecretRegistration): Promise<SecretSummary>;
     resolveSpecialSecret(kind: SpecialSecretKind): NodeJS.ProcessEnv;
     refreshSessionGitCredential(
         sessionId: string,
@@ -251,12 +263,15 @@ export interface SessionStore {
         githubToken: string,
     ): Promise<boolean>;
     /** The agents a scope covers and when each of them worked, waited, or asked. */
-    timeline(request: GetTimelineRequest): readonly TimelineAgent[];
+    timeline(request: GetTimelineRequest): Promise<readonly TimelineAgent[]>;
     transferSession(
         sessionId: string,
         request: TransferSessionRequest,
     ): Promise<TransferSessionResponse | undefined>;
-    unregisterSecret(secretId: string): boolean;
-    unregisterSpecialSecret(kind: SpecialSecretKind): boolean;
-    updateSecret(secretId: string, request: UpdateSecretRequest): SecretSummary | undefined;
+    unregisterSecret(secretId: string): Promise<boolean>;
+    unregisterSpecialSecret(kind: SpecialSecretKind): Promise<boolean>;
+    updateSecret(
+        secretId: string,
+        request: UpdateSecretRequest,
+    ): Promise<SecretSummary | undefined>;
 }

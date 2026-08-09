@@ -62,7 +62,7 @@ async function startServer(p2pPairing: P2pPairingServiceContract): Promise<{
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
-    const server = createProtocolHttpServer({ p2pPairing, token: "test-token" });
+    const server = await createProtocolHttpServer({ p2pPairing, token: "test-token" });
     await listen(server, socketPath);
     return {
         close: async () => {

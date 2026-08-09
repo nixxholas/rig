@@ -25,7 +25,7 @@ describe("onboarding HTTP", () => {
             })),
         };
         const started = await startServer(
-            createProtocolHttpServer({ onboarding, token: "secret" }),
+            await createProtocolHttpServer({ onboarding, token: "secret" }),
         );
         close.push(started.close);
 
@@ -47,7 +47,7 @@ describe("onboarding HTTP", () => {
             })),
         };
         const started = await startServer(
-            createProtocolHttpServer({ onboarding, token: "secret" }),
+            await createProtocolHttpServer({ onboarding, token: "secret" }),
         );
         close.push(started.close);
 
@@ -74,7 +74,7 @@ describe("onboarding HTTP", () => {
             })),
         };
         const started = await startServer(
-            createProtocolHttpServer({ onboarding, token: "secret" }),
+            await createProtocolHttpServer({ onboarding, token: "secret" }),
         );
         close.push(started.close);
 
@@ -100,7 +100,7 @@ describe("onboarding HTTP", () => {
     });
 
     it("reports when daemon-owned onboarding is unavailable", async () => {
-        const started = await startServer(createProtocolHttpServer({ token: "secret" }));
+        const started = await startServer(await createProtocolHttpServer({ token: "secret" }));
         close.push(started.close);
 
         expect(await send(started.socketPath, "GET", "/onboarding")).toEqual({

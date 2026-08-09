@@ -10,7 +10,11 @@ import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { InMemorySession } from "../session/InMemorySession.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
-import { HappySessionClient, type HappySessionClientOptions } from "./HappySessionClient.js";
+import {
+    HappySessionClient,
+    type HappyProjectContext,
+    type HappySessionClientOptions,
+} from "./HappySessionClient.js";
 import { HappySyncOutboxFullError, HappySyncRepository } from "./HappySyncRepository.js";
 import { HappyMessageMapper } from "./mapSessionEventToHappyMessages.js";
 import { handleHappySpawnSession } from "./handleHappySpawnSession.js";
@@ -21,14 +25,21 @@ const ATTACH_RETRY_DELAY_MS = 5_000;
 
 export interface HappySyncServiceOptions {
     configuration: HappyConnectionConfiguration;
-    createSession?: (id: string, request: CreateSessionRequest) => InMemorySession;
+    createSession?: (
+        id: string,
+        request: CreateSessionRequest,
+    ) => InMemorySession | Promise<InMemorySession>;
     databasePath: string;
     fetch?: typeof fetch;
-    getSubagents?: (sessionId: string) => readonly SubagentSummary[];
+    getSubagents?: (
+        sessionId: string,
+    ) => readonly SubagentSummary[] | Promise<readonly SubagentSummary[]>;
     getProjectContext?: (
         session: InMemorySession,
-    ) => ReturnType<NonNullable<HappySessionClientOptions["projectContext"]>>;
-    loadSession?: (sessionId: string) => InMemorySession | undefined;
+    ) => HappyProjectContext | Promise<HappyProjectContext>;
+    loadSession?: (
+        sessionId: string,
+    ) => InMemorySession | undefined | Promise<InMemorySession | undefined>;
     modelCatalog?: ModelCatalog;
     socketFactory?: HappySessionClientOptions["socketFactory"];
 }
@@ -53,7 +64,7 @@ export class HappySyncService {
     readonly #repository: HappySyncRepository;
     readonly #socketFactory: HappySessionClientOptions["socketFactory"];
 
-    constructor(options: HappySyncServiceOptions) {
+    private constructor(options: HappySyncServiceOptions, repository: HappySyncRepository) {
         this.#configuration = options.configuration;
         this.#credentialFingerprint = fingerprint(options.configuration);
         this.#createSession = options.createSession;
@@ -62,7 +73,7 @@ export class HappySyncService {
         this.#getProjectContext = options.getProjectContext;
         this.#loadSession = options.loadSession;
         this.#modelCatalog = options.modelCatalog;
-        this.#repository = new HappySyncRepository(options.databasePath);
+        this.#repository = repository;
         this.#socketFactory = options.socketFactory;
         if (
             options.configuration.machineId !== undefined &&
@@ -79,9 +90,9 @@ export class HappySyncService {
                         : { socketFactory: options.socketFactory }),
                     spawnSession: (params, signal) =>
                         handleHappySpawnSession({
-                            createSession: (id, request) => {
-                                const session = this.#createSession!(id, request);
-                                this.attach(session);
+                            createSession: async (id, request) => {
+                                const session = await this.#createSession!(id, request);
+                                await this.attach(session);
                             },
                             machineId: options.configuration.machineId!,
                             modelCatalog: options.modelCatalog!,
@@ -101,16 +112,26 @@ export class HappySyncService {
         }
     }
 
-    attach(session: InMemorySession): void {
+    static async open(options: HappySyncServiceOptions): Promise<HappySyncService> {
+        const repository = await HappySyncRepository.open(options.databasePath);
+        try {
+            return new HappySyncService(options, repository);
+        } catch (error) {
+            await repository.close();
+            throw error;
+        }
+    }
+
+    async attach(session: InMemorySession): Promise<void> {
         const closure = this.#detachedClientClosures.get(session.id);
         if (closure !== undefined && !session.snapshot().archived) {
             this.#scheduleReattach(session, closure);
             return;
         }
-        this.#attachSession(session, false);
+        await this.#attachSession(session, false);
     }
 
-    #attachSession(session: InMemorySession, includeArchived: boolean): void {
+    async #attachSession(session: InMemorySession, includeArchived: boolean): Promise<void> {
         if (this.#closed) return;
         const snapshot = session.snapshot();
         if (snapshot.agent.type !== "primary" || (snapshot.archived && !includeArchived)) {
@@ -121,7 +142,7 @@ export class HappySyncService {
             if ((this.#attachRetryAfter.get(session.id) ?? 0) > Date.now()) return;
             try {
                 const encryption = this.#configuration.credentials.encryption;
-                this.#repository.ensureSession({
+                await this.#repository.ensureSession({
                     credentialFingerprint: this.#credentialFingerprint,
                     ...(encryption.type === "legacy" ? { encryptionKey: encryption.secret } : {}),
                     encryptionVariant: encryption.type,
@@ -147,7 +168,7 @@ export class HappySyncService {
                 if (!includeArchived) {
                     const backfill = backfillMessages(session);
                     this.#messageMappers.set(session.id, backfill.mapper);
-                    client.enqueue(backfill.messages);
+                    await client.enqueue(backfill.messages);
                 }
                 client.start();
                 this.#attachRetryAfter.delete(session.id);
@@ -156,7 +177,7 @@ export class HappySyncService {
                 this.#clients.delete(session.id);
                 this.#messageMappers.delete(session.id);
                 this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
-                void client?.close().catch(rethrowDatabaseFailure);
+                await client?.close().catch(rethrowDatabaseFailure);
                 console.error(
                     `Happy sync could not attach session '${session.id}': ${String(error)}`,
                 );
@@ -179,7 +200,7 @@ export class HappySyncService {
         this.#detachedClientClosures.clear();
         this.#messageMappers.clear();
         this.#pendingReattachments.clear();
-        this.#repository.close();
+        await this.#repository.close();
         const failure =
             results.find(
                 (result): result is PromiseRejectedResult =>
@@ -189,7 +210,7 @@ export class HappySyncService {
         if (failure !== undefined) throw failure.reason;
     }
 
-    observe(event: SessionEvent, session: InMemorySession | undefined): void {
+    async observe(event: SessionEvent, session: InMemorySession | undefined): Promise<void> {
         if (this.#closed) return;
         if (session === undefined) return;
         const snapshot = session.snapshot();
@@ -197,9 +218,9 @@ export class HappySyncService {
         if (snapshot.archived) {
             if (
                 !this.#detachedClientClosures.has(session.id) &&
-                this.#repository.getSession(session.id) !== undefined
+                (await this.#repository.getSession(session.id)) !== undefined
             ) {
-                this.#attachSession(session, true);
+                await this.#attachSession(session, true);
             }
             this.#detach(session.id);
             return;
@@ -210,13 +231,13 @@ export class HappySyncService {
             return;
         }
         try {
-            this.attach(session);
+            await this.attach(session);
             if (event.type === "session_archived" && event.data.archived === false) {
                 this.#clients.get(session.id)?.resume();
             }
             const mapper = this.#messageMappers.get(session.id) ?? new HappyMessageMapper();
             this.#messageMappers.set(session.id, mapper);
-            this.#clients.get(session.id)?.enqueue(mapper.map(event));
+            await this.#clients.get(session.id)?.enqueue(mapper.map(event));
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             const client = this.#clients.get(session.id);
@@ -226,19 +247,19 @@ export class HappySyncService {
                 this.#clients.delete(session.id);
                 this.#messageMappers.delete(session.id);
                 this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
-                void client.close().catch(rethrowDatabaseFailure);
+                await client.close().catch(rethrowDatabaseFailure);
             }
             console.error(`Happy sync could not observe session '${session.id}': ${String(error)}`);
         }
     }
 
-    start(): void {
+    async start(): Promise<void> {
         if (this.#closed) return;
         this.#machineClient?.start();
         if (this.#loadSession === undefined) return;
-        for (const sessionId of this.#repository.sessionIds(this.#credentialFingerprint)) {
-            const session = this.#loadSession(sessionId);
-            if (session !== undefined) this.attach(session);
+        for (const sessionId of await this.#repository.sessionIds(this.#credentialFingerprint)) {
+            const session = await this.#loadSession(sessionId);
+            if (session !== undefined) await this.attach(session);
         }
     }
 
@@ -254,7 +275,7 @@ export class HappySyncService {
         const closure = client.archive();
         this.#detachedClientClosures.set(sessionId, closure);
         void closure.then(
-            () => {
+            async () => {
                 if (this.#detachedClientClosures.get(sessionId) === closure) {
                     this.#detachedClientClosures.delete(sessionId);
                 }
@@ -272,11 +293,11 @@ export class HappySyncService {
         if (this.#pendingReattachments.has(session.id)) return;
         this.#pendingReattachments.add(session.id);
         void closure.then(
-            () => {
+            async () => {
                 this.#pendingReattachments.delete(session.id);
                 if (this.#closed || session.snapshot().archived) return;
                 try {
-                    this.attach(session);
+                    await this.attach(session);
                     this.#clients.get(session.id)?.resume();
                 } catch (error) {
                     if (isDatabaseFailure(error)) throw error;
@@ -296,25 +317,27 @@ export class HappySyncService {
         if (this.#backfillTimers.has(session.id)) return;
         const timer = setTimeout(() => {
             this.#backfillTimers.delete(session.id);
-            const client = this.#clients.get(session.id);
-            if (client === undefined) {
-                this.attach(session);
-                return;
-            }
-            try {
-                const backfill = backfillMessages(session);
-                this.#messageMappers.set(session.id, backfill.mapper);
-                client.enqueue(backfill.messages);
-            } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
-                this.#scheduleBackfill(session);
-                console.error(
-                    `Happy sync could not recover session '${session.id}': ${String(error)}`,
-                );
-            }
+            void this.#runBackfill(session).catch(rethrowDatabaseFailure);
         }, ATTACH_RETRY_DELAY_MS);
         timer.unref();
         this.#backfillTimers.set(session.id, timer);
+    }
+
+    async #runBackfill(session: InMemorySession): Promise<void> {
+        const client = this.#clients.get(session.id);
+        if (client === undefined) {
+            await this.attach(session);
+            return;
+        }
+        try {
+            const backfill = backfillMessages(session);
+            this.#messageMappers.set(session.id, backfill.mapper);
+            await client.enqueue(backfill.messages);
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            this.#scheduleBackfill(session);
+            console.error(`Happy sync could not recover session '${session.id}': ${String(error)}`);
+        }
     }
 }
 

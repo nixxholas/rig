@@ -21,7 +21,7 @@ export interface WorkletContext {
         sourceFileSystem?: FileSystemContext,
         expectedPermissions?: WorkletPermissions,
     ): Promise<Worklet>;
-    list(): readonly Worklet[];
+    list(): Promise<readonly Worklet[]>;
     readLog(name: string): Promise<{ log: string; truncated: boolean }>;
     /** Changes whenever the daemon-wide set of callable worklet tools changes. */
     toolRevision?(): number;

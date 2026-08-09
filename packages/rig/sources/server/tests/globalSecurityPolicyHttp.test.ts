@@ -112,7 +112,7 @@ async function startServer(): Promise<{
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
     const securityPath = join(directory, "SECURITY.md");
-    const server = createProtocolHttpServer({
+    const server = await createProtocolHttpServer({
         globalSecurityPolicyPath: securityPath,
         token: "secret",
     });

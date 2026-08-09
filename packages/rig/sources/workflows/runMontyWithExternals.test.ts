@@ -25,7 +25,9 @@ describe("runMontyWithExternals", () => {
             inputs: { args: null },
             limits: { maxDurationSecs: 1 },
             onPrint: vi.fn(),
-            onSnapshot: (snapshot) => snapshots.push(snapshot),
+            onSnapshot: (snapshot) => {
+                snapshots.push(snapshot);
+            },
             signal: new AbortController().signal,
             scriptName: "workflow.py",
         });

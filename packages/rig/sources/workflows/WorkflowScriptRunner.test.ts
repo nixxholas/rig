@@ -354,6 +354,7 @@ function completedResult(request: SpawnSubagentRequest, output: string) {
 
 function createDatabaseError(): Error {
     const error = new Error("The database is full.");
-    error.name = "SqliteError";
+    error.name = "LibsqlError";
+    Object.assign(error, { code: "SQLITE_FULL" });
     return error;
 }

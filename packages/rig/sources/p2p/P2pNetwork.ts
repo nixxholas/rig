@@ -106,7 +106,7 @@ export class P2pNetwork {
         const trustStore = options.peerTrustStore;
         let peers: readonly P2pTrustedPeer[];
         try {
-            peers = trustStore.peers();
+            peers = await trustStore.peers();
         } catch (error) {
             for (const transport of enabledTransports(options.config)) {
                 statuses.set(transport, {
@@ -206,7 +206,7 @@ export class P2pNetwork {
                 ): Promise<void> => {
                     // Pairing can add trust after this network starts, so the durable store—not
                     // the startup projection used to seed the transport—is authoritative here.
-                    const configured = trustStore.peerForBinding("iroh", endpointId);
+                    const configured = await trustStore.peerForBinding("iroh", endpointId);
                     if (
                         configured === undefined ||
                         configured.instanceId !== peerIdentity.instanceId ||

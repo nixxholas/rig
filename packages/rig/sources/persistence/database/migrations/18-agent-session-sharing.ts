@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const statements = [
     `CREATE TABLE session_shares (
@@ -130,6 +130,6 @@ const statements = [
     "CREATE INDEX session_share_replicas_member ON session_share_replicas(share_member_id, grant_epoch)",
 ] as const;
 
-export function agentSessionSharing(database: SessionDatabase): void {
-    for (const statement of statements) database.run(sql.raw(statement));
+export async function agentSessionSharing(database: SessionDatabase): Promise<void> {
+    for (const statement of statements) await database.run(sql.raw(statement));
 }

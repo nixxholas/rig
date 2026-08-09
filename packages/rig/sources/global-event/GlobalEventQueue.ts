@@ -16,15 +16,17 @@ export type GlobalEventQueueListener = (delivery: GlobalEventDelivery) => void;
 
 export interface GlobalEventQueue {
     readonly durable: boolean;
-    append(event: GlobalEvent, tx?: TX): GlobalEventQueueEntry | undefined;
+    append(event: GlobalEvent, tx?: TX): Promise<GlobalEventQueueEntry | undefined>;
     /**
      * Appends an event delivered from a durable outbox whose source transaction
      * may have missed the acknowledgement of an earlier successful append.
      */
-    appendReplaySafe(event: GlobalEvent, tx?: TX): GlobalEventQueueEntry | undefined;
+    appendReplaySafe(event: GlobalEvent, tx?: TX): Promise<GlobalEventQueueEntry | undefined>;
     cursor(): string;
     deactivate(): void;
-    list(options?: ListGlobalEventQueueOptions): readonly GlobalEventQueueEntry[] | undefined;
+    list(
+        options?: ListGlobalEventQueueOptions,
+    ): Promise<readonly GlobalEventQueueEntry[] | undefined>;
     publish(entry: GlobalEventQueueEntry): void;
     /**
      * Delivers an event to current subscribers without storing it or advancing a cursor, and
@@ -40,5 +42,5 @@ export interface GlobalEventQueue {
      */
     publishLive(event: GlobalLiveEvent): boolean;
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void;
-    trim(through: string): TrimGlobalEventsResponse | undefined;
+    trim(through: string): Promise<TrimGlobalEventsResponse | undefined>;
 }

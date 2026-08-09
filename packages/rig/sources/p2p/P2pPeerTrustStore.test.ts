@@ -10,18 +10,18 @@ import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
 const databases: OpenSessionDatabase[] = [];
 
-afterEach(() => {
-    for (const opened of databases.splice(0)) opened.client.close();
+afterEach(async () => {
+    for (const opened of databases.splice(0)) await opened.client.close();
 });
 
 describe("P2pPeerTrustStore", () => {
     it("pins authenticated identity, bindings, and reusable connections in SQLite", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
         await store.validate(identity, "iroh", "a".repeat(64));
-        expect(store.peerForBinding("iroh", "a".repeat(64))).toBeUndefined();
+        expect(await store.peerForBinding("iroh", "a".repeat(64))).toBeUndefined();
         await store.verifyOrPin(
             identity,
             "iroh",
@@ -33,15 +33,15 @@ describe("P2pPeerTrustStore", () => {
         );
         const restored = P2pPeerTrustStore.fromDatabase(opened.database);
 
-        expect(restored.peerForBinding("iroh", "a".repeat(64))).toEqual({
+        expect(await restored.peerForBinding("iroh", "a".repeat(64))).toEqual({
             instanceId: identity.instanceId,
             publicKey: identity.publicKey,
         });
-        expect(restored.peers()[0]?.connections.iroh?.endpointId).toBe("a".repeat(64));
+        expect((await restored.peers())[0]?.connections.iroh?.endpointId).toBe("a".repeat(64));
     });
 
     it("refreshes an Iroh address ticket without changing the trusted identity", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
         const endpointId = "a".repeat(64);
@@ -59,7 +59,7 @@ describe("P2pPeerTrustStore", () => {
             iroh: { endpointId, ticket: "second-ticket" },
         });
 
-        expect(store.peers()[0]).toMatchObject({
+        expect((await store.peers())[0]).toMatchObject({
             connections: { iroh: { endpointId, ticket: "second-ticket" } },
             instanceId: identity.instanceId,
             publicKey: identity.publicKey,
@@ -67,7 +67,7 @@ describe("P2pPeerTrustStore", () => {
     });
 
     it("lets one stable identity add transport addresses but rejects conflicting pins", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const trusted = createP2pInstanceIdentity();
         const impostor = createP2pInstanceIdentity(trusted.instanceId);
         const other = createP2pInstanceIdentity();
@@ -82,22 +82,24 @@ describe("P2pPeerTrustStore", () => {
         await expect(store.verifyOrPin(other, "iroh", "a".repeat(64))).rejects.toThrow(
             "another P2P instance",
         );
-        expect(store.peerForBinding("iroh", "b".repeat(64))?.instanceId).toBe(trusted.instanceId);
+        expect((await store.peerForBinding("iroh", "b".repeat(64)))?.instanceId).toBe(
+            trusted.instanceId,
+        );
     });
 
     it("refuses to create trusted peer state without a display name", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
         await expect(store.verifyOrPin(identity, "iroh", "a".repeat(64))).rejects.toThrow(
             "must have a display name",
         );
-        expect(store.peers()).toEqual([]);
+        expect(await store.peers()).toEqual([]);
     });
 
     it("keeps prepared pairing trust inactive and removes it when pairing aborts", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
@@ -111,16 +113,16 @@ describe("P2pPeerTrustStore", () => {
             false,
             Date.now() + 60_000,
         );
-        expect(store.peers()).toEqual([]);
-        expect(store.readyPairings()).toEqual([]);
+        expect(await store.peers()).toEqual([]);
+        expect(await store.readyPairings()).toEqual([]);
 
         await prepared.abort();
-        expect(store.peers()).toEqual([]);
-        expect(store.readyPairings()).toEqual([]);
+        expect(await store.peers()).toEqual([]);
+        expect(await store.readyPairings()).toEqual([]);
     });
 
     it("recovers a durable ready pairing and promotes it into active trust", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
         const prepared = await store.preparePairing(
@@ -137,20 +139,20 @@ describe("P2pPeerTrustStore", () => {
         await prepared.markConfirmed();
 
         const restored = P2pPeerTrustStore.fromDatabase(opened.database);
-        expect(restored.peers()).toEqual([]);
-        expect(restored.readyPairings()).toHaveLength(1);
-        await restored.readyPairings()[0]!.activate();
-        expect(restored.readyPairings()).toHaveLength(1);
-        await restored.readyPairings()[0]!.complete();
-        expect(restored.peers()[0]).toMatchObject({
+        expect(await restored.peers()).toEqual([]);
+        expect(await restored.readyPairings()).toHaveLength(1);
+        await (await restored.readyPairings())[0]!.activate();
+        expect(await restored.readyPairings()).toHaveLength(1);
+        await (await restored.readyPairings())[0]!.complete();
+        expect((await restored.peers())[0]).toMatchObject({
             instanceId: identity.instanceId,
             name: "Remote",
         });
-        expect(restored.readyPairings()).toEqual([]);
+        expect(await restored.readyPairings()).toEqual([]);
     });
 
     it("aborting one transaction cannot erase an identical pairing that finalized", async () => {
-        const opened = openTrustDatabase();
+        const opened = await openTrustDatabase();
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
         const first = await store.preparePairing(
@@ -180,14 +182,14 @@ describe("P2pPeerTrustStore", () => {
         await second.complete();
         await first.abort();
 
-        expect(store.peers()).toHaveLength(1);
-        expect(store.peers()[0]?.instanceId).toBe(identity.instanceId);
+        expect(await store.peers()).toHaveLength(1);
+        expect((await store.peers())[0]?.instanceId).toBe(identity.instanceId);
     });
 });
 
-function openTrustDatabase(): OpenSessionDatabase {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
+async function openTrustDatabase(): Promise<OpenSessionDatabase> {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
     databases.push(opened);
     return opened;
 }

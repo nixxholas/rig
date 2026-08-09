@@ -29,7 +29,7 @@ describe("P2P inference credentials", () => {
         const modelCatalog = createModelCatalog({
             providers: { codex: { apiKey: "local", enabled: true, type: "codex" } },
         });
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             homeDirectory,
             localInstanceId: LOCAL_ID,
@@ -41,7 +41,7 @@ describe("P2P inference credentials", () => {
             localInstanceId: LOCAL_ID,
             publish: () => undefined,
         });
-        profiles.replicate(
+        await profiles.replicate(
             {
                 createdAt: 1,
                 email: "steve@example.test",
@@ -53,7 +53,7 @@ describe("P2P inference credentials", () => {
             },
             OWNER_ID,
         );
-        const replace = vi.fn(() => ({ changed: true, version: 1 }));
+        const replace = vi.fn(async () => ({ changed: true, version: 1 }));
         const remoteCatalog = {
             ...modelCatalog,
             providers: modelCatalog.providers.map((provider) => ({
@@ -62,7 +62,7 @@ describe("P2P inference credentials", () => {
             })),
         };
         const started = await startServer(
-            createProtocolHttpServer({
+            await createProtocolHttpServer({
                 canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
                 canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID || peerId === OTHER_ID,
                 modelCatalog,
@@ -75,7 +75,7 @@ describe("P2P inference credentials", () => {
         );
         close.push(async () => {
             await started.close();
-            store.close();
+            await store.close();
         });
         const envelope: P2pEncryptedCredentialSnapshot = {
             algorithm: "nacl_box",
@@ -168,7 +168,7 @@ describe("P2P inference credentials", () => {
         const modelCatalog = createModelCatalog({
             providers: { codex: { apiKey: "local", enabled: true, type: "codex" } },
         });
-        const store = new PersistentSessionStore({
+        const store = await PersistentSessionStore.open({
             databasePath: ":memory:",
             homeDirectory,
             localInstanceId: LOCAL_ID,
@@ -180,7 +180,7 @@ describe("P2P inference credentials", () => {
             localInstanceId: LOCAL_ID,
             publish: () => undefined,
         });
-        profiles.replicate(
+        await profiles.replicate(
             {
                 createdAt: 1,
                 email: "steve@example.test",
@@ -193,7 +193,7 @@ describe("P2P inference credentials", () => {
             OWNER_ID,
         );
         const otherProfileId = "aotherprofile0000000000001";
-        profiles.replicate(
+        await profiles.replicate(
             {
                 createdAt: 1,
                 email: "other@example.test",
@@ -205,18 +205,18 @@ describe("P2P inference credentials", () => {
             },
             OTHER_ID,
         );
-        const otherSession = store.create(
+        const otherSession = await store.create(
             { cwd: "/tmp/p2p-other-session" },
             { ownerInstanceId: OTHER_ID, profileId: otherProfileId },
         );
-        const ownerSession = store.create(
+        const ownerSession = await store.create(
             { cwd: "/tmp/p2p-owner-session" },
             { ownerInstanceId: OWNER_ID, profileId: OWNER_PROFILE_ID },
         );
         const ownerSubmit = vi.spyOn(ownerSession, "submit");
         const otherSubmit = vi.spyOn(otherSession, "submit");
         const started = await startServer(
-            createProtocolHttpServer({
+            await createProtocolHttpServer({
                 canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
                 canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID,
                 modelCatalog,
@@ -227,7 +227,7 @@ describe("P2P inference credentials", () => {
         );
         close.push(async () => {
             await started.close();
-            store.close();
+            await store.close();
         });
 
         expect(

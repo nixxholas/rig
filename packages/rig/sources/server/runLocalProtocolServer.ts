@@ -59,6 +59,7 @@ import {
     openNodeInspector,
     registerRigDebugRoot,
 } from "../debug/index.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import { RigUserError } from "../RigUserError.js";
 import type { HappySyncService } from "../happy/index.js";
 import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDirectory.js";
@@ -231,6 +232,19 @@ async function runOwnedLocalProtocolServer(
                     );
                 }
             }
+            if (store !== undefined) {
+                try {
+                    await store.remoteTerminals.close();
+                } catch (error) {
+                    if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
+                    daemonLog.record(
+                        "error",
+                        "daemon_remote_terminal_shutdown_failed",
+                        "Rig daemon could not close every remote terminal.",
+                        { error: errorToMessage(error) },
+                    );
+                }
+            }
             const serverClosed = new Promise<void>((resolve) => {
                 server.close(() => resolve());
             });
@@ -358,7 +372,7 @@ async function runOwnedLocalProtocolServer(
             if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
         }
         try {
-            store?.close();
+            await store?.close();
         } finally {
             daemonLog.record("info", "daemon_stopped", "Rig daemon stopped.");
             uninstallProcessFailureLogging();
@@ -471,7 +485,7 @@ async function runOwnedLocalProtocolServer(
                     },
                 );
             },
-            onSnapshot: (entity, snapshot) => {
+            onSnapshot: async (entity, snapshot) => {
                 const target = {
                     projectId: entity.projectId,
                     ...(entity.workspaceId === undefined
@@ -481,9 +495,29 @@ async function runOwnedLocalProtocolServer(
                 // Sessions carry Git state on their own stream, so a client
                 // watching a conversation never has to open the project stream
                 // as well to see which files changed.
-                store?.applyGitSnapshot(target, snapshot);
-                if (snapshot.comparison !== "ready") return;
-                store?.applyGitFacts(target, snapshot.facts);
+                try {
+                    await store?.applyGitSnapshot(target, snapshot);
+                    if (snapshot.comparison === "ready") {
+                        await store?.applyGitFacts(target, snapshot.facts);
+                    }
+                } catch (error: unknown) {
+                    if (isDatabaseFailure(error)) {
+                        rethrowDatabaseFailure(error);
+                        return;
+                    }
+                    daemonLog.record(
+                        "error",
+                        "git_state_persistence_failed",
+                        "Rig could not persist a Git state update.",
+                        {
+                            error: errorToMessage(error),
+                            projectId: entity.projectId,
+                            ...(entity.workspaceId === undefined
+                                ? {}
+                                : { workspaceId: entity.workspaceId }),
+                        },
+                    );
+                }
             },
             taskDrain,
         });
@@ -565,7 +599,7 @@ async function runOwnedLocalProtocolServer(
                     expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
                 ),
         });
-        store = new PersistentSessionStore({
+        store = await PersistentSessionStore.open({
             createRuntime: (options) => {
                 const ownerInstanceId = options.ownerInstanceId ?? p2pIdentity.instanceId;
                 const scopedProviders =
@@ -615,12 +649,12 @@ async function runOwnedLocalProtocolServer(
             ...(happyModule === undefined
                 ? {}
                 : { onSessionAccess: (session) => happySyncService?.attach(session) }),
-            onSessionEvent: (event, session) => {
+            onSessionEvent: async (event, session) => {
                 recordProviderFailure(daemonLog, event);
                 if (happyModule !== undefined) happySyncService?.observe(event, session);
                 if (store !== undefined && gitStateTracker !== undefined) {
                     const identity = session?.projectIdentity();
-                    markGitStateFromSessionEvent(
+                    await markGitStateFromSessionEvent(
                         event,
                         store,
                         gitStateTracker,
@@ -671,6 +705,9 @@ async function runOwnedLocalProtocolServer(
         shutdown.register("GitHub credential refresh", () => githubSecretRefreshLoop);
         const activeStore = store;
         const p2pPeerTrustStore = new P2pPeerTrustStore(activeStore);
+        const trustedPeerIds = new Set(
+            (await p2pPeerTrustStore.peers()).map((peer) => peer.instanceId),
+        );
         const p2pNode: {
             name: string;
             primaryId?: string;
@@ -686,14 +723,14 @@ async function runOwnedLocalProtocolServer(
         const canP2pPeerConfigure = (peerId: string): boolean => {
             if (p2pNode.role !== "secondary" || p2pNode.primaryId !== peerId) return false;
             try {
-                return p2pPeerTrustStore.peers().some((peer) => peer.instanceId === peerId);
+                return trustedPeerIds.has(peerId);
             } catch {
                 return false;
             }
         };
         const isTrustedP2pPeer = (peerId: string): boolean => {
             try {
-                return p2pPeerTrustStore.peers().some((peer) => peer.instanceId === peerId);
+                return trustedPeerIds.has(peerId);
             } catch {
                 return false;
             }
@@ -722,12 +759,12 @@ async function runOwnedLocalProtocolServer(
             database: activeStore,
             identity: p2pIdentity,
         });
-        p2pCredentialRuntimeRegistry = new P2pCredentialRuntimeRegistry({
+        p2pCredentialRuntimeRegistry = await P2pCredentialRuntimeRegistry.open({
             localCatalog: modelCatalog,
             localInstanceId: p2pIdentity.instanceId,
             localName: () => p2pNode.name,
             localProviders: availableProviders,
-            peers: () => p2pPeerTrustStore.peers(),
+            peers: async () => p2pPeerTrustStore.peers(),
             runtimeDirectory: join(paths.directory, "p2p-credential-runtime"),
             store: p2pCredentialStore,
         });
@@ -770,7 +807,7 @@ async function runOwnedLocalProtocolServer(
             profiles: profilesStore,
             resetState: async () => {
                 await resetMurmurStore(dirname(paths.databasePath));
-                activeStore.resetSharingState();
+                await activeStore.resetSharingState();
             },
         });
         sharing = sharingLifecycle;
@@ -794,11 +831,10 @@ async function runOwnedLocalProtocolServer(
             murmurConfigured: () => sharingLifecycle.configured(),
             onboardMurmur: (request) => sharingLifecycle.onboardMurmur(request),
             persistence: activeStore,
-            profileComplete: () =>
-                profilesStore
-                    .list()
-                    .some((profile) => profile.parentInstanceId === p2pIdentity.instanceId) ===
-                true,
+            profileComplete: async () =>
+                (await profilesStore.list()).some(
+                    (profile) => profile.parentInstanceId === p2pIdentity.instanceId,
+                ),
             providersConfigured: () => modelCatalog.models.length > 0,
         });
         {
@@ -809,6 +845,7 @@ async function runOwnedLocalProtocolServer(
                     identity: p2pIdentity,
                     name: () => p2pNode.name,
                     onPeerTrusted: (peer) => {
+                        trustedPeerIds.add(peer.instanceId);
                         p2pNetwork?.addTrustedPeer(peer);
                         p2pProfileReplicator?.peerChanged(peer.instanceId);
                         p2pCredentialRuntimeRegistry?.refresh();
@@ -893,7 +930,7 @@ async function runOwnedLocalProtocolServer(
             serveTunnel: createServeP2pTunnel({ socketPath, token }),
         });
         p2pCredentialReplicator = new P2pCredentialReplicator({
-            listPeers: () => p2pPeerTrustStore.peers(),
+            listPeers: async () => p2pPeerTrustStore.peers(),
             network: p2pNetwork,
             onError: (peerId, error) => {
                 daemonLog.record(
@@ -919,10 +956,11 @@ async function runOwnedLocalProtocolServer(
                 ),
             store: p2pCredentialStore,
         });
-        p2pCredentialReplicator.syncAll();
+        await p2pCredentialReplicator.syncAll();
         if (rigProfiles !== undefined && p2pIdentity !== undefined) {
             p2pProfileReplicator = new P2pProfileReplicator({
-                listPeerIds: () => p2pPeerTrustStore.peers().map((peer) => peer.instanceId),
+                listPeerIds: async () =>
+                    (await p2pPeerTrustStore.peers()).map((peer) => peer.instanceId),
                 localInstanceId: p2pIdentity.instanceId,
                 network: p2pNetwork,
                 onError: (peerId, error) => {
@@ -946,9 +984,9 @@ async function runOwnedLocalProtocolServer(
             daemonLog.record("info", "iroh_started", "Rig P2P networking is ready.", {
                 endpointId: irohStatus.localAddress,
                 instanceId: p2pNetwork.status().instanceId,
-                peers: p2pPeerTrustStore
-                    .peers()
-                    .filter((peer) => peer.connections.iroh !== undefined).length,
+                peers: (await p2pPeerTrustStore.peers()).filter(
+                    (peer) => peer.connections.iroh !== undefined,
+                ).length,
                 ...(loadedConfig.config.p2p.iroh.relayUrl === undefined
                     ? {}
                     : { relayUrl: loadedConfig.config.p2p.iroh.relayUrl }),
@@ -1012,35 +1050,36 @@ async function runOwnedLocalProtocolServer(
         if (stopping) return;
         if (happyModule !== undefined && happyConfiguration !== undefined) {
             try {
-                const service = new happyModule.HappySyncService({
+                const service = await happyModule.HappySyncService.open({
                     configuration: happyConfiguration,
-                    createSession: (id, request) =>
+                    createSession: async (id, request) =>
                         store!.createWithId(
                             id,
-                            configureSessionRequest(request, loadedConfig.config.docker, () =>
+                            await configureSessionRequest(request, loadedConfig.config.docker, () =>
                                 store!.queryProjectSettings(request.cwd),
                             ),
                         ),
                     databasePath: paths.databasePath,
-                    getSubagents: (sessionId) => store?.listSubagents(sessionId) ?? [],
-                    getProjectContext: (session) => {
+                    getSubagents: async (sessionId) =>
+                        (await store?.listSubagents(sessionId)) ?? [],
+                    getProjectContext: async (session) => {
                         const identity = session.projectIdentity();
                         if (identity === undefined) return undefined;
-                        const project = store?.getProject(identity.projectId);
+                        const project = await store?.getProject(identity.projectId);
                         if (project === undefined) return undefined;
                         const workspace =
                             identity.workspaceId === undefined
                                 ? undefined
-                                : store?.getWorkspace(project.id, identity.workspaceId);
+                                : await store?.getWorkspace(project.id, identity.workspaceId);
                         return {
                             project,
                             ...(workspace === undefined ? {} : { workspace }),
                         };
                     },
-                    loadSession: (sessionId) => store?.get(sessionId),
+                    loadSession: async (sessionId) => await store?.get(sessionId),
                     modelCatalog,
                 });
-                service.start();
+                await service.start();
                 happySyncService = service;
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
@@ -1063,7 +1102,7 @@ async function runOwnedLocalProtocolServer(
             return;
         }
 
-        createProtocolHttpServer(
+        await createProtocolHttpServer(
             {
                 inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
                 ...(loadedConfig.config.docker === undefined
@@ -1084,7 +1123,7 @@ async function runOwnedLocalProtocolServer(
                 p2pStatus: () => p2pNetwork?.status() ?? { name: p2pNode.name, transports: [] },
                 ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
                 ...(sharing === undefined ? {} : { sharing }),
-                replaceP2pCredentials: (authenticatedOwnerId, envelope) => {
+                replaceP2pCredentials: async (authenticatedOwnerId, envelope) => {
                     if (
                         store === undefined ||
                         p2pCredentialRuntimeRegistry === undefined ||
@@ -1092,25 +1131,30 @@ async function runOwnedLocalProtocolServer(
                     ) {
                         throw new Error("P2P credential provisioning is unavailable.");
                     }
-                    const peer = p2pPeerTrustStore
-                        .peers()
-                        .find((candidate) => candidate.instanceId === authenticatedOwnerId);
+                    const runtimeRegistry = p2pCredentialRuntimeRegistry;
+                    const peer = (await p2pPeerTrustStore.peers()).find(
+                        (candidate) => candidate.instanceId === authenticatedOwnerId,
+                    );
                     if (peer === undefined) {
                         throw new Error("That credential owner is not a trusted peer Rig.");
                     }
-                    const result = p2pCredentialStore.replaceEncrypted(
+                    const result = await p2pCredentialStore.replaceEncrypted(
                         authenticatedOwnerId,
                         peer.publicKey,
                         envelope,
                     );
-                    const runtimeChanged = p2pCredentialRuntimeRegistry.refresh();
+                    const runtimeChanged = await runtimeRegistry.refresh();
                     if (runtimeChanged) {
                         credentialUsageRouter.clearProvisionedCaches();
-                        for (const session of store.loadedSessions()) {
-                            session.refreshInferenceScope(
-                                p2pCredentialRuntimeRegistry.catalog(session.ownerInstanceId),
-                            );
-                        }
+                        await Promise.all(
+                            store
+                                .loadedSessions()
+                                .map((session) =>
+                                    session.refreshInferenceScope(
+                                        runtimeRegistry.catalog(session.ownerInstanceId),
+                                    ),
+                                ),
+                        );
                     }
                     return result;
                 },
@@ -1157,7 +1201,7 @@ async function runOwnedLocalProtocolServer(
                 },
                 onDaemonConfigChange: async (config) => {
                     await writeDaemonSettings(config.settings, {}, config.p2p.name);
-                    const globalEventQueue = store?.setDurableGlobalEventQueue(
+                    const globalEventQueue = await store?.setDurableGlobalEventQueue(
                         config.settings.durableGlobalEventQueue,
                     );
                     if (globalEventQueue === undefined) return undefined;
@@ -1184,12 +1228,12 @@ async function runOwnedLocalProtocolServer(
                                   if (stopping || nextConfiguration === undefined) return false;
                                   let next: HappySyncService;
                                   try {
-                                      next = new happyModule.HappySyncService({
+                                      next = await happyModule.HappySyncService.open({
                                           configuration: nextConfiguration,
-                                          createSession: (id, request) =>
+                                          createSession: async (id, request) =>
                                               store!.createWithId(
                                                   id,
-                                                  configureSessionRequest(
+                                                  await configureSessionRequest(
                                                       request,
                                                       loadedConfig.config.docker,
                                                       () =>
@@ -1197,17 +1241,19 @@ async function runOwnedLocalProtocolServer(
                                                   ),
                                               ),
                                           databasePath: paths.databasePath,
-                                          getSubagents: (sessionId) =>
-                                              store?.listSubagents(sessionId) ?? [],
-                                          getProjectContext: (session) => {
+                                          getSubagents: async (sessionId) =>
+                                              (await store?.listSubagents(sessionId)) ?? [],
+                                          getProjectContext: async (session) => {
                                               const identity = session.projectIdentity();
                                               if (identity === undefined) return undefined;
-                                              const project = store?.getProject(identity.projectId);
+                                              const project = await store?.getProject(
+                                                  identity.projectId,
+                                              );
                                               if (project === undefined) return undefined;
                                               const workspace =
                                                   identity.workspaceId === undefined
                                                       ? undefined
-                                                      : store?.getWorkspace(
+                                                      : await store?.getWorkspace(
                                                             project.id,
                                                             identity.workspaceId,
                                                         );
@@ -1216,7 +1262,8 @@ async function runOwnedLocalProtocolServer(
                                                   ...(workspace === undefined ? {} : { workspace }),
                                               };
                                           },
-                                          loadSession: (sessionId) => store?.get(sessionId),
+                                          loadSession: async (sessionId) =>
+                                              await store?.get(sessionId),
                                           modelCatalog,
                                       });
                                   } catch (error) {
@@ -1242,10 +1289,10 @@ async function runOwnedLocalProtocolServer(
                                           { error: errorToMessage(error) },
                                       );
                                   }
-                                  next.start();
+                                  await next.start();
                                   happySyncService = next;
                                   for (const session of store!.loadedSessions()) {
-                                      next.attach(session);
+                                      await next.attach(session);
                                   }
                                   return true;
                               });

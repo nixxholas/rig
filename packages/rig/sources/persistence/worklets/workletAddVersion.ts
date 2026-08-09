@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { WorkletPermissions } from "../../protocol/WorkletProtocol.js";
 import { worklets, workletVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 
 export interface WorkletVersionRecord {
     changeDescription: string;
@@ -14,9 +14,13 @@ export interface WorkletVersionRecord {
 }
 
 /** Records a newly imported version with its manifest and makes it current in one step. */
-export function workletAddVersion(tx: TX, name: string, record: WorkletVersionRecord): void {
-    inTx(tx, (transaction) => {
-        transaction
+export async function workletAddVersion(
+    tx: DatabaseScope,
+    name: string,
+    record: WorkletVersionRecord,
+): Promise<void> {
+    await inTx(tx, async (transaction) => {
+        await transaction
             .insert(workletVersions)
             .values({
                 changeDescription: record.changeDescription,
@@ -27,7 +31,7 @@ export function workletAddVersion(tx: TX, name: string, record: WorkletVersionRe
                 workletName: name,
             })
             .run();
-        transaction
+        await transaction
             .update(worklets)
             .set({ currentVersion: record.version, updatedAtMs: record.createdAt })
             .where(eq(worklets.name, name))

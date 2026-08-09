@@ -11,12 +11,12 @@ export interface WorkspaceRunTarget {
 }
 
 /** The one durable gate every session store applies before a managed-workspace runtime exists. */
-export function workspaceRunReadiness(
+export async function workspaceRunReadiness(
     projects: Pick<ProjectRepository, "getWorkspace">,
     target: WorkspaceRunTarget,
     stat: typeof statSync = statSync,
-): WorkspaceRunReadiness {
-    const workspace = projects.getWorkspace(target.projectId, target.workspaceId);
+): Promise<WorkspaceRunReadiness> {
+    const workspace = await projects.getWorkspace(target.projectId, target.workspaceId);
     if (workspace === undefined) {
         return {
             message:

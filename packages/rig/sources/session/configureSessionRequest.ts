@@ -7,11 +7,14 @@ import {
 } from "../execution/index.js";
 import { SessionConfigurationError } from "./SessionConfigurationError.js";
 
-export function configureSessionRequest(
+export async function configureSessionRequest(
     request: CreateSessionRequest,
     defaultDocker: DockerExecutionConfig | undefined,
-    queryProjectSettings?: () => ProjectSessionSettings | undefined,
-): CreateSessionRequest {
+    queryProjectSettings?: () =>
+        | ProjectSessionSettings
+        | undefined
+        | Promise<ProjectSessionSettings | undefined>,
+): Promise<CreateSessionRequest> {
     if (request.local === true && request.docker !== undefined) {
         throw new SessionConfigurationError(
             "Choose either local execution or a Docker environment, not both.",
@@ -21,7 +24,7 @@ export function configureSessionRequest(
     const projectSettings =
         request.local === true || request.docker !== undefined
             ? undefined
-            : queryProjectSettings?.();
+            : await queryProjectSettings?.();
     const projectCompute = projectSettings?.settings.defaultWorkspaceCompute;
     const projectDocker =
         projectCompute?.type === "docker" && projectSettings !== undefined

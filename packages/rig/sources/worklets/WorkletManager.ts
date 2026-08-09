@@ -15,6 +15,7 @@ import type {
     WorkletsChangedEvent,
 } from "../protocol/WorkletProtocol.js";
 import type { StoredWorklet } from "../persistence/worklets/queryWorklets.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import { getWorkletRuntimeDirectory } from "./getWorkletRuntimeDirectory.js";
 import { readBoundedWorkletLog } from "./readBoundedWorkletLog.js";
 import type { WorkletIconFileResult, WorkletIconFormat } from "./readWorkletIcon.js";
@@ -60,6 +61,8 @@ export class WorkletManager {
     readonly #createEventId = createEventIdFactory();
     readonly #environment: NodeJS.ProcessEnv;
     readonly #now: () => number;
+    readonly #pendingPublications = new Set<Promise<void>>();
+    #publicationTail = Promise.resolve();
     readonly #publish: (event: WorkletsChangedEvent) => void;
     readonly #registry: WorkletToolRegistry;
     readonly #runtimes = new Map<string, WorkletRuntime>();
@@ -86,26 +89,26 @@ export class WorkletManager {
     /** Launches every installed worklet at once and resolves when all of them have settled. */
     async start(): Promise<void> {
         await this.#store.cleanupStaging();
-        const installed = this.#store.list();
+        const installed = await this.#store.list();
         await Promise.all(
             installed.map((worklet) =>
                 this.#serializeLifecycle(worklet.name, () => this.#launch(worklet)),
             ),
         );
-        this.#publishChanged();
+        await this.#publishChanged();
     }
 
-    list(): readonly Worklet[] {
-        return this.#store.list().map((worklet) => this.#present(worklet));
+    async list(): Promise<readonly Worklet[]> {
+        return (await this.#store.list()).map((worklet) => this.#present(worklet));
     }
 
     /** The current worklets together with the change they reflect. */
-    catalog(): { version: EventId; worklets: readonly Worklet[] } {
-        return { version: this.#version, worklets: this.list() };
+    async catalog(): Promise<{ version: EventId; worklets: readonly Worklet[] }> {
+        return { version: this.#version, worklets: await this.list() };
     }
 
-    get(name: string): Worklet | undefined {
-        const stored = this.#store.get(name);
+    async get(name: string): Promise<Worklet | undefined> {
+        const stored = await this.#store.get(name);
         return stored === undefined ? undefined : this.#present(stored);
     }
 
@@ -123,7 +126,7 @@ export class WorkletManager {
                 name: inspected.name,
             });
             await this.#launch(stored);
-            this.#publishChanged();
+            await this.#publishChanged();
             return this.#present(stored);
         });
     }
@@ -138,7 +141,7 @@ export class WorkletManager {
             const stored = await this.#store.update(name, request, sourceFileSystem, expected);
             await this.#stop(name, "The worklet was replaced.");
             await this.#launch(stored);
-            this.#publishChanged();
+            await this.#publishChanged();
             return this.#present(stored);
         });
     }
@@ -149,10 +152,10 @@ export class WorkletManager {
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<Worklet> {
         return this.#serializeLifecycle(name, async () => {
-            const stored = this.#store.revert(name, request, expected);
+            const stored = await this.#store.revert(name, request, expected);
             await this.#stop(name, "The worklet was replaced.");
             await this.#launch(stored);
-            this.#publishChanged();
+            await this.#publishChanged();
             return this.#present(stored);
         });
     }
@@ -169,12 +172,12 @@ export class WorkletManager {
                     recursive: true,
                 });
             } catch (error) {
-                if (this.#store.get(name) === undefined) this.#runtimes.delete(name);
-                this.#publishChanged();
+                if ((await this.#store.get(name)) === undefined) this.#runtimes.delete(name);
+                await this.#publishChanged();
                 throw error;
             }
             this.#runtimes.delete(name);
-            this.#publishChanged();
+            await this.#publishChanged();
         });
     }
 
@@ -183,7 +186,7 @@ export class WorkletManager {
     }
 
     async readLog(name: string): Promise<{ log: string; truncated: boolean }> {
-        if (this.#store.get(name) === undefined) {
+        if ((await this.#store.get(name)) === undefined) {
             throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
         }
         const runtime = this.#runtimes.get(name);
@@ -203,6 +206,7 @@ export class WorkletManager {
                 this.#serializeLifecycle(name, () => this.#stop(name, "Rig shut down.")),
             ),
         );
+        await Promise.allSettled([this.#publicationTail, ...this.#pendingPublications]);
         await this.#registry.close();
     }
 
@@ -249,7 +253,7 @@ export class WorkletManager {
                 name: worklet.name,
                 onStatus: (status) => {
                     runtime.status = status;
-                    this.#publishChanged();
+                    this.#publishChangedInBackground();
                 },
                 onToolsRetired: (reason) => {
                     void this.#serializeLifecycle(worklet.name, async () => {
@@ -258,7 +262,7 @@ export class WorkletManager {
                         // lifecycle queue, it must not stop the replacement.
                         if (this.#runtimes.get(worklet.name) !== runtime) return;
                         await this.#stop(worklet.name, reason);
-                        this.#publishChanged();
+                        await this.#publishChanged();
                     });
                 },
                 permissions: worklet.permissions,
@@ -330,7 +334,7 @@ export class WorkletManager {
                 if (failure !== undefined) runtime.failure = failure;
                 runtime.tools = [];
                 delete runtime.running;
-                this.#publishChanged();
+                this.#publishChangedInBackground();
             });
     }
 
@@ -361,14 +365,36 @@ export class WorkletManager {
         };
     }
 
-    #publishChanged(): void {
+    #publishChanged(): Promise<void> {
+        const publication = this.#publicationTail
+            .catch(() => undefined)
+            .then(async () => {
+                if (this.#closed) return;
+                this.#version = this.#createEventId();
+                const worklets = await this.list();
+                this.#publish({
+                    createdAt: this.#now(),
+                    data: { version: this.#version, worklets },
+                    id: this.#createEventId(),
+                    type: "worklets_changed",
+                });
+            });
+        this.#publicationTail = publication;
+        return publication;
+    }
+
+    /**
+     * Status callbacks are synchronous, but publishing their catalog snapshots reads SQLite.
+     * Track those reads so shutdown drains work already admitted before the database closes.
+     */
+    #publishChangedInBackground(): void {
         if (this.#closed) return;
-        this.#version = this.#createEventId();
-        this.#publish({
-            createdAt: this.#now(),
-            data: { version: this.#version, worklets: this.list() },
-            id: this.#createEventId(),
-            type: "worklets_changed",
-        });
+        const publication = this.#publishChanged();
+        this.#pendingPublications.add(publication);
+        void publication
+            .finally(() => {
+                this.#pendingPublications.delete(publication);
+            })
+            .catch(rethrowDatabaseFailure);
     }
 }

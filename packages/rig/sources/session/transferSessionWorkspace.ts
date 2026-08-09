@@ -5,7 +5,7 @@ import type { InMemorySession } from "./InMemorySession.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 
 interface SessionTransferDependencies {
-    hasAttachedSessions(workspaceId: string): boolean;
+    hasAttachedSessions(workspaceId: string): boolean | Promise<boolean>;
     projects: ProjectRepository;
     releaseTarget(workspaceId: string, sessionId: string): void;
     reserveTarget(workspaceId: string, sessionId: string): void;
@@ -13,24 +13,26 @@ interface SessionTransferDependencies {
     targetWorkspaceId: string;
 }
 
-export function scheduleSessionWorkspaceTransfer(
+export async function scheduleSessionWorkspaceTransfer(
     dependencies: SessionTransferDependencies,
-): AgentSessionTransferSchedule {
-    const source = dependencies.session.scheduleWorkspaceTransfer(dependencies.targetWorkspaceId);
+): Promise<AgentSessionTransferSchedule> {
+    const source = await dependencies.session.scheduleWorkspaceTransfer(
+        dependencies.targetWorkspaceId,
+    );
     try {
-        dependencies.projects.validateSessionTransfer(
+        await dependencies.projects.validateSessionTransfer(
             source.projectId,
             source.sourceWorkspaceId,
             dependencies.targetWorkspaceId,
         );
-        assertTargetHasNoSessions(dependencies);
+        await assertTargetHasNoSessions(dependencies);
         dependencies.reserveTarget(dependencies.targetWorkspaceId, dependencies.session.id);
         return {
             state: "scheduled",
             targetWorkspaceId: dependencies.targetWorkspaceId,
         };
     } catch (error) {
-        dependencies.session.failWorkspaceTransfer(dependencies.targetWorkspaceId, error);
+        await dependencies.session.failWorkspaceTransfer(dependencies.targetWorkspaceId, error);
         dependencies.releaseTarget(dependencies.targetWorkspaceId, dependencies.session.id);
         throw error;
     }
@@ -39,7 +41,7 @@ export function scheduleSessionWorkspaceTransfer(
 export async function executeSessionWorkspaceTransfer(
     dependencies: SessionTransferDependencies & { scheduled?: boolean },
 ): Promise<TransferSessionResponse> {
-    const source = dependencies.session.beginWorkspaceTransfer(
+    const source = await dependencies.session.beginWorkspaceTransfer(
         dependencies.targetWorkspaceId,
         dependencies.scheduled === true ? { scheduled: true } : {},
     );
@@ -48,12 +50,12 @@ export async function executeSessionWorkspaceTransfer(
         | undefined;
     try {
         dependencies.reserveTarget(dependencies.targetWorkspaceId, dependencies.session.id);
-        assertTargetHasNoSessions(dependencies);
+        await assertTargetHasNoSessions(dependencies);
         const transfer = await dependencies.projects.prepareSessionTransfer(
             source.projectId,
             source.sourceWorkspaceId,
             dependencies.targetWorkspaceId,
-            () => assertTargetHasNoSessions(dependencies),
+            async () => await assertTargetHasNoSessions(dependencies),
         );
         prepared = transfer.prepared;
         const session = await dependencies.session.completeWorkspaceTransfer({
@@ -86,15 +88,19 @@ export async function executeSessionWorkspaceTransfer(
             }
             if (prepared.state.status === "failed") target = prepared.state.target;
         }
-        dependencies.session.failWorkspaceTransfer(dependencies.targetWorkspaceId, failure, target);
+        await dependencies.session.failWorkspaceTransfer(
+            dependencies.targetWorkspaceId,
+            failure,
+            target,
+        );
         throw failure;
     } finally {
         dependencies.releaseTarget(dependencies.targetWorkspaceId, dependencies.session.id);
     }
 }
 
-function assertTargetHasNoSessions(dependencies: SessionTransferDependencies): void {
-    if (dependencies.hasAttachedSessions(dependencies.targetWorkspaceId)) {
+async function assertTargetHasNoSessions(dependencies: SessionTransferDependencies): Promise<void> {
+    if (await dependencies.hasAttachedSessions(dependencies.targetWorkspaceId)) {
         throw new Error(
             "The target workspace must have no attached sessions before this session can move there.",
         );

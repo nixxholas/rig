@@ -24,7 +24,7 @@ describe("WorkletStore", () => {
         const source = await workletSource();
         const icon = await readFile(join(source, "icon.png"));
 
-        const store = createStore(root);
+        const store = await createStore(root);
         const created = await store.install({
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -53,7 +53,7 @@ describe("WorkletStore", () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
 
-        const store = createStore(root);
+        const store = await createStore(root);
         await store.install({
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -75,7 +75,7 @@ describe("WorkletStore", () => {
         );
         await expect(readFile(durable, "utf8")).resolves.toBe('{"seen":7}');
 
-        const reverted = store.revert("github-watch", { version: 1 });
+        const reverted = await store.revert("github-watch", { version: 1 });
         expect(reverted.currentVersion).toBe(1);
         // Reverting moves the pointer; every imported version stays on disk.
         await expect(readFile(join(root, "github-watch", "v2", "index.ts"), "utf8")).resolves.toBe(
@@ -84,7 +84,7 @@ describe("WorkletStore", () => {
         await expect(readFile(durable, "utf8")).resolves.toBe('{"seen":7}');
 
         await store.remove("github-watch");
-        expect(store.get("github-watch")).toBeUndefined();
+        expect(await store.get("github-watch")).toBeUndefined();
         await expect(readdir(join(root, "github-watch"))).resolves.toEqual(["Data"]);
         await expect(readFile(durable, "utf8")).resolves.toBe('{"seen":7}');
     });
@@ -92,7 +92,7 @@ describe("WorkletStore", () => {
     it("refuses a name that is not kebab-case, a second install, and a missing worklet", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
         const request = {
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -108,13 +108,15 @@ describe("WorkletStore", () => {
         await expect(
             store.update("missing", { changeDescription: "None", path: source }),
         ).rejects.toThrow(WorkletNotFoundError);
-        expect(() => store.revert("github-watch", { version: 9 })).toThrow(WorkletInvalidError);
+        await expect(store.revert("github-watch", { version: 9 })).rejects.toThrow(
+            WorkletInvalidError,
+        );
     });
 
     it("refuses an update whose manifest renames the worklet", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
         await store.install({
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -126,13 +128,13 @@ describe("WorkletStore", () => {
         await expect(
             store.update("github-watch", { changeDescription: "Renamed", path: other }),
         ).rejects.toThrow(WorkletInvalidError);
-        expect(store.get("github-watch")?.currentVersion).toBe(1);
+        expect((await store.get("github-watch"))?.currentVersion).toBe(1);
     });
 
     it("records each version's own manifest so reverting restores its permissions", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
         await store.install({
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -155,7 +157,7 @@ describe("WorkletStore", () => {
         });
         expect(updated.description).toBe("Watches a repository over the network");
 
-        const reverted = store.revert("github-watch", { version: 1 });
+        const reverted = await store.revert("github-watch", { version: 1 });
 
         expect(reverted.permissions).toEqual({ disk: "none", network: "none" });
         expect(reverted.description).toBe("Watches a repository");
@@ -166,7 +168,7 @@ describe("WorkletStore", () => {
         const source = await workletSource({
             permissions: { disk: "full", network: "none" } as never,
         });
-        const store = createStore(root);
+        const store = await createStore(root);
 
         await expect(
             store.install({
@@ -182,7 +184,7 @@ describe("WorkletStore", () => {
         const source = await workletSource({
             permissions: { disk: "none", network: "full" } as never,
         });
-        const store = createStore(root);
+        const store = await createStore(root);
 
         await expect(
             store.install({
@@ -196,7 +198,7 @@ describe("WorkletStore", () => {
     it("refuses staged permissions that differ from the grant reviewed by the caller", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
 
         await expect(
             store.install(
@@ -214,14 +216,14 @@ describe("WorkletStore", () => {
                 },
             ),
         ).rejects.toThrow("do not match the staged source manifest");
-        expect(store.get("github-watch")).toBeUndefined();
+        expect(await store.get("github-watch")).toBeUndefined();
         await expect(readdir(root)).resolves.not.toContain("github-watch");
     });
 
     it("replaces an unrecorded version folder left by an interrupted update", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
         await store.install({
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -246,7 +248,7 @@ describe("WorkletStore", () => {
     it("builds a staged update before making it current", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
         await store.install({
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -263,13 +265,13 @@ describe("WorkletStore", () => {
                 path: source,
             }),
         ).rejects.toThrow("could not be built");
-        expect(store.get("github-watch")).toMatchObject({ currentVersion: 1 });
-        expect(store.get("github-watch")?.versions).toHaveLength(1);
+        expect(await store.get("github-watch")).toMatchObject({ currentVersion: 1 });
+        expect((await store.get("github-watch"))?.versions).toHaveLength(1);
     });
 
     it("refuses a source folder missing either required document, or carrying a placeholder", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
-        const store = createStore(root);
+        const store = await createStore(root);
         const install = (source: string) =>
             store.install({
                 authorSessionId: "agent-1",
@@ -296,7 +298,7 @@ describe("WorkletStore", () => {
     it("keeps both documents with the version they were imported with", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
 
         await store.install({
             authorSessionId: "agent-1",
@@ -313,7 +315,7 @@ describe("WorkletStore", () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
         await rm(join(source, "worklet.json"));
-        const store = createStore(root);
+        const store = await createStore(root);
 
         await expect(
             store.install({
@@ -332,7 +334,7 @@ describe("WorkletStore", () => {
         await mkdir(join(source, "nested"));
         await symlink(join(outside, "secret.txt"), join(source, "nested", "leak.txt"));
 
-        const store = createStore(root);
+        const store = await createStore(root);
         await expect(
             store.install({
                 authorSessionId: "agent-1",
@@ -346,7 +348,7 @@ describe("WorkletStore", () => {
     it("reinstalling after an uninstall keeps the earlier data and starts versions over", async () => {
         const root = await temporaryDirectory("rig-worklet-store-");
         const source = await workletSource();
-        const store = createStore(root);
+        const store = await createStore(root);
         const request = {
             authorSessionId: "agent-1",
             iconPath: join(source, "icon.png"),
@@ -369,11 +371,11 @@ describe("WorkletStore", () => {
     });
 });
 
-function createStore(root: string, databasePath = ":memory:"): WorkletStore {
-    const opened = openSessionDatabase(databasePath);
-    migrateSessionDatabase(opened.database);
+async function createStore(root: string, databasePath = ":memory:"): Promise<WorkletStore> {
+    const opened = await openSessionDatabase(databasePath);
+    await migrateSessionDatabase(opened.database);
     cleanups.push(() => {
-        opened.client.close();
+        return opened.client.close();
     });
     return new WorkletStore({
         environment: { HAPPY_WORKLETS_DIRECTORY: root },

@@ -2,20 +2,20 @@ import { eq } from "drizzle-orm";
 
 import { applets, appletVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { TX } from "../Transaction.js";
+import type { DatabaseScope } from "../Transaction.js";
 import type { AppletAllowedScopes } from "../../protocol/AppletProtocol.js";
 
 /** Records a newly imported version and makes it current in one consistent step. */
-export function appletAddVersion(
-    tx: TX,
+export async function appletAddVersion(
+    tx: DatabaseScope,
     name: string,
     version: number,
     changeDescription: string,
     now: number,
     allowedScopes?: AppletAllowedScopes,
-): void {
-    inTx(tx, (transaction) => {
-        transaction
+): Promise<void> {
+    await inTx(tx, async (transaction) => {
+        await transaction
             .insert(appletVersions)
             .values({
                 changeDescription,
@@ -24,7 +24,7 @@ export function appletAddVersion(
                 appletName: name,
             })
             .run();
-        transaction
+        await transaction
             .update(applets)
             .set({
                 currentVersion: version,

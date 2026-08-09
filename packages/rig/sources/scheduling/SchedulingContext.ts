@@ -7,6 +7,6 @@ import type {
 
 export interface SchedulingContext {
     now(): number;
-    scheduleMessage(request: ScheduleMessageRequest): ScheduledMessage;
+    scheduleMessage(request: ScheduleMessageRequest): Promise<ScheduledMessage>;
     wait(request: DurableWaitRequest, signal?: AbortSignal): Promise<WaitResult>;
 }

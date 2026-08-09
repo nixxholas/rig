@@ -40,7 +40,7 @@ describe("InMemorySession provider failures", () => {
     it("keeps the provider error text on the durable run boundary", async () => {
         const session = createSession();
 
-        const run = session.submit({ text: "Fail this turn." });
+        const run = await session.submit({ text: "Fail this turn." });
         await expect(session.waitForRun(run.runId)).resolves.toEqual({
             errorMessage: PROVIDER_FAILURE,
             status: "error",
@@ -82,7 +82,7 @@ describe("InMemorySession provider failures", () => {
     it("reports the failed turn to external consumers instead of a completed one", async () => {
         const session = createSession();
 
-        const run = session.submit({ text: "Fail this turn." });
+        const run = await session.submit({ text: "Fail this turn." });
         await session.waitForRun(run.runId);
 
         const mapper = new HappyMessageMapper();
@@ -108,28 +108,28 @@ describe("InMemorySession provider failures", () => {
         const databasePath = join(directory, "sessions.sqlite");
         const fixture = createFixture();
         try {
-            const initial = new PersistentSessionStore({
+            const initial = await PersistentSessionStore.open({
                 createRuntime: fixture.createRuntime,
                 databasePath,
                 modelCatalog: fixture.catalog,
             });
-            const session = initial.create({
+            const session = await initial.create({
                 cwd: "/tmp/rig-provider-failure-persistence",
                 modelId: fixture.model.id,
                 providerId: fixture.provider.id,
             });
-            const run = session.submit({ text: "Persist this failure." });
+            const run = await session.submit({ text: "Persist this failure." });
             await session.waitForRun(run.runId);
             const sessionId = session.id;
-            initial.close();
+            await initial.close();
 
-            const restoredStore = new PersistentSessionStore({
+            const restoredStore = await PersistentSessionStore.open({
                 createRuntime: fixture.createRuntime,
                 databasePath,
                 modelCatalog: fixture.catalog,
             });
             try {
-                const restored = restoredStore.get(sessionId)!;
+                const restored = (await restoredStore.get(sessionId))!;
                 expect(
                     restored.state().messages.find((entry) => entry.message.role === "error")
                         ?.message,
@@ -151,7 +151,7 @@ describe("InMemorySession provider failures", () => {
                     requestedModelId: "test/provider-failure",
                 });
             } finally {
-                restoredStore.close();
+                await restoredStore.close();
             }
         } finally {
             await rm(directory, { force: true, recursive: true });

@@ -31,7 +31,7 @@ const databases: OpenSessionDatabase[] = [];
 
 afterEach(async () => {
     await Promise.all(networks.splice(0).map((network) => network.close()));
-    for (const opened of databases.splice(0)) opened.client.close();
+    for (const opened of databases.splice(0)) await opened.client.close();
     await Promise.all(
         directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
     );
@@ -299,7 +299,7 @@ describe("IrohNetwork", () => {
         const serverId = serverEndpoint.id().toString();
         const directory = await createTestSocketDirectory();
         directories.push(directory);
-        const trust = openTrustStore();
+        const trust = await openTrustStore();
         await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId, undefined, "Client Rig");
 
         const client = await IrohNetwork.create({
@@ -355,7 +355,7 @@ describe("IrohNetwork", () => {
         const serverId = serverEndpoint.id().toString();
         const directory = await createTestSocketDirectory();
         directories.push(directory);
-        const clientTrust = openTrustStore();
+        const clientTrust = await openTrustStore();
         const serverTask = (async () => {
             const incoming = await serverEndpoint.acceptNext();
             if (incoming === null) return;
@@ -396,7 +396,7 @@ describe("IrohNetwork", () => {
                 status: "unreachable",
             }),
         );
-        expect(clientTrust.peerForBinding("iroh", serverId)).toBeUndefined();
+        expect(await clientTrust.peerForBinding("iroh", serverId)).toBeUndefined();
         await serverTask;
         await serverEndpoint.close();
     });
@@ -1475,9 +1475,9 @@ describe("IrohNetwork", () => {
     });
 });
 
-function openTrustStore(): P2pPeerTrustStore {
-    const opened = openSessionDatabase(":memory:");
-    migrateSessionDatabase(opened.database);
+async function openTrustStore(): Promise<P2pPeerTrustStore> {
+    const opened = await openSessionDatabase(":memory:");
+    await migrateSessionDatabase(opened.database);
     databases.push(opened);
     return P2pPeerTrustStore.fromDatabase(opened.database);
 }

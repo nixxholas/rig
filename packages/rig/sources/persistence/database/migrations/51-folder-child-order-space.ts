@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { generateKeyBetween } from "../../../utils/fractionalIndexing.js";
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 const ROOT_GROUP = "\u0000root";
 
@@ -20,16 +20,18 @@ interface ChildRow {
  * independent lists allow it: folders retain their old order first, then items retain their old
  * order. Stable ids break ties within either old list.
  */
-export function folderChildOrderSpace(database: SessionDatabase): void {
-    const collision = database.get<{ id: string }>(
-        sql.raw(`
+export async function folderChildOrderSpace(database: SessionDatabase): Promise<void> {
+    const collision = (
+        await database.all<{ id: string }>(
+            sql.raw(`
             SELECT folders.id AS id
             FROM folders
             INNER JOIN folder_items ON folder_items.id = folders.id
             ORDER BY folders.id
             LIMIT 1
         `),
-    );
+        )
+    )[0];
     if (collision !== undefined) {
         throw new Error(
             "Cannot enable shared folder ordering because a folder and folder item have the same ID.",
@@ -43,14 +45,14 @@ export function folderChildOrderSpace(database: SessionDatabase): void {
         else group.push(row);
     };
 
-    for (const row of database.all<{
+    for (const row of await database.all<{
         id: string;
         orderKey: string;
         parentId: string | null;
     }>(sql.raw("SELECT id, order_key AS orderKey, parent_id AS parentId FROM folders"))) {
         add({ ...row, kind: "folder" });
     }
-    for (const row of database.all<{
+    for (const row of await database.all<{
         id: string;
         orderKey: string;
         parentId: string;
@@ -69,11 +71,11 @@ export function folderChildOrderSpace(database: SessionDatabase): void {
         for (const child of group) {
             const orderKey = generateKeyBetween(previous, null);
             if (child.kind === "folder") {
-                database.run(
+                await database.run(
                     sql`UPDATE folders SET order_key = ${orderKey} WHERE id = ${child.id}`,
                 );
             } else {
-                database.run(
+                await database.run(
                     sql`UPDATE folder_items SET order_key = ${orderKey} WHERE id = ${child.id}`,
                 );
             }

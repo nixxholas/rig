@@ -8,13 +8,37 @@ import {
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
+import { asyncLock, type AsyncLock } from "../concurrency/index.js";
 
-export type SessionEventListener = (event: SessionEvent) => void;
-export type SessionEventAppendHook = (event: SessionEvent) => void;
-export type SessionEventNotificationScheduler = (notify: () => void) => void;
+export type SessionEventListener = (event: SessionEvent) => void | Promise<void>;
+export type SessionEventAppendHook = (event: SessionEvent) => void | Promise<void>;
+export type SessionEventNotification = () => void | Promise<void>;
+export type SessionEventNotificationScheduler = (
+    notify: SessionEventNotification,
+) => void | Promise<void>;
+export interface SessionEventLogCheckpoint {
+    readonly eventIndexes: ReadonlyMap<EventId, number>;
+    readonly eventStartIndex: number;
+    readonly events: readonly SessionEvent[];
+    readonly firstEventId: EventId | undefined;
+    readonly lastEventId: EventId | undefined;
+    readonly messageCreatedAt: ReadonlyMap<string, number>;
+    readonly messageEventId: ReadonlyMap<string, EventId>;
+    readonly messageSteeredAt: ReadonlyMap<string, number>;
+    readonly messageSteeringEventId: ReadonlyMap<string, EventId>;
+    readonly messageSubmissions: ReadonlyMap<string, SessionEvent & { type: "message_submitted" }>;
+    readonly nextEventIndex: number;
+    readonly permissionReviewEventIds: ReadonlyMap<string, EventId>;
+    readonly permissionReviews: ReadonlyMap<string, SessionPermissionReview>;
+    readonly providerQuotas: ReadonlyMap<string, ProviderQuota>;
+    readonly revision: number;
+    readonly shellCommands: ReadonlyMap<string, ShellCommandState>;
+    readonly usageRevision: number;
+}
 const SESSION_EVENT_RETENTION_LIMIT = 4_096;
 
 export class SessionEventLog {
+    readonly #appendLock: AsyncLock = asyncLock();
     #events: SessionEvent[] = [];
     #eventIndexes = new Map<EventId, number>();
     #eventStartIndex = 0;
@@ -66,46 +90,117 @@ export class SessionEventLog {
         this.#onAppend = options.onAppend;
     }
 
-    append(event: SessionEvent): SessionEvent {
-        this.#onAppend?.(event);
-        if (!isLiveOnlySessionEvent(event)) {
-            this.#eventIndexes.set(event.id, this.#nextEventIndex);
-            this.#nextEventIndex += 1;
-            this.#events.push(event);
-            this.#firstEventId ??= event.id;
-            if (event.type === "message_submitted") {
-                this.#messageSubmissions.set(event.data.message.id, event);
-            }
-            this.#recordMessageTime(event);
-            this.#recordPermissionReview(event);
-            this.#recordCurrentState(event);
-            if (this.#events.length > this.#retentionLimit) {
-                const removed = this.#events.shift();
-                if (removed !== undefined) {
-                    this.#eventIndexes.delete(removed.id);
-                    this.#forgetEventIndexes(removed);
+    append(event: SessionEvent): Promise<SessionEvent> {
+        return this.#appendLock.runInLock(async () => {
+            // The durable hook runs before any in-memory projection changes. A rejected
+            // persistence write therefore leaves the log, cursors, and notifications untouched.
+            if (this.#onAppend !== undefined) await this.#onAppend(event);
+            if (!isLiveOnlySessionEvent(event)) {
+                this.#eventIndexes.set(event.id, this.#nextEventIndex);
+                this.#nextEventIndex += 1;
+                this.#events.push(event);
+                this.#firstEventId ??= event.id;
+                if (event.type === "message_submitted") {
+                    this.#messageSubmissions.set(event.data.message.id, event);
                 }
-                this.#eventStartIndex += 1;
-                this.#firstEventId = this.#events[0]?.id;
-            }
-        }
-        this.#revision += 1;
-        if (affectsSessionUsage(event)) this.#usageRevision += 1;
-        this.#lastEventId = event.id;
-        const listeners = [...this.#listeners];
-        const notify = () => {
-            for (const listener of listeners) {
-                try {
-                    listener(event);
-                } catch {
-                    // Subscribers are optional observers. A disconnected or broken
-                    // consumer must not roll back an event that is already durable.
+                this.#recordMessageTime(event);
+                this.#recordPermissionReview(event);
+                this.#recordCurrentState(event);
+                if (this.#events.length > this.#retentionLimit) {
+                    const removed = this.#events.shift();
+                    if (removed !== undefined) {
+                        this.#eventIndexes.delete(removed.id);
+                        this.#forgetEventIndexes(removed);
+                    }
+                    this.#eventStartIndex += 1;
+                    this.#firstEventId = this.#events[0]?.id;
                 }
             }
+
+            this.#revision += 1;
+            if (affectsSessionUsage(event)) this.#usageRevision += 1;
+            this.#lastEventId = event.id;
+            const listeners = [...this.#listeners];
+            const notify: SessionEventNotification = () => {
+                let pending: Promise<void> | undefined;
+                for (const listener of listeners) {
+                    if (pending !== undefined) {
+                        pending = pending.then(async () => {
+                            try {
+                                await listener(event);
+                            } catch {
+                                // Subscribers are optional observers. A disconnected or broken
+                                // consumer must not roll back an event that is already durable.
+                            }
+                        });
+                        continue;
+                    }
+                    try {
+                        const result = listener(event);
+                        if (result !== undefined) {
+                            pending = Promise.resolve(result).catch(() => {
+                                // Subscribers are optional observers. A disconnected or broken
+                                // consumer must not roll back an event that is already durable.
+                            });
+                        }
+                    } catch {
+                        // Subscribers are optional observers. A disconnected or broken
+                        // consumer must not roll back an event that is already durable.
+                    }
+                }
+                return pending;
+            };
+            if (this.#deferNotification === undefined) {
+                const pending = notify();
+                if (pending !== undefined) await pending;
+            } else {
+                const scheduled = this.#deferNotification(notify);
+                if (scheduled !== undefined) await scheduled;
+            }
+            return event;
+        });
+    }
+
+    checkpoint(): SessionEventLogCheckpoint {
+        return {
+            eventIndexes: new Map(this.#eventIndexes),
+            eventStartIndex: this.#eventStartIndex,
+            events: [...this.#events],
+            firstEventId: this.#firstEventId,
+            lastEventId: this.#lastEventId,
+            messageCreatedAt: new Map(this.#messageCreatedAt),
+            messageEventId: new Map(this.#messageEventId),
+            messageSteeredAt: new Map(this.#messageSteeredAt),
+            messageSteeringEventId: new Map(this.#messageSteeringEventId),
+            messageSubmissions: new Map(this.#messageSubmissions),
+            nextEventIndex: this.#nextEventIndex,
+            permissionReviewEventIds: new Map(this.#permissionReviewEventIds),
+            permissionReviews: new Map(this.#permissionReviews),
+            providerQuotas: new Map(this.#providerQuotas),
+            revision: this.#revision,
+            shellCommands: new Map(this.#shellCommands),
+            usageRevision: this.#usageRevision,
         };
-        if (this.#deferNotification === undefined) notify();
-        else this.#deferNotification(notify);
-        return event;
+    }
+
+    restore(checkpoint: SessionEventLogCheckpoint): void {
+        this.#eventIndexes = new Map(checkpoint.eventIndexes);
+        this.#eventStartIndex = checkpoint.eventStartIndex;
+        this.#events = [...checkpoint.events];
+        this.#firstEventId = checkpoint.firstEventId;
+        this.#lastEventId = checkpoint.lastEventId;
+        this.#messageCreatedAt = new Map(checkpoint.messageCreatedAt);
+        this.#messageEventId = new Map(checkpoint.messageEventId);
+        this.#messageSteeredAt = new Map(checkpoint.messageSteeredAt);
+        this.#messageSteeringEventId = new Map(checkpoint.messageSteeringEventId);
+        this.#messageSubmissions = new Map(checkpoint.messageSubmissions);
+        this.#nextEventIndex = checkpoint.nextEventIndex;
+        this.#permissionReviewEventIds = new Map(checkpoint.permissionReviewEventIds);
+        this.#permissionReviews = new Map(checkpoint.permissionReviews);
+        this.#providerQuotas = new Map(checkpoint.providerQuotas);
+        this.#revision = checkpoint.revision;
+        this.#shellCommands = new Map(checkpoint.shellCommands);
+        this.#usageRevision = checkpoint.usageRevision;
     }
 
     firstCreatedAt(): number | undefined {

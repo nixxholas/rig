@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * The folder tree.
@@ -9,8 +9,8 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * storage directory named after the folder's own id, so a move rewrites rows and never the disk.
  * Sessions gain the folder they were filed into; a session without one sits in Unsorted.
  */
-export function folders(database: SessionDatabase): void {
-    database.run(
+export async function folders(database: SessionDatabase): Promise<void> {
+    await database.run(
         sql.raw(`
         CREATE TABLE folders (
             id TEXT NOT NULL PRIMARY KEY,
@@ -28,13 +28,19 @@ export function folders(database: SessionDatabase): void {
         )
     `),
     );
-    database.run(sql.raw("CREATE INDEX folders_parent_order ON folders (parent_id, order_key)"));
-    const sessions = database.get<{ name: string }>(
-        sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
+    await database.run(
+        sql.raw("CREATE INDEX folders_parent_order ON folders (parent_id, order_key)"),
     );
+    const sessions = (
+        await database.all<{ name: string }>(
+            sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
+        )
+    )[0];
     if (sessions === undefined) return;
-    database.run(sql.raw("ALTER TABLE sessions ADD COLUMN folder_id TEXT REFERENCES folders(id)"));
-    database.run(
+    await database.run(
+        sql.raw("ALTER TABLE sessions ADD COLUMN folder_id TEXT REFERENCES folders(id)"),
+    );
+    await database.run(
         sql.raw("CREATE INDEX sessions_folder ON sessions (folder_id, updated_at_ms DESC)"),
     );
 }

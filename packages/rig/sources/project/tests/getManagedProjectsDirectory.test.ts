@@ -4,9 +4,7 @@ import { getManagedProjectsDirectory } from "../getManagedProjectsDirectory.js";
 
 describe("getManagedProjectsDirectory", () => {
     it("uses the Projects folder inside the user's Happy directory", () => {
-        expect(getManagedProjectsDirectory({}, "/Users/steve")).toBe(
-            "/Users/steve/Happy/Projects",
-        );
+        expect(getManagedProjectsDirectory({}, "/Users/steve")).toBe("/Users/steve/Happy/Projects");
     });
 
     it("accepts only an absolute override", () => {

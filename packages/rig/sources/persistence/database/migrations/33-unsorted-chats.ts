@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import type { SessionDatabase } from "../openSessionDatabase.js";
+import type { DrizzleSessionTx as SessionDatabase } from "../SessionDatabase.js";
 
 /**
  * When a chat started out belonging nowhere.
@@ -11,13 +11,15 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
  * folder tree with no folder, and it holds the moment that happened for as long as the chat has
  * none, so filing and unfiling move the chat without rewriting where it came from.
  */
-export function unsortedChats(database: SessionDatabase): void {
-    const sessions = database.get<{ name: string }>(
-        sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
-    );
+export async function unsortedChats(database: SessionDatabase): Promise<void> {
+    const sessions = (
+        await database.all<{ name: string }>(
+            sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
+        )
+    )[0];
     if (sessions === undefined) return;
-    database.run(sql.raw("ALTER TABLE sessions ADD COLUMN unsorted_since_ms INTEGER"));
-    database.run(
+    await database.run(sql.raw("ALTER TABLE sessions ADD COLUMN unsorted_since_ms INTEGER"));
+    await database.run(
         sql.raw(
             "CREATE INDEX sessions_unsorted ON sessions (unsorted_since_ms) WHERE archived = 0",
         ),
