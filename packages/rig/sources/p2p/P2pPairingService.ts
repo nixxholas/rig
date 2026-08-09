@@ -138,7 +138,9 @@ export class P2pPairingService implements P2pPairingServiceContract {
             operation.decision?.reject(new Error("The P2P pairing service stopped."));
         }
         await Promise.allSettled([
-            ...[...this.#operations.values()].map((operation) => operation.endpoint.close()),
+            ...[...this.#operations.values()].map((operation) =>
+                closePairingEndpoint(operation.endpoint),
+            ),
             withDeadline(
                 Promise.allSettled(this.#tasks),
                 CLOSE_TIMEOUT_MS,
@@ -184,7 +186,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
             this.#track(this.#runInviter(operation));
             return { id, invitation: encodeInvitation(payload) };
         } catch (error) {
-            await endpoint.close().catch(() => undefined);
+            await closePairingEndpoint(endpoint);
             throw error;
         }
     }
@@ -275,7 +277,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
             this.#fail(operation, error);
         } finally {
             connection?.close(CLOSE_PAIRING, []);
-            await operation.endpoint.close().catch(() => undefined);
+            await closePairingEndpoint(operation.endpoint);
         }
     }
 
@@ -397,7 +399,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
             this.#fail(operation, error);
         } finally {
             connection?.close(CLOSE_PAIRING, []);
-            await operation.endpoint.close().catch(() => undefined);
+            await closePairingEndpoint(operation.endpoint);
         }
     }
 
@@ -583,7 +585,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
                 phase: "expired",
                 role: operation.state.role,
             };
-            void operation.endpoint.close().catch(() => undefined);
+            void closePairingEndpoint(operation.endpoint);
         }
     }
 
@@ -629,8 +631,17 @@ export class P2pPairingService implements P2pPairingServiceContract {
 
     #track(task: Promise<void>): void {
         this.#tasks.add(task);
-        void task.finally(() => this.#tasks.delete(task));
+        void task.then(
+            () => this.#tasks.delete(task),
+            () => this.#tasks.delete(task),
+        );
     }
+}
+
+function closePairingEndpoint(endpoint: Endpoint): Promise<void> {
+    return Promise.resolve()
+        .then(() => endpoint.close())
+        .catch(() => undefined);
 }
 
 function isTerminalPairingPhase(phase: P2pPairingState["phase"]): boolean {

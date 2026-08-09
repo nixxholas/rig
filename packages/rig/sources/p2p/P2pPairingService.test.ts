@@ -15,6 +15,50 @@ afterEach(async () => {
 });
 
 describe("P2pPairingService", () => {
+    it("contains a locally closed rejection from background pairing cleanup", async () => {
+        const endpointId = Iroh.SecretKey.generate().public();
+        const address = new Iroh.EndpointAddr(endpointId, "https://relay.example.com", [
+            "127.0.0.1:7777",
+        ]);
+        let closeThrows = true;
+        const endpoint = {
+            acceptNext: async () => null,
+            addr: () => address,
+            close: () => {
+                if (closeThrows) throw new Error("LocallyClosed");
+                return Promise.resolve();
+            },
+            id: () => endpointId,
+        } as unknown as Iroh.Endpoint;
+        const bindings = {
+            ...Iroh,
+            Endpoint: {
+                bind: async () => endpoint,
+            },
+        } as unknown as typeof Iroh;
+        const identity = createP2pInstanceIdentity();
+        const pairing = new P2pPairingService({
+            bindings,
+            config: {},
+            identity,
+            name: () => "Main Rig",
+            peerTrustStore: recordingTrustStore().store,
+            relayMode: Iroh.RelayMode.disabled(),
+            setPrimaryIfUnset: noPrimaryChange,
+            stableIrohEndpointId: endpointId.toString(),
+            stableIrohEndpointTicket: () => Iroh.EndpointTicket.fromAddr(address).toString(),
+            waitUntilOnline: false,
+        });
+
+        const escaped = await captureUnhandledRejection(async () => {
+            await pairing.createInvitation();
+        });
+        closeThrows = false;
+        await pairing.close();
+
+        expect(escaped).toBeUndefined();
+    });
+
     it("shows the same emoji before mutually pinning trust and assigning the first primary", async () => {
         const inviterTrust = recordingTrustStore();
         const joinerTrust = recordingTrustStore();
@@ -468,5 +512,25 @@ async function waitForPhase<Phase extends P2pPairingState["phase"]>(
         }
         if (Date.now() >= deadline) throw new Error(`Pairing did not reach ${phase}.`);
         await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+}
+
+async function captureUnhandledRejection(run: () => Promise<void>): Promise<unknown> {
+    const installed = process.listeners("unhandledRejection");
+    for (const listener of installed) process.off("unhandledRejection", listener);
+    let captured: unknown;
+    const observe = (reason: unknown): void => {
+        captured ??= reason;
+    };
+    process.on("unhandledRejection", observe);
+    try {
+        await run();
+        for (let attempt = 0; attempt < 200 && captured === undefined; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return captured;
+    } finally {
+        process.off("unhandledRejection", observe);
+        for (const listener of installed) process.on("unhandledRejection", listener);
     }
 }

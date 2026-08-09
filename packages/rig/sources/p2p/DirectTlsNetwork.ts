@@ -611,7 +611,10 @@ export class DirectTlsNetwork implements P2pTransport {
 
     #track(task: Promise<void>): void {
         this.#tasks.add(task);
-        void task.finally(() => this.#tasks.delete(task));
+        void task.then(
+            () => this.#tasks.delete(task),
+            () => this.#tasks.delete(task),
+        );
     }
 }
 

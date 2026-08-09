@@ -132,7 +132,7 @@ export class P2pProfileReplicator {
             this.#report("local", error);
         });
         this.#run = run;
-        void run.finally(() => {
+        const finish = (): void => {
             if (this.#run === run) this.#run = undefined;
             if (
                 this.#abort.signal.aborted ||
@@ -142,7 +142,8 @@ export class P2pProfileReplicator {
                 return;
             }
             this.#scheduleRetry();
-        });
+        };
+        void run.then(finish, finish);
     }
 
     #scheduleRetry(): void {

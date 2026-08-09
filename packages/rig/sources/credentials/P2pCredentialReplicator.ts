@@ -93,10 +93,11 @@ export class P2pCredentialReplicator {
             this.#renewalTimer = undefined;
             const run = this.#renewLeases();
             this.#renewalRun = run;
-            void run.finally(() => {
+            const finish = (): void => {
                 if (this.#renewalRun === run) this.#renewalRun = undefined;
                 this.#scheduleLeaseRenewal();
-            });
+            };
+            void run.then(finish, finish);
         }, LEASE_RENEWAL_INTERVAL_MS);
         this.#renewalTimer.unref?.();
     }
