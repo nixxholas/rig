@@ -93,12 +93,12 @@ function folderSession(
     };
 }
 
-function liveHello(): string {
+function liveHello(gap = false, resumed = false): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
-        gap: false,
+        gap,
         protocolVersion: 16,
-        resumed: false,
+        resumed,
     })}\n\n`;
 }
 
@@ -194,6 +194,196 @@ describe("folder catalog synchronization", () => {
             releaseCatalog.resolve();
             await settle();
             expect(connection.view().folders.map((item) => item.id)).toEqual(["new"]);
+        } finally {
+            rig.close();
+        }
+    });
+
+    it("does not publish an in-flight folder snapshot older than a required revision", async () => {
+        const stream = streamResponse();
+        const releaseStaleSnapshot = deferred();
+        const staleSnapshotStarted = deferred();
+        const freshSnapshotLoaded = deferred();
+        const selected = folder("selected", 2);
+        const history: string[] = [];
+        let folderReads = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: async (input) => {
+                const path = new URL(String(input)).pathname;
+                if (path === "/events/live") return stream.response;
+                if (path === "/catalog") return Response.json(catalog([selected]));
+                if (path === "/git/watch") return Response.json({ snapshots: [] });
+                if (path === "/folders") {
+                    folderReads += 1;
+                    if (folderReads === 1) {
+                        staleSnapshotStarted.resolve();
+                        await releaseStaleSnapshot.promise;
+                        return Response.json({ folders: [], items: [], revision: 1 });
+                    }
+                    freshSnapshotLoaded.resolve();
+                    return Response.json({ folders: [selected], items: [], revision: 2 });
+                }
+                throw new Error(`Unexpected request to ${path}`);
+            },
+            token: "secret",
+        });
+        rig.connectFolders({
+            onChange: (view, state) => {
+                history.push(
+                    `${state.connection}:${view.folders.map((item) => item.id).join(",")}`,
+                );
+            },
+        });
+        try {
+            stream.write(liveHello());
+            await settle();
+            stream.write(changed(1));
+            await staleSnapshotStarted.promise;
+            stream.write(changed(2));
+            releaseStaleSnapshot.resolve();
+            await freshSnapshotLoaded.promise;
+            await settle();
+
+            expect(folderReads).toBe(2);
+            expect(history).toEqual(["connecting:", "live:selected"]);
+        } finally {
+            rig.close();
+        }
+    });
+
+    it("does not let a stale first snapshot erase an acknowledged optimistic folder", async () => {
+        const stream = streamResponse();
+        const releaseCatalog = deferred();
+        const releaseCreate = deferred();
+        const releaseStaleSnapshot = deferred();
+        const createStarted = deferred();
+        const staleSnapshotStarted = deferred();
+        const freshSnapshotLoaded = deferred();
+        const created = folder("created", 2);
+        const history: string[] = [];
+        let folderReads = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: async (input, init) => {
+                const path = new URL(String(input)).pathname;
+                const method = init?.method ?? "GET";
+                if (path === "/events/live") return stream.response;
+                if (path === "/catalog") {
+                    await releaseCatalog.promise;
+                    return Response.json(catalog([created]));
+                }
+                if (path === "/git/watch") return Response.json({ snapshots: [] });
+                if (path === "/folders" && method === "POST") {
+                    createStarted.resolve();
+                    await releaseCreate.promise;
+                    return Response.json({ folder: created, revision: 2 });
+                }
+                if (path === "/folders") {
+                    folderReads += 1;
+                    if (folderReads === 1) {
+                        staleSnapshotStarted.resolve();
+                        await releaseStaleSnapshot.promise;
+                        return Response.json({ folders: [], items: [], revision: 1 });
+                    }
+                    freshSnapshotLoaded.resolve();
+                    return Response.json({ folders: [created], items: [], revision: 2 });
+                }
+                throw new Error(`Unexpected request to ${method} ${path}`);
+            },
+            token: "secret",
+        });
+        rig.connectFolders({
+            onChange: (view, state) => {
+                history.push(
+                    `${state.connection}:${view.folders.map((item) => item.id).join(",")}`,
+                );
+            },
+        });
+        try {
+            stream.write(liveHello());
+            await settle();
+            rig.folders.create({ id: created.id, name: created.name });
+            await createStarted.promise;
+            stream.write(changed(1));
+            await staleSnapshotStarted.promise;
+            releaseCreate.resolve();
+            await settle();
+            releaseStaleSnapshot.resolve();
+            await freshSnapshotLoaded.promise;
+            await settle();
+
+            expect(folderReads).toBe(2);
+            expect(history).toEqual(["connecting:", "connecting:created", "connecting:created"]);
+        } finally {
+            releaseCatalog.resolve();
+            rig.close();
+        }
+    });
+
+    it("reloads the revisioned folder snapshot after a stream gap", async () => {
+        const stream = streamResponse();
+        const releasePreGapSnapshot = deferred();
+        const preGapSnapshotStarted = deferred();
+        const gapCatalogLoaded = deferred();
+        const postGapSnapshotLoaded = deferred();
+        const initial = folder("initial");
+        const replacement = folder("replacement", 2);
+        const history: string[] = [];
+        let catalogReads = 0;
+        let folderReads = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: async (input) => {
+                const path = new URL(String(input)).pathname;
+                if (path === "/events/live") return stream.response;
+                if (path === "/catalog") {
+                    catalogReads += 1;
+                    if (catalogReads === 2) gapCatalogLoaded.resolve();
+                    return Response.json(catalog(catalogReads === 1 ? [initial] : [replacement]));
+                }
+                if (path === "/git/watch") return Response.json({ snapshots: [] });
+                if (path === "/folders") {
+                    folderReads += 1;
+                    if (folderReads === 1) {
+                        preGapSnapshotStarted.resolve();
+                        await releasePreGapSnapshot.promise;
+                        return Response.json({ folders: [initial], items: [], revision: 1 });
+                    }
+                    postGapSnapshotLoaded.resolve();
+                    return Response.json({ folders: [replacement], items: [], revision: 2 });
+                }
+                throw new Error(`Unexpected request to ${path}`);
+            },
+            token: "secret",
+        });
+        const connection = rig.connectFolders({
+            onChange: (view, state) => {
+                history.push(
+                    `${state.connection}:${view.folders.map((item) => item.id).join(",")}`,
+                );
+            },
+        });
+        try {
+            stream.write(liveHello());
+            await settle();
+            stream.write(changed(1));
+            await preGapSnapshotStarted.promise;
+            expect(connection.view().folders.map((item) => item.id)).toEqual(["initial"]);
+
+            stream.write(liveHello(true));
+            await gapCatalogLoaded.promise;
+            await settle();
+            expect(connection.view().folders.map((item) => item.id)).toEqual(["replacement"]);
+
+            releasePreGapSnapshot.resolve();
+            await postGapSnapshotLoaded.promise;
+            await settle();
+
+            expect(history).toEqual(["connecting:", "live:initial", "live:replacement"]);
+            expect(catalogReads).toBe(2);
+            expect(folderReads).toBe(2);
+            expect(connection.view().folders.map((item) => item.id)).toEqual(["replacement"]);
         } finally {
             rig.close();
         }

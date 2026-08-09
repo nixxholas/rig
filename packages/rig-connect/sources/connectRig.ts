@@ -986,9 +986,11 @@ interface FolderSubscriber extends RigFoldersSubscriptionOptions {
 }
 
 interface FolderEntry {
+    folderBaselineApplied: boolean;
     hasFolderSnapshot: boolean;
     loadedRevision: number;
     loading?: Promise<void>;
+    reloadGeneration: number;
     requiredRevision: number;
     store: FolderStore;
     subscribers: Set<FolderSubscriber>;
@@ -1356,8 +1358,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const createFolderEntry = (): FolderEntry => {
         if (folderEntry !== undefined) return folderEntry;
         folderEntry = {
+            folderBaselineApplied: false,
             hasFolderSnapshot: false,
             loadedRevision: 0,
+            reloadGeneration: 0,
             requiredRevision: 0,
             store: new FolderStore(),
             subscribers: new Set(),
@@ -2472,6 +2476,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 
     const requestFolderReload = (entry: FolderEntry): Promise<void> => {
         if (entry.loading !== undefined) return entry.loading;
+        const generation = entry.reloadGeneration;
         entry.loading = (async () => {
             let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
             do {
@@ -2484,6 +2489,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         signal: rootController.signal,
                     });
                     const data = await readResponseBody(response);
+                    if (generation !== entry.reloadGeneration) return;
                     if (!response.ok) {
                         throw new MutationHttpError(
                             response.status,
@@ -2493,13 +2499,24 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         );
                     }
                     const snapshot = Value.Decode(listFoldersResponseSchema, data);
-                    entry.hasFolderSnapshot = true;
-                    entry.loadedRevision = Math.max(entry.loadedRevision, snapshot.revision);
-                    reconcile(["folder-tree"], undefined, [], false, () => ({
-                        folderDeltas: entry.store.replaceFolders(snapshot.folders, snapshot.items),
-                    }));
+                    const minimumRevision = Math.max(entry.loadedRevision, entry.requiredRevision);
+                    // A request already in flight can predate a later invalidation. Keep the
+                    // applied tree until a response includes that revision, or this stale
+                    // snapshot would publish a false removal before the loop refetches.
+                    if (!entry.folderBaselineApplied || snapshot.revision >= minimumRevision) {
+                        entry.folderBaselineApplied = true;
+                        entry.hasFolderSnapshot = true;
+                        entry.loadedRevision = snapshot.revision;
+                        reconcile(["folder-tree"], undefined, [], false, () => ({
+                            folderDeltas: entry.store.replaceFolders(
+                                snapshot.folders,
+                                snapshot.items,
+                            ),
+                        }));
+                    }
                     retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
                 } catch (error) {
+                    if (generation !== entry.reloadGeneration) return;
                     if (!isRetryableMutationError(error)) throw error;
                     const delay =
                         error instanceof MutationHttpError && error.retryAfterMs !== undefined
@@ -2511,6 +2528,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             } while (
                 !closed &&
                 folderEntry === entry &&
+                generation === entry.reloadGeneration &&
                 entry.loadedRevision < entry.requiredRevision
             );
         })()
@@ -2524,6 +2542,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 releaseUnusedEntries();
             });
         return entry.loading;
+    };
+
+    const requestFolderReloadAfterCurrent = async (entry: FolderEntry): Promise<void> => {
+        await entry.loading;
+        if (closed || folderEntry !== entry) return;
+        await requestFolderReload(entry);
     };
 
     const loadCatalog = async (entry: GroupEntry): Promise<void> => {
@@ -2577,9 +2601,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 const sessions = entry.store.sessionSummaries();
                 let folderDeltas: readonly FolderDelta[] | undefined;
                 if (folderEntry !== undefined) {
+                    const folderHelloApplies = !folderEntry.hasFolderSnapshot;
+                    if (folderHelloApplies) folderEntry.folderBaselineApplied = true;
                     folderDeltas = [
                         ...folderEntry.store.setConnection("live"),
-                        ...(!folderEntry.hasFolderSnapshot
+                        ...(folderHelloApplies
                             ? folderEntry.store.applyHello({ ...hello, sessions })
                             : folderEntry.store.applyCatalogSessions(sessions)),
                     ];
@@ -2901,6 +2927,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 for (const entry of documentEntries.values()) {
                     if (entry.started) void requestDocumentReload(entry);
+                }
+                if (hello.gap && folderEntry !== undefined) {
+                    folderEntry.reloadGeneration += 1;
+                    void requestFolderReloadAfterCurrent(folderEntry);
                 }
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
@@ -4525,6 +4555,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 id,
                 (publish) => {
                     if (folderEntry === undefined) return () => undefined;
+                    folderEntry.folderBaselineApplied = true;
                     const changed = folderEntry.store.applyOptimisticFolder(optimistic);
                     if (publish) publishFolders(changed.deltas);
                     return changed.undo;
