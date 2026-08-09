@@ -48,6 +48,7 @@ import { profileGitIdentity } from "./migrations/43-profile-git-identity.js";
 import { remoteWorkspaces } from "./migrations/44-remote-workspaces.js";
 import { folderItemsAndDocuments } from "./migrations/45-folder-items-and-documents.js";
 import { folderItemMutationRetention } from "./migrations/46-folder-item-mutation-retention.js";
+import { onboardingState } from "./migrations/47-onboarding-state.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -103,6 +104,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     remoteWorkspaces,
     folderItemsAndDocuments,
     folderItemMutationRetention,
+    onboardingState,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

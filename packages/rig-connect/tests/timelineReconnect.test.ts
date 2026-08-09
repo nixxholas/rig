@@ -276,7 +276,7 @@ function timeline(spans?: GetTimelineResponse["agents"][number]["spans"]): GetTi
 }
 
 function hello(cursor: string, gap: boolean, resumed: boolean): string {
-    return `event: hello\ndata: ${JSON.stringify({ cursor, gap, protocolVersion: 15, resumed })}\n\n`;
+    return `event: hello\ndata: ${JSON.stringify({ cursor, gap, protocolVersion: 16, resumed })}\n\n`;
 }
 
 function update(type: string, createdAt: number, data: unknown): string {

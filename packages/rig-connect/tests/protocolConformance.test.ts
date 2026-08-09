@@ -9,6 +9,7 @@ import { happyComputeErrorSchema } from "../../happy-plugins/sources/computeType
 // conformance check.
 import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
+    CURRENT_ONBOARDING_VERSION as DAEMON_CURRENT_ONBOARDING_VERSION,
     DOCUMENT_STATE_MAX_BYTES as DAEMON_DOCUMENT_STATE_MAX_BYTES,
     DOCUMENT_UPDATE_MAX_BYTES as DAEMON_DOCUMENT_UPDATE_MAX_BYTES,
     DOCUMENT_UPDATE_PAGE_MAX_LIMIT as DAEMON_DOCUMENT_UPDATE_PAGE_MAX_LIMIT,
@@ -36,6 +37,7 @@ import {
     moveFolderItemRequestSchema as daemonMoveFolderItemRequestSchema,
     moveFolderRequestSchema as daemonMoveFolderRequestSchema,
     moveSessionRequestSchema as daemonMoveSessionRequestSchema,
+    onboardingStatusSchema as daemonOnboardingStatusSchema,
     sessionScopeSchema as daemonSessionScopeSchema,
     updateFolderRequestSchema as daemonUpdateFolderRequestSchema,
     writeDocumentRequestSchema as daemonWriteDocumentRequestSchema,
@@ -57,6 +59,7 @@ import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
 import type * as localInstallation from "@/RigInstallationInspection.js";
 import {
+    CURRENT_ONBOARDING_VERSION,
     DOCUMENT_STATE_MAX_BYTES,
     DOCUMENT_UPDATE_MAX_BYTES,
     DOCUMENT_UPDATE_PAGE_MAX_LIMIT,
@@ -89,6 +92,7 @@ import {
     moveFolderItemRequestSchema,
     moveFolderRequestSchema,
     rigProfileSchema,
+    onboardingStatusSchema,
     moveSessionRequestSchema,
     projectWorkspaceSchema,
     sessionScopeSchema,
@@ -221,6 +225,8 @@ type _WorkspaceErrorMaxLength = Assignable<
 >;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
+type _OnboardingStatus = Assignable<local.OnboardingStatus, daemon.OnboardingStatus>;
+type _DaemonOnboardingStatus = Assignable<daemon.OnboardingStatus, local.OnboardingStatus>;
 type _Folder = Assignable<local.Folder, daemon.Folder>;
 type _FolderExact = Assignable<daemon.Folder, local.Folder>;
 type _FolderItem = Assignable<local.FolderItem, daemon.FolderItem>;
@@ -471,6 +477,20 @@ describe("protocol conformance", () => {
             expect(Value.Check(rigDaemonInstallationDiscoverySchema, value)).toBe(false);
             expect(Value.Check(daemonRigDaemonInstallationDiscoverySchema, value)).toBe(false);
         }
+    });
+
+    it("keeps onboarding schemas structurally identical to the daemon", () => {
+        expect(CURRENT_ONBOARDING_VERSION).toBe(DAEMON_CURRENT_ONBOARDING_VERSION);
+        expect(onboardingStatusSchema).toStrictEqual(daemonOnboardingStatusSchema);
+
+        const profileRequired = {
+            onboardingVersion: 1,
+            state: "profile_required",
+        };
+        expect(Value.Decode(onboardingStatusSchema, profileRequired)).toEqual(profileRequired);
+        expect(Value.Decode(daemonOnboardingStatusSchema, profileRequired)).toEqual(
+            profileRequired,
+        );
     });
 
     it("keeps the embedded protocol types assignable from the daemon's own types", () => {

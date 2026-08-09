@@ -105,6 +105,7 @@ import type {
     P2pStatus,
     CreateP2pInvitationResponse,
     JoinP2pInvitationResponse,
+    OnboardingStatus,
     P2pPairingState,
     CreateRigProfileRequest,
     RigProfile,
@@ -121,6 +122,7 @@ import {
     happyCloudStatusSchema,
     p2pStatusChangedEventSchema,
     p2pStatusSchema,
+    onboardingStatusSchema,
     createRigProfileRequestSchema,
     listRigProfilesResponseSchema,
     rigProfileIdSchema,
@@ -813,6 +815,8 @@ export interface RigConnection {
     connectHappyCloud: (options: RigHappyCloudSubscriptionOptions) => RigHappyCloudConnection;
     /** Follows authenticated P2P transports and trusted peer reachability. */
     connectP2p: (options: RigP2pSubscriptionOptions) => RigP2pConnection;
+    /** Materializes the current daemon-owned onboarding requirement. */
+    getOnboardingStatus: (options?: { signal?: AbortSignal }) => Promise<OnboardingStatus>;
     /** Follows the human profiles whose identities appear on messages. */
     connectProfiles: (options: RigProfilesSubscriptionOptions) => RigProfilesConnection;
     listProfiles: (options?: { signal?: AbortSignal }) => Promise<readonly RigProfile[]>;
@@ -5032,6 +5036,37 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
+    const readOnboardingStatus = async (signal: AbortSignal): Promise<OnboardingStatus> => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const response = await request(endpointUrl(options.endpoint, "onboarding"), {
+            headers: {
+                accept: "application/json",
+                authorization: `Bearer ${options.token}`,
+            },
+            signal,
+        });
+        if (!response.ok) {
+            throw new Error(`Rig could not read onboarding status (${String(response.status)}).`);
+        }
+        try {
+            return Value.Decode(onboardingStatusSchema, await response.json());
+        } catch {
+            signal.throwIfAborted();
+            throw new Error("Rig returned an invalid onboarding status.");
+        }
+    };
+
+    const getOnboardingStatus: RigConnection["getOnboardingStatus"] = async (
+        operationOptions = {},
+    ) => {
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            return await readOnboardingStatus(operation.signal);
+        } finally {
+            operation.detach();
+        }
+    };
+
     const createProfilesEntry = (): ProfilesEntry => {
         if (profilesEntry !== undefined) return profilesEntry;
         const linked = linkedController(rootController.signal);
@@ -6924,6 +6959,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         getHappyCloudProfile,
         getHappyCloudSessionBlob,
         getHappyCloudStatus,
+        getOnboardingStatus,
         getP2pPairing,
         joinP2pInvitation,
         folders,
@@ -7114,8 +7150,8 @@ function linkedController(parent: AbortSignal): {
     detach: () => void;
 } {
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    if (parent.aborted) controller.abort();
+    const abort = () => controller.abort(parent.reason);
+    if (parent.aborted) abort();
     else parent.addEventListener("abort", abort, { once: true });
     return {
         controller,
@@ -7129,16 +7165,18 @@ function combinedSignal(
 ): { detach: () => void; signal: AbortSignal } {
     if (additional === undefined) return { detach: () => undefined, signal: parent };
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    if (parent.aborted || additional.aborted) controller.abort();
+    const abortForParent = () => controller.abort(parent.reason);
+    const abortForAdditional = () => controller.abort(additional.reason);
+    if (parent.aborted) abortForParent();
+    else if (additional.aborted) abortForAdditional();
     else {
-        parent.addEventListener("abort", abort, { once: true });
-        additional.addEventListener("abort", abort, { once: true });
+        parent.addEventListener("abort", abortForParent, { once: true });
+        additional.addEventListener("abort", abortForAdditional, { once: true });
     }
     return {
         detach: () => {
-            parent.removeEventListener("abort", abort);
-            additional.removeEventListener("abort", abort);
+            parent.removeEventListener("abort", abortForParent);
+            additional.removeEventListener("abort", abortForAdditional);
         },
         signal: controller.signal,
     };

@@ -33,6 +33,7 @@ import { CONTAINER_DOCS_PATH, getBundledDocsRoot } from "../../execution/getBund
 import { CONTAINER_GENERATED_PATH } from "../../execution/getGeneratedMount.js";
 import { getGeneratedDirectory } from "../../generated-media/index.js";
 import type { GlobalEventQueue } from "../../global-event/GlobalEventQueue.js";
+import type { OnboardingServiceContract } from "../../onboarding/OnboardingService.js";
 import { ProjectRegistrationError } from "../../project/ProjectRepository.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
@@ -3532,7 +3533,13 @@ describe("createProtocolHttpServer", () => {
 
     it("rejects new mutations as soon as shutdown begins", async () => {
         const taskDrain = new TrackedTaskDrain();
-        const { client, close } = await startServer({ taskDrain });
+        const onboarding: OnboardingServiceContract = {
+            status: vi.fn<OnboardingServiceContract["status"]>(async () => ({
+                onboardingVersion: 1,
+                state: "complete",
+            })),
+        };
+        const { client, close, socketPath } = await startServer({ onboarding, taskDrain });
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-closing-test" });
 
@@ -3546,6 +3553,10 @@ describe("createProtocolHttpServer", () => {
             await expect(
                 client.registerProject({ path: "/tmp/rig-closing-project" }),
             ).rejects.toThrow("local daemon is shutting down");
+            await expect(
+                requestRawJson(socketPath, "/onboarding", { body: "", method: "GET" }),
+            ).resolves.toMatchObject({ statusCode: 503 });
+            expect(onboarding.status).not.toHaveBeenCalled();
             await expect(client.getSession(created.session.id)).resolves.toMatchObject({
                 session: { id: created.session.id },
             });
@@ -3650,6 +3661,7 @@ async function startServer(
         onShutdown?: () => void;
         onReloadHappy?: () => boolean | Promise<boolean>;
         onStartInspector?: () => Promise<{ inspectorUrl: string }>;
+        onboarding?: OnboardingServiceContract;
         profiles?: RigProfileStore;
         store?: SessionStore;
         taskDrain?: TrackedTaskDrain;
@@ -3685,6 +3697,7 @@ async function startServer(
         ...(options.onStartInspector !== undefined
             ? { onStartInspector: options.onStartInspector }
             : {}),
+        ...(options.onboarding === undefined ? {} : { onboarding: options.onboarding }),
         ...(options.onDaemonSettingsChange === undefined
             ? {}
             : {

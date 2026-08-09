@@ -1,5 +1,10 @@
 export type { EventId } from "./EventId.js";
 export {
+    CURRENT_ONBOARDING_VERSION,
+    onboardingStatusSchema,
+    type OnboardingStatus,
+} from "./OnboardingProtocol.js";
+export {
     createRigProfileRequestSchema,
     listRigProfilesResponseSchema,
     replicateRigProfileRequestSchema,

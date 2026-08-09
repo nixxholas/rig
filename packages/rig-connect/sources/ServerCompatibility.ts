@@ -1,7 +1,7 @@
 /** Oldest daemon protocol this build of rig-connect can read. */
-export const MINIMUM_RIG_PROTOCOL_VERSION = 15;
+export const MINIMUM_RIG_PROTOCOL_VERSION = 16;
 /** Newest daemon protocol this build of rig-connect can read. */
-export const MAXIMUM_RIG_PROTOCOL_VERSION = 15;
+export const MAXIMUM_RIG_PROTOCOL_VERSION = 16;
 
 export type ServerCompatibility =
     | {
@@ -35,7 +35,9 @@ export const CHECKING_SERVER_COMPATIBILITY: ServerCompatibility = {
 };
 
 /** Classifies one daemon before rig-connect accepts any state from it. */
-export function serverCompatibility(protocolVersion: number): ServerCompatibility {
+export function serverCompatibility(
+    protocolVersion: number,
+): Exclude<ServerCompatibility, { status: "checking" }> {
     if (!Number.isSafeInteger(protocolVersion) || protocolVersion < 0) protocolVersion = 0;
     const supported = {
         maximumSupportedProtocolVersion: MAXIMUM_RIG_PROTOCOL_VERSION,

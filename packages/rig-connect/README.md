@@ -18,6 +18,42 @@ the same build runs in Node, in a browser, and in any runtime that provides them
 validation uses TypeBox. The package has no runtime dependency on `rig`, and a browser bundle
 carries no daemon code.
 
+## Resolving onboarding
+
+Desktop applications use one resolver for the ordered preconnection and daemon-owned onboarding
+states:
+
+```ts
+import { resolveRigOnboarding } from "@slopus/rig-connect";
+
+const onboarding = await resolveRigOnboarding({
+    endpoint,
+    token,
+    inspectLocalRig: (signal) => nativeBridge.inspectRig(signal),
+});
+```
+
+The native bridge returns `{ status: "not_installed" }` when the Rig executable is absent,
+`{ status: "not_running" }` when its daemon is known to be stopped, or the validated output of
+`rig inspect --json` unchanged. `rig-connect` then applies the ordering itself: local availability,
+CLI compatibility and data readiness, authenticated daemon discovery, daemon compatibility, and
+finally `GET /onboarding`.
+
+The resulting `RigOnboardingState` is one closed TypeBox-validated union:
+
+- `rig_not_installed`, `rig_not_running`, or `rig_unreachable`;
+- `version_mismatch`, with `upgrade: "rig" | "happy"` and either the incompatible protocol range
+  or the CLI/data-schema facts and message that require a Rig upgrade;
+- the daemon-owned `complete`, `provider_setup`, or `profile_required` status.
+
+This keeps process discovery in the native layer without making each Happy surface reproduce the
+onboarding decision tree. The exported `localRigOnboardingInspectionSchema` validates native bridge
+results, and `rigOnboardingStateSchema` validates the complete result.
+
+After connecting, `getOnboardingStatus` materializes the current status from `GET /onboarding`.
+Callers query it after completing a step; onboarding has no live subscription or change event. Rig
+checks only whether at least one provider is configured and does not run inference.
+
 ## Discovering a running Rig
 
 Onboarding can discover an authenticated daemon once without opening the live event stream or

@@ -23,6 +23,18 @@ export const rigDataIdentityTable = sqliteTable(
     ],
 );
 
+export const onboardingState = sqliteTable(
+    "onboarding_state",
+    {
+        singleton: integer("singleton").notNull().primaryKey(),
+        completedVersion: integer("completed_version").notNull().default(0),
+    },
+    (state) => [
+        check("onboarding_state_singleton", sql`${state.singleton} = 1`),
+        check("onboarding_state_completed_version", sql`${state.completedVersion} >= 0`),
+    ],
+);
+
 export const p2pPeers = sqliteTable("p2p_peers", {
     instanceId: text("instance_id").notNull().primaryKey(),
     publicKey: text("public_key").notNull().unique(),

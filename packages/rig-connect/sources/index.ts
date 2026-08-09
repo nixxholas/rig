@@ -14,6 +14,16 @@ export {
 } from "./discoverRigInstallation.js";
 export type { DiscoverRigInstallationOptions } from "./discoverRigInstallation.js";
 export {
+    localRigOnboardingInspectionSchema,
+    resolveRigOnboarding,
+    rigOnboardingStateSchema,
+} from "./resolveRigOnboarding.js";
+export type {
+    LocalRigOnboardingInspection,
+    ResolveRigOnboardingOptions,
+    RigOnboardingState,
+} from "./resolveRigOnboarding.js";
+export {
     rigCliInstallationInspectionSchema,
     rigDaemonInstallationDiscoverySchema,
     rigInstallationCliDataSchema,
@@ -118,6 +128,7 @@ export type {
     HappyCloudStatus,
     P2pStatus,
     P2pStatusChangedEvent,
+    OnboardingStatus,
     CreateP2pInvitationResponse,
     JoinP2pInvitationResponse,
     P2pPairingState,
@@ -233,6 +244,8 @@ export {
     p2pStatusChangedEventSchema,
     p2pStatusSchema,
     p2pTransportStatusSchema,
+    CURRENT_ONBOARDING_VERSION,
+    onboardingStatusSchema,
     createRigProfileRequestSchema,
     listRigProfilesResponseSchema,
     rigProfileChangedEventSchema,

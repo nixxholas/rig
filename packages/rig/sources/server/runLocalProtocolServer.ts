@@ -87,6 +87,7 @@ import {
     P2pCredentialRuntimeRegistry,
     P2pCredentialStore,
 } from "../credentials/index.js";
+import { OnboardingService } from "../onboarding/OnboardingService.js";
 import { prepareRemoteWorkGitSecret } from "./prepareRemoteWorkGitSecret.js";
 
 export interface RunLocalProtocolServerOptions {
@@ -161,6 +162,7 @@ async function runOwnedLocalProtocolServer(
     let p2pCredentialRuntimeRegistry: P2pCredentialRuntimeRegistry | undefined;
     let p2pCredentialStore: P2pCredentialStore | undefined;
     let rigProfiles: RigProfileStore | undefined;
+    let onboarding: OnboardingService | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -722,6 +724,15 @@ async function runOwnedLocalProtocolServer(
                 p2pProfileReplicator?.syncProfile(event.data.profileId, event.data.version);
             },
         });
+        onboarding = new OnboardingService({
+            persistence: activeStore,
+            profileComplete: () =>
+                rigProfiles
+                    ?.list()
+                    .some((profile) => profile.parentInstanceId === p2pIdentity.instanceId) ===
+                true,
+            providersConfigured: () => modelCatalog.models.length > 0,
+        });
         {
             try {
                 const irohSecret = await loadOrCreateIrohSecretKey(paths.irohSecretKeyPath);
@@ -995,6 +1006,7 @@ async function runOwnedLocalProtocolServer(
                     : { globalEventQueue: store.globalEventQueue }),
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
+                ...(onboarding === undefined ? {} : { onboarding }),
                 resolveModelCatalog: (ownerInstanceId) =>
                     p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
                 happyCloud: store.happyCloud,

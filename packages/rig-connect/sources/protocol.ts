@@ -2878,6 +2878,38 @@ export const p2pStatusChangedEventSchema = Type.Object(
 );
 export type P2pStatusChangedEvent = Static<typeof p2pStatusChangedEventSchema>;
 
+/** Advance when a newly required onboarding step is introduced. */
+export const CURRENT_ONBOARDING_VERSION = 1;
+const onboardingExact = { additionalProperties: false } as const;
+const onboardingVersionSchema = Type.Integer({
+    maximum: Number.MAX_SAFE_INTEGER,
+    minimum: 1,
+});
+export const onboardingStatusSchema = Type.Union([
+    Type.Object(
+        {
+            onboardingVersion: onboardingVersionSchema,
+            state: Type.Literal("complete"),
+        },
+        onboardingExact,
+    ),
+    Type.Object(
+        {
+            onboardingVersion: onboardingVersionSchema,
+            state: Type.Literal("provider_setup"),
+        },
+        onboardingExact,
+    ),
+    Type.Object(
+        {
+            onboardingVersion: onboardingVersionSchema,
+            state: Type.Literal("profile_required"),
+        },
+        onboardingExact,
+    ),
+]);
+export type OnboardingStatus = Static<typeof onboardingStatusSchema>;
+
 export type GlobalEvent =
     | ComputePreparationEvent
     | FolderEvent

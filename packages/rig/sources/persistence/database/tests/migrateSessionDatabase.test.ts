@@ -80,6 +80,23 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
+    it("seeds one singleton onboarding state row", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database);
+
+        expect(opened.database.select().from(schema.onboardingState).all()).toEqual([
+            {
+                completedVersion: 0,
+                singleton: 1,
+            },
+        ]);
+        expect(() =>
+            opened.database.update(schema.onboardingState).set({ completedVersion: -1 }).run(),
+        ).toThrow(/CHECK constraint failed/u);
+
+        opened.client.close();
+    });
+
     it("attributes pre-owner sessions to the local Rig while advancing to session owner schema", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database);

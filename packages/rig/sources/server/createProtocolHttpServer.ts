@@ -148,6 +148,7 @@ import {
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
 import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
+import type { OnboardingServiceContract } from "../onboarding/OnboardingService.js";
 import { HappyCloudPersistenceError } from "../persistence/happy-cloud/HappyCloudPersistenceError.js";
 import {
     normalizeRigProfilePhoto,
@@ -332,6 +333,7 @@ export interface ProtocolHttpServerOptions {
     happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
+    onboarding?: OnboardingServiceContract;
     resolveModelCatalog?: (ownerInstanceId: string) => ModelCatalog;
     p2pNetwork?: P2pNetwork;
     p2pPairing?: P2pPairingServiceContract;
@@ -425,6 +427,7 @@ export function createProtocolHttpServer(
         prepareP2pRequest: options.prepareP2pRequest,
         happyCloud: options.happyCloud,
         onDaemonConfigChange: options.onDaemonConfigChange,
+        onboarding: options.onboarding,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
         plugins: options.plugins,
@@ -528,6 +531,7 @@ interface ProtocolServerRuntimeConfig {
     prepareP2pRequest: PrepareP2pHttpRequest | undefined;
     happyCloud: HappyCloudServiceContract | undefined;
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
+    onboarding: OnboardingServiceContract | undefined;
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
     plugins:
@@ -663,6 +667,24 @@ async function handleRequest(
             200,
             healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue.durable),
         );
+        return;
+    }
+    if (route.name === "onboarding") {
+        if (request.method !== "GET") {
+            response.setHeader("allow", "GET");
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        if (p2pPeerId(request) !== undefined) {
+            sendJson(response, 403, { error: "Onboarding is available only on the local Rig." });
+            return;
+        }
+        const onboarding = runtimeConfig.onboarding;
+        if (onboarding === undefined) {
+            sendJson(response, 503, { error: "Rig onboarding is unavailable." });
+            return;
+        }
+        sendJson(response, 200, await onboarding.status());
         return;
     }
 
@@ -4816,6 +4838,7 @@ function matchRoute(pathname: string):
               | "health"
               | "inference-credentials"
               | "installation"
+              | "onboarding"
               | "p2p-status"
               | "p2p-invitations"
               | "p2p-joins"
@@ -5028,6 +5051,7 @@ function matchRoute(pathname: string):
     if (pathname === "/health") return { name: "health" };
     if (pathname === "/inference-credentials") return { name: "inference-credentials" };
     if (pathname === "/installation") return { name: "installation" };
+    if (pathname === "/onboarding") return { name: "onboarding" };
     if (pathname === "/p2p/status") return { name: "p2p-status" };
     if (pathname === "/p2p/invitations") return { name: "p2p-invitations" };
     if (pathname === "/p2p/joins") return { name: "p2p-joins" };
@@ -5965,6 +5989,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "config") return request.method === "PATCH";
+    if (route.name === "onboarding") return request.method === "GET";
     if (route.name === "global-instructions") return request.method === "PUT";
     if (route.name === "global-security-policy") return request.method === "PUT";
     if (route.name === "debug-inspector") return request.method === "POST";

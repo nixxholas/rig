@@ -248,7 +248,7 @@ describe("Happy Cloud API", () => {
                                     `event: hello\ndata: ${JSON.stringify({
                                         cursor: "cloud-0",
                                         gap: false,
-                                        protocolVersion: 15,
+                                        protocolVersion: 16,
                                         resumed: false,
                                     })}\n\n`,
                                 ),
@@ -356,7 +356,7 @@ describe("Happy Cloud API", () => {
                                     `event: hello\ndata: ${JSON.stringify({
                                         cursor: `hello-${String(streams.length)}`,
                                         gap: false,
-                                        protocolVersion: 15,
+                                        protocolVersion: 16,
                                         resumed: false,
                                     })}\n\n`,
                                 ),
@@ -448,7 +448,7 @@ describe("Happy Cloud API", () => {
                                     `event: hello\ndata: ${JSON.stringify({
                                         cursor: "self-0",
                                         gap: false,
-                                        protocolVersion: 15,
+                                        protocolVersion: 16,
                                         resumed: false,
                                     })}\n\n`,
                                 ),
@@ -540,7 +540,7 @@ describe("Happy Cloud API", () => {
                                     `event: hello\ndata: ${JSON.stringify({
                                         cursor: "rollback-0",
                                         gap: false,
-                                        protocolVersion: 15,
+                                        protocolVersion: 16,
                                         resumed: false,
                                     })}\n\n`,
                                 ),
@@ -629,7 +629,7 @@ describe("Happy Cloud API", () => {
                                     `event: hello\ndata: ${JSON.stringify({
                                         cursor: `gap-${liveRequests}`,
                                         gap,
-                                        protocolVersion: 15,
+                                        protocolVersion: 16,
                                         resumed: gap,
                                     })}\n\n`,
                                 ),
@@ -807,7 +807,7 @@ describe("Happy Cloud API", () => {
                                     `event: hello\ndata: ${JSON.stringify({
                                         cursor: "stale-0",
                                         gap: false,
-                                        protocolVersion: 15,
+                                        protocolVersion: 16,
                                         resumed: false,
                                     })}\n\n`,
                                 ),
@@ -971,7 +971,7 @@ function liveResponse(signal: AbortSignal | null | undefined): Response {
                         `event: hello\ndata: ${JSON.stringify({
                             cursor: "cloud-cursor",
                             gap: false,
-                            protocolVersion: 15,
+                            protocolVersion: 16,
                             resumed: false,
                         })}\n\n`,
                     ),

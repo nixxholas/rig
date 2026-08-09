@@ -61,7 +61,7 @@ function catalog(folders: readonly Folder[], items: readonly FolderItem[]): Glob
             since: 0,
         },
         projects: [],
-        protocolVersion: 15,
+        protocolVersion: 16,
         sessions: [],
         sessionsComplete: true,
         terminalGroups: [],
@@ -73,7 +73,7 @@ function liveHello(): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
         gap: false,
-        protocolVersion: 15,
+        protocolVersion: 16,
         resumed: false,
     })}\n\n`;
 }
