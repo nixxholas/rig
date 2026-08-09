@@ -45,6 +45,7 @@ export interface GymOptions {
     providerOverrides?: readonly ("claude" | "codex" | "grok" | "kimi")[];
     rows?: number;
     startupText?: string;
+    terminalBackgroundColorQuery?: boolean;
     terminalColorScheme?: TerminalColorScheme;
     timeoutMs?: number;
 }

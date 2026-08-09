@@ -18,19 +18,27 @@ export class GhosttyTerminal {
     #outputRevision = 0;
     #ptyWriteHandlers = new Set<(data: string) => void>();
     #rows: number;
+    readonly #terminalBackgroundColorQuery: boolean;
     readonly #terminal: WasmGhosttyTerminal;
     #topArrivalCount = 0;
 
-    private constructor(terminal: WasmGhosttyTerminal, cols: number, rows: number) {
+    private constructor(
+        terminal: WasmGhosttyTerminal,
+        cols: number,
+        rows: number,
+        terminalBackgroundColorQuery: boolean,
+    ) {
         this.#terminal = terminal;
         this.#cols = cols;
         this.#rows = rows;
+        this.#terminalBackgroundColorQuery = terminalBackgroundColorQuery;
     }
 
     static async create(
         cols: number,
         rows: number,
         colorScheme: TerminalColorScheme = "dark",
+        terminalBackgroundColorQuery = true,
     ): Promise<GhosttyTerminal> {
         const terminal = await createGhosttyTerminal({
             colorScheme,
@@ -38,7 +46,7 @@ export class GhosttyTerminal {
             maxScrollback: 10_000,
             rows,
         });
-        return new GhosttyTerminal(terminal, cols, rows);
+        return new GhosttyTerminal(terminal, cols, rows, terminalBackgroundColorQuery);
     }
 
     close(): void {
@@ -57,9 +65,11 @@ export class GhosttyTerminal {
 
     onPtyWrite(handler: (data: string) => void): () => void {
         this.#ptyWriteHandlers.add(handler);
-        const removeNativeHandler = this.#terminal.onPtyWrite((data) =>
-            handler(Buffer.from(data).toString("utf8")),
-        );
+        const removeNativeHandler = this.#terminal.onPtyWrite((data) => {
+            const response = Buffer.from(data).toString("utf8");
+            if (!this.#terminalBackgroundColorQuery && response.startsWith("\x1b]11;")) return;
+            handler(response);
+        });
         return () => {
             this.#ptyWriteHandlers.delete(handler);
             removeNativeHandler();

@@ -145,13 +145,21 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         version: readPackageVersion(),
     });
     const terminalCrashCleanup = installTerminalCrashCleanup({ terminal, tui });
-    let terminalBackground: ReturnType<TUI["queryTerminalBackgroundColor"]>;
+    let terminalAppearance: Promise<
+        [
+            Awaited<ReturnType<TUI["queryTerminalBackgroundColor"]>>,
+            Awaited<ReturnType<TUI["queryTerminalColorScheme"]>>,
+        ]
+    >;
     let exitReason: AppExitReason = "exit";
     try {
         startup.start();
         tui.setTerminalColorSchemeNotifications(true);
         terminal.write("\x1b[?1004h");
-        terminalBackground = tui.queryTerminalBackgroundColor({ timeoutMs: 250 });
+        terminalAppearance = Promise.all([
+            tui.queryTerminalBackgroundColor({ timeoutMs: 250 }),
+            tui.queryTerminalColorScheme({ timeoutMs: 250 }),
+        ]);
     } catch (error) {
         try {
             startup.stop();
@@ -242,7 +250,11 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     });
     try {
         const processManager = new NativeProcessManager();
-        const theme = resolveTerminalTheme(loadedConfig.config.theme, await terminalBackground);
+        const [terminalBackground, terminalColorScheme] = await terminalAppearance;
+        const theme = resolveTerminalTheme(
+            loadedConfig.config.theme,
+            terminalBackground ?? terminalColorSchemeBackground(terminalColorScheme),
+        );
         const sessionCwd = session.session.cwd;
         if (session.session.title !== undefined) {
             terminal.setTitle(`Rig - ${sanitizeTerminalTitle(session.session.title)}`);
@@ -482,10 +494,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                 app.setTheme(
                     resolveTerminalTheme(
                         loadedConfig.config.theme,
-                        background ??
-                            (colorScheme === "light"
-                                ? { r: 0xff, g: 0xff, b: 0xff }
-                                : { r: 0x0d, g: 0x0d, b: 0x0d }),
+                        background ?? terminalColorSchemeBackground(colorScheme),
                     ),
                 );
             });
@@ -570,6 +579,13 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     return exitReason === "reload"
         ? { action: "reload", sessionId: session.session.id }
         : { action: "exit" };
+}
+
+function terminalColorSchemeBackground(
+    colorScheme: "dark" | "light" | undefined,
+): { r: number; g: number; b: number } | undefined {
+    if (colorScheme === undefined) return undefined;
+    return colorScheme === "light" ? { r: 0xff, g: 0xff, b: 0xff } : { r: 0x0d, g: 0x0d, b: 0x0d };
 }
 
 function sanitizeTerminalTitle(value: string): string {

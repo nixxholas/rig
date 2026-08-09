@@ -97,6 +97,7 @@ export async function createGym(options: GymOptions): Promise<Gym> {
             cols,
             rows,
             options.terminalColorScheme,
+            options.terminalBackgroundColorQuery,
         );
         profileGymTiming(profileId, "terminal", terminalStartedAt);
         ghostty = startedGhostty;
