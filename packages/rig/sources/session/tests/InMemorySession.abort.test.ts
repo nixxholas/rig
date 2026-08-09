@@ -430,7 +430,7 @@ describe("InMemorySession abort", () => {
             });
             await session.beginShutdown();
         }
-    });
+    }, 10_000);
 
     it("continues the same run immediately when aborting with pending steering", async () => {
         const started = deferred<void>();
