@@ -5,6 +5,7 @@ import { assertRegistryLatestMatchesManifest } from "./release/assertRegistryLat
 import { resolveReleasePackage } from "./release/resolveReleasePackage.js";
 import { runCommand } from "./release/runCommand.js";
 import { validateRelease } from "./release/validateRelease.js";
+import { resolveReleaseVersionArguments } from "./release/resolveReleaseVersionArguments.js";
 
 const VERSION_BUMPS = new Set([
     "major",
@@ -18,12 +19,14 @@ const VERSION_BUMPS = new Set([
 const SEMANTIC_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const USAGE = `Usage:
   pnpm release <version>
+  pnpm release beta
   pnpm release rig-connect <version>
   pnpm release happy-plugins <version>
 
 Examples:
   pnpm release minor            a release with new features in it
   pnpm release patch            a release that only fixes things
+  pnpm release beta             the next quick beta, with typechecks but no tests
   pnpm release 0.4.0            that same choice, spelled out
   pnpm release rig-connect patch
   pnpm release happy-plugins patch
@@ -46,12 +49,18 @@ async function release(): Promise<void> {
     if (
         releaseInput === undefined ||
         arguments_.length !== 1 ||
-        (!VERSION_BUMPS.has(releaseInput) && !SEMANTIC_VERSION.test(releaseInput))
+        (releaseInput !== "beta" &&
+            !VERSION_BUMPS.has(releaseInput) &&
+            !SEMANTIC_VERSION.test(releaseInput))
     ) {
         throw new Error(USAGE);
     }
 
     const initialManifest = readPackageManifest(releasePackage);
+    const versionArguments = resolveReleaseVersionArguments(initialManifest.version, releaseInput);
+    if (versionArguments.beta && releasePackage.key !== "rig") {
+        throw new Error("Beta releases are only available for @slopus/rig.");
+    }
     assertReleaseBumpAllowed({ currentVersion: initialManifest.version, requested: releaseInput });
 
     const worktreeStatus = runCommand("git", ["status", "--porcelain"], {
@@ -109,11 +118,11 @@ async function release(): Promise<void> {
     }
 
     console.log("Validating the release...");
-    validateRelease(releasePackage);
+    validateRelease(releasePackage, { tests: !versionArguments.beta });
 
     if (!retryingRelease) {
         console.log(`Creating the ${releaseInput} release commit and tag...`);
-        runCommand("pnpm", ["version", releaseInput, "--no-git-tag-version"], {
+        runCommand("pnpm", ["version", ...versionArguments.arguments], {
             cwd: releasePackage.directory,
         });
         const versionedManifest = readPackageManifest(releasePackage);
@@ -128,9 +137,18 @@ async function release(): Promise<void> {
 
     const releaseManifest = readPackageManifest(releasePackage);
     console.log(`Previewing ${releaseManifest.name}@${releaseManifest.version}...`);
-    runCommand("pnpm", ["publish", "--access", "public", "--dry-run", "--no-git-checks"], {
-        cwd: releasePackage.directory,
-    });
+    runCommand(
+        "pnpm",
+        [
+            "publish",
+            "--access",
+            "public",
+            "--dry-run",
+            "--no-git-checks",
+            ...(versionArguments.beta ? ["--tag", "beta"] : []),
+        ],
+        { cwd: releasePackage.directory },
+    );
 
     console.log("Pushing the release commit and tag...");
     const tag = `${releasePackage.tagPrefix}${releaseManifest.version}`;

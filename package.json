@@ -14,6 +14,7 @@
         "link:dev": "cd packages/rig-dev && pnpm link --global",
         "lint": "oxlint .",
         "release": "TMPDIR=\"$PWD/.local\" tsx scripts/release.ts",
+        "release:beta": "pnpm release beta",
         "release:minor": "pnpm release minor",
         "release:patch": "pnpm release patch",
         "release:happy-plugins:patch": "pnpm release happy-plugins patch",

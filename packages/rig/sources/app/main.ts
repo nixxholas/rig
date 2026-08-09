@@ -14,6 +14,7 @@ import { RigUserError } from "../RigUserError.js";
 import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
 import { runP2pBridgeCommand } from "./runP2pBridgeCommand.js";
 import { runP2pPairingCommand } from "./runP2pPairingCommand.js";
+import { runUpgradeCommand } from "./runUpgradeCommand.js";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<0 | 2 | void> {
     if (argv.length === 1 && argv[0] === "--server") {
@@ -52,6 +53,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         }
         const inspection = runRigInspection({ json: commandArgs[0] === "--json" });
         return rigInspectionExitCode(inspection);
+    }
+    if (command === "upgrade") {
+        if (commandArgs.length !== 0) {
+            throw new RigUserError("Rig upgrade does not take arguments.", {
+                hint: "Usage: rig upgrade",
+            });
+        }
+        await runUpgradeCommand();
+        return;
     }
     const options: RunAppOptions = {
         cwd: process.cwd(),

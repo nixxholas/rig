@@ -8,6 +8,7 @@ import { runExec } from "./runExec.js";
 import { runLocalProtocolServer } from "../server/index.js";
 import { runHappyAuthCommand } from "../happy/index.js";
 import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
+import { runUpgradeCommand } from "./runUpgradeCommand.js";
 
 vi.mock("./runApp.js", () => ({ runApp: vi.fn() }));
 vi.mock("./runDesktop.js", () => ({ runDesktop: vi.fn() }));
@@ -19,6 +20,7 @@ vi.mock("./runRigInspection.js", () => ({
     rigInspectionExitCode: vi.fn(() => 0),
     runRigInspection: vi.fn(),
 }));
+vi.mock("./runUpgradeCommand.js", () => ({ runUpgradeCommand: vi.fn() }));
 
 describe("main command dispatch", () => {
     beforeEach(() => {
@@ -39,6 +41,7 @@ describe("main command dispatch", () => {
         });
         vi.mocked(rigInspectionExitCode).mockReset();
         vi.mocked(rigInspectionExitCode).mockReturnValue(0);
+        vi.mocked(runUpgradeCommand).mockReset();
     });
 
     it("starts the internal server only for its exact private invocation", async () => {
@@ -113,6 +116,21 @@ describe("main command dispatch", () => {
         expect(rigInspectionExitCode).toHaveBeenCalledWith(
             expect.objectContaining({ data: { status: "absent" } }),
         );
+    });
+
+    it("upgrades to the newest Rig beta without starting a session", async () => {
+        await main(["upgrade"]);
+
+        expect(runUpgradeCommand).toHaveBeenCalledOnce();
+        expect(runApp).not.toHaveBeenCalled();
+    });
+
+    it("rejects upgrade arguments before running npm", async () => {
+        await expect(main(["upgrade", "latest"])).rejects.toThrow(
+            "Rig upgrade does not take arguments.",
+        );
+
+        expect(runUpgradeCommand).not.toHaveBeenCalled();
     });
 
     it.each([["--bogus"], ["--json", "extra"]])(

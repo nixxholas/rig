@@ -21,7 +21,7 @@ test("synchronizes the frozen workspace install before release validation", () =
         environment: NodeJS.ProcessEnv | undefined;
     }> = [];
 
-    validateRelease(RELEASE_PACKAGE, (command, arguments_, options) => {
+    validateRelease(RELEASE_PACKAGE, {}, (command, arguments_, options) => {
         commands.push({ arguments_, command, environment: options?.environment });
         return { status: 0, stderr: "", stdout: "" };
     });
@@ -49,4 +49,19 @@ test("synchronizes the frozen workspace install before release validation", () =
     );
     assert.equal(commands[0]?.environment?.CI, "true");
     assert.deepEqual(commands[2]?.environment, createReleaseTestEnvironment());
+});
+
+test("a beta release typechecks and builds without running tests", () => {
+    const commands: Array<{ arguments_: readonly string[]; command: string }> = [];
+
+    validateRelease(RELEASE_PACKAGE, { tests: false }, (command, arguments_) => {
+        commands.push({ arguments_, command });
+        return { status: 0, stderr: "", stdout: "" };
+    });
+
+    assert.deepEqual(commands, [
+        { arguments_: ["install", "--frozen-lockfile"], command: "pnpm" },
+        { arguments_: ["run", "check"], command: "pnpm" },
+        { arguments_: ["--filter", "happy-plugins", "build"], command: "pnpm" },
+    ]);
 });

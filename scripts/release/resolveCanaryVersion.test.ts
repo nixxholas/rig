@@ -21,6 +21,17 @@ test("follows a feature release the same way", () => {
     );
 });
 
+test("continues on the following patch line while main carries a beta", () => {
+    assert.equal(
+        resolveCanaryVersion({
+            baseVersion: "0.0.165-beta.0",
+            buildNumber: "8",
+            commit: "123456789abcdef",
+        }),
+        "0.0.166-canary.8.1234567",
+    );
+});
+
 test("shortens and normalizes the commit", () => {
     assert.equal(
         resolveCanaryVersion({ baseVersion: "0.0.9", buildNumber: "7", commit: "ABCDEF1234567" }),

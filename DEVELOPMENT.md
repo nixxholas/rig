@@ -166,6 +166,28 @@ Pushing a tag named `v<package version>` starts the `Publish package` GitHub
 Actions workflow, which repeats the validation and publishes `@slopus/rig` to
 npm.
 
+### Beta releases
+
+Publish the next beta when a change should reach early adopters quickly:
+
+```sh
+pnpm release beta
+```
+
+From a stable version this creates the next patch as `-beta.0`; each later beta
+increments that suffix. Beta releases run type checks and build the package but
+skip tests both locally and in the publish workflow. They use npm's `beta`
+distribution tag and never move `latest`. Install or advance to the newest beta
+with:
+
+```sh
+rig upgrade
+```
+
+That command runs `npm install -g @slopus/rig@beta`. When the installed version
+is a canary, it preserves that channel and installs `@slopus/rig@canary`
+instead.
+
 ### Canary builds
 
 Every push to `main` publishes a canary to npm under the `canary` distribution
