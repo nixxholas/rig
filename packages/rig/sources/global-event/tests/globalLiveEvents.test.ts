@@ -1,7 +1,10 @@
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
     ComputePreparationEvent,
+    DocumentEvent,
+    FolderEvent,
     GitChangeSnapshot,
     GlobalEventDelivery,
     GlobalLiveEvent,
@@ -9,6 +12,7 @@ import type {
 import { inTx } from "../../persistence/inTx.js";
 import { migrateSessionDatabase } from "../../persistence/database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
+import { durableGlobalEvents } from "../../persistence/database/schema.js";
 import { InMemoryGlobalEventQueue } from "../InMemoryGlobalEventQueue.js";
 import { PersistentGlobalEventQueue } from "../PersistentGlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "../shouldPublishGlobalEvent.js";
@@ -153,6 +157,49 @@ describe("live global events", () => {
                 event,
             }),
         ]);
+    });
+
+    it("stores folder and document events under their own aggregates", () => {
+        const opened = openSessionDatabase(":memory:");
+        clients.push(opened.client);
+        migrateSessionDatabase(opened.database);
+        const queue = new PersistentGlobalEventQueue(opened.database);
+        const documentEvent: DocumentEvent = {
+            createdAt: 1,
+            data: { documentId: "document-1", version: 2 },
+            id: "document-event-1" as never,
+            type: "document_changed",
+        };
+        const folderEvent: FolderEvent = {
+            createdAt: 2,
+            data: { revision: 3 },
+            id: "folder-event-1" as never,
+            type: "folders_changed",
+        };
+
+        queue.append(documentEvent);
+        queue.append(folderEvent);
+
+        expect(
+            opened.database
+                .select({
+                    aggregateId: durableGlobalEvents.aggregateId,
+                    aggregateKind: durableGlobalEvents.aggregateKind,
+                })
+                .from(durableGlobalEvents)
+                .where(eq(durableGlobalEvents.type, "document_changed"))
+                .get(),
+        ).toEqual({ aggregateId: "document-1", aggregateKind: "document" });
+        expect(
+            opened.database
+                .select({
+                    aggregateId: durableGlobalEvents.aggregateId,
+                    aggregateKind: durableGlobalEvents.aggregateKind,
+                })
+                .from(durableGlobalEvents)
+                .where(eq(durableGlobalEvents.type, "folders_changed"))
+                .get(),
+        ).toEqual({ aggregateId: "catalog", aggregateKind: "folder" });
     });
 });
 

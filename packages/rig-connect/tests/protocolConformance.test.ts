@@ -9,16 +9,36 @@ import { happyComputeErrorSchema } from "../../happy-plugins/sources/computeType
 // conformance check.
 import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
+    DOCUMENT_STATE_MAX_BYTES as DAEMON_DOCUMENT_STATE_MAX_BYTES,
+    DOCUMENT_UPDATE_MAX_BYTES as DAEMON_DOCUMENT_UPDATE_MAX_BYTES,
+    DOCUMENT_UPDATE_PAGE_MAX_LIMIT as DAEMON_DOCUMENT_UPDATE_PAGE_MAX_LIMIT,
+    DOCUMENT_UPDATE_RETENTION_MAX_BYTES as DAEMON_DOCUMENT_UPDATE_RETENTION_MAX_BYTES,
+    DOCUMENT_UPDATE_RETENTION_MAX_COUNT as DAEMON_DOCUMENT_UPDATE_RETENTION_MAX_COUNT,
     PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
     FOLDER_ICON_MAX_LENGTH as DAEMON_FOLDER_ICON_MAX_LENGTH,
     FOLDER_NAME_MAX_LENGTH as DAEMON_FOLDER_NAME_MAX_LENGTH,
     FOLDER_TEXT_MAX_LENGTH as DAEMON_FOLDER_TEXT_MAX_LENGTH,
+    createDocumentRequestSchema as daemonCreateDocumentRequestSchema,
+    createFolderItemRequestSchema as daemonCreateFolderItemRequestSchema,
     createFolderRequestSchema as daemonCreateFolderRequestSchema,
+    documentCreatedBySchema as daemonDocumentCreatedBySchema,
+    documentErrorCodeSchema as daemonDocumentErrorCodeSchema,
+    documentErrorResponseSchema as daemonDocumentErrorResponseSchema,
+    documentResponseSchema as daemonDocumentResponseSchema,
+    documentSchema as daemonDocumentSchema,
+    documentUnreadCursorSchema as daemonDocumentUnreadCursorSchema,
+    documentUpdatePageSchema as daemonDocumentUpdatePageSchema,
+    documentUpdateSchema as daemonDocumentUpdateSchema,
+    folderItemSchema as daemonFolderItemSchema,
+    folderItemTargetSchema as daemonFolderItemTargetSchema,
     folderSchema as daemonFolderSchema,
+    listDocumentUpdatesRequestSchema as daemonListDocumentUpdatesRequestSchema,
+    moveFolderItemRequestSchema as daemonMoveFolderItemRequestSchema,
     moveFolderRequestSchema as daemonMoveFolderRequestSchema,
     moveSessionRequestSchema as daemonMoveSessionRequestSchema,
     sessionScopeSchema as daemonSessionScopeSchema,
     updateFolderRequestSchema as daemonUpdateFolderRequestSchema,
+    writeDocumentRequestSchema as daemonWriteDocumentRequestSchema,
     discoverPluginCatalogRequestSchema as daemonDiscoverPluginCatalogRequestSchema,
     discoverPluginCatalogResponseSchema as daemonDiscoverPluginCatalogResponseSchema,
     installPluginRequestSchema as daemonInstallPluginRequestSchema,
@@ -37,17 +57,36 @@ import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
 import type * as localInstallation from "@/RigInstallationInspection.js";
 import {
+    DOCUMENT_STATE_MAX_BYTES,
+    DOCUMENT_UPDATE_MAX_BYTES,
+    DOCUMENT_UPDATE_PAGE_MAX_LIMIT,
+    DOCUMENT_UPDATE_RETENTION_MAX_BYTES,
+    DOCUMENT_UPDATE_RETENTION_MAX_COUNT,
     FOLDER_ICON_MAX_LENGTH,
     FOLDER_NAME_MAX_LENGTH,
     FOLDER_TEXT_MAX_LENGTH,
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     computeServiceErrorSchema,
+    createDocumentRequestSchema,
+    createFolderItemRequestSchema,
     createFolderRequestSchema,
     discoverPluginCatalogRequestSchema,
+    documentCreatedBySchema,
+    documentErrorCodeSchema,
+    documentErrorResponseSchema,
+    documentResponseSchema,
+    documentSchema,
+    documentUnreadCursorSchema,
+    documentUpdatePageSchema,
+    documentUpdateSchema,
     folderSchema,
+    folderItemSchema,
+    folderItemTargetSchema,
     githubPluginCatalogSchema,
     installPluginRequestSchema,
+    listDocumentUpdatesRequestSchema,
+    moveFolderItemRequestSchema,
     moveFolderRequestSchema,
     rigProfileSchema,
     moveSessionRequestSchema,
@@ -56,6 +95,7 @@ import {
     providerCredentialProvenanceSchema,
     systemNoticePayloadSchema,
     updateFolderRequestSchema,
+    writeDocumentRequestSchema,
 } from "@/protocol.js";
 import {
     rigCliInstallationInspectionSchema,
@@ -183,6 +223,11 @@ type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
 type _Folder = Assignable<local.Folder, daemon.Folder>;
 type _FolderExact = Assignable<daemon.Folder, local.Folder>;
+type _FolderItem = Assignable<local.FolderItem, daemon.FolderItem>;
+type _FolderItemExact = Assignable<daemon.FolderItem, local.FolderItem>;
+type _FolderItemTarget = Assignable<local.FolderItemTarget, daemon.FolderItemTarget>;
+type _FolderItemTargetExact = Assignable<daemon.FolderItemTarget, local.FolderItemTarget>;
+type _FolderItemResponse = Assignable<local.FolderItemResponse, daemon.FolderItemResponse>;
 type _FolderEvent = Assignable<local.FolderEvent, daemon.FolderEvent>;
 type _FolderErrorCode = Assignable<local.FolderErrorCode, daemon.FolderErrorCode>;
 type _FolderErrorResponse = Assignable<local.FolderErrorResponse, daemon.FolderErrorResponse>;
@@ -190,8 +235,30 @@ type _ListFoldersResponse = Assignable<local.ListFoldersResponse, daemon.ListFol
 type _FolderResponse = Assignable<local.FolderResponse, daemon.FolderResponse>;
 // The other direction too: a request this library sends must be one the daemon accepts.
 type _CreateFolderRequest = Assignable<daemon.CreateFolderRequest, local.CreateFolderRequest>;
+type _CreateFolderItemRequest = Assignable<
+    daemon.CreateFolderItemRequest,
+    local.CreateFolderItemRequest
+>;
 type _UpdateFolderRequest = Assignable<daemon.UpdateFolderRequest, local.UpdateFolderRequest>;
 type _MoveFolderRequest = Assignable<daemon.MoveFolderRequest, local.MoveFolderRequest>;
+type _MoveFolderItemRequest = Assignable<daemon.MoveFolderItemRequest, local.MoveFolderItemRequest>;
+type _Document = Assignable<local.Document, daemon.Document>;
+type _DocumentExact = Assignable<daemon.Document, local.Document>;
+type _DocumentCreatedBy = Assignable<local.DocumentCreatedBy, daemon.DocumentCreatedBy>;
+type _DocumentCreatedByExact = Assignable<daemon.DocumentCreatedBy, local.DocumentCreatedBy>;
+type _DocumentUpdate = Assignable<local.DocumentUpdate, daemon.DocumentUpdate>;
+type _DocumentUpdateExact = Assignable<daemon.DocumentUpdate, local.DocumentUpdate>;
+type _DocumentUpdatePage = Assignable<local.DocumentUpdatePage, daemon.DocumentUpdatePage>;
+type _DocumentUpdatePageExact = Assignable<daemon.DocumentUpdatePage, local.DocumentUpdatePage>;
+type _DocumentResponse = Assignable<local.DocumentResponse, daemon.DocumentResponse>;
+type _DocumentErrorResponse = Assignable<local.DocumentErrorResponse, daemon.DocumentErrorResponse>;
+type _DocumentEvent = Assignable<local.DocumentEvent, daemon.DocumentEvent>;
+type _CreateDocumentRequest = Assignable<daemon.CreateDocumentRequest, local.CreateDocumentRequest>;
+type _WriteDocumentRequest = Assignable<daemon.WriteDocumentRequest, local.WriteDocumentRequest>;
+type _ListDocumentUpdatesRequest = Assignable<
+    daemon.ListDocumentUpdatesRequest,
+    local.ListDocumentUpdatesRequest
+>;
 type _SessionScope = Assignable<local.SessionScope, daemon.SessionScope>;
 type _HappyCloudStatus = Assignable<local.HappyCloudStatus, daemon.HappyCloudStatus>;
 type _HappyCloudChangedEvent = Assignable<
@@ -541,6 +608,42 @@ describe("protocol conformance", () => {
         refuses(...moves({ ...move, orderKey: "a1" }));
         refuses(...creates({ name: "x".repeat(FOLDER_NAME_MAX_LENGTH + 1) }));
         refuses(...creates({ name: "Media", orderKey: "a1" }));
+    });
+
+    it("keeps folder-item and opaque document schemas identical to the daemon", () => {
+        expect(createFolderItemRequestSchema).toStrictEqual(daemonCreateFolderItemRequestSchema);
+        expect(moveFolderItemRequestSchema).toStrictEqual(daemonMoveFolderItemRequestSchema);
+        expect(folderItemTargetSchema).toStrictEqual(daemonFolderItemTargetSchema);
+        expect(folderItemSchema).toStrictEqual(daemonFolderItemSchema);
+        expect(DOCUMENT_STATE_MAX_BYTES).toBe(DAEMON_DOCUMENT_STATE_MAX_BYTES);
+        expect(DOCUMENT_UPDATE_MAX_BYTES).toBe(DAEMON_DOCUMENT_UPDATE_MAX_BYTES);
+        expect(DOCUMENT_UPDATE_PAGE_MAX_LIMIT).toBe(DAEMON_DOCUMENT_UPDATE_PAGE_MAX_LIMIT);
+        expect(DOCUMENT_UPDATE_RETENTION_MAX_COUNT).toBe(
+            DAEMON_DOCUMENT_UPDATE_RETENTION_MAX_COUNT,
+        );
+        expect(DOCUMENT_UPDATE_RETENTION_MAX_BYTES).toBe(
+            DAEMON_DOCUMENT_UPDATE_RETENTION_MAX_BYTES,
+        );
+        expect(documentUnreadCursorSchema).toStrictEqual(daemonDocumentUnreadCursorSchema);
+        expect(documentCreatedBySchema).toStrictEqual(daemonDocumentCreatedBySchema);
+        expect(documentSchema).toStrictEqual(daemonDocumentSchema);
+        expect(documentUpdateSchema).toStrictEqual(daemonDocumentUpdateSchema);
+        expect(createDocumentRequestSchema).toStrictEqual(daemonCreateDocumentRequestSchema);
+        expect(writeDocumentRequestSchema).toStrictEqual(daemonWriteDocumentRequestSchema);
+        expect(
+            Value.Check(writeDocumentRequestSchema, {
+                state: {},
+                unreadCursor: null,
+                update: {},
+            }),
+        ).toBe(true);
+        expect(listDocumentUpdatesRequestSchema).toStrictEqual(
+            daemonListDocumentUpdatesRequestSchema,
+        );
+        expect(documentResponseSchema).toStrictEqual(daemonDocumentResponseSchema);
+        expect(documentUpdatePageSchema).toStrictEqual(daemonDocumentUpdatePageSchema);
+        expect(documentErrorCodeSchema).toStrictEqual(daemonDocumentErrorCodeSchema);
+        expect(documentErrorResponseSchema).toStrictEqual(daemonDocumentErrorResponseSchema);
     });
 
     it("accepts and refuses exactly the same plugin catalog and installation payloads", () => {

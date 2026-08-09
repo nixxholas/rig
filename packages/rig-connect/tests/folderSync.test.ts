@@ -47,6 +47,7 @@ function catalog(
             providers: [],
         },
         cursor: "01900000-0000-7000-8000-000000000001",
+        folderItems: [],
         folders,
         identity: { version: "test" },
         presence: {
@@ -61,7 +62,7 @@ function catalog(
             since: 0,
         },
         projects: [],
-        protocolVersion: 14,
+        protocolVersion: 15,
         sessions,
         sessionsComplete: true,
         terminalGroups: [],
@@ -96,7 +97,7 @@ function liveHello(): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
         gap: false,
-        protocolVersion: 14,
+        protocolVersion: 15,
         resumed: false,
     })}\n\n`;
 }
@@ -136,6 +137,7 @@ describe("folder catalog synchronization", () => {
                 if (path === "/folders" && method === "GET") {
                     return Response.json({
                         folders: [authoritative],
+                        items: [],
                         revision: authoritative.version,
                     });
                 }
@@ -174,7 +176,7 @@ describe("folder catalog synchronization", () => {
                     return Response.json(catalog([]));
                 }
                 if (path === "/folders") {
-                    return Response.json({ folders: [newest], revision: 1 });
+                    return Response.json({ folders: [newest], items: [], revision: 1 });
                 }
                 if (path === "/git/watch") return Response.json({ snapshots: [] });
                 throw new Error(`Unexpected request to ${path}`);
@@ -213,6 +215,7 @@ describe("folder catalog synchronization", () => {
                 if (path === "/folders" && method === "GET") {
                     return Response.json({
                         folders: [authoritative],
+                        items: [],
                         revision: authoritative.version,
                     });
                 }
@@ -272,7 +275,7 @@ describe("folder catalog synchronization", () => {
                 if (path === "/catalog") return Response.json(catalog([parent]));
                 if (path === "/git/watch") return Response.json({ snapshots: [] });
                 if (path === "/folders") {
-                    return Response.json({ folders: [parent], revision: 1 });
+                    return Response.json({ folders: [parent], items: [], revision: 1 });
                 }
                 if (path === "/sessions") {
                     await never.promise;
@@ -320,6 +323,7 @@ describe("folder catalog synchronization", () => {
                 if (path === "/folders" && method === "GET") {
                     return Response.json({
                         folders: createdFolder === undefined ? [] : [createdFolder],
+                        items: [],
                         revision: createdFolder === undefined ? 0 : 1,
                     });
                 }
@@ -373,7 +377,7 @@ describe("folder catalog synchronization", () => {
                 if (path === "/catalog") return Response.json(catalog([parent], [initial]));
                 if (path === "/git/watch") return Response.json({ snapshots: [] });
                 if (path === "/folders") {
-                    return Response.json({ folders: [parent], revision: 1 });
+                    return Response.json({ folders: [parent], items: [], revision: 1 });
                 }
                 if (path === "/sessions/chat/scope") {
                     moves += 1;
@@ -417,7 +421,9 @@ describe("folder catalog synchronization", () => {
                 if (path === "/events/live") return stream.response;
                 if (path === "/catalog") return Response.json(catalog([], [initial]));
                 if (path === "/git/watch") return Response.json({ snapshots: [] });
-                if (path === "/folders") return Response.json({ folders: [], revision: 0 });
+                if (path === "/folders") {
+                    return Response.json({ folders: [], items: [], revision: 0 });
+                }
                 if (path === "/sessions/chat/scope") {
                     moves += 1;
                     return Response.json(

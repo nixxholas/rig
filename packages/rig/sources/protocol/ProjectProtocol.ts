@@ -25,7 +25,8 @@ import {
     githubPluginPackageSourceSchema,
     githubRepositorySchema,
 } from "../plugins/githubPluginCatalog.js";
-import type { Folder, FolderEvent } from "./FolderProtocol.js";
+import type { Folder, FolderEvent, FolderItem } from "./FolderProtocol.js";
+import type { DocumentEvent } from "./DocumentProtocol.js";
 import type { HappyCloudChangedEvent } from "./HappyCloudProtocol.js";
 import type { P2pStatusChangedEvent } from "./P2pProtocol.js";
 import type { RigProfileChangedEvent } from "./ProfileProtocol.js";
@@ -706,6 +707,7 @@ export type GlobalLiveEvent =
 
 export type GlobalEvent =
     | ComputePreparationEvent
+    | DocumentEvent
     | SessionEvent
     | FolderEvent
     | ProjectEvent
@@ -769,6 +771,7 @@ export interface GlobalStreamHello {
     catalog: ModelCatalog;
     /** The whole folder tree; virtual nesting is carried by each folder's parent. */
     folders: readonly Folder[];
+    folderItems: readonly FolderItem[];
     identity: DaemonIdentity;
     /** Where the user is right now, and every presence they can switch to. */
     presence: PresenceSnapshot;

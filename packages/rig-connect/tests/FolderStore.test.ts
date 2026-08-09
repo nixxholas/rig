@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { FolderStore } from "@/FolderStore.js";
 import type {
     Folder,
+    FolderItem,
     GlobalEvent,
     GlobalStreamHello,
     SessionScope,
@@ -49,6 +50,7 @@ function session(
 function hello(
     folders: readonly Folder[],
     sessions: readonly SessionSummary[] = [],
+    folderItems: readonly FolderItem[] = [],
 ): GlobalStreamHello {
     return {
         catalog: {
@@ -59,6 +61,7 @@ function hello(
         },
         cursor: "c1",
         folders,
+        folderItems,
         identity: { version: "test" },
         presence: {
             presence: {
@@ -72,11 +75,29 @@ function hello(
             since: 0,
         },
         projects: [],
-        protocolVersion: 14,
+        protocolVersion: 15,
         sessions,
         sessionsComplete: true,
         terminalGroups: [],
         workspaces: [],
+    };
+}
+
+function item(
+    id: string,
+    folderId: string,
+    orderKey: string,
+    overrides: Partial<FolderItem> = {},
+): FolderItem {
+    return {
+        createdAt: 1,
+        folderId,
+        id,
+        orderKey,
+        target: { kind: "project", projectId: "project-1" },
+        updatedAt: 1,
+        version: 1,
+        ...overrides,
     };
 }
 
@@ -202,5 +223,125 @@ describe("FolderStore", () => {
 
         expect(store.applyHello(hello([folder("media")]))).toEqual([]);
         expect(store.view()).toBe(before);
+    });
+
+    it("renders duplicate target links and orders each folder's items independently", () => {
+        const store = new FolderStore();
+        store.applyHello(
+            hello(
+                [folder("media", { orderKey: "a" }), folder("writing", { orderKey: "b" })],
+                [],
+                [
+                    item("media-second", "media", "b"),
+                    item("writing-first", "writing", "a"),
+                    item("media-first", "media", "a"),
+                    item("document", "writing", "b", {
+                        target: { documentId: "document-1", kind: "document" },
+                    }),
+                ],
+            ),
+        );
+
+        expect(store.folders()[0]?.items.map((value) => value.id)).toEqual([
+            "media-first",
+            "media-second",
+        ]);
+        expect(store.folders()[1]?.items.map((value) => value.id)).toEqual([
+            "writing-first",
+            "document",
+        ]);
+        expect(store.folders()[0]?.items[0]?.target).toEqual(store.folders()[0]?.items[1]?.target);
+    });
+
+    it("hides archived project and workspace targets without mutating their folder items", () => {
+        const store = new FolderStore();
+        const projectItem = item("project-item", "media", "a");
+        const workspaceItem = item("workspace-item", "media", "b", {
+            target: { kind: "workspace", workspaceId: "workspace-1" },
+        });
+        store.applyHello(hello([folder("media")], [], [projectItem, workspaceItem]));
+
+        const projectDeltas = store.apply({
+            createdAt: 2,
+            data: { project: { archivedAt: 2, id: "project-1" } },
+            id: "event-project",
+            projectId: "project-1",
+            type: "project_updated",
+        } as unknown as GlobalEvent);
+
+        expect(store.folders()[0]?.items.map((value) => value.id)).toEqual(["workspace-item"]);
+        expect(projectDeltas).toContainEqual({
+            itemId: "project-item",
+            type: "item_removed",
+        });
+        expect(store.item("project-item")).toBe(projectItem);
+
+        const workspaceDeltas = store.apply({
+            createdAt: 3,
+            data: {
+                workspace: {
+                    archivedAt: 3,
+                    id: "workspace-1",
+                    projectId: "project-1",
+                },
+            },
+            id: "event-workspace",
+            projectId: "project-1",
+            type: "workspace_updated",
+            workspaceId: "workspace-1",
+        } as unknown as GlobalEvent);
+
+        expect(store.folders()[0]?.items).toEqual([]);
+        expect(workspaceDeltas).toContainEqual({
+            itemId: "workspace-item",
+            type: "item_removed",
+        });
+        expect(store.item("workspace-item")).toBe(workspaceItem);
+    });
+
+    it("moves and archives items optimistically, restoring each mutation on undo", () => {
+        const store = new FolderStore();
+        store.applyHello(
+            hello(
+                [folder("media", { orderKey: "a" }), folder("writing", { orderKey: "b" })],
+                [],
+                [item("first", "media", "a"), item("second", "media", "b")],
+            ),
+        );
+
+        const move = store.applyOptimisticItemMove("second", "writing", null);
+        expect(store.folders()[0]?.items.map((value) => value.id)).toEqual(["first"]);
+        expect(store.folders()[1]?.items.map((value) => value.id)).toEqual(["second"]);
+        move.undo();
+        expect(store.folders()[0]?.items.map((value) => value.id)).toEqual(["first", "second"]);
+
+        const archive = store.applyOptimisticItemArchive("second", 2);
+        expect(store.folders()[0]?.items.map((value) => value.id)).toEqual(["first"]);
+        archive.undo();
+        expect(store.folders()[0]?.items.map((value) => value.id)).toEqual(["first", "second"]);
+    });
+
+    it("keeps unrelated folder item references stable", () => {
+        const store = new FolderStore();
+        const media = item("media", "media", "a");
+        const writing = item("writing", "writing", "a");
+        store.applyHello(
+            hello(
+                [folder("media", { orderKey: "a" }), folder("writing", { orderKey: "b" })],
+                [],
+                [media, writing],
+            ),
+        );
+        const mediaNode = store.folders()[0];
+        const mediaItem = mediaNode?.items[0];
+
+        store.applyItem({
+            ...writing,
+            target: { workspaceId: "workspace-1", kind: "workspace" },
+            version: 2,
+        });
+
+        expect(store.folders()[0]).toBe(mediaNode);
+        expect(store.folders()[0]?.items[0]).toBe(mediaItem);
     });
 });

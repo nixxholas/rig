@@ -13,6 +13,7 @@ import { sessionShareEntryLog } from "../migrations/19-session-share-entry-log.j
  * `CREATE TABLE` or `ADD COLUMN` meets its own output and the rewind fails.
  */
 export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase): void {
+    dropFolderItemsAndDocumentsSchema(database);
     dropSessionScopeSchema(database);
     for (const table of database.all<{ name: string }>(
         sql.raw(
@@ -37,6 +38,18 @@ export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase
     database.run(sql.raw("ALTER TABLE project_workspaces DROP COLUMN branch"));
     agentSessionSharing(database);
     sessionShareEntryLog(database);
+}
+
+export function dropFolderItemsAndDocumentsSchema(database: SessionDatabase): void {
+    for (const table of [
+        "folder_item_mutations",
+        "folder_items",
+        "document_mutations",
+        "document_updates",
+        "documents",
+    ]) {
+        database.run(sql.raw(`DROP TABLE IF EXISTS "${table}"`));
+    }
 }
 
 /** Rebuilds migration 36's checked table into the migration 35 shape before older rewinds. */

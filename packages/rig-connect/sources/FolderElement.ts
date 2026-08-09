@@ -1,6 +1,7 @@
 import type { ConnectionState, MutationRejectedDelta } from "./ChatElement.js";
 import type {
     Folder,
+    FolderItem,
     SessionScope,
     SessionStatus,
     SessionSummary,
@@ -9,6 +10,7 @@ import type {
 } from "./protocol.js";
 
 export type { Folder };
+export type { FolderItem };
 
 /**
  * One folder with the folders nested inside it already joined.
@@ -33,6 +35,8 @@ export interface FolderNode {
     readonly parentId?: string;
     /** Flat storage directory holding this folder's files. */
     readonly path: string;
+    /** Things linked into this folder, ordered independently of every other folder. */
+    readonly items: readonly FolderItem[];
     /** Chats directly contained by this folder, ordered independently of every other folder. */
     readonly sessions: readonly FolderSession[];
     /** Standing instructions every agent working in this folder must follow. */
@@ -81,6 +85,7 @@ export type FolderDelta =
     | { readonly type: "folders_changed"; readonly view: FolderView }
     | { readonly folderId: string; readonly type: "folder_added" }
     | { readonly folderId: string; readonly type: "folder_removed" }
+    | { readonly itemId: string; readonly type: "item_added" | "item_removed" }
     | { readonly sessionId: string; readonly type: "session_added" | "session_removed" }
     | { readonly state: FoldersState; readonly type: "folders_state_changed" }
     | MutationRejectedDelta;

@@ -49,10 +49,16 @@ import type {
     HappyCloudProfileCiphertextResponse,
     HappyCloudSessionBlobResponse,
     HappyCloudStatus,
+    CreateDocumentRequest,
+    CreateFolderItemRequest,
     CreateFolderRequest,
+    DocumentResponse,
+    DocumentUpdatePage,
+    FolderItemResponse,
     FolderResponse,
     GoalSessionResponse,
     MoveFolderRequest,
+    MoveFolderItemRequest,
     MoveSessionRequest,
     UpdateFolderRequest,
     ListGlobalEventsResponse,
@@ -123,6 +129,7 @@ import type {
     UpdateSessionRequest,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
+    WriteDocumentRequest,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import { EventStreamHttpError } from "./EventStreamHttpError.js";
@@ -652,6 +659,76 @@ export class ProtocolHttpClient {
 
     archiveFolder(folderId: string): Promise<FolderResponse> {
         return this.#requestJson("POST", `/folders/${encodeURIComponent(folderId)}/archive`);
+    }
+
+    createFolderItem(
+        folderId: string,
+        request: CreateFolderItemRequest,
+    ): Promise<FolderItemResponse> {
+        return this.#requestJson("POST", `/folders/${encodeURIComponent(folderId)}/items`, request);
+    }
+
+    getFolderItem(itemId: string): Promise<FolderItemResponse> {
+        return this.#requestJson("GET", `/folder-items/${encodeURIComponent(itemId)}`);
+    }
+
+    moveFolderItem(
+        itemId: string,
+        request: MoveFolderItemRequest,
+        expectedVersion: number,
+    ): Promise<FolderItemResponse> {
+        return this.#requestJson(
+            "POST",
+            `/folder-items/${encodeURIComponent(itemId)}/move`,
+            request,
+            { "if-match": JSON.stringify(String(expectedVersion)) },
+        );
+    }
+
+    archiveFolderItem(itemId: string, expectedVersion: number): Promise<FolderItemResponse> {
+        return this.#requestJson(
+            "POST",
+            `/folder-items/${encodeURIComponent(itemId)}/archive`,
+            undefined,
+            { "if-match": JSON.stringify(String(expectedVersion)) },
+        );
+    }
+
+    createDocument(request: CreateDocumentRequest): Promise<DocumentResponse> {
+        return this.#requestJson("POST", "/documents", request);
+    }
+
+    getDocument(documentId: string): Promise<DocumentResponse> {
+        return this.#requestJson("GET", `/documents/${encodeURIComponent(documentId)}`);
+    }
+
+    listDocumentUpdates(
+        documentId: string,
+        options: { afterVersion?: number; limit?: number } = {},
+    ): Promise<DocumentUpdatePage> {
+        const search = new URLSearchParams();
+        if (options.afterVersion !== undefined) {
+            search.set("afterVersion", String(options.afterVersion));
+        }
+        if (options.limit !== undefined) search.set("limit", String(options.limit));
+        const suffix = search.size === 0 ? "" : `?${search.toString()}`;
+        return this.#requestJson(
+            "GET",
+            `/documents/${encodeURIComponent(documentId)}/updates${suffix}`,
+        );
+    }
+
+    writeDocument(
+        documentId: string,
+        request: WriteDocumentRequest,
+        expectedVersion: number,
+    ): Promise<DocumentResponse> {
+        return this.#requestJson(
+            "POST",
+            `/documents/${encodeURIComponent(documentId)}/write`,
+            request,
+            { "if-match": JSON.stringify(String(expectedVersion)) },
+        );
     }
 
     moveSessionScope(

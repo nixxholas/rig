@@ -8,8 +8,11 @@ import type {
 } from "./FolderElement.js";
 import type {
     Folder,
+    FolderItem,
     GlobalEvent,
     GlobalStreamHello,
+    Project,
+    ProjectWorkspace,
     SessionScope,
     SessionEvent,
     SessionSummary,
@@ -18,16 +21,21 @@ import { sessionUnreadAfterEvent } from "./sessionUnread.js";
 
 const ROOT = "";
 const EMPTY_SESSIONS: readonly FolderSession[] = [];
+const EMPTY_ITEMS: readonly FolderItem[] = [];
 
 /** Projects the flat folder/session catalog into the one tree a folder view renders. */
 export class FolderStore {
+    #archivedProjectIds = new Set<string>();
+    #archivedWorkspaceIds = new Set<string>();
     #folders = new Map<string, Folder>();
+    #items = new Map<string, FolderItem>();
     #sessions = new Map<string, FolderSessionSource>();
     #sessionValues = new Map<string, { source: FolderSessionSource; value: FolderSession }>();
     #nodes = new Map<
         string,
         {
             children: readonly FolderNode[];
+            items: readonly FolderItem[];
             sessions: readonly FolderSession[];
             source: Folder;
             value: FolderNode;
@@ -35,6 +43,7 @@ export class FolderStore {
     >();
     #view: FolderView = { folders: [], unsorted: [] };
     #viewStale = true;
+    #workspaceProjectIds = new Map<string, string>();
     #state: FoldersState = { connection: "connecting" };
 
     view(): FolderView {
@@ -54,6 +63,10 @@ export class FolderStore {
         return this.#folders.get(folderId);
     }
 
+    item(itemId: string): FolderItem | undefined {
+        return this.#items.get(itemId);
+    }
+
     sessionSummary(sessionId: string): FolderSessionSource | undefined {
         return this.#sessions.get(sessionId);
     }
@@ -69,13 +82,15 @@ export class FolderStore {
     }
 
     applyHello(hello: GlobalStreamHello): FolderDelta[] {
-        const folderDeltas = this.replaceFolders(hello.folders);
+        const targetDeltas = this.#replaceTargetCatalog(hello);
+        const folderDeltas = this.replaceFolders(hello.folders, hello.folderItems);
         const sessionDeltas = this.applyCatalogSessions(hello.sessions);
-        const changed = [...folderDeltas, ...sessionDeltas].some(
+        const changed = [...targetDeltas, ...folderDeltas, ...sessionDeltas].some(
             (delta) => delta.type === "folders_changed",
         );
         return [
             ...(changed ? ([{ type: "folders_changed", view: this.view() }] as const) : []),
+            ...targetDeltas.filter((delta) => delta.type !== "folders_changed"),
             ...folderDeltas.filter((delta) => delta.type !== "folders_changed"),
             ...sessionDeltas.filter((delta) => delta.type !== "folders_changed"),
         ];
@@ -101,7 +116,7 @@ export class FolderStore {
         return view === previous ? [] : [{ type: "folders_changed", view }];
     }
 
-    replaceFolders(folders: readonly Folder[]): FolderDelta[] {
+    replaceFolders(folders: readonly Folder[], items: readonly FolderItem[] = []): FolderDelta[] {
         const previous = this.view();
         const old = this.#folders;
         const next = new Map<string, Folder>();
@@ -121,6 +136,23 @@ export class FolderStore {
             if (isVisible(folder)) deltas.push({ folderId: folder.id, type: "folder_removed" });
         }
         this.#folders = next;
+        const oldItems = this.#items;
+        const nextItems = new Map<string, FolderItem>();
+        for (const item of items) {
+            const known = oldItems.get(item.id);
+            const current = known !== undefined && known.version >= item.version ? known : item;
+            nextItems.set(item.id, current);
+            if (this.#isVisibleItem(current) && !this.#isVisibleItem(known)) {
+                deltas.push({ itemId: item.id, type: "item_added" });
+            }
+        }
+        for (const item of oldItems.values()) {
+            if (nextItems.has(item.id)) continue;
+            if (this.#isVisibleItem(item)) {
+                deltas.push({ itemId: item.id, type: "item_removed" });
+            }
+        }
+        this.#items = nextItems;
         this.#viewStale = true;
         const view = this.view();
         if (view !== previous) deltas.unshift({ type: "folders_changed", view });
@@ -146,7 +178,42 @@ export class FolderStore {
         return deltas;
     }
 
+    applyItem(item: FolderItem): FolderDelta[] {
+        const known = this.#items.get(item.id);
+        if (known !== undefined && known.version >= item.version) return [];
+        const previous = this.view();
+        this.#items.set(item.id, item);
+        this.#viewStale = true;
+        const view = this.view();
+        return [
+            ...(view === previous ? [] : ([{ type: "folders_changed", view }] as const)),
+            ...(!this.#isVisibleItem(known) && this.#isVisibleItem(item)
+                ? ([{ itemId: item.id, type: "item_added" }] as const)
+                : this.#isVisibleItem(known) && !this.#isVisibleItem(item)
+                  ? ([{ itemId: item.id, type: "item_removed" }] as const)
+                  : []),
+        ];
+    }
+
     apply(event: GlobalEvent): FolderDelta[] {
+        if (event.type === "project_created" || event.type === "project_updated") {
+            const project = (event.data as { project: Project }).project;
+            return this.#applyTargetVisibility(() => {
+                if (project.archivedAt === undefined) this.#archivedProjectIds.delete(project.id);
+                else this.#archivedProjectIds.add(project.id);
+            });
+        }
+        if (event.type === "workspace_created" || event.type === "workspace_updated") {
+            const workspace = (event.data as { workspace: ProjectWorkspace }).workspace;
+            return this.#applyTargetVisibility(() => {
+                this.#workspaceProjectIds.set(workspace.id, workspace.projectId);
+                if (workspace.archivedAt === undefined) {
+                    this.#archivedWorkspaceIds.delete(workspace.id);
+                } else {
+                    this.#archivedWorkspaceIds.add(workspace.id);
+                }
+            });
+        }
         const sessionId = "sessionId" in event ? event.sessionId : undefined;
         if (typeof sessionId !== "string") return [];
         const known = this.#sessions.get(sessionId);
@@ -401,6 +468,89 @@ export class FolderStore {
         };
     }
 
+    applyOptimisticItemCreate(item: FolderItem): {
+        deltas: readonly FolderDelta[];
+        undo: () => void;
+    } {
+        if (this.#items.has(item.id)) return { deltas: [], undo: () => undefined };
+        const deltas = this.#setItem(item);
+        return {
+            deltas,
+            undo: () => {
+                if (this.#items.get(item.id) !== item) return;
+                this.#items.delete(item.id);
+                this.#viewStale = true;
+            },
+        };
+    }
+
+    applyOptimisticItemMove(
+        itemId: string,
+        folderId: string,
+        afterId: string | null,
+    ): { deltas: readonly FolderDelta[]; undo: () => void } {
+        const known = this.#items.get(itemId);
+        if (known === undefined) return { deltas: [], undo: () => undefined };
+        const updated: FolderItem = {
+            ...known,
+            folderId,
+            orderKey: this.optimisticItemOrderKey(folderId, afterId, itemId),
+        };
+        const deltas = this.#setItem(updated);
+        return {
+            deltas,
+            undo: () => {
+                if (this.#items.get(itemId) !== updated) return;
+                this.#items.set(itemId, known);
+                this.#viewStale = true;
+            },
+        };
+    }
+
+    applyOptimisticItemArchive(
+        itemId: string,
+        archivedAt: number,
+    ): { deltas: readonly FolderDelta[]; undo: () => void } {
+        const known = this.#items.get(itemId);
+        if (known === undefined || known.archivedAt !== undefined) {
+            return { deltas: [], undo: () => undefined };
+        }
+        const updated: FolderItem = { ...known, archivedAt };
+        const deltas = this.#setItem(updated);
+        return {
+            deltas,
+            undo: () => {
+                if (this.#items.get(itemId) !== updated) return;
+                this.#items.set(itemId, known);
+                this.#viewStale = true;
+            },
+        };
+    }
+
+    optimisticItemOrderKey(folderId: string, afterId?: string | null, excludeId?: string): string {
+        const siblings = [...this.#items.values()]
+            .filter(
+                (item) =>
+                    item.id !== excludeId &&
+                    item.folderId === folderId &&
+                    this.#isVisibleItem(item),
+            )
+            .sort(byOrderKey);
+        const afterIndex =
+            afterId === undefined
+                ? siblings.length - 1
+                : afterId === null
+                  ? -1
+                  : siblings.findIndex((item) => item.id === afterId);
+        const after = afterIndex < 0 ? undefined : siblings[afterIndex];
+        const before = siblings[afterIndex + 1];
+        return after === undefined
+            ? `\u0000${before?.orderKey ?? ""}`
+            : before === undefined
+              ? `${after.orderKey}\uffff`
+              : `${after.orderKey}\u0000`;
+    }
+
     optimisticSessionOrderKey(
         scope: Extract<SessionScope, { kind: "folder" | "unsorted" }>,
         afterId?: string | null,
@@ -443,8 +593,90 @@ export class FolderStore {
         ];
     }
 
+    #setItem(item: FolderItem): FolderDelta[] {
+        const known = this.#items.get(item.id);
+        if (known !== undefined && sameValue(known, item)) return [];
+        const previous = this.view();
+        this.#items.set(item.id, item);
+        this.#viewStale = true;
+        const view = this.view();
+        return [
+            ...(view === previous ? [] : ([{ type: "folders_changed", view }] as const)),
+            ...(!this.#isVisibleItem(known) && this.#isVisibleItem(item)
+                ? ([{ itemId: item.id, type: "item_added" }] as const)
+                : this.#isVisibleItem(known) && !this.#isVisibleItem(item)
+                  ? ([{ itemId: item.id, type: "item_removed" }] as const)
+                  : []),
+        ];
+    }
+
+    #applyTargetVisibility(update: () => void): FolderDelta[] {
+        const before = new Set(
+            [...this.#items.values()]
+                .filter((item) => this.#isVisibleItem(item))
+                .map((item) => item.id),
+        );
+        const previous = this.view();
+        update();
+        this.#viewStale = true;
+        const after = new Set(
+            [...this.#items.values()]
+                .filter((item) => this.#isVisibleItem(item))
+                .map((item) => item.id),
+        );
+        const view = this.view();
+        return [
+            ...(view === previous ? [] : ([{ type: "folders_changed", view }] as const)),
+            ...[...before]
+                .filter((itemId) => !after.has(itemId))
+                .map((itemId) => ({ itemId, type: "item_removed" }) as const),
+            ...[...after]
+                .filter((itemId) => !before.has(itemId))
+                .map((itemId) => ({ itemId, type: "item_added" }) as const),
+        ];
+    }
+
+    #isVisibleItem(item: FolderItem | undefined): boolean {
+        if (item === undefined || item.archivedAt !== undefined) return false;
+        if (item.target.kind === "project") {
+            return !this.#archivedProjectIds.has(item.target.projectId);
+        }
+        if (item.target.kind === "workspace") {
+            const projectId = this.#workspaceProjectIds.get(item.target.workspaceId);
+            return (
+                !this.#archivedWorkspaceIds.has(item.target.workspaceId) &&
+                (projectId === undefined || !this.#archivedProjectIds.has(projectId))
+            );
+        }
+        return true;
+    }
+
+    #replaceTargetCatalog(hello: GlobalStreamHello): FolderDelta[] {
+        return this.#applyTargetVisibility(() => {
+            this.#archivedProjectIds = new Set(
+                hello.projects
+                    .filter((project) => project.archivedAt !== undefined)
+                    .map((project) => project.id),
+            );
+            this.#archivedWorkspaceIds = new Set(
+                hello.workspaces
+                    .filter((workspace) => workspace.archivedAt !== undefined)
+                    .map((workspace) => workspace.id),
+            );
+            this.#workspaceProjectIds = new Map(
+                hello.workspaces.map((workspace) => [workspace.id, workspace.projectId]),
+            );
+        });
+    }
+
     #rebuild(): void {
         this.#viewStale = false;
+        const itemsByFolder = new Map<string, FolderItem[]>();
+        for (const item of this.#items.values()) {
+            if (!this.#isVisibleItem(item)) continue;
+            mapList(itemsByFolder, item.folderId).push(item);
+        }
+        for (const items of itemsByFolder.values()) items.sort(byOrderKey);
         const sessionsByFolder = new Map<string, FolderSession[]>();
         const unsorted: FolderSession[] = [];
         for (const session of this.#sessions.values()) {
@@ -469,7 +701,13 @@ export class FolderStore {
             mapList(childrenOf, parentId).push(folder);
         }
         for (const siblings of childrenOf.values()) siblings.sort(byOrderKey);
-        const folders = this.#nodesUnder(ROOT, childrenOf, sessionsByFolder, new Set());
+        const folders = this.#nodesUnder(
+            ROOT,
+            childrenOf,
+            itemsByFolder,
+            sessionsByFolder,
+            new Set(),
+        );
         const previous = this.#view;
         const nextUnsorted = sameItems(previous.unsorted, unsorted) ? previous.unsorted : unsorted;
         this.#view =
@@ -481,13 +719,14 @@ export class FolderStore {
     #nodesUnder(
         parentId: string,
         childrenOf: Map<string, Folder[]>,
+        itemsByFolder: Map<string, FolderItem[]>,
         sessionsByFolder: Map<string, FolderSession[]>,
         open: Set<string>,
     ): readonly FolderNode[] {
         if (open.has(parentId)) return [];
         open.add(parentId);
         const nodes = (childrenOf.get(parentId) ?? []).map((folder) =>
-            this.#node(folder, childrenOf, sessionsByFolder, open),
+            this.#node(folder, childrenOf, itemsByFolder, sessionsByFolder, open),
         );
         open.delete(parentId);
         const previous =
@@ -498,15 +737,24 @@ export class FolderStore {
     #node(
         folder: Folder,
         childrenOf: Map<string, Folder[]>,
+        itemsByFolder: Map<string, FolderItem[]>,
         sessionsByFolder: Map<string, FolderSession[]>,
         open: Set<string>,
     ): FolderNode {
-        const children = this.#nodesUnder(folder.id, childrenOf, sessionsByFolder, open);
+        const children = this.#nodesUnder(
+            folder.id,
+            childrenOf,
+            itemsByFolder,
+            sessionsByFolder,
+            open,
+        );
+        const items = itemsByFolder.get(folder.id) ?? EMPTY_ITEMS;
         const sessions = sessionsByFolder.get(folder.id) ?? EMPTY_SESSIONS;
         const cached = this.#nodes.get(folder.id);
         if (
             cached?.source === folder &&
             cached.children === children &&
+            sameItems(cached.items, items) &&
             sameItems(cached.sessions, sessions)
         ) {
             return cached.value;
@@ -515,6 +763,7 @@ export class FolderStore {
             children,
             createdAt: folder.createdAt,
             id: folder.id,
+            items,
             name: folder.name,
             orderKey: folder.orderKey,
             path: folder.path,
@@ -526,7 +775,7 @@ export class FolderStore {
             ...(folder.parentId === undefined ? {} : { parentId: folder.parentId }),
             ...(folder.rules === undefined ? {} : { rules: folder.rules }),
         };
-        this.#nodes.set(folder.id, { children, sessions, source: folder, value });
+        this.#nodes.set(folder.id, { children, items, sessions, source: folder, value });
         return value;
     }
 

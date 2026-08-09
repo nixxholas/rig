@@ -70,10 +70,14 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
         let aggregate: {
             id: string;
-            kind: "compute" | "project" | "session" | "workspace";
+            kind: "compute" | "document" | "folder" | "project" | "session" | "workspace";
         };
         if ("computeInstanceId" in event) {
             aggregate = { id: event.computeInstanceId, kind: "compute" };
+        } else if (event.type === "document_changed") {
+            aggregate = { id: event.data.documentId, kind: "document" };
+        } else if (event.type === "folders_changed") {
+            aggregate = { id: "catalog", kind: "folder" };
         } else if ("workspaceId" in event && typeof event.workspaceId === "string") {
             aggregate = { id: event.workspaceId, kind: "workspace" };
         } else if ("sessionId" in event && typeof event.sessionId === "string") {

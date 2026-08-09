@@ -1735,6 +1735,72 @@ export const folderSchema = Type.Object(
 );
 export type Folder = Static<typeof folderSchema>;
 
+/**
+ * One thing linked into a folder. The linked thing keeps its own identity and
+ * ordering elsewhere; this row only gives that thing a position in this
+ * folder's direct item list.
+ */
+export const folderItemTargetSchema = Type.Union([
+    Type.Object(
+        {
+            kind: Type.Literal("project"),
+            projectId: Type.String({ maxLength: 128, minLength: 1 }),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            kind: Type.Literal("workspace"),
+            workspaceId: Type.String({ maxLength: 128, minLength: 1 }),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            documentId: Type.String({ maxLength: 128, minLength: 1 }),
+            kind: Type.Literal("document"),
+        },
+        exact,
+    ),
+]);
+export type FolderItemTarget = Static<typeof folderItemTargetSchema>;
+
+export const folderItemSchema = Type.Object(
+    {
+        archivedAt: Type.Optional(Type.Number()),
+        createdAt: Type.Number(),
+        folderId: Type.String(),
+        id: Type.String(),
+        orderKey: Type.String(),
+        target: folderItemTargetSchema,
+        updatedAt: Type.Number(),
+        version: Type.Number(),
+    },
+    exact,
+);
+export type FolderItem = Static<typeof folderItemSchema>;
+
+export const createFolderItemRequestSchema = Type.Object(
+    {
+        afterId: Type.Optional(Type.Union([folderIdSchema, Type.Null()])),
+        id: Type.Optional(folderIdSchema),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        target: folderItemTargetSchema,
+    },
+    exact,
+);
+export type CreateFolderItemRequest = Static<typeof createFolderItemRequestSchema>;
+
+export const moveFolderItemRequestSchema = Type.Object(
+    {
+        afterId: Type.Union([folderIdSchema, Type.Null()]),
+        folderId: folderIdSchema,
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+    },
+    exact,
+);
+export type MoveFolderItemRequest = Static<typeof moveFolderItemRequestSchema>;
+
 export const createFolderRequestSchema = Type.Object(
     {
         description: Type.Optional(Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH })),
@@ -1811,7 +1877,11 @@ export const folderResponseSchema = Type.Object(
     exact,
 );
 export const listFoldersResponseSchema = Type.Object(
-    { folders: Type.Array(folderSchema), revision: Type.Integer({ minimum: 0 }) },
+    {
+        folders: Type.Array(folderSchema),
+        items: Type.Array(folderItemSchema),
+        revision: Type.Integer({ minimum: 0 }),
+    },
     exact,
 );
 
@@ -1820,9 +1890,11 @@ export const folderErrorCodeSchema = Type.Union([
     Type.Literal("folder_not_found"),
     Type.Literal("parent_not_found"),
     Type.Literal("sibling_not_found"),
+    Type.Literal("item_not_found"),
+    Type.Literal("target_not_found"),
     Type.Literal("cycle"),
-    Type.Literal("storage_unavailable"),
     Type.Literal("version_conflict"),
+    Type.Literal("storage_unavailable"),
 ]);
 export type FolderErrorCode = Static<typeof folderErrorCodeSchema>;
 
@@ -1839,6 +1911,7 @@ export type FolderErrorResponse = Static<typeof folderErrorResponseSchema>;
 
 export interface ListFoldersResponse {
     folders: readonly Folder[];
+    items: readonly FolderItem[];
     revision: number;
 }
 
@@ -1846,6 +1919,158 @@ export interface FolderResponse {
     folder: Folder;
     revision: number;
 }
+
+export interface FolderItemResponse {
+    item: FolderItem;
+    revision: number;
+}
+
+export const DOCUMENT_STATE_MAX_BYTES = 8 * 1024 * 1024;
+export const DOCUMENT_UPDATE_MAX_BYTES = 1024 * 1024;
+export const DOCUMENT_UPDATE_PAGE_MAX_LIMIT = 1_000;
+export const DOCUMENT_UPDATE_RETENTION_MAX_COUNT = 10_000;
+export const DOCUMENT_UPDATE_RETENTION_MAX_BYTES = 64 * 1024 * 1024;
+
+const documentIdentityIdSchema = Type.String({
+    maxLength: 32,
+    minLength: 2,
+    pattern: "^[a-z][a-z0-9]+$",
+});
+const documentProfileIdentitySchema = Type.Union([documentIdentityIdSchema, Type.Null()]);
+export const documentUnreadCursorSchema = Type.String({
+    pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+});
+export const documentCreatedBySchema = Type.Object(
+    {
+        instanceId: documentIdentityIdSchema,
+        profileId: Type.Optional(documentIdentityIdSchema),
+    },
+    exact,
+);
+export type DocumentCreatedBy = Static<typeof documentCreatedBySchema>;
+
+/**
+ * A live application-owned object. Rig only stores and versions `state` and
+ * `update`; their contents are deliberately opaque to the protocol.
+ */
+export const documentSchema = Type.Object(
+    {
+        createdAt: Type.Integer({ minimum: 0 }),
+        createdBy: documentCreatedBySchema,
+        firstRetainedVersion: Type.Integer({ minimum: 1 }),
+        id: Type.String(),
+        mimeType: Type.String(),
+        state: Type.Unknown(),
+        unreadCursor: Type.Optional(documentUnreadCursorSchema),
+        updatedAt: Type.Integer({ minimum: 0 }),
+        version: Type.Integer({ minimum: 1 }),
+    },
+    exact,
+);
+export type Document = Static<typeof documentSchema>;
+
+export const documentUpdateSchema = Type.Object(
+    {
+        createdAt: Type.Integer({ minimum: 0 }),
+        documentId: Type.String(),
+        id: documentUnreadCursorSchema,
+        update: Type.Unknown(),
+        version: Type.Integer({ minimum: 2 }),
+    },
+    exact,
+);
+export type DocumentUpdate = Static<typeof documentUpdateSchema>;
+
+export const createDocumentRequestSchema = Type.Object(
+    {
+        id: Type.Optional(folderIdSchema),
+        identity: Type.Optional(documentProfileIdentitySchema),
+        mimeType: Type.String({ maxLength: 256, minLength: 1 }),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        state: Type.Unknown(),
+        unreadCursor: Type.Optional(documentUnreadCursorSchema),
+    },
+    exact,
+);
+export type CreateDocumentRequest = Static<typeof createDocumentRequestSchema>;
+
+/**
+ * The only document mutation. Its version is compared by the write endpoint
+ * before the new opaque state and update are retained.
+ */
+export const writeDocumentRequestSchema = Type.Object(
+    {
+        mimeType: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        state: Type.Unknown(),
+        unreadCursor: Type.Optional(Type.Union([documentUnreadCursorSchema, Type.Null()])),
+        update: Type.Unknown(),
+    },
+    exact,
+);
+export type WriteDocumentRequest = Static<typeof writeDocumentRequestSchema>;
+
+export const listDocumentUpdatesRequestSchema = Type.Object(
+    {
+        afterVersion: Type.Integer({ minimum: 0 }),
+        limit: Type.Optional(Type.Integer({ maximum: DOCUMENT_UPDATE_PAGE_MAX_LIMIT, minimum: 1 })),
+    },
+    exact,
+);
+export type ListDocumentUpdatesRequest = Static<typeof listDocumentUpdatesRequestSchema>;
+
+export const documentResponseSchema = Type.Object({ document: documentSchema }, exact);
+export type DocumentResponse = Static<typeof documentResponseSchema>;
+
+/** One bounded page from a document's retained, ordered update queue. */
+export const documentUpdatePageSchema = Type.Object(
+    {
+        currentVersion: Type.Integer({ minimum: 1 }),
+        firstRetainedVersion: Type.Integer({ minimum: 1 }),
+        gap: Type.Boolean(),
+        hasMore: Type.Boolean(),
+        nextAfterVersion: Type.Integer({ minimum: 0 }),
+        updates: Type.Array(documentUpdateSchema, { maxItems: DOCUMENT_UPDATE_PAGE_MAX_LIMIT }),
+    },
+    exact,
+);
+export type DocumentUpdatePage = Static<typeof documentUpdatePageSchema>;
+
+export const documentErrorCodeSchema = Type.Union([
+    Type.Literal("invalid_request"),
+    Type.Literal("document_not_found"),
+    Type.Literal("version_conflict"),
+]);
+export type DocumentErrorCode = Static<typeof documentErrorCodeSchema>;
+
+export const documentErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            { code: documentErrorCodeSchema, message: Type.String({ minLength: 1 }) },
+            exact,
+        ),
+    },
+    exact,
+);
+export type DocumentErrorResponse = Static<typeof documentErrorResponseSchema>;
+
+export const documentEventSchema = Type.Object(
+    {
+        createdAt: Type.Number(),
+        data: Type.Object(
+            {
+                documentId: Type.String(),
+                mutationId: Type.Optional(Type.String()),
+                version: Type.Number(),
+            },
+            exact,
+        ),
+        id: Type.String(),
+        type: Type.Literal("document_changed"),
+    },
+    exact,
+);
+export type DocumentEvent = Static<typeof documentEventSchema>;
 
 /**
  * A durable folder update.
@@ -2227,6 +2452,8 @@ export interface GlobalStreamHello {
     cursor: string;
     /** The whole unarchived folder tree; virtual nesting is carried by each folder's parent. */
     folders: readonly Folder[];
+    /** Folder-local item ordering, independent of the project catalog's ordering. */
+    folderItems: readonly FolderItem[];
     identity: DaemonIdentity;
     presence: PresenceSnapshot;
     protocolVersion: number;
@@ -2654,6 +2881,7 @@ export type P2pStatusChangedEvent = Static<typeof p2pStatusChangedEventSchema>;
 export type GlobalEvent =
     | ComputePreparationEvent
     | FolderEvent
+    | DocumentEvent
     | HappyCloudChangedEvent
     | P2pStatusChangedEvent
     | RigProfileChangedEvent

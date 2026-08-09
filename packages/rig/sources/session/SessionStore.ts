@@ -3,14 +3,22 @@ import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateDocumentRequest,
+    CreateFolderItemRequest,
     CreateFolderRequest,
     CreateProjectWorkspaceRequest,
     CreateRemoteProjectRequest,
     CreateSessionRequest,
+    Document,
+    DocumentCreatedBy,
+    DocumentUpdatePage,
     Folder,
+    FolderItem,
     ListFoldersResponse,
+    ListDocumentUpdatesRequest,
     GetTimelineRequest,
     GitRepositoryFacts,
+    MoveFolderItemRequest,
     MoveFolderRequest,
     Project,
     ProjectCreator,
@@ -27,6 +35,7 @@ import type {
     TransferSessionResponse,
     UpdateSecretRequest,
     UpdateFolderRequest,
+    WriteDocumentRequest,
 } from "../protocol/index.js";
 import type { AgentTreeUsage } from "../agent/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
@@ -50,6 +59,8 @@ export interface SessionCreationOptions {
 }
 
 export interface SessionStore {
+    /** Stable identity of this Rig installation. */
+    readonly localInstanceId: string;
     /** Stable identity for this initialized Rig data generation. */
     readonly dataEpoch: string;
     /** Schema version observed from the initialized store after migration. */
@@ -127,6 +138,18 @@ export interface SessionStore {
     listFolders(): readonly Folder[];
     folderCatalog(): ListFoldersResponse;
     getFolder(folderId: string): Folder | undefined;
+    getFolderItem(itemId: string): FolderItem | undefined;
+    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem;
+    moveFolderItem(
+        itemId: string,
+        request: MoveFolderItemRequest,
+        expectedVersion?: number,
+    ): FolderItem | undefined;
+    archiveFolderItem(
+        itemId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): FolderItem | undefined;
     createFolder(request: CreateFolderRequest): Folder;
     updateFolder(
         folderId: string,
@@ -144,6 +167,17 @@ export interface SessionStore {
         expectedVersion?: number,
         mutationId?: string,
     ): Folder | undefined;
+    getDocument(documentId: string): Document | undefined;
+    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document;
+    writeDocument(
+        documentId: string,
+        request: WriteDocumentRequest,
+        expectedVersion: number,
+    ): Document | undefined;
+    documentUpdates(
+        documentId: string,
+        request: ListDocumentUpdatesRequest,
+    ): DocumentUpdatePage | undefined;
     /** Files one chat into a folder, or takes it back out into Unsorted with `null`. */
     setSessionFolder(
         sessionId: string,

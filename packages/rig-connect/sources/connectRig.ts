@@ -9,6 +9,8 @@ import type {
     SessionState,
 } from "./ChatElement.js";
 import { ChatStore } from "./ChatStore.js";
+import type { DocumentDelta, DocumentState } from "./DocumentElement.js";
+import { DocumentStore } from "./DocumentStore.js";
 import type { FolderDelta, FolderView, FoldersState } from "./FolderElement.js";
 import { FolderStore } from "./FolderStore.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
@@ -53,11 +55,19 @@ import type {
     BackgroundProcessSnapshot,
     ComputePreparationEvent,
     ExternalToolCallResolution,
+    CreateDocumentRequest,
     CreateFolderRequest,
+    CreateFolderItemRequest,
+    Document,
+    DocumentUpdate,
+    DocumentUpdatePage,
     Folder,
+    FolderItem,
     MoveFolderRequest,
+    MoveFolderItemRequest,
     MoveSessionRequest,
     UpdateFolderRequest,
+    WriteDocumentRequest,
     GitChangeSnapshot,
     GitWatchResponse,
     GitHubPluginCatalog,
@@ -120,6 +130,10 @@ import {
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
     p2pPairingStateSchema,
+    documentEventSchema,
+    documentResponseSchema,
+    documentUpdatePageSchema,
+    folderItemSchema,
     folderResponseSchema,
     listFoldersResponseSchema,
     listPluginsResponseSchema,
@@ -273,6 +287,13 @@ const pluginCatalogErrorResponseSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+const folderItemMutationResponseSchema = Type.Object(
+    {
+        item: folderItemSchema,
+        revision: Type.Integer({ minimum: 0 }),
+    },
+    { additionalProperties: false },
+);
 
 export interface ConnectRigOptions {
     endpoint: string;
@@ -378,6 +399,17 @@ export interface RigFoldersSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+export interface RigDocumentSubscriptionOptions {
+    documentId: string;
+    onChange: (
+        document: Document | undefined,
+        updates: readonly DocumentUpdate[],
+        state: DocumentState,
+    ) => void;
+    onDelta?: (delta: DocumentDelta) => void;
+    onError?: (error: unknown) => void;
+}
+
 export interface RigProviderUsageSubscriptionOptions {
     onChange: (providers: readonly ProviderUsageEntry[], state: ProviderUsageState) => void;
     onDelta?: (delta: ProviderUsageDelta) => void;
@@ -439,6 +471,13 @@ export interface RigFoldersConnection {
     /** The folder tree and global Unsorted list as one atomic application value. */
     view: () => FolderView;
     state: () => FoldersState;
+    close: () => void;
+}
+
+export interface RigDocumentConnection {
+    document: () => Document | undefined;
+    updates: () => readonly DocumentUpdate[];
+    state: () => DocumentState;
     close: () => void;
 }
 
@@ -659,13 +698,28 @@ export interface FolderCreateOptions {
     folderId?: string;
 }
 
+export interface FolderItemLinkOptions {
+    /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
+    itemId?: string;
+}
+
+export interface DocumentCreateOptions {
+    /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
+    documentId?: string;
+}
+
+export interface DocumentUpdatesLoadOptions {
+    afterVersion?: number;
+    limit?: number;
+    signal?: AbortSignal;
+}
+
 /**
  * Everything a view does to the folder tree.
  *
- * Each call answers with the folder Rig actually stored, and the same change also arrives on the
- * live stream, so a subscribed tree updates whether or not this client made it. Nothing here is
- * predicted locally: the daemon derives a folder's place among its siblings itself, which is why a
- * move names where the folder landed rather than an order key.
+ * Each call applies its prediction immediately and returns the mutation identity used to reconcile
+ * the daemon's response and live echo. The daemon still derives authoritative order keys, which is
+ * why moves name their destination and preceding item rather than inventing an order key.
  */
 export interface RigFolders {
     /**
@@ -686,10 +740,36 @@ export interface RigFolders {
     move(folderId: string, request: MoveFolderRequest): MutationId;
     /** Puts a folder away together with everything nested under it. */
     archive(folderId: string): MutationId;
+    /** Links one project, workspace, or document into this folder's direct item list. */
+    linkItem(
+        folderId: string,
+        request: CreateFolderItemRequest,
+        options?: FolderItemLinkOptions,
+    ): MutationId;
+    /** Moves an item into or within a folder without changing its target's own ordering. */
+    moveItem(itemId: string, request: Omit<MoveFolderItemRequest, "mutationId">): MutationId;
+    /** Removes the link only. The project, workspace, or document remains unchanged. */
+    unlinkItem(itemId: string): MutationId;
     /** Moves one chat within the folder tree or Unsorted ordering domain. */
     moveSession(sessionId: string, request: Omit<MoveSessionRequest, "mutationId">): MutationId;
     /** Files one chat into a folder, or moves it to Unsorted with `null`. */
     setSessionFolder(sessionId: string, folderId: string | null): MutationId;
+}
+
+export interface RigDocuments {
+    /** Creates an opaque live document and returns its client-chosen document identity. */
+    create(request: CreateDocumentRequest, options?: DocumentCreateOptions): MutationId;
+    /**
+     * Applies one strict compare-version-and-write prediction.
+     *
+     * The exact caller-supplied version is sent on every attempt. Rig Connect never rebases it.
+     */
+    write(documentId: string, expectedVersion: number, request: WriteDocumentRequest): MutationId;
+    /** Loads one bounded page of the retained opaque update queue. */
+    loadUpdates(
+        documentId: string,
+        options?: DocumentUpdatesLoadOptions,
+    ): Promise<DocumentUpdatePage>;
 }
 
 export class ProjectRegistrationProtocolError extends Error {
@@ -727,6 +807,8 @@ export interface RigConnection {
      * adds no request of its own.
      */
     connectFolders: (options: RigFoldersSubscriptionOptions) => RigFoldersConnection;
+    /** Follows one opaque document snapshot over the shared global stream. */
+    connectDocument: (options: RigDocumentSubscriptionOptions) => RigDocumentConnection;
     /** Follows the authoritative status plus this client's pending Happy Cloud choices. */
     connectHappyCloud: (options: RigHappyCloudSubscriptionOptions) => RigHappyCloudConnection;
     /** Follows authenticated P2P transports and trusted peer reachability. */
@@ -788,6 +870,8 @@ export interface RigConnection {
     projects: RigProjects;
     /** Entity-first folder tree actions. */
     folders: RigFolders;
+    /** Entity-first live document actions. */
+    documents: RigDocuments;
     /** Reads enrollment, profile status, and every independently denied/granted capability. */
     getHappyCloudStatus: (options?: HappyCloudOperationOptions) => Promise<HappyCloudStatus>;
     /**
@@ -904,6 +988,28 @@ interface FolderEntry {
     requiredRevision: number;
     store: FolderStore;
     subscribers: Set<FolderSubscriber>;
+}
+
+interface DocumentSubscriber extends RigDocumentSubscriptionOptions {
+    closed: boolean;
+}
+
+interface PendingDocumentCreate {
+    promise: Promise<boolean>;
+    settle: (committed: boolean) => void;
+}
+
+interface DocumentEntry {
+    bootstrapVersion: number;
+    controller: AbortController;
+    detachRoot: () => void;
+    loading?: Promise<void>;
+    pendingCreate?: PendingDocumentCreate;
+    reloadPending: boolean;
+    requiredVersion: number;
+    started: boolean;
+    store: DocumentStore;
+    subscribers: Set<DocumentSubscriber>;
 }
 
 interface ProviderUsageSubscriber extends RigProviderUsageSubscriptionOptions {
@@ -1151,6 +1257,7 @@ interface PendingMutation {
     applyAcceptedResponse?: (data: unknown) => boolean;
     applyOptimistic: (publish: boolean) => () => void;
     attemptController?: AbortController;
+    documentId?: string;
     entityKey: string;
     expectsWorkspaceResponse?: boolean;
     id: MutationId;
@@ -1168,6 +1275,7 @@ interface PendingMutation {
 }
 
 interface ReconcileOutput {
+    documentDeltas?: ReadonlyMap<string, readonly DocumentDelta[]>;
     folderDeltas?: readonly FolderDelta[];
     groupDeltas?: readonly GroupDelta[];
     sessionDeltas?: ReadonlyMap<string, readonly ChatDelta[]>;
@@ -1183,6 +1291,13 @@ interface GroupCapture {
     entry: GroupEntry;
     projects: readonly ProjectGroup[];
     state: GroupsState;
+}
+
+interface DocumentCapture {
+    document: Document | undefined;
+    entry: DocumentEntry;
+    state: DocumentState;
+    updates: readonly DocumentUpdate[];
 }
 
 interface GitWatchEntity {
@@ -1205,10 +1320,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const nextEntityId = createCuid2(now, options.randomValues);
     const rootController = new AbortController();
     const sessionEntries = new Map<string, SessionEntry>();
+    const documentEntries = new Map<string, DocumentEntry>();
     const queues = new Map<string, PendingMutation[]>();
     const activeWorkers = new Set<string>();
     const pendingOverlays: PendingMutation[] = [];
     const pendingFolderCreates = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+    const pendingDocumentCreates = new Map<string, PendingDocumentCreate>();
     const knownSessionCursors = new Map<string, string>();
     const knownGroupVersions = new Map<string, number>();
     const presenceClosers = new Set<() => void>();
@@ -1242,6 +1359,30 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             subscribers: new Set(),
         };
         return folderEntry;
+    };
+
+    const createDocumentEntry = (documentId: string): DocumentEntry => {
+        const known = documentEntries.get(documentId);
+        if (known !== undefined) return known;
+        const linked = linkedController(rootController.signal);
+        const pendingCreate = pendingDocumentCreates.get(documentId);
+        const entry: DocumentEntry = {
+            bootstrapVersion: 0,
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            reloadPending: false,
+            requiredVersion: 0,
+            started: false,
+            store: new DocumentStore(documentId),
+            subscribers: new Set(),
+            ...(pendingCreate === undefined ? {} : { pendingCreate }),
+        };
+        documentEntries.set(documentId, entry);
+        const key = documentKey(documentId);
+        if (pendingOverlays.some((mutation) => mutation.entityKey === key)) {
+            reconcile([key], undefined, [], false, () => ({}));
+        }
+        return entry;
     };
 
     const publishSession = (entry: SessionEntry, deltas: readonly ChatDelta[]): void => {
@@ -1342,6 +1483,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         }
     };
 
+    const publishDocument = (entry: DocumentEntry, deltas: readonly DocumentDelta[]): void => {
+        if (closed || deltas.length === 0) return;
+        for (const subscriber of [...entry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(entry.store.document(), entry.store.updates(), entry.store.state());
+            for (const delta of deltas) subscriber.onDelta?.(delta);
+        }
+    };
+
     const publishPlugins = (changed: boolean): void => {
         if (closed || !changed || pluginsEntry === undefined) return;
         for (const subscriber of [...pluginsEntry.subscribers]) {
@@ -1378,6 +1528,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     const applyOutput = (output: ReconcileOutput): void => {
+        for (const [documentId, deltas] of output.documentDeltas ?? []) {
+            const entry = documentEntries.get(documentId);
+            if (entry !== undefined) publishDocument(entry, deltas);
+        }
         for (const [sessionId, deltas] of output.sessionDeltas ?? []) {
             const entry = sessionEntries.get(sessionId);
             if (entry !== undefined) publishSession(entry, deltas);
@@ -1399,6 +1553,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (mutation.action === "create_folder") {
             pendingFolderCreates.get(mutation.id)?.resolve();
             pendingFolderCreates.delete(mutation.id);
+        }
+        if (mutation.action === "create_document") {
+            pendingDocumentCreates.get(mutation.id)?.settle(true);
+            pendingDocumentCreates.delete(mutation.id);
         }
     };
 
@@ -1449,6 +1607,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                       projects: groupsEntry.store.projects(),
                       state: groupsEntry.store.state(),
                   };
+        const documentCaptures = new Map<string, DocumentCapture>();
+        for (const [documentId, entry] of documentEntries) {
+            if (!keys.has(documentKey(documentId))) continue;
+            documentCaptures.set(documentId, {
+                document: entry.store.document(),
+                entry,
+                state: entry.store.state(),
+                updates: entry.store.updates(),
+            });
+        }
         const folderBefore = folderEntry?.store.view();
 
         for (const mutation of [...relevant].reverse()) mutation.undo();
@@ -1475,6 +1643,37 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 });
             }
             publishSession(capture.entry, semantic);
+        }
+        for (const [documentId, capture] of documentCaptures) {
+            const semantic: DocumentDelta[] = [
+                ...(output.documentDeltas?.get(documentId) ?? []),
+            ].filter(
+                (delta) =>
+                    delta.type !== "document_changed" &&
+                    delta.type !== "document_state_changed" &&
+                    delta.type !== "document_updates_changed",
+            );
+            const document = capture.entry.store.document();
+            const state = capture.entry.store.state();
+            const updates = capture.entry.store.updates();
+            if (document !== capture.document) {
+                semantic.unshift({
+                    ...(document === undefined ? {} : { document }),
+                    type: "document_changed",
+                });
+            }
+            if (updates !== capture.updates) {
+                semantic.push({ type: "document_updates_changed", updates });
+            }
+            if (state !== capture.state) {
+                semantic.push({ state, type: "document_state_changed" });
+            }
+            publishDocument(capture.entry, semantic);
+        }
+        for (const [documentId, deltas] of output.documentDeltas ?? []) {
+            if (documentCaptures.has(documentId)) continue;
+            const entry = documentEntries.get(documentId);
+            if (entry !== undefined) publishDocument(entry, deltas);
         }
         for (const [sessionId, deltas] of output.sessionDeltas ?? []) {
             if (!sessionCaptures.has(sessionId)) {
@@ -1558,6 +1757,28 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 
     const applyAcceptedResponse = (mutation: PendingMutation, data: unknown): boolean => {
         if (mutation.applyAcceptedResponse?.(data) === true) return true;
+        if (mutation.documentId !== undefined) {
+            let document: Document;
+            try {
+                document = Value.Decode(documentResponseSchema, data).document;
+            } catch {
+                return false;
+            }
+            const entry = documentEntries.get(mutation.documentId);
+            if (entry === undefined) {
+                acknowledge(mutation.id);
+            } else {
+                reconcile([mutation.entityKey], mutation.id, [], false, () => ({
+                    documentDeltas: new Map([
+                        [
+                            mutation.documentId as string,
+                            entry.store.applyAuthoritativeDocument(document),
+                        ],
+                    ]),
+                }));
+            }
+            return true;
+        }
         const project = responseEntity(data, "project");
         if (
             groupsEntry !== undefined &&
@@ -1657,6 +1878,20 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         data: unknown,
     ): ReconcileOutput => {
         mutation.applyAuthoritativeResponse?.(data);
+        if (mutation.documentId !== undefined) {
+            const entry = documentEntries.get(mutation.documentId);
+            if (entry === undefined) return {};
+            try {
+                const document = Value.Decode(documentResponseSchema, data).document;
+                return {
+                    documentDeltas: new Map([
+                        [mutation.documentId, entry.store.applyAuthoritativeDocument(document)],
+                    ]),
+                };
+            } catch {
+                return {};
+            }
+        }
         const project = responseEntity(data, "project");
         if (
             groupsEntry !== undefined &&
@@ -1751,6 +1986,19 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                       projects: groupsEntry.store.projects(),
                       state: groupsEntry.store.state(),
                   };
+        const documentEntry =
+            mutation.documentId === undefined
+                ? undefined
+                : documentEntries.get(mutation.documentId);
+        const documentCapture: DocumentCapture | undefined =
+            documentEntry === undefined
+                ? undefined
+                : {
+                      document: documentEntry.store.document(),
+                      entry: documentEntry,
+                      state: documentEntry.store.state(),
+                      updates: documentEntry.store.updates(),
+                  };
         const folderCapture = folderEntry?.store.view();
         for (const candidate of [...sameEntity].reverse()) candidate.undo();
         const index = pendingOverlays.indexOf(mutation);
@@ -1758,6 +2006,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (mutation.action === "create_folder") {
             pendingFolderCreates.get(mutation.id)?.resolve();
             pendingFolderCreates.delete(mutation.id);
+        }
+        if (mutation.action === "create_document") {
+            pendingDocumentCreates.get(mutation.id)?.settle(false);
+            pendingDocumentCreates.delete(mutation.id);
         }
         const authoritative = applyAuthoritativeResponseDirectly(mutation, authoritativeData);
         for (const candidate of pendingOverlays) {
@@ -1814,6 +2066,25 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             const view = folderEntry.store.view();
             if (view !== folderCapture) deltas.unshift({ type: "folders_changed", view });
             publishFolders(deltas);
+        }
+        if (documentCapture !== undefined) {
+            const deltas: DocumentDelta[] = [rejection];
+            const document = documentCapture.entry.store.document();
+            const updates = documentCapture.entry.store.updates();
+            const state = documentCapture.entry.store.state();
+            if (document !== documentCapture.document) {
+                deltas.unshift({
+                    ...(document === undefined ? {} : { document }),
+                    type: "document_changed",
+                });
+            }
+            if (updates !== documentCapture.updates) {
+                deltas.push({ type: "document_updates_changed", updates });
+            }
+            if (state !== documentCapture.state) {
+                deltas.push({ state, type: "document_state_changed" });
+            }
+            publishDocument(documentCapture.entry, deltas);
         }
     };
 
@@ -2110,6 +2381,91 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return entry;
     };
 
+    const requestDocumentReload = (entry: DocumentEntry): Promise<void> => {
+        if (entry.loading !== undefined) {
+            entry.reloadPending = true;
+            return entry.loading;
+        }
+        const documentId = entry.store.documentId();
+        if (documentId === undefined) {
+            return Promise.reject(new Error("A document identity is required."));
+        }
+        const version = ++entry.bootstrapVersion;
+        entry.loading = (async () => {
+            const pendingCreate = entry.pendingCreate;
+            if (pendingCreate !== undefined) {
+                const committed = await pendingCreate.promise;
+                if (entry.pendingCreate === pendingCreate) delete entry.pendingCreate;
+                if (!committed) {
+                    throw new Error("Rig could not create that document.");
+                }
+            }
+            do {
+                entry.reloadPending = false;
+                const response = await request(
+                    endpointUrl(options.endpoint, `documents/${encodeURIComponent(documentId)}`),
+                    {
+                        headers: {
+                            accept: "application/json",
+                            authorization: `Bearer ${options.token}`,
+                        },
+                        signal: entry.controller.signal,
+                    },
+                );
+                const data = await readResponseBody(response);
+                if (!response.ok) {
+                    throw new MutationHttpError(
+                        response.status,
+                        humanMutationError(data, response.status),
+                        retryAfterMilliseconds(response.headers.get("retry-after"), now()),
+                        data,
+                    );
+                }
+                const document = Value.Decode(documentResponseSchema, data).document;
+                if (document.id !== documentId) {
+                    throw new Error("Rig returned a different document than the one requested.");
+                }
+                if (version !== entry.bootstrapVersion || entry.controller.signal.aborted) return;
+                if (document.version < entry.requiredVersion) {
+                    entry.reloadPending = true;
+                    await wait(
+                        options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS,
+                        entry.controller.signal,
+                    );
+                    continue;
+                }
+                reconcile([documentKey(documentId)], undefined, [], false, () => ({
+                    documentDeltas: new Map([
+                        [
+                            documentId,
+                            [
+                                ...entry.store.setConnection("live"),
+                                ...entry.store.applyAuthoritativeDocument(document),
+                            ],
+                        ],
+                    ]),
+                }));
+            } while (entry.reloadPending && !entry.controller.signal.aborted);
+        })()
+            .catch((error: unknown) => {
+                if (closed || entry.controller.signal.aborted) return;
+                publishDocument(entry, entry.store.setConnection("closed"));
+                for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+            })
+            .finally(() => {
+                if (documentEntries.get(documentId) === entry) delete entry.loading;
+                releaseUnusedEntries();
+            });
+        return entry.loading;
+    };
+
+    const startDocumentEntry = (entry: DocumentEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (liveStreamOpen) void requestDocumentReload(entry);
+    };
+
     const requestFolderReload = (entry: FolderEntry): Promise<void> => {
         if (entry.loading !== undefined) return entry.loading;
         entry.loading = (async () => {
@@ -2136,7 +2492,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     entry.hasFolderSnapshot = true;
                     entry.loadedRevision = Math.max(entry.loadedRevision, snapshot.revision);
                     reconcile(["folder-tree"], undefined, [], false, () => ({
-                        folderDeltas: entry.store.replaceFolders(snapshot.folders),
+                        folderDeltas: entry.store.replaceFolders(snapshot.folders, snapshot.items),
                     }));
                     retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
                 } catch (error) {
@@ -2510,6 +2866,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (folderEntry !== undefined) {
                         publishFolders(folderEntry.store.setConnection("live"));
                     }
+                    for (const entry of documentEntries.values()) {
+                        if (entry.started) {
+                            publishDocument(entry, entry.store.setConnection("live"));
+                        }
+                    }
                     if (pluginsEntry !== undefined) {
                         publishPlugins(pluginsEntry.store.setConnection("live"));
                     }
@@ -2533,6 +2894,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (profilesEntry !== undefined && profilesEntry.started) {
                     void loadProfiles(profilesEntry);
+                }
+                for (const entry of documentEntries.values()) {
+                    if (entry.started) void requestDocumentReload(entry);
                 }
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
@@ -2675,6 +3039,32 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     void requestFolderReload(entry);
                     return;
                 }
+                if (event.type === "document_changed") {
+                    let changed: Static<typeof documentEventSchema>;
+                    try {
+                        changed = Value.Decode(documentEventSchema, event);
+                    } catch {
+                        const error = new Error("Rig sent an invalid document update.");
+                        for (const entry of documentEntries.values()) {
+                            for (const subscriber of [...entry.subscribers]) {
+                                subscriber.onError?.(error);
+                            }
+                        }
+                        return;
+                    }
+                    const entry = documentEntries.get(changed.data.documentId);
+                    if (entry !== undefined) {
+                        entry.requiredVersion = Math.max(
+                            entry.requiredVersion,
+                            changed.data.version,
+                        );
+                        publishDocument(entry, entry.store.apply(changed));
+                    }
+                    acknowledge(changed.data.mutationId);
+                    if (entry !== undefined) void requestDocumentReload(entry);
+                    releaseUnusedEntries();
+                    return;
+                }
                 if (event.type === "worklets_changed") {
                     const entry = workletsEntry;
                     if (entry === undefined || !entry.started) return;
@@ -2773,6 +3163,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (folderEntry !== undefined) {
                     publishFolders(folderEntry.store.setConnection("reconnecting"));
                 }
+                for (const entry of documentEntries.values()) {
+                    if (entry.started) {
+                        publishDocument(entry, entry.store.setConnection("reconnecting"));
+                    }
+                }
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("reconnecting"));
                 }
@@ -2813,6 +3208,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         subscriber.onError?.(error);
                     }
                 }
+                for (const entry of documentEntries.values()) {
+                    publishDocument(entry, entry.store.setConnection("closed"));
+                    for (const subscriber of [...entry.subscribers]) {
+                        subscriber.onError?.(error);
+                    }
+                }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
@@ -2835,6 +3236,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (workletsEntry !== undefined) {
                     publishWorklets(workletsEntry.store.setConnection("closed"));
+                }
+                for (const entry of documentEntries.values()) {
+                    publishDocument(entry, entry.store.setConnection("closed"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
@@ -3029,6 +3433,19 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             entry.detachRoot();
             sessionEntries.delete(sessionId);
         }
+        for (const [documentId, entry] of documentEntries) {
+            const key = documentKey(documentId);
+            if (
+                entry.subscribers.size > 0 ||
+                pendingOverlays.some((mutation) => mutation.entityKey === key) ||
+                (queues.get(key)?.length ?? 0) > 0
+            ) {
+                continue;
+            }
+            entry.controller.abort();
+            entry.detachRoot();
+            documentEntries.delete(documentId);
+        }
         for (const [key, entry] of [...timelineEntries]) {
             if (entry.subscribers.size > 0) continue;
             entry.controller.abort();
@@ -3201,6 +3618,28 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return {
             view: () => folderEntry?.store.view() ?? { folders: [], unsorted: [] },
             state: () => folderEntry?.store.state() ?? { connection: "closed" },
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                releaseUnusedEntries();
+            },
+        };
+    };
+
+    const connectDocument = (
+        subscription: RigDocumentSubscriptionOptions,
+    ): RigDocumentConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createDocumentEntry(subscription.documentId);
+        const subscriber: DocumentSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        subscriber.onChange(entry.store.document(), entry.store.updates(), entry.store.state());
+        startDocumentEntry(entry);
+        return {
+            document: () => entry.store.document(),
+            updates: () => entry.store.updates(),
+            state: () => entry.store.state(),
             close: () => {
                 if (subscriber.closed) return;
                 subscriber.closed = true;
@@ -3884,6 +4323,82 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
+    const enqueueFolderItemMutation = (
+        action: Extract<
+            MutationAction,
+            "link_folder_item" | "move_folder_item" | "unlink_folder_item"
+        >,
+        id: MutationId,
+        applyOptimistic: PendingMutation["applyOptimistic"],
+        prepare: PendingMutation["prepare"],
+        pendingDocumentCreate?: PendingDocumentCreate,
+    ): MutationId => {
+        const entry = createFolderEntry();
+        let conflictRebases = 0;
+        return enqueue({
+            acknowledged: false,
+            action,
+            applyAcceptedResponse: (data) => {
+                let response: Static<typeof folderItemMutationResponseSchema>;
+                try {
+                    response = Value.Decode(folderItemMutationResponseSchema, data);
+                } catch {
+                    return false;
+                }
+                const current = folderEntry;
+                if (current === undefined) {
+                    acknowledge(id);
+                    return true;
+                }
+                current.requiredRevision = Math.max(current.requiredRevision, response.revision);
+                reconcile(["folder-tree"], id, [], false, () => ({
+                    folderDeltas: current.store.applyItem(response.item),
+                }));
+                void requestFolderReload(current);
+                return true;
+            },
+            applyOptimistic,
+            entityKey: "folder-tree",
+            id,
+            prepare,
+            ready: async () => {
+                if (!entry.hasFolderSnapshot && entry.loading === undefined) {
+                    await requestFolderReload(entry);
+                } else {
+                    await entry.loading;
+                }
+                if (!entry.hasFolderSnapshot) {
+                    throw new Error("Rig could not load the folder catalog.");
+                }
+                if (pendingDocumentCreate !== undefined && !(await pendingDocumentCreate.promise)) {
+                    throw new MutationHttpError(
+                        409,
+                        "Rig could not create that document.",
+                        undefined,
+                        undefined,
+                    );
+                }
+            },
+            rebaseOnConflict: (data) => {
+                let response: Static<typeof folderItemMutationResponseSchema>;
+                try {
+                    response = Value.Decode(folderItemMutationResponseSchema, data);
+                } catch {
+                    return false;
+                }
+                const current = folderEntry;
+                if (current === undefined || conflictRebases >= 8) return false;
+                conflictRebases += 1;
+                current.requiredRevision = Math.max(current.requiredRevision, response.revision);
+                reconcile(["folder-tree"], undefined, [], false, () => ({
+                    folderDeltas: current.store.applyItem(response.item),
+                }));
+                return true;
+            },
+            undo: () => undefined,
+        });
+    };
+
     const moveSession = (
         sessionId: string,
         request: Omit<MoveSessionRequest, "mutationId">,
@@ -4155,12 +4670,237 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 relatedSessionIds,
             );
         },
+        linkItem: (folderId, itemRequest, linkOptions = {}) => {
+            const id = linkOptions.itemId ?? itemRequest.id ?? nextEntityId();
+            const createdAt = now();
+            const pendingDocumentCreate =
+                itemRequest.target.kind === "document"
+                    ? pendingDocumentCreates.get(itemRequest.target.documentId)
+                    : undefined;
+            return enqueueFolderItemMutation(
+                "link_folder_item",
+                id,
+                (publish) => {
+                    if (folderEntry === undefined) return () => undefined;
+                    const optimistic: FolderItem = {
+                        createdAt,
+                        folderId,
+                        id,
+                        orderKey: folderEntry.store.optimisticItemOrderKey(
+                            folderId,
+                            itemRequest.afterId,
+                        ),
+                        target: itemRequest.target,
+                        updatedAt: createdAt,
+                        version: 0,
+                    };
+                    const changed = folderEntry.store.applyOptimisticItemCreate(optimistic);
+                    if (publish) publishFolders(changed.deltas);
+                    return changed.undo;
+                },
+                () => ({
+                    body: { ...itemRequest, id, mutationId: id },
+                    headers: { "x-rig-mutation-id": id },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `folders/${encodeURIComponent(folderId)}/items`,
+                    ),
+                }),
+                pendingDocumentCreate,
+            );
+        },
+        moveItem: (itemId, itemRequest) => {
+            const id = nextMutationId();
+            return enqueueFolderItemMutation(
+                "move_folder_item",
+                id,
+                (publish) => {
+                    if (folderEntry === undefined) return () => undefined;
+                    const changed = folderEntry.store.applyOptimisticItemMove(
+                        itemId,
+                        itemRequest.folderId,
+                        itemRequest.afterId,
+                    );
+                    if (publish) publishFolders(changed.deltas);
+                    return changed.undo;
+                },
+                () => ({
+                    body: { ...itemRequest, mutationId: id },
+                    headers: {
+                        ...ifMatchHeader(requiredFolderItemVersion(folderEntry, itemId)),
+                        "x-rig-mutation-id": id,
+                    },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `folder-items/${encodeURIComponent(itemId)}/move`,
+                    ),
+                }),
+            );
+        },
         moveSession,
         setSessionFolder: (sessionId, folderId) =>
             moveSession(sessionId, {
                 afterId: null,
                 scope: folderId === null ? { kind: "unsorted" } : { folderId, kind: "folder" },
             }),
+        unlinkItem: (itemId) => {
+            const id = nextMutationId();
+            return enqueueFolderItemMutation(
+                "unlink_folder_item",
+                id,
+                (publish) => {
+                    if (folderEntry === undefined) return () => undefined;
+                    const changed = folderEntry.store.applyOptimisticItemArchive(itemId, now());
+                    if (publish) publishFolders(changed.deltas);
+                    return changed.undo;
+                },
+                () => ({
+                    headers: {
+                        ...ifMatchHeader(requiredFolderItemVersion(folderEntry, itemId)),
+                        "x-rig-mutation-id": id,
+                    },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `folder-items/${encodeURIComponent(itemId)}/archive`,
+                    ),
+                }),
+            );
+        },
+    };
+
+    const documents: RigDocuments = {
+        create: (documentRequest, createOptions = {}) => {
+            const documentId = createOptions.documentId ?? documentRequest.id ?? nextEntityId();
+            let settleCreate!: (committed: boolean) => void;
+            const createPromise = new Promise<boolean>((resolve) => {
+                settleCreate = resolve;
+            });
+            const pendingCreate = { promise: createPromise, settle: settleCreate };
+            pendingDocumentCreates.set(documentId, pendingCreate);
+            const entry = documentEntries.get(documentId);
+            if (entry !== undefined) entry.pendingCreate = pendingCreate;
+            try {
+                return enqueue({
+                    acknowledged: false,
+                    action: "create_document",
+                    applyOptimistic: () => () => undefined,
+                    documentId,
+                    entityKey: documentKey(documentId),
+                    id: documentId,
+                    prepare: () => ({
+                        body: { ...documentRequest, id: documentId, mutationId: documentId },
+                        headers: { "x-rig-mutation-id": documentId },
+                        method: "POST",
+                        url: endpointUrl(options.endpoint, "documents"),
+                    }),
+                    undo: () => undefined,
+                });
+            } catch (error) {
+                pendingCreate.settle(false);
+                pendingDocumentCreates.delete(documentId);
+                throw error;
+            }
+        },
+        loadUpdates: async (documentId, loadOptions = {}) => {
+            if (closed) throw new Error("This Rig connection is closed.");
+            const entry = documentEntries.get(documentId);
+            if (entry !== undefined) {
+                publishDocument(entry, entry.store.startLoadingUpdates());
+            }
+            const operation = combinedSignal(rootController.signal, loadOptions.signal);
+            try {
+                const search = new URLSearchParams({
+                    afterVersion: String(loadOptions.afterVersion ?? 0),
+                    ...(loadOptions.limit === undefined
+                        ? {}
+                        : { limit: String(loadOptions.limit) }),
+                });
+                const response = await request(
+                    endpointUrl(
+                        options.endpoint,
+                        `documents/${encodeURIComponent(documentId)}/updates?${search.toString()}`,
+                    ),
+                    {
+                        headers: {
+                            accept: "application/json",
+                            authorization: `Bearer ${options.token}`,
+                        },
+                        signal: operation.signal,
+                    },
+                );
+                const data = await readResponseBody(response);
+                if (!response.ok) {
+                    throw new MutationHttpError(
+                        response.status,
+                        humanMutationError(data, response.status),
+                        retryAfterMilliseconds(response.headers.get("retry-after"), now()),
+                        data,
+                    );
+                }
+                const page = Value.Decode(documentUpdatePageSchema, data);
+                if (page.updates.some((update) => update.documentId !== documentId)) {
+                    throw new Error("Rig returned updates for a different document.");
+                }
+                if (entry !== undefined && documentEntries.get(documentId) === entry) {
+                    publishDocument(entry, entry.store.applyUpdatePage(page));
+                }
+                return page;
+            } catch (error) {
+                if (entry !== undefined && documentEntries.get(documentId) === entry) {
+                    publishDocument(entry, entry.store.failLoadingUpdates());
+                }
+                throw error;
+            } finally {
+                operation.detach();
+            }
+        },
+        write: (documentId, expectedVersion, documentRequest) => {
+            if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+                throw new Error("A document write needs a positive expected version.");
+            }
+            const id = nextMutationId();
+            return enqueue({
+                acknowledged: false,
+                action: "write_document",
+                applyOptimistic: (publish) => {
+                    const entry = documentEntries.get(documentId);
+                    if (entry?.store.document()?.version !== expectedVersion) {
+                        return () => undefined;
+                    }
+                    const changed = entry.store.applyOptimisticPatch({
+                        state: documentRequest.state,
+                        updatedAt: now(),
+                        ...("mimeType" in documentRequest
+                            ? { mimeType: documentRequest.mimeType }
+                            : {}),
+                        ...("unreadCursor" in documentRequest
+                            ? { unreadCursor: documentRequest.unreadCursor }
+                            : {}),
+                    });
+                    if (publish) publishDocument(entry, changed.deltas);
+                    return changed.undo;
+                },
+                documentId,
+                entityKey: documentKey(documentId),
+                id,
+                prepare: () => ({
+                    body: { ...documentRequest, mutationId: id },
+                    headers: {
+                        ...ifMatchHeader(expectedVersion),
+                        "x-rig-mutation-id": id,
+                    },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `documents/${encodeURIComponent(documentId)}/write`,
+                    ),
+                }),
+                undo: () => undefined,
+            });
+        },
     };
 
     const happyCloudGetInit = (operationOptions: HappyCloudOperationOptions): RequestInit => ({
@@ -6089,6 +6829,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             pendingOverlays.length = 0;
             for (const pending of pendingFolderCreates.values()) pending.resolve();
             pendingFolderCreates.clear();
+            for (const pending of pendingDocumentCreates.values()) pending.settle(false);
+            pendingDocumentCreates.clear();
             queues.clear();
             for (const entry of sessionEntries.values()) {
                 entry.controller.abort();
@@ -6096,6 +6838,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 entry.subscribers.clear();
             }
             sessionEntries.clear();
+            for (const entry of documentEntries.values()) {
+                entry.controller.abort();
+                entry.detachRoot();
+                entry.subscribers.clear();
+            }
+            documentEntries.clear();
             if (groupsEntry !== undefined) {
                 groupsEntry.controller.abort();
                 groupsEntry.detachRoot();
@@ -6151,6 +6899,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         cancelScheduledMessage,
         clearGoal,
         compactSession,
+        connectDocument,
         connectFolders,
         connectGroups,
         connectHappyCloud,
@@ -6169,6 +6918,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         createSession,
         detachSecret,
         discoverPluginCatalog,
+        documents,
         forkSession,
         installPlugin,
         getHappyCloudProfile,
@@ -6229,6 +6979,10 @@ function sessionKey(sessionId: string): string {
     return `session:${sessionId}`;
 }
 
+function documentKey(documentId: string): string {
+    return `document:${documentId}`;
+}
+
 function projectKey(projectId: string): string {
     return `project:${projectId}`;
 }
@@ -6270,6 +7024,12 @@ function ifMatchHeader(value: string | number | undefined): Record<string, strin
 function requiredFolderVersion(entry: FolderEntry | undefined, folderId: string): number {
     const version = entry?.store.folder(folderId)?.version;
     if (version === undefined) throw new Error("That folder no longer exists.");
+    return version;
+}
+
+function requiredFolderItemVersion(entry: FolderEntry | undefined, itemId: string): number {
+    const version = entry?.store.item(itemId)?.version;
+    if (version === undefined) throw new Error("That folder item no longer exists.");
     return version;
 }
 

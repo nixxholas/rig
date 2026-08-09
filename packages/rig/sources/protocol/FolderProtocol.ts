@@ -44,6 +44,66 @@ export const folderSchema = Type.Object(
 );
 export type Folder = Static<typeof folderSchema>;
 
+export const folderItemTargetSchema = Type.Union([
+    Type.Object(
+        { kind: Type.Literal("project"), projectId: Type.String({ minLength: 1, maxLength: 128 }) },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            kind: Type.Literal("workspace"),
+            workspaceId: Type.String({ minLength: 1, maxLength: 128 }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            documentId: Type.String({ minLength: 1, maxLength: 128 }),
+            kind: Type.Literal("document"),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export type FolderItemTarget = Static<typeof folderItemTargetSchema>;
+
+export const folderItemSchema = Type.Object(
+    {
+        archivedAt: Type.Optional(Type.Number()),
+        createdAt: Type.Number(),
+        folderId: Type.String(),
+        id: Type.String(),
+        orderKey: Type.String(),
+        target: folderItemTargetSchema,
+        updatedAt: Type.Number(),
+        version: Type.Number(),
+    },
+    { additionalProperties: false },
+);
+export type FolderItem = Static<typeof folderItemSchema>;
+
+export const createFolderItemRequestSchema = Type.Object(
+    {
+        afterId: Type.Optional(
+            Type.Union([Type.String({ maxLength: 128, minLength: 1 }), Type.Null()]),
+        ),
+        id: Type.Optional(Type.String({ maxLength: 128, minLength: 1 })),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        target: folderItemTargetSchema,
+    },
+    { additionalProperties: false },
+);
+export type CreateFolderItemRequest = Static<typeof createFolderItemRequestSchema>;
+
+export const moveFolderItemRequestSchema = Type.Object(
+    {
+        afterId: Type.Union([Type.String({ maxLength: 128, minLength: 1 }), Type.Null()]),
+        folderId: Type.String({ maxLength: 128, minLength: 1 }),
+        mutationId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+    },
+    { additionalProperties: false },
+);
+export type MoveFolderItemRequest = Static<typeof moveFolderItemRequestSchema>;
+
 export const createFolderRequestSchema = Type.Object(
     {
         description: Type.Optional(Type.String({ maxLength: FOLDER_TEXT_MAX_LENGTH })),
@@ -101,6 +161,8 @@ export const folderErrorCodeSchema = Type.Union([
     Type.Literal("folder_not_found"),
     Type.Literal("parent_not_found"),
     Type.Literal("sibling_not_found"),
+    Type.Literal("item_not_found"),
+    Type.Literal("target_not_found"),
     Type.Literal("cycle"),
     Type.Literal("version_conflict"),
     Type.Literal("storage_unavailable"),
@@ -118,17 +180,32 @@ export const folderErrorResponseSchema = Type.Object(
 );
 export type FolderErrorResponse = Static<typeof folderErrorResponseSchema>;
 
-export interface ListFoldersResponse {
-    folders: readonly Folder[];
-    /** Durable tree revision represented by this response. */
-    revision: number;
-}
+export const listFoldersResponseSchema = Type.Object(
+    {
+        folders: Type.Array(folderSchema),
+        /** Ordered independently inside each item's own folder. */
+        items: Type.Array(folderItemSchema),
+        /** Durable tree revision represented by this response. */
+        revision: Type.Integer({ minimum: 0 }),
+    },
+    { additionalProperties: false },
+);
+export type ListFoldersResponse = Static<typeof listFoldersResponseSchema>;
 
 export interface FolderResponse {
     folder: Folder;
     /** Durable tree revision committed with this folder response. */
     revision: number;
 }
+
+export const folderItemResponseSchema = Type.Object(
+    {
+        item: folderItemSchema,
+        revision: Type.Integer({ minimum: 0 }),
+    },
+    { additionalProperties: false },
+);
+export type FolderItemResponse = Static<typeof folderItemResponseSchema>;
 
 export interface BaseFolderEvent<TType extends string, TData> {
     createdAt: number;

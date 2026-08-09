@@ -1,6 +1,6 @@
 import { and, inArray, isNull, sql } from "drizzle-orm";
 
-import { folders, sessions } from "../database/schema.js";
+import { folderItems, folders, sessions } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 
 /**
@@ -42,6 +42,10 @@ export function folderArchive(
             .where(and(sql`${folders.id} IN (${subtree})`, isNull(folders.archivedAtMs)))
             .run().changes,
     );
+    tx.update(folderItems)
+        .set({ archivedAtMs: now, updatedAtMs: now, version: sql`${folderItems.version} + 1` })
+        .where(and(sql`${folderItems.folderId} IN (${subtree})`, isNull(folderItems.archivedAtMs)))
+        .run();
     if (sessionIds.length > 0) {
         tx.update(sessions)
             .set({ archived: true, updatedAtMs: now })

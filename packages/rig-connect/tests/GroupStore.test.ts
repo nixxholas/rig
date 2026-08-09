@@ -107,13 +107,14 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
             ],
             since: 0,
         },
-        protocolVersion: 14,
+        protocolVersion: 15,
         projects: [project("p1")],
         sessions: [session("s1", "p1")],
         sessionsComplete: true,
         terminalGroups: [],
         workspaces: [],
         ...overrides,
+        folderItems: overrides.folderItems ?? [],
     };
 }
 

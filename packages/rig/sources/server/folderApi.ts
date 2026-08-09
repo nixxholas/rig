@@ -203,8 +203,10 @@ export async function serveFolderRequest(
 function statusForCode(code: FolderErrorCode): number {
     switch (code) {
         case "folder_not_found":
+        case "item_not_found":
         case "parent_not_found":
         case "sibling_not_found":
+        case "target_not_found":
             return 404;
         case "cycle":
         case "invalid_request":

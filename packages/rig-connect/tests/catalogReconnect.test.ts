@@ -67,6 +67,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
             providers: [],
         },
         cursor,
+        folderItems: [],
         folders: [],
         identity: { version: "test" },
         presence: {
@@ -88,7 +89,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
             ],
             since: 0,
         },
-        protocolVersion: 14,
+        protocolVersion: 15,
         projects: [
             {
                 createdAt: 1,
@@ -116,7 +117,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
 }
 
 function liveHello(cursor: string, gap: boolean, resumed: boolean): string {
-    return `event: hello\ndata: ${JSON.stringify({ cursor, gap, protocolVersion: 14, resumed })}\n\n`;
+    return `event: hello\ndata: ${JSON.stringify({ cursor, gap, protocolVersion: 15, resumed })}\n\n`;
 }
 
 function titleEvent(title: string): string {

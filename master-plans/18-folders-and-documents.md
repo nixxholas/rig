@@ -4,22 +4,39 @@ How to implement this is not yet clear. What follows is the idea.
 
 ## Big picture
 
-Instead of focusing on projects and worktrees, we have a more controlled
-filesystem of files, documents and so on.
+Instead of focusing on projects and worktrees, we have folders whose contents
+are an ordered list of items.
 
 Every folder has one main chat, optionally, and several optional additional
 chats. Think of it as Notion, except it is built around chats rather than
-around documents. Documents are what the chat produces.
+around documents. Documents are one of the things the chat can produce.
 
 When we open a folder in Happy we see the main chat and the additional ones,
-and maybe some applets or something like that.
+its items, and maybe some applets or something like that.
 
 This lives in parallel with what we have today. Code projects and Git
 workspaces stay as they are; folders are a new way of working — media,
 documents, work that is not code.
 
-Projects — actual projects — can be elements of this tree. They are also like
-folders, but rather they are terminal folders.
+A folder item exists within exactly one folder and references exactly one
+thing: a workspace, a project, or a document. Each folder is its own ordering
+domain for the items directly inside it, so an item's order key has meaning
+only within that folder. Items are not a separate tree or an ordering system
+outside folders.
+
+Projects and workspaces can therefore be linked into folders, but they do not
+become folders themselves. Projects retain their own independent order in the
+main project list. Linking or reordering a project item inside a folder does
+not change that project-list order.
+
+A document is a live object with a MIME type, a current state, and an ordered,
+CRDT-like queue of updates. Apps can use this to implement their own document
+types. Rig treats the state and updates as opaque.
+
+The only write operation on a document is compare-version-and-write. A document
+also tracks `createdAt`, `updatedAt`, `createdBy`, and an unread cursor. The
+unread cursor is a UUIDv7 for a document change worth surfacing in the UI. It is
+set explicitly through the API; Rig does not infer it.
 
 Every folder has some description and some rules. Every folder potentially has
 an icon: a picture, an emoji, or one of some predefined icons.
@@ -36,8 +53,12 @@ sorted themselves, or if sorting is impossible.
 
 ## The tree
 
-The most interesting part is that this is a tree of folders. We must be able to
-manipulate it very easily: we must be able to drag and drop folders freely.
+The most interesting part is that this is a tree of folders, with ordered items
+inside each folder. We must be able to manipulate it very easily: we must be
+able to drag and drop folders freely, and drag items into and within folders.
+Dragging or reordering an item changes its containing folder and/or its order
+among the items directly in that folder. Dragging a project or workspace into
+a folder links it as an item; item operations do not rearrange the folder tree.
 
 These folders are not really filesystem folders. They are not nested inside one
 another; they are only virtually nested. An agent knows which folder it is in
@@ -79,30 +100,51 @@ roll back very efficiently, Time-Machine-like.
 
 **A. Folders and chats.** The tree, the main chat and the additional chats in
 each folder, each folder's description, rules and icon, and flat physical
-storage under opaque ids. Done when a folder can be created in Happy, its main
-chat opened, and its documents produced by that chat.
+storage under opaque ids. Done when a folder can be created in Happy and its
+main chat opened.
 
-**B. Manipulating the tree.** Free drag-and-drop of folders, and folder
-parameters that can change, while nothing moves on disk. Done when rearranging
-the tree is instant and an agent still knows both where it is virtually and
-where it is physically.
+**B. Items and documents.** Folder items that each exist within exactly one
+folder and reference exactly one workspace, project or document. Each folder
+orders its own direct items, independently of the folder tree and of the main
+project list. Documents have a MIME type, opaque current state, an ordered queue
+of opaque updates, `createdAt`, `updatedAt`, `createdBy`, and the API-set UUIDv7
+unread cursor. Done when projects and workspaces can be linked into folders as
+items without changing project-list order, an app can implement a custom
+document type, and compare-version-and-write is the only document write
+operation.
 
-**C. Unsorted chats.** A new chat with no folder, the Unsorted list above the
+**C. Manipulating folders and items.** Free drag-and-drop of folders in the
+tree, items between and within folders, and folder parameters that can change,
+while nothing moves on disk. Done when rearranging the folder tree and changing
+an item's containing folder or order within it are instant, and an agent still
+knows both where it is virtually and where it is physically.
+
+**D. Unsorted chats.** A new chat with no folder, the Unsorted list above the
 folders, a chat that files itself while you talk to it, and automatic archiving
 after 24 hours. Done when a chat started from nowhere ends up in the right
 folder on its own, and one that cannot is gone the next day.
 
-**D. Checkpointing.** Pick one of the three directions and track what changed,
+**E. Checkpointing.** Pick one of the three directions and track what changed,
 so a model's work is saved automatically or rolled back. Done when a folder can
 be pointed at, forked and rolled back cheaply with very large files in it.
 
 ## What done looks like
 
-- Work is organized as a tree of folders holding files and documents, alongside
-  code projects rather than replacing them.
-- A project sits in that tree as a terminal folder.
-- A folder is a chat, optionally several, and the documents those chats produce,
-  with its own description, rules and icon.
+- Work is organized as a tree of folders. Every item exists within exactly one
+  folder and references one workspace, project or document.
+- Each folder independently orders the items directly inside it. An item's
+  order key is meaningful only within that folder, and items do not form a
+  separate tree or ordering system outside folders.
+- Projects and workspaces can be linked into folders as items without becoming
+  folders themselves.
+- Projects keep an independent order in the main project list. Linking,
+  moving, or reordering a project item in a folder does not change that order.
+- A folder has a chat, optionally several, an ordered list of items, and its own
+  description, rules and icon.
+- A document is a live object with a MIME type, opaque current state and an
+  ordered queue of opaque updates for apps to interpret.
+- Compare-version-and-write is the only document write operation. `createdAt`,
+  `updatedAt`, `createdBy`, and the API-set UUIDv7 unread cursor are tracked.
 - A chat can start belonging nowhere, file itself into a folder while you talk
   to it, and disappear on its own if it never does.
 - The tree is virtual and dynamic; the storage under it is flat and static.

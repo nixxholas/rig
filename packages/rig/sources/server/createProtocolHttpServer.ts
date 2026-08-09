@@ -289,6 +289,8 @@ import {
 } from "./projectFileApi.js";
 import { listGitWorkingTreeFiles } from "../git/listGitWorkingTreeFiles.js";
 import { serveFolderRequest } from "./folderApi.js";
+import { serveFolderItemRequest } from "./folderItemApi.js";
+import { serveDocumentRequest } from "./documentApi.js";
 import { FolderError } from "../folders/FolderRepository.js";
 import { moveSessionRequestSchema, sessionScopeSchema } from "../protocol/index.js";
 import { createNodeFileSystemContext } from "../agent/context/createNodeFileSystemContext.js";
@@ -1786,6 +1788,63 @@ async function handleRequest(
             request,
             response,
             (limitBytes) => readJson<unknown>(request, limitBytes),
+        );
+        return;
+    }
+    if (
+        routeName === "folder-items" ||
+        routeName === "folder-item" ||
+        routeName === "folder-item-archive" ||
+        routeName === "folder-item-move"
+    ) {
+        await serveFolderItemRequest(
+            store,
+            {
+                name: routeName,
+                ...("folderId" in route && route.folderId !== undefined
+                    ? { folderId: route.folderId }
+                    : {}),
+                ...("itemId" in route && route.itemId !== undefined
+                    ? { itemId: route.itemId }
+                    : {}),
+            },
+            request,
+            response,
+            (limitBytes) => readJson<unknown>(request, limitBytes),
+        );
+        return;
+    }
+    if (
+        routeName === "documents" ||
+        routeName === "document" ||
+        routeName === "document-updates" ||
+        routeName === "document-write"
+    ) {
+        await serveDocumentRequest(
+            store,
+            {
+                name: routeName,
+                ...("documentId" in route && route.documentId !== undefined
+                    ? { documentId: route.documentId }
+                    : {}),
+            },
+            request,
+            response,
+            url.searchParams,
+            (limitBytes) => readJson<unknown>(request, limitBytes),
+            (profileId) => {
+                if (
+                    !authorizeMessageProfile(request, response, runtimeConfig, {
+                        identity: profileId ?? null,
+                    })
+                ) {
+                    return undefined;
+                }
+                return {
+                    instanceId: p2pPeerId(request) ?? store.localInstanceId,
+                    ...(profileId === undefined || profileId === null ? {} : { profileId }),
+                };
+            },
         );
         return;
     }
@@ -4769,6 +4828,7 @@ function matchRoute(pathname: string):
               | "presence"
               | "profiles"
               | "plugin-catalog"
+              | "documents"
               | "folders"
               | "plugins"
               | "projects"
@@ -4846,6 +4906,21 @@ function matchRoute(pathname: string):
     | {
           folderId: string;
           name: "folder" | "folder-archive" | "folder-move";
+          sessionId?: undefined;
+      }
+    | {
+          folderId: string;
+          name: "folder-items";
+          sessionId?: undefined;
+      }
+    | {
+          itemId: string;
+          name: "folder-item" | "folder-item-archive" | "folder-item-move";
+          sessionId?: undefined;
+      }
+    | {
+          documentId: string;
+          name: "document" | "document-updates" | "document-write";
           sessionId?: undefined;
       }
     | {
@@ -4997,6 +5072,7 @@ function matchRoute(pathname: string):
     }
     if (pathname === "/plugins") return { name: "plugins" };
     if (pathname === "/plugin-catalogs/github") return { name: "plugin-catalog" };
+    if (pathname === "/documents") return { name: "documents" };
     if (pathname === "/folders") return { name: "folders" };
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/projects/clone") return { name: "project-clone" };
@@ -5139,11 +5215,36 @@ function matchRoute(pathname: string):
     if (globalParts[0] === "folders" && globalParts[1] !== undefined) {
         const folderId = decodeURIComponent(globalParts[1]);
         if (globalParts.length === 2) return { folderId, name: "folder" };
+        if (globalParts.length === 3 && globalParts[2] === "items") {
+            return { folderId, name: "folder-items" };
+        }
         if (globalParts.length === 3 && globalParts[2] === "archive") {
             return { folderId, name: "folder-archive" };
         }
         if (globalParts.length === 3 && globalParts[2] === "move") {
             return { folderId, name: "folder-move" };
+        }
+        return undefined;
+    }
+    if (globalParts[0] === "folder-items" && globalParts[1] !== undefined) {
+        const itemId = decodeURIComponent(globalParts[1]);
+        if (globalParts.length === 2) return { itemId, name: "folder-item" };
+        if (globalParts.length === 3 && globalParts[2] === "archive") {
+            return { itemId, name: "folder-item-archive" };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "move") {
+            return { itemId, name: "folder-item-move" };
+        }
+        return undefined;
+    }
+    if (globalParts[0] === "documents" && globalParts[1] !== undefined) {
+        const documentId = decodeURIComponent(globalParts[1]);
+        if (globalParts.length === 2) return { documentId, name: "document" };
+        if (globalParts.length === 3 && globalParts[2] === "updates") {
+            return { documentId, name: "document-updates" };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "write") {
+            return { documentId, name: "document-write" };
         }
         return undefined;
     }
@@ -5897,8 +5998,15 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "sessions") return request.method === "POST";
+    if (route.name === "documents") return request.method === "POST";
+    if (route.name === "document-write") return request.method === "POST";
+    if (route.name === "document" || route.name === "document-updates") return false;
     if (route.name === "folders") return request.method !== "GET";
     if (["folder", "folder-archive", "folder-move"].includes(route.name)) {
+        return request.method !== "GET";
+    }
+    if (route.name === "folder-items") return request.method === "POST";
+    if (["folder-item", "folder-item-archive", "folder-item-move"].includes(route.name)) {
         return request.method !== "GET";
     }
     if (route.name === "projects") return request.method !== "GET";
@@ -6252,6 +6360,10 @@ function buildGroupCatalog(
         folders:
             ownerInstanceId === undefined
                 ? store.listFolders().filter((folder) => folder.archivedAt === undefined)
+                : [],
+        folderItems:
+            ownerInstanceId === undefined
+                ? store.folderCatalog().items.filter((item) => item.archivedAt === undefined)
                 : [],
         identity,
         presence: store.presence.state(),

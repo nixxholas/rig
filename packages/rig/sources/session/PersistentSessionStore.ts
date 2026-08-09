@@ -12,17 +12,25 @@ import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateDocumentRequest,
+    CreateFolderItemRequest,
     CreateFolderRequest,
     CreateProjectWorkspaceRequest,
     CreateRemoteProjectRequest,
     CreateSessionRequest,
+    Document,
+    DocumentCreatedBy,
+    DocumentUpdatePage,
     EventId,
     Folder,
+    FolderItem,
     GetTimelineRequest,
     GitChangeSnapshot,
     GitRepositoryFacts,
     GlobalEventQueueEntry,
     ModelCatalog,
+    ListDocumentUpdatesRequest,
+    MoveFolderItemRequest,
     MoveFolderRequest,
     Project,
     ProjectCreator,
@@ -45,6 +53,7 @@ import type {
     TransferSessionRequest,
     TransferSessionResponse,
     UpdateFolderRequest,
+    WriteDocumentRequest,
     UpdateSecretRequest,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
@@ -90,6 +99,7 @@ import {
     type ProjectSessionSettings,
 } from "../project/ProjectRepository.js";
 import { FolderRepository } from "../folders/FolderRepository.js";
+import { DocumentRepository } from "../documents/DocumentRepository.js";
 import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
@@ -253,7 +263,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly dataEpoch: string;
     readonly dataSchemaVersion: number;
     #modelCatalog: ModelCatalog;
-    readonly #localInstanceId: string;
+    readonly localInstanceId: string;
     readonly #resolveModelCatalog: (ownerInstanceId: string) => ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #now: () => number;
@@ -267,6 +277,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #globalEventQueue: GlobalEventQueue;
     #precommittedGlobalEvents = new Map<EventId, GlobalEventQueueEntry | null>();
     #folders: FolderRepository;
+    #documents: DocumentRepository;
     #projects: ProjectRepository;
     #workspaceReadyWaiters!: ReturnType<typeof createWorkspaceReadyWaiters>;
     #secrets: SecretRegistry;
@@ -298,7 +309,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly worklets: WorkletStore;
 
     constructor(options: PersistentSessionStoreOptions) {
-        this.#localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
+        this.localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
         this.#resolveModelCatalog =
             options.resolveModelCatalog ?? (() => options.modelCatalog ?? createModelCatalog());
         this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
@@ -314,7 +325,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.liveEvents.publish(event);
         });
         this.#secrets = new SecretRegistry();
-        this.#modelCatalog = this.#resolveModelCatalog(this.#localInstanceId);
+        this.#modelCatalog = this.#resolveModelCatalog(this.localInstanceId);
         this.#createRuntime = options.createRuntime;
         this.#defaultDocker = options.defaultDocker;
         this.#mcpToolProvider = options.mcpToolProvider;
@@ -332,7 +343,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#client = opened.client;
         this.#database = opened.database;
         if (options.databasePath !== ":memory:") chmodSync(options.databasePath, 0o600);
-        migrateSessionDatabase(this.#database, { localInstanceId: this.#localInstanceId });
+        migrateSessionDatabase(this.#database, { localInstanceId: this.localInstanceId });
         this.dataEpoch = queryRigDataEpoch(this.#database);
         this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
         if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
@@ -366,7 +377,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#projects = new ProjectRepository({
             ...(options.projectClone === undefined ? {} : { cloneRemote: options.projectClone }),
             database: this.#database,
-            localInstanceId: this.#localInstanceId,
+            localInstanceId: this.localInstanceId,
             ...(options.projectGit === undefined ? {} : { git: options.projectGit }),
             ...(options.homeDirectory === undefined
                 ? {}
@@ -418,6 +429,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             },
             transaction: (body) => this.#transaction(body),
         });
+        this.#documents = new DocumentRepository({
+            database: this.#database,
+            now: this.#now,
+            onEvent: (event) => this.#publishGlobalEvent(event),
+            transaction: (body) => this.#transaction(body),
+        });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
             this.#projects.getWorkspace(projectId, workspaceId),
         );
@@ -437,7 +454,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
         this.#agentManager = new AgentSessionManager({
-            localInstanceId: this.#localInstanceId,
+            localInstanceId: this.localInstanceId,
             repository: {
                 archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
@@ -824,7 +841,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 const ownerInstanceId =
                     inherited?.ownerInstanceId ??
                     (options.ownerInstanceId === undefined
-                        ? this.#localInstanceId
+                        ? this.localInstanceId
                         : validOwnerInstanceId(options.ownerInstanceId));
                 const profileId = inherited?.profileId ?? options.profileId ?? request.identity;
                 if (profileId !== undefined) {
@@ -1258,6 +1275,30 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#folders.getFolder(folderId);
     }
 
+    getFolderItem(itemId: string): FolderItem | undefined {
+        return this.#folders.getFolderItem(itemId);
+    }
+
+    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem {
+        return this.#folders.createFolderItem(folderId, request);
+    }
+
+    moveFolderItem(
+        itemId: string,
+        request: MoveFolderItemRequest,
+        expectedVersion?: number,
+    ): FolderItem | undefined {
+        return this.#folders.moveFolderItem(itemId, request, expectedVersion);
+    }
+
+    archiveFolderItem(
+        itemId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): FolderItem | undefined {
+        return this.#folders.archiveFolderItem(itemId, expectedVersion, mutationId);
+    }
+
     createFolder(request: CreateFolderRequest): Folder {
         return this.#folders.createFolder(request);
     }
@@ -1284,6 +1325,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         mutationId?: string,
     ): Folder | undefined {
         return this.#folders.archiveFolder(folderId, expectedVersion, mutationId);
+    }
+
+    getDocument(documentId: string): Document | undefined {
+        return this.#documents.getDocument(documentId);
+    }
+
+    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document {
+        return this.#documents.createDocument(request, createdBy);
+    }
+
+    writeDocument(
+        documentId: string,
+        request: WriteDocumentRequest,
+        expectedVersion: number,
+    ): Document | undefined {
+        return this.#documents.writeDocument(documentId, request, expectedVersion);
+    }
+
+    documentUpdates(
+        documentId: string,
+        request: ListDocumentUpdatesRequest,
+    ): DocumentUpdatePage | undefined {
+        return this.#documents.documentUpdates(documentId, request);
     }
 
     setSessionFolder(
@@ -1318,7 +1382,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#projects.createRemoteProject(request, {
             ...options,
             createdBy: options?.createdBy ?? {
-                instanceId: this.#localInstanceId,
+                instanceId: this.localInstanceId,
                 profileId: request.identity,
             },
         });
@@ -2275,7 +2339,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #modelCatalogFor(ownerInstanceId: string): ModelCatalog {
-        return ownerInstanceId === this.#localInstanceId
+        return ownerInstanceId === this.localInstanceId
             ? this.#modelCatalog
             : this.#resolveModelCatalog(ownerInstanceId);
     }

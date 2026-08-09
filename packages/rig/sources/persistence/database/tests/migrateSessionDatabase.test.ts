@@ -18,6 +18,7 @@ import { projectUserMutationVersion } from "../migrations/16-project-user-mutati
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import {
     dropSchemaAddedAfterIdentityMigrations,
+    dropFolderItemsAndDocumentsSchema,
     dropSessionScopeSchema,
 } from "./dropSchemaAddedAfterIdentityMigrations.js";
 import * as schema from "../schema.js";
@@ -83,6 +84,7 @@ describe("migrateSessionDatabase", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database);
         opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN owner_instance_id"));
+        dropFolderItemsAndDocumentsSchema(opened.database);
         opened.database.run(sql.raw("PRAGMA user_version = 38"));
 
         migrateSessionDatabase(opened.database, {
@@ -157,6 +159,7 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("DROP TABLE session_mutations"));
         opened.database.run(sql.raw("DROP TABLE folder_mutations"));
         opened.database.run(sql.raw("DROP TABLE folder_catalog"));
+        dropFolderItemsAndDocumentsSchema(opened.database);
         opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
         migrateSessionDatabase(opened.database);

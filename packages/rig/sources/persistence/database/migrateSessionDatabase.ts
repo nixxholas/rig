@@ -46,6 +46,8 @@ import { sessionCredentialBinding } from "./migrations/41-session-credential-bin
 import { remoteProjects } from "./migrations/42-remote-projects.js";
 import { profileGitIdentity } from "./migrations/43-profile-git-identity.js";
 import { remoteWorkspaces } from "./migrations/44-remote-workspaces.js";
+import { folderItemsAndDocuments } from "./migrations/45-folder-items-and-documents.js";
+import { folderItemMutationRetention } from "./migrations/46-folder-item-mutation-retention.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -99,6 +101,8 @@ const migrations: readonly SessionDatabaseMigration[] = [
     remoteProjects,
     profileGitIdentity,
     remoteWorkspaces,
+    folderItemsAndDocuments,
+    folderItemMutationRetention,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

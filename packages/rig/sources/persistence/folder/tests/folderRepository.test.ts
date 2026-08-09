@@ -18,6 +18,8 @@ import type { Folder, FolderErrorCode, FolderEvent } from "../../../protocol/ind
 import { FolderError, FolderRepository } from "../../../folders/FolderRepository.js";
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
+import { documents, folderItemMutations } from "../../database/schema.js";
+import { recordFolderItemMutationReceipt } from "../../folderItem/folderItemMutationReceipt.js";
 import type { TX } from "../../Transaction.js";
 
 const opened: ReturnType<typeof openSessionDatabase>[] = [];
@@ -419,6 +421,121 @@ describe("FolderRepository", () => {
 
         expect(unchanged).toEqual(folder);
         expect(events).toEqual([]);
+    });
+
+    it("links duplicate targets in folder-local order and unlinks without touching the target", () => {
+        const { database, repository } = createRepository();
+        const source = repository.createFolder({ name: "Source" });
+        const target = repository.createFolder({ name: "Target" });
+        const documentId = createId();
+        database
+            .insert(documents)
+            .values({
+                createdAtMs: 1,
+                createdByInstanceId: "alocalinstance00000000001",
+                firstRetainedVersion: 2,
+                id: documentId,
+                mimeType: "application/x-board",
+                stateJson: "{}",
+                updatedAtMs: 1,
+                version: 1,
+            })
+            .run();
+        const first = repository.createFolderItem(source.id, {
+            id: createId(),
+            mutationId: "link-first",
+            target: { documentId, kind: "document" },
+        });
+        const second = repository.createFolderItem(source.id, {
+            id: createId(),
+            mutationId: "link-second",
+            target: { documentId, kind: "document" },
+        });
+
+        expect(repository.folderCatalog().items.map((item) => item.id)).toEqual([
+            first.id,
+            second.id,
+        ]);
+        const moved = repository.moveFolderItem(
+            second.id,
+            { afterId: null, folderId: target.id, mutationId: "move-second" },
+            second.version,
+        );
+        expect(moved).toMatchObject({ folderId: target.id, orderKey: "a0", version: 2 });
+
+        const archived = repository.archiveFolderItem(moved!.id, moved!.version, "unlink-second");
+        expect(archived?.archivedAt).toBeDefined();
+        expect(
+            database
+                .select({ id: documents.id })
+                .from(documents)
+                .all()
+                .map((row) => row.id),
+        ).toEqual([documentId]);
+        expect(repository.folderCatalog().revision).toBe(6);
+    });
+
+    it("keeps an item's create receipt under unrelated mutation pressure", () => {
+        const { database, repository } = createRepository();
+        const folder = repository.createFolder({ name: "Source" });
+        const documentId = createId();
+        const itemId = createId();
+        const request = {
+            id: itemId,
+            mutationId: "link-document",
+            target: { documentId, kind: "document" } as const,
+        };
+        database
+            .insert(documents)
+            .values({
+                createdAtMs: 1,
+                createdByInstanceId: "alocalinstance00000000001",
+                firstRetainedVersion: 2,
+                id: documentId,
+                mimeType: "application/x-board",
+                stateJson: "{}",
+                updatedAtMs: 1,
+                version: 1,
+            })
+            .run();
+
+        const linked = repository.createFolderItem(folder.id, request);
+        database.transaction((tx) => {
+            for (let index = 0; index < 10_000; index += 1) {
+                tx.insert(folderItemMutations)
+                    .values({
+                        action: "move",
+                        createdAtMs: index + 10,
+                        itemId: "unrelated-item",
+                        mutationId: `unrelated-${String(index)}`,
+                        requestFingerprint: `unrelated-${String(index)}`,
+                    })
+                    .run();
+            }
+            recordFolderItemMutationReceipt(tx, {
+                action: "move",
+                fingerprint: "newest-unrelated",
+                itemId: "unrelated-item",
+                mutationId: "newest-unrelated",
+                now: 10_010,
+            });
+        });
+
+        expect(repository.createFolderItem(folder.id, request)).toEqual(linked);
+        expect(
+            database
+                .select({ mutationId: folderItemMutations.mutationId })
+                .from(folderItemMutations)
+                .all()
+                .filter((receipt) => receipt.mutationId.startsWith("unrelated")),
+        ).toHaveLength(9_999);
+        expect(
+            database
+                .select({ mutationId: folderItemMutations.mutationId })
+                .from(folderItemMutations)
+                .all()
+                .some((receipt) => receipt.mutationId === "link-document"),
+        ).toBe(true);
     });
 
     it("refuses to file a chat into a folder it does not know", () => {

@@ -6,13 +6,16 @@ import { createId } from "@paralleldrive/cuid2";
 import { sql } from "drizzle-orm";
 
 import {
+    type CreateFolderItemRequest,
     createEventIdFactory,
     FOLDER_NAME_MAX_LENGTH,
     type CreateFolderRequest,
     type Folder,
+    type FolderItem,
     type FolderErrorCode,
     type FolderEvent,
     type ListFoldersResponse,
+    type MoveFolderItemRequest,
     type MoveFolderRequest,
     type UpdateFolderRequest,
 } from "../protocol/index.js";
@@ -24,6 +27,18 @@ import { advanceFolderCatalogRevision } from "../persistence/folder/advanceFolde
 import { queryFolderCatalogRevision } from "../persistence/folder/queryFolderCatalogRevision.js";
 import { queryFolder } from "../persistence/folder/queryFolder.js";
 import { queryFolders } from "../persistence/folder/queryFolders.js";
+import { folderItemArchive } from "../persistence/folderItem/folderItemArchive.js";
+import { folderItemCreate } from "../persistence/folderItem/folderItemCreate.js";
+import { folderItemMove } from "../persistence/folderItem/folderItemMove.js";
+import { queryFolderItem, queryFolderItems } from "../persistence/folderItem/queryFolderItems.js";
+import {
+    folderItemsWithActiveTargets,
+    queryFolderItemTargetExists,
+} from "../persistence/folderItem/queryFolderItemTargetExists.js";
+import {
+    queryFolderItemMutationReceipt,
+    recordFolderItemMutationReceipt,
+} from "../persistence/folderItem/folderItemMutationReceipt.js";
 import {
     SESSION_SCOPE_MUTATION_ACTION,
     sessionMoveScope,
@@ -104,10 +119,14 @@ export class FolderRepository {
     }
 
     folderCatalog(): ListFoldersResponse {
-        return this.#mutate((tx) => ({
-            folders: queryFolders(tx),
-            revision: queryFolderCatalogRevision(tx),
-        }));
+        return this.#mutate((tx) => {
+            const items = queryFolderItems(tx);
+            return {
+                folders: [...queryFolders(tx)],
+                items: [...folderItemsWithActiveTargets(tx, items)],
+                revision: queryFolderCatalogRevision(tx),
+            };
+        });
     }
 
     folderCatalogRevision(): number {
@@ -116,6 +135,180 @@ export class FolderRepository {
 
     getFolder(folderId: string): Folder | undefined {
         return queryFolder(this.#database, folderId);
+    }
+
+    getFolderItem(itemId: string): FolderItem | undefined {
+        return queryFolderItem(this.#database, itemId);
+    }
+
+    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem {
+        const fingerprint = JSON.stringify({
+            afterId: request.afterId ?? (request.afterId === null ? null : "omitted"),
+            folderId,
+            id: request.id ?? null,
+            target: request.target,
+        });
+        const applied = this.#itemReceipt(request.mutationId, "create", fingerprint);
+        if (applied !== undefined) {
+            const item = this.getFolderItem(applied);
+            if (item !== undefined) return item;
+        }
+        const id =
+            request.id === undefined
+                ? createId()
+                : (() => {
+                      try {
+                          return clientChosenId(request.id, "folder item");
+                      } catch {
+                          throw new FolderError(
+                              "invalid_request",
+                              "The folder item ID must be a cuid2 identity.",
+                          );
+                      }
+                  })();
+        if (this.getFolderItem(id) !== undefined) {
+            throw new FolderError("invalid_request", "That folder item ID is already in use.");
+        }
+        if (!queryFolderItemTargetExists(this.#database, request.target)) {
+            throw new FolderError("target_not_found", "That folder item target was not found.");
+        }
+        const siblings = queryFolderItems(this.#database, folderId).filter(
+            (item) => item.archivedAt === undefined,
+        );
+        const appendedKey = generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null);
+        let orderKey = appendedKey;
+        if (request.afterId !== undefined) {
+            if (request.afterId === id) {
+                throw new FolderError(
+                    "invalid_request",
+                    "A folder item cannot be placed after itself.",
+                );
+            }
+            try {
+                orderKey = orderKeyAfter(
+                    [...siblings, { id, orderKey: appendedKey }],
+                    id,
+                    request.afterId,
+                );
+            } catch {
+                throw new FolderError(
+                    "sibling_not_found",
+                    "That preceding item was not found in the folder.",
+                );
+            }
+        }
+        return this.#mutate((tx) => {
+            const outcome = folderItemCreate(tx, {
+                folderId,
+                id,
+                now: this.#now(),
+                orderKey,
+                target: request.target,
+            });
+            if (outcome.outcome === "folder_not_found") {
+                throw new FolderError("folder_not_found", "That folder was not found.");
+            }
+            this.#recordItemReceipt(tx, request.mutationId, "create", fingerprint, id);
+            this.#advanceItemAndPublish(tx, request.mutationId);
+            return queryFolderItem(tx, id)!;
+        });
+    }
+
+    moveFolderItem(
+        itemId: string,
+        request: MoveFolderItemRequest,
+        expectedVersion?: number,
+    ): FolderItem | undefined {
+        const fingerprint = JSON.stringify({ expectedVersion, itemId, request });
+        const applied = this.#itemReceipt(request.mutationId, "move", fingerprint);
+        if (applied !== undefined) return this.getFolderItem(applied);
+        const current = this.getFolderItem(itemId);
+        if (current === undefined || current.archivedAt !== undefined) return undefined;
+        if (expectedVersion !== undefined && current.version !== expectedVersion) {
+            throw new FolderError("version_conflict", "The folder item changed before it moved.");
+        }
+        const siblings = queryFolderItems(this.#database, request.folderId).filter(
+            (item) => item.archivedAt === undefined && item.id !== itemId,
+        );
+        if (
+            request.afterId !== null &&
+            !siblings.some((sibling) => sibling.id === request.afterId)
+        ) {
+            throw new FolderError("sibling_not_found", "That preceding item was not found.");
+        }
+        const placeholder =
+            request.folderId === current.folderId
+                ? current
+                : {
+                      id: itemId,
+                      orderKey: generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null),
+                  };
+        const orderKey = orderKeyAfter([...siblings, placeholder], itemId, request.afterId);
+        if (request.folderId === current.folderId && orderKey === current.orderKey) {
+            this.#mutate((tx) =>
+                this.#recordItemReceipt(tx, request.mutationId, "move", fingerprint, itemId),
+            );
+            return current;
+        }
+        return this.#mutate((tx) => {
+            const outcome = folderItemMove(
+                tx,
+                itemId,
+                request.folderId,
+                orderKey,
+                this.#now(),
+                expectedVersion,
+            );
+            if (outcome.outcome === "folder_not_found") {
+                throw new FolderError("folder_not_found", "That folder was not found.");
+            }
+            if (outcome.outcome === "version_conflict") {
+                throw new FolderError(
+                    "version_conflict",
+                    "The folder item changed before it moved.",
+                );
+            }
+            if (outcome.outcome === "item_not_found") return undefined;
+            this.#recordItemReceipt(tx, request.mutationId, "move", fingerprint, itemId);
+            this.#advanceItemAndPublish(tx, request.mutationId);
+            return queryFolderItem(tx, itemId);
+        });
+    }
+
+    archiveFolderItem(
+        itemId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): FolderItem | undefined {
+        const fingerprint = JSON.stringify({ expectedVersion, itemId });
+        const applied = this.#itemReceipt(mutationId, "archive", fingerprint);
+        if (applied !== undefined) return this.getFolderItem(applied);
+        const current = this.getFolderItem(itemId);
+        if (current === undefined) return undefined;
+        if (expectedVersion !== undefined && current.version !== expectedVersion) {
+            throw new FolderError(
+                "version_conflict",
+                "The folder item changed before it was archived.",
+            );
+        }
+        if (current.archivedAt !== undefined) {
+            this.#mutate((tx) =>
+                this.#recordItemReceipt(tx, mutationId, "archive", fingerprint, itemId),
+            );
+            return current;
+        }
+        return this.#mutate((tx) => {
+            const changed = folderItemArchive(tx, itemId, this.#now(), expectedVersion);
+            if (changed === 0) {
+                throw new FolderError(
+                    "version_conflict",
+                    "The folder item changed before it was archived.",
+                );
+            }
+            this.#recordItemReceipt(tx, mutationId, "archive", fingerprint, itemId);
+            this.#advanceItemAndPublish(tx, mutationId);
+            return queryFolderItem(tx, itemId);
+        });
     }
 
     /** Resolves one active folder through its enforced flat-storage boundary. */
@@ -636,6 +829,40 @@ export class FolderRepository {
         return name;
     }
 
+    #itemReceipt(
+        mutationId: string | undefined,
+        action: string,
+        fingerprint: string,
+    ): string | undefined {
+        if (mutationId === undefined) return undefined;
+        const receipt = queryFolderItemMutationReceipt(this.#database, mutationId);
+        if (receipt === undefined) return undefined;
+        if (receipt.action !== action || receipt.fingerprint !== fingerprint) {
+            throw new FolderError(
+                "invalid_request",
+                "That mutation ID was already used for a different folder item change.",
+            );
+        }
+        return receipt.itemId;
+    }
+
+    #recordItemReceipt(
+        tx: TX,
+        mutationId: string | undefined,
+        action: string,
+        fingerprint: string,
+        itemId: string,
+    ): void {
+        if (mutationId === undefined) return;
+        recordFolderItemMutationReceipt(tx, {
+            action,
+            fingerprint,
+            itemId,
+            mutationId,
+            now: this.#now(),
+        });
+    }
+
     #folderIcon(requested: string): string {
         const icon = requested.trim();
         const graphemes = [
@@ -659,6 +886,20 @@ export class FolderRepository {
         folderId: string,
     ): number {
         this.#recordMutation(tx, mutationId, action, folderId);
+        const revision = advanceFolderCatalogRevision(tx);
+        this.#onEvent?.({
+            createdAt: this.#now(),
+            data: {
+                ...(mutationId === undefined ? {} : { mutationId }),
+                revision,
+            },
+            id: this.#createEventId(),
+            type: "folders_changed",
+        });
+        return revision;
+    }
+
+    #advanceItemAndPublish(tx: TX, mutationId: string | undefined): number {
         const revision = advanceFolderCatalogRevision(tx);
         this.#onEvent?.({
             createdAt: this.#now(),

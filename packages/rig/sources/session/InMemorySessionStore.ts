@@ -7,14 +7,22 @@ import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateDocumentRequest,
+    CreateFolderItemRequest,
     CreateFolderRequest,
     CreateProjectWorkspaceRequest,
     CreateRemoteProjectRequest,
     CreateSessionRequest,
+    Document,
+    DocumentCreatedBy,
+    DocumentUpdatePage,
     Folder,
+    FolderItem,
     GetTimelineRequest,
     GitRepositoryFacts,
     ModelCatalog,
+    ListDocumentUpdatesRequest,
+    MoveFolderItemRequest,
     MoveFolderRequest,
     Project,
     ProjectCreator,
@@ -33,6 +41,7 @@ import type {
     TransferSessionRequest,
     TransferSessionResponse,
     UpdateFolderRequest,
+    WriteDocumentRequest,
     UpdateSecretRequest,
 } from "../protocol/index.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
@@ -69,6 +78,7 @@ import {
     type ProjectSessionSettings,
 } from "../project/ProjectRepository.js";
 import { FolderRepository } from "../folders/FolderRepository.js";
+import { DocumentRepository } from "../documents/DocumentRepository.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
@@ -123,7 +133,7 @@ export class InMemorySessionStore implements SessionStore {
     #createRuntime: InMemorySessionOptions["createRuntime"];
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     #modelCatalog: ModelCatalog;
-    readonly #localInstanceId: string;
+    readonly localInstanceId: string;
     readonly #resolveModelCatalog: (ownerInstanceId: string) => ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #onWorkspaceCleanupError:
@@ -135,6 +145,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     readonly #folders: FolderRepository;
+    readonly #documents: DocumentRepository;
     readonly #projects: ProjectRepository;
     #workspaceReadyWaiters!: ReturnType<typeof createWorkspaceReadyWaiters>;
     readonly dataEpoch: string;
@@ -153,13 +164,13 @@ export class InMemorySessionStore implements SessionStore {
     #transactionCommitCallbacks: (() => void)[] | undefined;
 
     constructor(options: InMemorySessionStoreOptions = {}) {
-        this.#localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
+        this.localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
         this.#resolveModelCatalog =
             options.resolveModelCatalog ?? (() => options.modelCatalog ?? createModelCatalog());
         const opened = openSessionDatabase(":memory:");
         this.#client = opened.client;
         this.#database = opened.database;
-        migrateSessionDatabase(this.#database, { localInstanceId: this.#localInstanceId });
+        migrateSessionDatabase(this.#database, { localInstanceId: this.localInstanceId });
         this.dataEpoch = queryRigDataEpoch(this.#database);
         this.dataSchemaVersion = querySessionDatabaseVersion(this.#database);
         if (this.dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
@@ -179,7 +190,7 @@ export class InMemorySessionStore implements SessionStore {
         this.#projects = new ProjectRepository({
             ...(options.projectClone === undefined ? {} : { cloneRemote: options.projectClone }),
             database: this.#database,
-            localInstanceId: this.#localInstanceId,
+            localInstanceId: this.localInstanceId,
             ...(options.homeDirectory === undefined
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
@@ -227,6 +238,11 @@ export class InMemorySessionStore implements SessionStore {
             },
             transaction: (body) => this.#transaction(body),
         });
+        this.#documents = new DocumentRepository({
+            database: this.#database,
+            onEvent: (event) => this.#publishGlobalEvent(event),
+            transaction: (body) => this.#transaction(body),
+        });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
             this.#projects.getWorkspace(projectId, workspaceId),
         );
@@ -258,13 +274,13 @@ export class InMemorySessionStore implements SessionStore {
             this.liveEvents.publish(event);
         });
         this.#secrets = new SecretRegistry(options.secrets);
-        this.#modelCatalog = this.#resolveModelCatalog(this.#localInstanceId);
+        this.#modelCatalog = this.#resolveModelCatalog(this.localInstanceId);
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#createRuntime = options.createRuntime;
         this.#defaultDocker = options.defaultDocker;
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#agentManager = new AgentSessionManager({
-            localInstanceId: this.#localInstanceId,
+            localInstanceId: this.localInstanceId,
             repository: {
                 archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
@@ -560,7 +576,7 @@ export class InMemorySessionStore implements SessionStore {
         const ownerInstanceId =
             inherited?.ownerInstanceId ??
             (options.ownerInstanceId === undefined
-                ? this.#localInstanceId
+                ? this.localInstanceId
                 : validOwnerInstanceId(options.ownerInstanceId));
         const profileId = inherited?.profileId ?? options.profileId ?? request.identity;
         if (profileId !== undefined) {
@@ -750,7 +766,7 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     #modelCatalogFor(ownerInstanceId: string): ModelCatalog {
-        return ownerInstanceId === this.#localInstanceId
+        return ownerInstanceId === this.localInstanceId
             ? this.#modelCatalog
             : this.#resolveModelCatalog(ownerInstanceId);
     }
@@ -999,6 +1015,30 @@ export class InMemorySessionStore implements SessionStore {
         return this.#folders.getFolder(folderId);
     }
 
+    getFolderItem(itemId: string): FolderItem | undefined {
+        return this.#folders.getFolderItem(itemId);
+    }
+
+    createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem {
+        return this.#folders.createFolderItem(folderId, request);
+    }
+
+    moveFolderItem(
+        itemId: string,
+        request: MoveFolderItemRequest,
+        expectedVersion?: number,
+    ): FolderItem | undefined {
+        return this.#folders.moveFolderItem(itemId, request, expectedVersion);
+    }
+
+    archiveFolderItem(
+        itemId: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): FolderItem | undefined {
+        return this.#folders.archiveFolderItem(itemId, expectedVersion, mutationId);
+    }
+
     createFolder(request: CreateFolderRequest): Folder {
         return this.#folders.createFolder(request);
     }
@@ -1038,6 +1078,29 @@ export class InMemorySessionStore implements SessionStore {
             void session.recordFolderArchived().catch(rethrowDatabaseFailure);
         }
         return archived;
+    }
+
+    getDocument(documentId: string): Document | undefined {
+        return this.#documents.getDocument(documentId);
+    }
+
+    createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document {
+        return this.#documents.createDocument(request, createdBy);
+    }
+
+    writeDocument(
+        documentId: string,
+        request: WriteDocumentRequest,
+        expectedVersion: number,
+    ): Document | undefined {
+        return this.#documents.writeDocument(documentId, request, expectedVersion);
+    }
+
+    documentUpdates(
+        documentId: string,
+        request: ListDocumentUpdatesRequest,
+    ): DocumentUpdatePage | undefined {
+        return this.#documents.documentUpdates(documentId, request);
     }
 
     setSessionFolder(
@@ -1136,7 +1199,7 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.createRemoteProject(request, {
             ...options,
             createdBy: options?.createdBy ?? {
-                instanceId: this.#localInstanceId,
+                instanceId: this.localInstanceId,
                 profileId: request.identity,
             },
         });

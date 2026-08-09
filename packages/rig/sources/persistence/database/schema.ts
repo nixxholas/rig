@@ -339,6 +339,99 @@ export const folderMutations = sqliteTable(
     (table) => [index("folder_mutations_created").on(table.createdAtMs, table.mutationId)],
 );
 
+export const documents = sqliteTable("documents", {
+    id: text("id").primaryKey(),
+    mimeType: text("mime_type").notNull(),
+    stateJson: text("state_json").notNull(),
+    version: integer("version").notNull(),
+    firstRetainedVersion: integer("first_retained_version").notNull(),
+    createdByInstanceId: text("created_by_instance_id").notNull(),
+    createdByProfileId: text("created_by_profile_id"),
+    unreadCursor: text("unread_cursor"),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
+export const documentUpdates = sqliteTable(
+    "document_updates",
+    {
+        id: text("id").primaryKey(),
+        documentId: text("document_id")
+            .notNull()
+            .references(() => documents.id),
+        version: integer("version").notNull(),
+        updateJson: text("update_json").notNull(),
+        byteLength: integer("byte_length").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        unique().on(table.documentId, table.version),
+        index("document_updates_document_version").on(table.documentId, table.version),
+    ],
+);
+
+export const documentMutations = sqliteTable(
+    "document_mutations",
+    {
+        mutationId: text("mutation_id").primaryKey(),
+        action: text("action").notNull(),
+        documentId: text("document_id").notNull(),
+        requestFingerprint: text("request_fingerprint").notNull(),
+        resultVersion: integer("result_version").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [index("document_mutations_created").on(table.createdAtMs, table.mutationId)],
+);
+
+export const folderItems = sqliteTable(
+    "folder_items",
+    {
+        id: text("id").primaryKey(),
+        folderId: text("folder_id")
+            .notNull()
+            .references(() => folders.id),
+        projectId: text("project_id").references(() => projects.id),
+        workspaceId: text("workspace_id").references(() => projectWorkspaces.id),
+        documentId: text("document_id").references(() => documents.id),
+        orderKey: text("order_key").notNull(),
+        version: integer("version").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+        archivedAtMs: integer("archived_at_ms"),
+    },
+    (table) => [
+        check(
+            "folder_items_exactly_one_target",
+            sql`(${table.projectId} IS NOT NULL) + (${table.workspaceId} IS NOT NULL) + (${table.documentId} IS NOT NULL) = 1`,
+        ),
+        index("folder_items_folder_order").on(
+            table.folderId,
+            table.archivedAtMs,
+            table.orderKey,
+            table.id,
+        ),
+    ],
+);
+
+export const folderItemMutations = sqliteTable(
+    "folder_item_mutations",
+    {
+        mutationId: text("mutation_id").primaryKey(),
+        action: text("action").notNull(),
+        itemId: text("item_id").notNull(),
+        requestFingerprint: text("request_fingerprint").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        index("folder_item_mutations_created").on(table.createdAtMs, table.mutationId),
+        index("folder_item_mutations_item_created").on(
+            table.itemId,
+            table.createdAtMs,
+            table.mutationId,
+        ),
+    ],
+);
+
 /** Bounded receipts that make ambiguous session mutation retries idempotent. */
 export const sessionMutations = sqliteTable(
     "session_mutations",
