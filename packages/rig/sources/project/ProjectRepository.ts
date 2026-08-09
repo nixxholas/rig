@@ -426,7 +426,7 @@ export class ProjectRepository {
                 token: githubToken,
             });
         };
-        const retried = this.#retriedRemoteProject(id, path, request);
+        const retried = this.#retriedRemoteProject(id, path, request, creator);
         if (retried !== undefined) {
             await registerCredential();
             const canRetry =
@@ -482,7 +482,7 @@ export class ProjectRepository {
             this.scheduleInitialization(id);
             return project;
         } catch (error) {
-            const racedRetry = this.#retriedRemoteProject(id, path, request);
+            const racedRetry = this.#retriedRemoteProject(id, path, request, creator);
             if (racedRetry !== undefined) {
                 if (racedRetry.initializationStatus !== "ready") {
                     this.scheduleInitialization(id);
@@ -1132,14 +1132,12 @@ export class ProjectRepository {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
         if (
-            project.createdBy === undefined
+            request.identity === undefined
                 ? options.createdBy !== undefined
                 : options.createdBy === undefined ||
-                  request.identity !== options.createdBy.profileId ||
-                  project.createdBy.instanceId !== options.createdBy.instanceId ||
-                  project.createdBy.profileId !== options.createdBy.profileId
+                  request.identity !== options.createdBy.profileId
         ) {
-            throw new Error("That human profile does not own the managed project.");
+            throw new Error("The workspace creator does not match its human profile.");
         }
         if (request.secret !== undefined && project.remoteSource?.kind !== "github") {
             throw new Error("GitHub credentials can only be used with a GitHub project.");
@@ -1148,18 +1146,23 @@ export class ProjectRepository {
         const requestedId =
             request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
         const requestedRef = requestedBaseRef(request.baseRef);
-        const retry = this.#retriedWorkspace(projectId, requestedId, requestedRef);
-        if (retry !== undefined) return retry;
+        const retry = this.#retriedWorkspace(
+            projectId,
+            requestedId,
+            requestedRef,
+            options.createdBy,
+        );
         if (options.githubToken !== undefined && options.createdBy !== undefined) {
-            await this.refreshGitCredential(projectId, options.createdBy, options.githubToken);
+            await this.registerGitCredential(projectId, options.createdBy, options.githubToken);
         }
         if (
-            options.createdBy !== undefined &&
             project.requiredSecretKind === "github" &&
-            this.gitAuthentication(projectId, options.createdBy) === undefined
+            (options.createdBy === undefined ||
+                this.gitAuthentication(projectId, options.createdBy) === undefined)
         ) {
-            throw new Error("GitHub credentials are unavailable for this managed project.");
+            throw new Error("GitHub credentials are unavailable for this workspace creator.");
         }
+        if (retry !== undefined) return retry;
         const workspaceRoot = join(this.#workspacesDirectory, project.storageKey);
         const workspaceId = requestedId ?? createId();
         const gitRefs = workspaceGitRefSnapshot(project.path);
@@ -1212,12 +1215,7 @@ export class ProjectRepository {
         ) {
             throw new Error("That human profile does not own a managed GitHub project.");
         }
-        const authentication = await this.#gitCredentialBroker.register({
-            creator,
-            projectId,
-            repository: project.remoteSource.repository,
-            token: githubToken,
-        });
+        const authentication = await this.registerGitCredential(projectId, creator, githubToken);
         if (project.initializationStatus === "failed") {
             this.#mutate((tx) => {
                 const changed = projectRetryInitialization(tx, project.id, this.#now());
@@ -1226,6 +1224,23 @@ export class ProjectRepository {
             this.scheduleInitialization(project.id);
         }
         return authentication;
+    }
+
+    async registerGitCredential(
+        projectId: string,
+        creator: ProjectCreator,
+        githubToken: string,
+    ): Promise<GitAuthentication> {
+        const project = this.getProject(projectId);
+        if (project?.remoteSource?.kind !== "github") {
+            throw new Error("GitHub credentials can only be used with a GitHub project.");
+        }
+        return await this.#gitCredentialBroker.register({
+            creator,
+            projectId,
+            repository: project.remoteSource.repository,
+            token: githubToken,
+        });
     }
 
     gitAuthentication(
@@ -1267,6 +1282,7 @@ export class ProjectRepository {
         projectId: string,
         requestedId: string | undefined,
         baseRef: string | undefined,
+        creator: ProjectCreator | undefined,
     ): ProjectWorkspace | undefined {
         if (requestedId === undefined) return undefined;
         const workspace = queryWorkspaceById(this.#database, requestedId);
@@ -1276,6 +1292,16 @@ export class ProjectRepository {
         }
         if (baseRef !== undefined && workspace.baseRef !== baseRef) {
             throw new Error("That workspace ID already names a workspace with a different base.");
+        }
+        if (
+            creator === undefined
+                ? workspace.createdBy !== undefined
+                : workspace.createdBy?.instanceId !== creator.instanceId ||
+                  workspace.createdBy.profileId !== creator.profileId
+        ) {
+            throw new Error(
+                "That workspace ID already names a workspace created by another human profile.",
+            );
         }
         return workspace;
     }
@@ -1757,6 +1783,7 @@ export class ProjectRepository {
         id: string,
         path: string,
         request: CreateRemoteProjectRequest,
+        creator: ProjectCreator,
     ): Project | undefined {
         const project = queryProject(this.#database, id);
         if (project === undefined) return undefined;
@@ -1764,7 +1791,8 @@ export class ProjectRepository {
             project.path !== path ||
             !remoteProjectSourcesEqual(project.remoteSource, request.source) ||
             project.requiredSecretKind !== request.secret?.kind ||
-            project.createdBy?.profileId !== request.identity
+            project.createdBy?.instanceId !== creator.instanceId ||
+            project.createdBy.profileId !== creator.profileId
         ) {
             throw new ProjectRegistrationError(
                 "project_id_conflict",
@@ -2034,15 +2062,15 @@ export class ProjectRepository {
             return workspace;
         }
         if (
-            workspace.createdBy !== undefined &&
             project.requiredSecretKind === "github" &&
-            this.gitAuthentication(project.id, workspace.createdBy) === undefined
+            (workspace.createdBy === undefined ||
+                this.gitAuthentication(project.id, workspace.createdBy) === undefined)
         ) {
             throw new Error(
-                "GitHub credentials are unavailable. Retry the workspace from its owner Rig.",
+                "GitHub credentials are unavailable. Retry the workspace from its creator Rig.",
             );
         }
-        const git = this.#gitForProject(project);
+        const git = this.#gitForProject(project, workspace.createdBy);
         const gitTopLevel = await readGitTopLevel(git, project.path);
         if (gitTopLevel !== project.path) {
             throw new Error("Managed workspaces require a Git repository project.");
@@ -2074,9 +2102,9 @@ export class ProjectRepository {
         return this.getWorkspace(workspace.projectId, workspace.id);
     }
 
-    #gitForProject(project: Project): GitCommandRunner {
-        if (this.#hasCustomGit || project.createdBy === undefined) return this.#git;
-        const authentication = this.#daemonGitAuthentication(project.id, project.createdBy);
+    #gitForProject(project: Project, creator: ProjectCreator | undefined): GitCommandRunner {
+        if (this.#hasCustomGit || creator === undefined) return this.#git;
+        const authentication = this.#daemonGitAuthentication(project.id, creator);
         if (authentication === undefined) return this.#git;
         return (cwd, args) =>
             runGitCommandWithEnvironment(cwd, args, {

@@ -24,11 +24,14 @@ describe("P2P inference credentials", () => {
     });
 
     it("accepts an encrypted snapshot only from its authenticated owner and binds sessions to it", async () => {
+        const homeDirectory = await createTestSocketDirectory();
+        close.push(() => rm(homeDirectory, { force: true, recursive: true }));
         const modelCatalog = createModelCatalog({
             providers: { codex: { apiKey: "local", enabled: true, type: "codex" } },
         });
         const store = new PersistentSessionStore({
             databasePath: ":memory:",
+            homeDirectory,
             localInstanceId: LOCAL_ID,
             modelCatalog,
             resolveModelCatalog: () => modelCatalog,
@@ -61,7 +64,7 @@ describe("P2P inference credentials", () => {
         const started = await startServer(
             createProtocolHttpServer({
                 canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
-                canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID,
+                canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID || peerId === OTHER_ID,
                 modelCatalog,
                 profiles,
                 replaceP2pCredentials: replace,
@@ -153,15 +156,21 @@ describe("P2P inference credentials", () => {
         const sessionId = (created.body as { session: { id: string } }).session.id;
         expect(
             await send(started.socketPath, "GET", `/sessions/${sessionId}`, undefined, OTHER_ID),
-        ).toMatchObject({ status: 403 });
+        ).toMatchObject({
+            body: { session: { id: sessionId, ownerInstanceId: OWNER_ID } },
+            status: 200,
+        });
     });
 
-    it("keeps P2P broadcasts, timelines, and daemon-wide events inside the authenticated owner's boundary", async () => {
+    it("shares broadcasts and timelines while keeping raw daemon event administration private", async () => {
+        const homeDirectory = await createTestSocketDirectory();
+        close.push(() => rm(homeDirectory, { force: true, recursive: true }));
         const modelCatalog = createModelCatalog({
             providers: { codex: { apiKey: "local", enabled: true, type: "codex" } },
         });
         const store = new PersistentSessionStore({
             databasePath: ":memory:",
+            homeDirectory,
             localInstanceId: LOCAL_ID,
             modelCatalog,
             resolveModelCatalog: () => modelCatalog,
@@ -229,16 +238,21 @@ describe("P2P inference credentials", () => {
                 JSON.stringify({
                     all: true,
                     identity: OWNER_PROFILE_ID,
-                    text: "Only my own sessions.",
+                    text: "Every shared session.",
                 }),
                 OWNER_ID,
             ),
         ).toMatchObject({
-            body: { submissions: [{ sessionId: ownerSession.id }] },
+            body: {
+                submissions: expect.arrayContaining([
+                    expect.objectContaining({ sessionId: ownerSession.id }),
+                    expect.objectContaining({ sessionId: otherSession.id }),
+                ]),
+            },
             status: 202,
         });
         expect(ownerSubmit).toHaveBeenCalledOnce();
-        expect(otherSubmit).not.toHaveBeenCalled();
+        expect(otherSubmit).toHaveBeenCalledOnce();
 
         expect(
             await send(
@@ -248,12 +262,15 @@ describe("P2P inference credentials", () => {
                 JSON.stringify({
                     identity: OWNER_PROFILE_ID,
                     sessionIds: [otherSession.id],
-                    text: "This must be refused.",
+                    text: "Continue the other profile's session.",
                 }),
                 OWNER_ID,
             ),
-        ).toMatchObject({ status: 403 });
-        expect(otherSubmit).not.toHaveBeenCalled();
+        ).toMatchObject({
+            body: { submissions: [{ sessionId: otherSession.id }] },
+            status: 202,
+        });
+        expect(otherSubmit).toHaveBeenCalledTimes(2);
 
         expect(
             await send(
@@ -264,7 +281,12 @@ describe("P2P inference credentials", () => {
                 OWNER_ID,
             ),
         ).toMatchObject({
-            body: { agents: [{ sessionId: ownerSession.id }] },
+            body: {
+                agents: expect.arrayContaining([
+                    expect.objectContaining({ sessionId: ownerSession.id }),
+                    expect.objectContaining({ sessionId: otherSession.id }),
+                ]),
+            },
             status: 200,
         });
 

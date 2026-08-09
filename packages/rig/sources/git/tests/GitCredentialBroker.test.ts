@@ -142,6 +142,62 @@ describe("GitCredentialBroker", () => {
         });
     });
 
+    it("keeps each human profile's credential separate within one shared project", async () => {
+        const forwardedTokens: string[] = [];
+        const broker = new GitCredentialBroker({
+            forward: async (input) => {
+                forwardedTokens.push(input.token);
+                input.response.end("ok");
+            },
+        });
+        brokers.push(broker);
+        const projectId = "aproject000000000000000005";
+        const otherCreator = {
+            instanceId: "aotherinstance00000000001",
+            profileId: "aotherprofile0000000000001",
+        };
+        const first = await broker.register({
+            creator,
+            projectId,
+            repository: "slopus/rig",
+            token: "creator-token",
+        });
+        const other = await broker.register({
+            creator: otherCreator,
+            projectId,
+            repository: "slopus/rig",
+            token: "other-token",
+        });
+        const firstPrefix = (first.environment.GIT_CONFIG_KEY_1 ?? "")
+            .replace("url.", "")
+            .replace(".insteadOf", "");
+        const otherPrefix = (other.environment.GIT_CONFIG_KEY_1 ?? "")
+            .replace("url.", "")
+            .replace(".insteadOf", "");
+
+        await send(`${firstPrefix}/info/refs?service=git-upload-pack`);
+        await send(`${otherPrefix}/info/refs?service=git-upload-pack`);
+        expect(forwardedTokens).toEqual(["creator-token", "other-token"]);
+
+        await broker.register({
+            creator: otherCreator,
+            projectId,
+            repository: "slopus/rig",
+            token: "rotated-other-token",
+        });
+        await send(`${firstPrefix}/info/refs?service=git-upload-pack`);
+        await send(`${otherPrefix}/info/refs?service=git-upload-pack`);
+        expect(forwardedTokens.slice(-2)).toEqual(["creator-token", "rotated-other-token"]);
+
+        broker.revoke(projectId);
+        expect(await send(`${firstPrefix}/info/refs?service=git-upload-pack`)).toMatchObject({
+            status: 404,
+        });
+        expect(await send(`${otherPrefix}/info/refs?service=git-upload-pack`)).toMatchObject({
+            status: 404,
+        });
+    });
+
     it("revokes one project's in-memory credential and capability", async () => {
         const forward = vi.fn(async (input) => {
             input.response.end("ok");

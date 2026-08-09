@@ -36,6 +36,30 @@ afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
+describe("P2P shared work routes", () => {
+    it.each([
+        ["GET", "/projects"],
+        ["POST", "/projects/project-id/workspaces"],
+        ["GET", "/projects/project-id/terminals"],
+        ["POST", "/projects/project-id/terminals"],
+        ["POST", "/sessions/session-id/messages"],
+        ["POST", "/sessions/session-id/abort"],
+        ["POST", "/sessions/session-id/terminals"],
+        ["GET", "/sessions/session-id/terminals/terminal-id"],
+    ])("allows %s %s", (method, path) => {
+        expect(isP2pRemoteWorkPath(path, method)).toBe(true);
+    });
+
+    it.each([
+        ["GET", "/config"],
+        ["PUT", "/config/security"],
+        ["GET", "/inference-credentials"],
+        ["GET", "/health"],
+    ])("keeps %s %s outside shared work access", (method, path) => {
+        expect(isP2pRemoteWorkPath(path, method)).toBe(false);
+    });
+});
+
 describe("P2P HTTP between two real daemon servers", () => {
     it("serves request/response and live events through the local peer prefix", async () => {
         const firstKey = SecretKey.generate();

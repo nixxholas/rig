@@ -1278,20 +1278,24 @@ function isP2pCredentialPath(path: string): boolean {
     return new URL(path, "http://rig.local").pathname === "/inference-credentials";
 }
 
-export function isP2pRemoteWorkPath(path: string, method: string): boolean {
+export function isP2pRemoteWorkPath(path: string, _method: string): boolean {
     const pathname = new URL(path, "http://rig.local").pathname;
     return (
-        (method === "POST" &&
-            (pathname === "/projects/clone" ||
-                /^\/projects\/[^/]+\/workspaces$/u.test(pathname) ||
-                pathname === "/sessions" ||
-                pathname === "/messages" ||
-                /^\/sessions\/[^/]+\/(?:context|messages|steer)$/u.test(pathname))) ||
-        (method === "GET" &&
-            (pathname === "/catalog" ||
-                pathname === "/events/live" ||
-                /^\/sessions\/[^/]+\/state$/u.test(pathname))) ||
-        (method === "POST" && pathname === "/git/watch")
+        pathname === "/catalog" ||
+        pathname === "/events/live" ||
+        pathname === "/git/watch" ||
+        pathname === "/messages" ||
+        pathname === "/timeline" ||
+        pathname === "/documents" ||
+        pathname.startsWith("/documents/") ||
+        pathname === "/folders" ||
+        pathname.startsWith("/folders/") ||
+        pathname === "/project-assets" ||
+        pathname.startsWith("/project-assets/") ||
+        pathname === "/projects" ||
+        pathname.startsWith("/projects/") ||
+        pathname === "/sessions" ||
+        pathname.startsWith("/sessions/")
     );
 }
 

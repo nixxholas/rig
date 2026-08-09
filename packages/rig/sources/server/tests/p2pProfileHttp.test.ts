@@ -89,8 +89,10 @@ describe("P2P human profiles", () => {
         expect(
             await send(started.socketPath, "GET", `/profiles/${PROFILE_ID}`, undefined, PRIMARY_ID),
         ).toMatchObject({ body: { profile }, status: 200 });
-        expect(await send(started.socketPath, "GET", "/profiles", undefined, PRIMARY_ID)).toEqual({
-            body: { profiles: [profile] },
+        expect(
+            await send(started.socketPath, "GET", "/profiles", undefined, PRIMARY_ID),
+        ).toMatchObject({
+            body: { profiles: expect.arrayContaining([profile, localProfile]) },
             status: 200,
         });
         const otherProfile = {
@@ -112,6 +114,12 @@ describe("P2P human profiles", () => {
             ),
         ).toMatchObject({
             body: { profile: otherProfile },
+            status: 200,
+        });
+        expect(
+            await send(started.socketPath, "GET", "/profiles", undefined, OTHER_ID),
+        ).toMatchObject({
+            body: { profiles: expect.arrayContaining([profile, otherProfile, localProfile]) },
             status: 200,
         });
         const remoteProjectRequest = {
@@ -141,6 +149,74 @@ describe("P2P human profiles", () => {
                 PRIMARY_ID,
             ),
         ).toMatchObject({ body: { code: "profile_required" }, status: 400 });
+        expect(
+            await send(
+                started.socketPath,
+                "POST",
+                "/sessions",
+                JSON.stringify({
+                    cwd: managedProject.path,
+                    gitSecret: { kind: "github" },
+                    identity: OTHER_PROFILE_ID,
+                    projectId: managedProject.id,
+                    temporaryGitSecret: {
+                        kind: "github",
+                        token: "other-session-token",
+                    },
+                }),
+                OTHER_ID,
+            ),
+        ).toMatchObject({
+            body: {
+                session: {
+                    ownerInstanceId: OTHER_ID,
+                    profileId: OTHER_PROFILE_ID,
+                    projectId: managedProject.id,
+                },
+            },
+            status: 201,
+        });
+        expect(
+            await send(
+                started.socketPath,
+                "GET",
+                `/sessions/${session.id}/state`,
+                undefined,
+                OTHER_ID,
+            ),
+        ).toMatchObject({ body: { session: { id: session.id } }, status: 200 });
+        const crossWriterCredentialRefresh = vi.spyOn(store, "refreshSessionGitCredential");
+        expect(
+            await send(
+                started.socketPath,
+                "POST",
+                `/sessions/${session.id}/messages`,
+                JSON.stringify({
+                    gitSecret: { kind: "github" },
+                    identity: OTHER_PROFILE_ID,
+                    temporaryGitSecret: {
+                        kind: "github",
+                        token: "other-writer-token",
+                    },
+                    text: "Continue this shared session",
+                }),
+                OTHER_ID,
+            ),
+        ).toMatchObject({ status: 202 });
+        expect(crossWriterCredentialRefresh).toHaveBeenLastCalledWith(
+            session.id,
+            { instanceId: OTHER_ID, profileId: OTHER_PROFILE_ID },
+            "other-writer-token",
+        );
+        await expect(crossWriterCredentialRefresh.mock.results.at(-1)?.value).resolves.toBe(false);
+        crossWriterCredentialRefresh.mockRestore();
+        expect(
+            session.events
+                .since(undefined)
+                ?.findLast((event) => event.type === "message_submitted"),
+        ).toMatchObject({
+            data: { message: { identity: OTHER_PROFILE_ID } },
+        });
         const localSession = store.create({ cwd: "/tmp/unowned-remote-session" });
         expect(
             await send(
@@ -154,7 +230,16 @@ describe("P2P human profiles", () => {
                 }),
                 PRIMARY_ID,
             ),
-        ).toMatchObject({ status: 403 });
+        ).toMatchObject({
+            body: {
+                session: {
+                    ownerInstanceId: PRIMARY_ID,
+                    profileId: PROFILE_ID,
+                    projectId: localSession.snapshot().projectId,
+                },
+            },
+            status: 201,
+        });
         expect(
             await send(
                 started.socketPath,
@@ -315,6 +400,13 @@ describe("P2P human profiles", () => {
                         id: managedProject.id,
                     }),
                 ]),
+                sessions: expect.arrayContaining([
+                    expect.objectContaining({
+                        id: session.id,
+                        ownerInstanceId: PRIMARY_ID,
+                        profileId: PROFILE_ID,
+                    }),
+                ]),
                 workspaces: [
                     expect.objectContaining({
                         createdBy: {
@@ -335,7 +427,7 @@ describe("P2P human profiles", () => {
                 undefined,
                 PRIMARY_ID,
             ),
-        ).toMatchObject({ status: 404 });
+        ).toMatchObject({ body: { profile: localProfile }, status: 200 });
         expect(
             await send(
                 started.socketPath,

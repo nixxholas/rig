@@ -350,7 +350,7 @@ describe("persistent scheduling", () => {
         }
     });
 
-    it("rejects known cross-owner scheduled targets before persisting", () => {
+    it("persists scheduled messages across trusted peer owners", () => {
         const localInstanceId = "alocalinstance00000000001";
         const peerAInstanceId = "apeerainstance000000001";
         const peerBInstanceId = "apeerbinstance000000001";
@@ -372,22 +372,25 @@ describe("persistent scheduling", () => {
             const local = store.create(gymSessionRequest("/tmp/rig-schedule-local"));
             const dueAt = Date.now() + 60_000;
 
-            expect(() =>
-                sender.scheduleMessage({
-                    dueAt,
-                    message: "Do not cross the owner boundary.",
-                    targetAgentId: otherOwner.snapshot().agentId,
-                }),
-            ).toThrow("No available agent has that agent ID.");
-            expect(sender.scheduledMessages()).toEqual([]);
+            const crossOwner = sender.scheduleMessage({
+                dueAt,
+                message: "Continue the other peer's work.",
+                targetAgentId: otherOwner.snapshot().agentId,
+            });
+            expect(crossOwner).toMatchObject({ status: "pending" });
 
-            expect(
-                sender.scheduleMessage({
-                    dueAt,
-                    message: "Same owner.",
-                    targetAgentId: sameOwner.snapshot().agentId,
-                }),
-            ).toMatchObject({ status: "pending" });
+            const samePeer = sender.scheduleMessage({
+                dueAt,
+                message: "Same peer.",
+                targetAgentId: sameOwner.snapshot().agentId,
+            });
+            expect(samePeer).toMatchObject({ status: "pending" });
+            expect(sender.scheduledMessages()).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({ id: crossOwner.id, status: "pending" }),
+                    expect.objectContaining({ id: samePeer.id, status: "pending" }),
+                ]),
+            );
             expect(
                 local.scheduleMessage({
                     dueAt,

@@ -29,7 +29,6 @@ import type {
     DisconnectSessionTerminalResponse,
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
-    GlobalEvent,
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
     GetGlobalSecurityPolicyResponse,
@@ -865,22 +864,12 @@ async function handleRequest(
             return;
         }
         if (request.method === "GET" && route.name === "profiles") {
-            const visible =
-                authenticatedPeerId === undefined
-                    ? profiles.list()
-                    : profiles
-                          .list()
-                          .filter((profile) => profile.parentInstanceId === authenticatedPeerId);
-            sendJson<ListRigProfilesResponse>(response, 200, { profiles: [...visible] });
+            sendJson<ListRigProfilesResponse>(response, 200, { profiles: [...profiles.list()] });
             return;
         }
         if (request.method === "GET" && route.name === "profile") {
             const profile = profiles.get(route.profileId);
-            if (
-                profile === undefined ||
-                (authenticatedPeerId !== undefined &&
-                    profile.parentInstanceId !== authenticatedPeerId)
-            ) {
+            if (profile === undefined) {
                 sendJson(response, 404, { error: "Rig profile not found." });
                 return;
             }
@@ -2482,7 +2471,6 @@ async function handleRequest(
             sendJson(response, 400, { error: "The watch request is invalid." });
             return;
         }
-        const authenticatedOwnerId = p2pPeerId(request);
         for (const requested of body.entities as { projectId?: unknown; workspaceId?: unknown }[]) {
             if (typeof requested?.projectId !== "string") continue;
             const project = store.getProject(requested.projectId);
@@ -2496,18 +2484,7 @@ async function handleRequest(
             if (entity !== undefined) tracker.watch(entity);
         }
         sendJson<GitWatchResponse>(response, 200, {
-            snapshots: tracker
-                .liveSnapshots()
-                .filter(
-                    (event) =>
-                        authenticatedOwnerId === undefined ||
-                        globalLiveEventVisibleToPeer(
-                            event,
-                            authenticatedOwnerId,
-                            store,
-                            runtimeConfig,
-                        ),
-                ),
+            snapshots: tracker.liveSnapshots(),
         });
         return;
     }
@@ -2922,16 +2899,7 @@ async function handleRequest(
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
         const broadcast = body as BroadcastMessageRequest;
         const authenticatedOwnerId = p2pPeerId(request);
-        const allTargets =
-            broadcast.all === true
-                ? store
-                      .list({ limit: 501 })
-                      .filter(
-                          (summary) =>
-                              authenticatedOwnerId === undefined ||
-                              summary.ownerInstanceId === authenticatedOwnerId,
-                      )
-                : undefined;
+        const allTargets = broadcast.all === true ? store.list({ limit: 501 }) : undefined;
         if (allTargets !== undefined && allTargets.length > 500) {
             sendJson(response, 409, {
                 error: "A single broadcast can target at most 500 sessions.",
@@ -2966,26 +2934,6 @@ async function handleRequest(
             sendJson(response, 404, { error: "One or more sessions were not found." });
             return;
         }
-        if (
-            authenticatedOwnerId !== undefined &&
-            sessions.some(
-                (candidate) => candidate!.snapshot().ownerInstanceId !== authenticatedOwnerId,
-            )
-        ) {
-            sendJson(response, 403, {
-                error: "A broadcast cannot target another Rig's sessions.",
-            });
-            return;
-        }
-        if (
-            authenticatedOwnerId !== undefined &&
-            sessions.some((candidate) => candidate!.snapshot().profileId !== body.identity)
-        ) {
-            sendJson(response, 403, {
-                error: "A broadcast cannot target another human profile's sessions.",
-            });
-            return;
-        }
         if (sessions.some((candidate) => candidate!.isSubagent())) {
             sendJson(response, 409, { error: "Subagent sessions cannot receive broadcasts." });
             return;
@@ -3005,16 +2953,6 @@ async function handleRequest(
         }
         const { all: _all, sessionIds: _sessionIds, ...message } = broadcast;
         const githubToken = transport.githubToken;
-        if (
-            authenticatedOwnerId !== undefined &&
-            transport.gitSecretRequested &&
-            githubToken === undefined
-        ) {
-            sendJson(response, 409, {
-                error: "GitHub credentials are not available for this remote operation.",
-            });
-            return;
-        }
         if (
             githubToken !== undefined &&
             authenticatedOwnerId !== undefined &&
@@ -3178,7 +3116,7 @@ async function handleRequest(
                 : (runtimeConfig.resolveModelCatalog?.(ownerInstanceId) ?? modelCatalog);
         sendJson<GlobalStreamHello>(response, 200, {
             cursor: store.liveEvents.cursor(),
-            ...buildGroupCatalog(store, scopedCatalog, identity, sessionTerminals, ownerInstanceId),
+            ...buildGroupCatalog(store, scopedCatalog, identity, sessionTerminals),
         });
         return;
     }
@@ -3192,23 +3130,8 @@ async function handleRequest(
         // Same ordering as the catalog: the stream position is read before the
         // agents, so a client can tell whether a later event is already included.
         const cursor = store.liveEvents.cursor();
-        const authenticatedOwnerId = p2pPeerId(request);
-        const allowedSessionIds =
-            authenticatedOwnerId === undefined
-                ? undefined
-                : new Set(
-                      store
-                          .list()
-                          .filter((session) => session.ownerInstanceId === authenticatedOwnerId)
-                          .map((session) => session.id),
-                  );
         sendJson<GetTimelineResponse>(response, 200, {
-            agents: store
-                .timeline(parsed.request)
-                .filter(
-                    (agent) =>
-                        allowedSessionIds === undefined || allowedSessionIds.has(agent.sessionId),
-                ),
+            agents: store.timeline(parsed.request),
             cursor,
             scope: parsed.request.scope,
         });
@@ -3218,22 +3141,7 @@ async function handleRequest(
     // Outside the durable-log gate on purpose: the live stream is the one
     // subscription a local client always has, whether or not events are stored.
     if (request.method === "GET" && route.name === "live-events-stream") {
-        const authenticatedOwnerId = p2pPeerId(request);
-        streamLiveEvents(
-            request,
-            response,
-            store.liveEvents,
-            url.searchParams.get("after"),
-            authenticatedOwnerId === undefined
-                ? undefined
-                : (entry) =>
-                      globalLiveEventVisibleToPeer(
-                          entry.event,
-                          authenticatedOwnerId,
-                          store,
-                          runtimeConfig,
-                      ),
-        );
+        streamLiveEvents(request, response, store.liveEvents, url.searchParams.get("after"));
         return;
     }
 
@@ -3526,14 +3434,7 @@ async function handleRequest(
             });
             return;
         }
-        const authenticatedOwnerId = p2pPeerId(request);
-        const summaries = store
-            .list()
-            .filter(
-                (summary) =>
-                    authenticatedOwnerId === undefined ||
-                    summary.ownerInstanceId === authenticatedOwnerId,
-            );
+        const summaries = store.list();
         const filtered =
             archived === "all"
                 ? summaries
@@ -3558,17 +3459,6 @@ async function handleRequest(
         sendJson(response, 404, { error: "Session not found" });
         return;
     }
-    const authenticatedOwnerId = p2pPeerId(request);
-    if (
-        authenticatedOwnerId !== undefined &&
-        session.snapshot().ownerInstanceId !== authenticatedOwnerId
-    ) {
-        sendJson(response, 403, {
-            error: "That session belongs to another Rig's inference credentials.",
-        });
-        return;
-    }
-
     if (
         route.name === "session-attachment-download" ||
         route.name === "session-attachment-preview"
@@ -4070,7 +3960,6 @@ async function handleRequest(
             return;
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
-        if (!authorizeSessionProfile(request, response, session.snapshot(), body.identity)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -4088,10 +3977,8 @@ async function handleRequest(
                 response,
                 store,
                 session.id,
-                session.snapshot(),
                 body.identity,
                 transport.githubToken,
-                transport.gitSecretRequested,
             ))
         ) {
             return;
@@ -4124,7 +4011,6 @@ async function handleRequest(
             return;
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
-        if (!authorizeSessionProfile(request, response, session.snapshot(), body.identity)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted?.data.delivery === "context") {
@@ -4143,10 +4029,8 @@ async function handleRequest(
                 response,
                 store,
                 session.id,
-                session.snapshot(),
                 body.identity,
                 transport.githubToken,
-                transport.gitSecretRequested,
             ))
         ) {
             return;
@@ -4221,7 +4105,6 @@ async function handleRequest(
             return;
         }
         if (!authorizeMessageProfile(request, response, runtimeConfig, body)) return;
-        if (!authorizeSessionProfile(request, response, session.snapshot(), body.identity)) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -4240,10 +4123,8 @@ async function handleRequest(
                 response,
                 store,
                 session.id,
-                session.snapshot(),
                 body.identity,
                 transport.githubToken,
-                transport.gitSecretRequested,
             ))
         ) {
             return;
@@ -6468,7 +6349,6 @@ function buildGroupCatalog(
     modelCatalog: ModelCatalog,
     identity: DaemonIdentity,
     sessionTerminals: SessionTerminalTracker,
-    ownerInstanceId?: string,
 ): Omit<GlobalStreamHello, "cursor"> {
     const inboxItems = new Map<string, ReturnType<SessionStore["listDurableUserInputs"]>>();
     for (const call of store.listDurableUserInputs()) {
@@ -6477,10 +6357,6 @@ function buildGroupCatalog(
     }
     const sessions = store
         .listActive()
-        .filter(
-            (summary) =>
-                ownerInstanceId === undefined || summary.ownerInstanceId === ownerInstanceId,
-        )
         .map((summary) => ({
             ...summary,
             inboxItems: (inboxItems.get(summary.id) ?? []).map((call) => ({
@@ -6506,31 +6382,10 @@ function buildGroupCatalog(
                 workspace.status !== "archived",
         );
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
-    const visibleSessions =
-        ownerInstanceId === undefined
-            ? sessions
-            : sessions.filter((session) => {
-                  if (session.scope.kind === "project") {
-                      return projectIds.has(session.scope.projectId);
-                  }
-                  if (session.scope.kind === "workspace") {
-                      return (
-                          projectIds.has(session.scope.projectId) &&
-                          workspaceIds.has(session.scope.workspaceId)
-                      );
-                  }
-                  return session.scope.kind === "unsorted";
-              });
     return {
         catalog: modelCatalog,
-        folders:
-            ownerInstanceId === undefined
-                ? store.listFolders().filter((folder) => folder.archivedAt === undefined)
-                : [],
-        folderItems:
-            ownerInstanceId === undefined
-                ? store.folderCatalog().items.filter((item) => item.archivedAt === undefined)
-                : [],
+        folders: store.listFolders().filter((folder) => folder.archivedAt === undefined),
+        folderItems: store.folderCatalog().items.filter((item) => item.archivedAt === undefined),
         identity,
         presence: store.presence.state(),
         protocolVersion: RIG_PROTOCOL_VERSION,
@@ -6549,7 +6404,7 @@ function buildGroupCatalog(
                       },
                   ],
         ),
-        sessions: visibleSessions,
+        sessions,
         sessionsComplete: true,
         workspaces,
     };
@@ -6798,12 +6653,6 @@ function authorizeRemoteSessionTarget(
 ): boolean {
     const peerId = p2pPeerId(request);
     if (peerId === undefined) return true;
-    if (body.scope?.kind === "folder") {
-        sendJson(response, 400, {
-            error: "Remote sessions may use Unsorted or an owned project or workspace.",
-        });
-        return false;
-    }
     if (body.projectId === undefined && body.workspaceId === undefined) return true;
     const workspace =
         body.workspaceId === undefined
@@ -6811,44 +6660,20 @@ function authorizeRemoteSessionTarget(
             : store.listWorkspaces().find((candidate) => candidate.id === body.workspaceId);
     const projectId = body.projectId ?? workspace?.projectId;
     const project = projectId === undefined ? undefined : store.getProject(projectId);
-    const creator = workspace?.createdBy ?? project?.createdBy;
     if (
         project === undefined ||
         (body.workspaceId !== undefined && workspace === undefined) ||
         (body.projectId !== undefined &&
             workspace !== undefined &&
-            workspace.projectId !== body.projectId) ||
-        body.identity === undefined ||
-        creator?.instanceId !== peerId ||
-        creator.profileId !== body.identity
+            workspace.projectId !== body.projectId)
     ) {
-        sendJson(response, 403, {
-            code: "profile_not_owned",
-            error: "That project or workspace is not owned by this human profile.",
+        sendJson(response, 400, {
+            code: "invalid_target",
+            error: "The remote session project or workspace does not exist or does not match.",
         });
         return false;
     }
     return true;
-}
-
-function globalLiveEventVisibleToPeer(
-    event: GlobalEvent,
-    peerInstanceId: string,
-    store: SessionStore,
-    runtimeConfig: ProtocolServerRuntimeConfig,
-): boolean {
-    if ("sessionId" in event) {
-        return store.get(event.sessionId)?.snapshot().ownerInstanceId === peerInstanceId;
-    }
-    if ("projectId" in event) return true;
-    if (event.type === "profile_changed") {
-        return (
-            runtimeConfig.profiles?.get(event.data.profileId)?.parentInstanceId === peerInstanceId
-        );
-    }
-    // Events without a shared project/workspace or credential owner can contain folder, peer, or
-    // daemon activity that is not exposed over the P2P catalog.
-    return false;
 }
 
 function authorizeMessageProfile(
@@ -6906,22 +6731,11 @@ async function prepareSessionGitCredential(
     response: ServerResponse,
     store: SessionStore,
     sessionId: string,
-    session: { profileId?: string },
     identity: string | null | undefined,
     githubToken: string | undefined,
-    gitSecretRequested: boolean,
 ): Promise<boolean> {
     const peerId = p2pPeerId(request);
-    if (!authorizeSessionProfile(request, response, session, identity)) return false;
-    if (githubToken === undefined) {
-        if (gitSecretRequested && peerId !== undefined) {
-            sendJson(response, 409, {
-                error: "GitHub credentials are not available for this remote operation.",
-            });
-            return false;
-        }
-        return true;
-    }
+    if (githubToken === undefined) return true;
     if (peerId === undefined || identity === undefined || identity === null) {
         sendJson(response, 400, {
             error: "Temporary Git credentials are accepted only from an authenticated human profile.",
@@ -6940,18 +6754,4 @@ async function prepareSessionGitCredential(
         sendJson(response, 409, { error: errorToMessage(error) });
         return false;
     }
-}
-
-function authorizeSessionProfile(
-    request: IncomingMessage,
-    response: ServerResponse,
-    session: { profileId?: string },
-    identity: string | null | undefined,
-): boolean {
-    if (p2pPeerId(request) === undefined || session.profileId === identity) return true;
-    sendJson(response, 403, {
-        code: "profile_not_owned",
-        error: "That session belongs to another human profile.",
-    });
-    return false;
 }

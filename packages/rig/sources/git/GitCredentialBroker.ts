@@ -88,13 +88,13 @@ export class GitCredentialBroker {
         if (this.#closed) throw new Error("The Git credential broker is closed.");
         const repository = validateGitHubRepository(input.repository);
         const token = validateToken(input.token);
-        const current = this.#records.get(input.projectId);
+        const recordKey = credentialRecordKey(input.projectId, input.creator);
+        const current = this.#records.get(recordKey);
         if (
             current !== undefined &&
-            (current.repository.toLowerCase() !== repository.toLowerCase() ||
-                !sameCreator(current.creator, input.creator))
+            current.repository.toLowerCase() !== repository.toLowerCase()
         ) {
-            throw new Error("That project already has a different Git credential owner.");
+            throw new Error("That project credential names a different Git repository.");
         }
         const port = await this.#start();
         if (this.#closed) throw new Error("The Git credential broker is closed.");
@@ -108,7 +108,7 @@ export class GitCredentialBroker {
         record.creator = { ...input.creator };
         record.repository = repository;
         record.token = token;
-        this.#records.set(input.projectId, record);
+        this.#records.set(recordKey, record);
         return authenticationFor(port, record);
     }
 
@@ -116,20 +116,16 @@ export class GitCredentialBroker {
         projectId: string,
         creator: ProjectCreator,
     ): GitCommandAuthentication | undefined {
-        const record = this.#records.get(projectId);
-        if (
-            record === undefined ||
-            this.#port === undefined ||
-            !sameCreator(record.creator, creator)
-        )
-            return undefined;
+        const recordKey = credentialRecordKey(projectId, creator);
+        const record = this.#records.get(recordKey);
+        if (record === undefined || this.#port === undefined) return undefined;
         return commandAuthenticationFor(this.#port, () => {
-            const current = this.#records.get(projectId);
+            const current = this.#records.get(recordKey);
             if (current !== record) {
                 throw new Error("Git authentication changed before the command could start.");
             }
             const capability = randomBytes(32).toString("hex");
-            this.#commandLeases.set(capability, projectId);
+            this.#commandLeases.set(capability, recordKey);
             let released = false;
             return {
                 ...authenticationWithCapability(this.#port!, record, capability),
@@ -146,21 +142,17 @@ export class GitCredentialBroker {
         projectId: string,
         creator: ProjectCreator,
     ): GitAuthentication | undefined {
-        const record = this.#records.get(projectId);
-        if (
-            record === undefined ||
-            this.#port === undefined ||
-            !sameCreator(record.creator, creator)
-        ) {
-            return undefined;
-        }
+        const record = this.#records.get(credentialRecordKey(projectId, creator));
+        if (record === undefined || this.#port === undefined) return undefined;
         return authenticationFor(this.#port, record);
     }
 
     revoke(projectId: string): void {
-        this.#records.delete(projectId);
-        for (const [capability, leaseProjectId] of this.#commandLeases) {
-            if (leaseProjectId === projectId) this.#commandLeases.delete(capability);
+        for (const [recordKey, record] of this.#records) {
+            if (record.projectId === projectId) this.#records.delete(recordKey);
+        }
+        for (const [capability, recordKey] of this.#commandLeases) {
+            if (!this.#records.has(recordKey)) this.#commandLeases.delete(capability);
         }
     }
 
@@ -311,13 +303,13 @@ function authorizeRequest(
         return undefined;
     }
     const repository = `${owner}/${repositoryWithGit.slice(0, -4)}`;
-    const leasedProjectId = commandLeases.get(capability);
-    const record = [...records.values()].find((candidate) => {
+    const leasedRecordKey = commandLeases.get(capability);
+    const record = [...records].find(([recordKey, candidate]) => {
         const capabilityMatches =
             candidate.capability === capability ||
-            (leasedProjectId !== undefined && candidate.projectId === leasedProjectId);
+            (leasedRecordKey !== undefined && recordKey === leasedRecordKey);
         return capabilityMatches && candidate.repository.toLowerCase() === repository.toLowerCase();
-    });
+    })?.[1];
     if (record === undefined) return undefined;
     if (request.method === "GET") {
         const requestedService = url.searchParams.get("service");
@@ -342,6 +334,10 @@ function authorizeRequest(
         path: `/${record.repository}.git/${servicePath}${url.search}`,
         record,
     };
+}
+
+function credentialRecordKey(projectId: string, creator: ProjectCreator): string {
+    return `${projectId}\0${creator.instanceId}\0${creator.profileId}`;
 }
 
 async function forwardGitRequest(input: ForwardGitRequest): Promise<void> {
@@ -433,10 +429,6 @@ function validateToken(token: string): string {
         throw new Error("The GitHub token is invalid.");
     }
     return token;
-}
-
-function sameCreator(left: ProjectCreator, right: ProjectCreator): boolean {
-    return left.instanceId === right.instanceId && left.profileId === right.profileId;
 }
 
 function sendError(response: ServerResponse, status: number, message: string): void {

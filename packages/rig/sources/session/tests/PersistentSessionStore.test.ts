@@ -23,6 +23,7 @@ import type {
 import { PersistentSessionStore } from "../PersistentSessionStore.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { GitCommandRunner } from "../../git/types.js";
+import { GitCredentialBroker } from "../../git/GitCredentialBroker.js";
 import { RigProfileStore } from "../../profiles/index.js";
 
 const execFile = promisify(execFileCallback);
@@ -106,11 +107,19 @@ describe("PersistentSessionStore", () => {
         }
     });
 
-    it("gives remote project sessions a broker capability without exposing the GitHub token", async () => {
+    it("uses only the session creator's Git credential in a shared remote project", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const home = await mkdtemp(join(tmpdir(), "rig-remote-session-home-"));
         const localInstanceId = "alocalgitbroker0000000001";
         const remoteInstanceId = "aremotegitbroker000000001";
+        const workspaceGitTokens: string[] = [];
+        const gitCredentialBroker = new GitCredentialBroker({
+            forward: async (request) => {
+                workspaceGitTokens.push(request.token);
+                request.response.writeHead(401);
+                request.response.end();
+            },
+        });
         let captured:
             | {
                   shellEnvironment?: Readonly<Record<string, string>>;
@@ -128,10 +137,16 @@ describe("PersistentSessionStore", () => {
         try {
             store = new PersistentSessionStore({
                 createRuntime: (options) => {
-                    const projectGit = options.secrets?.activate(["project-git"]) ?? {
+                    let projectGit = {
                         environment: {},
                         release: () => {},
                     };
+                    try {
+                        projectGit = options.secrets?.activate(["project-git"]) ?? projectGit;
+                    } catch {
+                        // A shared project credential is deliberately unavailable until this
+                        // session's own creator supplies one.
+                    }
                     captured = {
                         ...(options.shellEnvironment === undefined
                             ? {}
@@ -151,9 +166,20 @@ describe("PersistentSessionStore", () => {
                     throw new Error("Captured brokered Git environment.");
                 },
                 databasePath,
+                gitCredentialBroker,
                 homeDirectory: home,
                 localInstanceId,
-                projectClone: async ({ destination }) => createGitRepository(destination),
+                projectClone: async ({ destination }) => {
+                    await createGitRepository(destination);
+                    await execFile("git", [
+                        "-C",
+                        destination,
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://github.com/slopus/rig.git",
+                    ]);
+                },
                 resolveModelCatalog: () => testModelCatalog(),
             });
             const profiles = new RigProfileStore({
@@ -161,47 +187,124 @@ describe("PersistentSessionStore", () => {
                 localInstanceId,
                 publish: () => undefined,
             });
-            const profile = {
+            const projectProfile = {
                 createdAt: 1,
-                email: "steve@example.test",
+                email: "project@example.test",
                 id: "agitbrokerprofile0000000001",
-                name: "Steve Korshakov",
+                name: "Project creator",
                 parentInstanceId: remoteInstanceId,
                 updatedAt: 1,
                 version: 1,
             } as const;
-            profiles.replicate(profile, remoteInstanceId);
+            const sessionInstanceId = "asessiongitbroker000000001";
+            const workspaceInstanceId = "aworkspacegitbroker0000001";
+            const workspaceProfile = {
+                createdAt: 2,
+                email: "workspace@example.test",
+                id: "aworkspacegitprofile0000001",
+                name: "Workspace creator",
+                parentInstanceId: workspaceInstanceId,
+                updatedAt: 2,
+                version: 1,
+            } as const;
+            const sessionProfile = {
+                createdAt: 3,
+                email: "session@example.test",
+                id: "asessiongitprofile000000001",
+                name: "Session creator",
+                parentInstanceId: sessionInstanceId,
+                updatedAt: 3,
+                version: 1,
+            } as const;
+            profiles.replicate(projectProfile, remoteInstanceId);
+            profiles.replicate(workspaceProfile, workspaceInstanceId);
+            profiles.replicate(sessionProfile, sessionInstanceId);
             const project = await store.createRemoteProject(
                 {
-                    identity: profile.id,
+                    identity: projectProfile.id,
                     name: "Brokered project",
                     secret: { kind: "github" },
                     source: { kind: "github", repository: "slopus/rig" },
                 },
                 {
-                    createdBy: { instanceId: remoteInstanceId, profileId: profile.id },
+                    createdBy: {
+                        instanceId: remoteInstanceId,
+                        profileId: projectProfile.id,
+                    },
                     githubToken: "initial-github-token",
                 },
             );
             await expect
                 .poll(() => store?.getProject(project.id)?.initializationStatus)
                 .toBe("ready");
+            const workspace = await store.createWorkspace(
+                project.id,
+                {
+                    identity: workspaceProfile.id,
+                    name: "Shared workspace",
+                    secret: { kind: "github" },
+                },
+                {
+                    createdBy: {
+                        instanceId: workspaceInstanceId,
+                        profileId: workspaceProfile.id,
+                    },
+                    githubToken: "workspace-creator-token",
+                },
+            );
+            await expect
+                .poll(() => store?.getWorkspace(project.id, workspace!.id)?.status)
+                .toBe("ready");
+            expect(workspaceGitTokens.length).toBeGreaterThan(0);
+            expect(new Set(workspaceGitTokens)).toEqual(new Set(["workspace-creator-token"]));
             const session = store.create(
-                { cwd: project.path, identity: profile.id },
-                { ownerInstanceId: remoteInstanceId, profileId: profile.id },
+                {
+                    cwd: workspace!.path,
+                    identity: sessionProfile.id,
+                    projectId: project.id,
+                    workspaceId: workspace!.id,
+                },
+                { ownerInstanceId: sessionInstanceId, profileId: sessionProfile.id },
             );
-            await store.refreshSessionGitCredential(
-                session.id,
-                { instanceId: remoteInstanceId, profileId: profile.id },
-                "rotated-github-token",
+            expect(
+                await store.refreshSessionGitCredential(
+                    session.id,
+                    { instanceId: remoteInstanceId, profileId: projectProfile.id },
+                    "project-creator-session-token",
+                ),
+            ).toBe(false);
+            expect(
+                await store.refreshSessionGitCredential(
+                    session.id,
+                    {
+                        instanceId: workspaceInstanceId,
+                        profileId: workspaceProfile.id,
+                    },
+                    "workspace-creator-session-token",
+                ),
+            ).toBe(false);
+            await expect(session.compact()).rejects.toThrow(
+                "Secret 'project-git' is not attached to this session or project.",
             );
+            expect(captured).toBeUndefined();
+
+            expect(
+                await store.refreshSessionGitCredential(
+                    session.id,
+                    { instanceId: sessionInstanceId, profileId: sessionProfile.id },
+                    "session-creator-token",
+                ),
+            ).toBe(true);
 
             await expect(session.compact()).rejects.toThrow("Captured brokered Git environment.");
             expect(JSON.stringify(captured)).not.toContain("initial-github-token");
-            expect(JSON.stringify(captured)).not.toContain("rotated-github-token");
+            expect(JSON.stringify(captured)).not.toContain("project-creator-session-token");
+            expect(JSON.stringify(captured)).not.toContain("workspace-creator-session-token");
+            expect(JSON.stringify(captured)).not.toContain("workspace-creator-token");
+            expect(JSON.stringify(captured)).not.toContain("session-creator-token");
             expect(captured?.shellEnvironment).toMatchObject({
-                GIT_AUTHOR_EMAIL: profile.email,
-                GIT_AUTHOR_NAME: profile.name,
+                GIT_AUTHOR_EMAIL: sessionProfile.email,
+                GIT_AUTHOR_NAME: sessionProfile.name,
             });
             expect(captured?.shellEnvironment).not.toHaveProperty("GIT_CONFIG_KEY_1");
             expect(captured?.projectGitEnvironment).toMatchObject({

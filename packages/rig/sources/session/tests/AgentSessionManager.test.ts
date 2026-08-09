@@ -9,7 +9,7 @@ import { AgentSessionManager } from "../AgentSessionManager.js";
 import type { InMemorySession } from "../InMemorySession.js";
 
 describe("AgentSessionManager", () => {
-    it("isolates peer-owned agent lookup, messaging, and scheduling by owner", () => {
+    it("shares agent lookup, messaging, and scheduling across trusted peer owners", () => {
         const deliveredToSameOwner = vi.fn();
         const deliveredToOtherOwner = vi.fn();
         const peerA = {
@@ -81,16 +81,12 @@ describe("AgentSessionManager", () => {
         expect(peerCommunication.send("peer-a-target-agent", "Same owner.")).toEqual({
             delivered: true,
         });
-        expect(() => peerCommunication.info("peer-b-agent")).toThrow(
-            "No available agent has that agent ID.",
-        );
-        expect(() => manager.assertCanScheduleMessage(peerA.id, "peer-b-agent")).toThrow(
-            "No available agent has that agent ID.",
-        );
-        expect(() =>
-            manager.sendScheduledMessage(peerA.id, "peer-b-agent", "Later.", "message-1"),
-        ).toThrow("No available agent has that agent ID.");
-        expect(deliveredToOtherOwner).not.toHaveBeenCalled();
+        expect(peerCommunication.info("peer-b-agent")).toMatchObject({
+            agentId: "peer-b-agent",
+        });
+        expect(() => manager.assertCanScheduleMessage(peerA.id, "peer-b-agent")).not.toThrow();
+        manager.sendScheduledMessage(peerA.id, "peer-b-agent", "Later.", "message-1");
+        expect(deliveredToOtherOwner).toHaveBeenCalledOnce();
 
         expect(() => manager.assertCanScheduleMessage(peerA.id, "unknown-agent")).not.toThrow();
 
@@ -99,7 +95,7 @@ describe("AgentSessionManager", () => {
             agentId: "peer-b-agent",
         });
         manager.sendScheduledMessage(local.id, "peer-b-agent", "Local operator.", "message-2");
-        expect(deliveredToOtherOwner).toHaveBeenCalledOnce();
+        expect(deliveredToOtherOwner).toHaveBeenCalledTimes(2);
     });
 
     it("sends agent-authored steering and changes an owned delegate permission mode", async () => {

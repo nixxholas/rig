@@ -111,8 +111,10 @@ describe("global event stream", () => {
 
         fixture.store.create({ cwd: "/tmp/rig-shared-project" });
         await stream.waitForText("project_created");
+        await stream.waitForText("session_created");
 
         expect(stream.frames.join("")).toContain("project_created");
+        expect(stream.frames.join("")).toContain("session_created");
         stream.close();
     });
 

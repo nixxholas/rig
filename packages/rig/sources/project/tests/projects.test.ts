@@ -140,7 +140,7 @@ describe("projects", () => {
                 baseRef: "HEAD",
                 name: "Unattributed workspace",
             }),
-        ).rejects.toThrow("does not own the managed project");
+        ).rejects.toThrow("GitHub credentials are unavailable for this workspace creator.");
 
         const repeated = await fixture.store.createRemoteProject({
             identity: profile.id,
@@ -151,32 +151,48 @@ describe("projects", () => {
         });
         expect(repeated.id).toBe(projectId);
         expect(clones).toHaveLength(1);
+        await expect(
+            fixture.store.createRemoteProject(
+                {
+                    identity: profile.id,
+                    name: "Managed Repository",
+                    projectId,
+                    secret: { kind: "github" },
+                    source: { kind: "github", repository: "slopus/rig" },
+                },
+                {
+                    createdBy: {
+                        instanceId: "aanotherinstance0000000001",
+                        profileId: profile.id,
+                    },
+                    githubToken: "other-instance-token",
+                },
+            ),
+        ).rejects.toMatchObject({ code: "project_id_conflict" });
+        const workspaceCreator = {
+            instanceId: "aworkspacepeer00000000001",
+            profileId: "aworkspaceprofile0000000001",
+        };
         const workspace = await fixture.store.createWorkspace(
             projectId,
             {
                 baseRef: "HEAD",
-                identity: profile.id,
-                name: "Remote owner workspace",
+                identity: workspaceCreator.profileId,
+                name: "Peer-owned workspace",
                 secret: { kind: "github" },
             },
             {
-                createdBy: {
-                    instanceId: TEST_LOCAL_INSTANCE_ID,
-                    profileId: profile.id,
-                },
-                githubToken: "rotated-workspace-token",
+                createdBy: workspaceCreator,
+                githubToken: "workspace-creator-token",
             },
         );
-        expect(workspace?.createdBy).toEqual({
-            instanceId: TEST_LOCAL_INSTANCE_ID,
-            profileId: profile.id,
-        });
+        expect(workspace?.createdBy).toEqual(workspaceCreator);
         await expect
             .poll(() => fixture.store.getWorkspace(projectId, workspace!.id)?.status)
             .toBe("ready");
         expect(JSON.stringify(fixture.store.listProjects())).not.toContain("temporary-token");
         expect(JSON.stringify(fixture.store.listWorkspaces(projectId))).not.toContain(
-            "rotated-workspace-token",
+            "workspace-creator-token",
         );
         expect(JSON.stringify(fixture.store.globalEventQueue.list())).not.toContain(
             "temporary-token",
@@ -380,7 +396,7 @@ describe("projects", () => {
         expect(fixture.store.listProjects()).toEqual([]);
     });
 
-    it("registers Git roots and linked worktree roots without creating chats or workspaces", async () => {
+    it("registers Git roots and lets remote profiles create attributed workspaces", async () => {
         const fixture = await createFixture({ durableGlobalEventQueue: true });
         const repository = await createRepository(fixture.root, "registered-project");
         const linkedWorktree = join(fixture.root, "linked-worktree");
@@ -400,21 +416,27 @@ describe("projects", () => {
         expect(worktree.id).not.toBe(first.id);
         expect(fixture.store.listProjects()).toHaveLength(2);
         expect(fixture.store.listWorkspaces()).toEqual([]);
-        await expect(
-            fixture.store.createWorkspace(
-                first.id,
-                {
-                    identity: "aremoteprofile000000000001",
-                    name: "Remote intrusion",
+        const remoteWorkspace = await fixture.store.createWorkspace(
+            first.id,
+            {
+                identity: "aremoteprofile000000000001",
+                name: "Remote workspace",
+            },
+            {
+                createdBy: {
+                    instanceId: "aremoteinstance000000001",
+                    profileId: "aremoteprofile000000000001",
                 },
-                {
-                    createdBy: {
-                        instanceId: "aremoteinstance000000001",
-                        profileId: "aremoteprofile000000000001",
-                    },
-                },
-            ),
-        ).rejects.toThrow("does not own the managed project");
+            },
+        );
+        expect(remoteWorkspace).toMatchObject({
+            createdBy: {
+                instanceId: "aremoteinstance000000001",
+                profileId: "aremoteprofile000000000001",
+            },
+            name: "Remote workspace",
+            projectId: first.id,
+        });
         expect(fixture.store.list()).toEqual([]);
         expect(
             fixture.store.globalEventQueue

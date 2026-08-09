@@ -124,6 +124,7 @@ export interface InMemorySessionStoreOptions {
     presence?: PresenceStore;
     secrets?: readonly EnvironmentSecretRegistration[];
     homeDirectory?: string;
+    gitCredentialBroker?: ProjectRepositoryOptions["gitCredentialBroker"];
     stateDirectory?: string;
     workspacesDirectory?: string;
 }
@@ -190,6 +191,9 @@ export class InMemorySessionStore implements SessionStore {
         this.#projects = new ProjectRepository({
             ...(options.projectClone === undefined ? {} : { cloneRemote: options.projectClone }),
             database: this.#database,
+            ...(options.gitCredentialBroker === undefined
+                ? {}
+                : { gitCredentialBroker: options.gitCredentialBroker }),
             localInstanceId: this.localInstanceId,
             ...(options.homeDirectory === undefined
                 ? {}
@@ -691,26 +695,6 @@ export class InMemorySessionStore implements SessionStore {
             };
         })();
         try {
-            if (
-                profileId !== undefined &&
-                (resolved.scope.kind === "project" || resolved.scope.kind === "workspace")
-            ) {
-                const project = this.#projects.getProject(resolved.scope.projectId);
-                const workspace =
-                    resolved.scope.kind === "workspace"
-                        ? this.#projects.getWorkspace(
-                              resolved.scope.projectId,
-                              resolved.scope.workspaceId,
-                          )
-                        : undefined;
-                const creator = workspace?.createdBy ?? project?.createdBy;
-                if (
-                    creator !== undefined &&
-                    (creator.instanceId !== ownerInstanceId || creator.profileId !== profileId)
-                ) {
-                    throw new Error("That project or workspace belongs to another human profile.");
-                }
-            }
             if (resolved.scope.kind === "workspace") {
                 this.#assertWorkspaceAcceptingSessions(resolved.scope.workspaceId);
             }
@@ -890,9 +874,11 @@ export class InMemorySessionStore implements SessionStore {
             .flatMap((session) =>
                 session.events.all().filter((event) => isTimelineEventType(event.type)),
             );
-        return buildTimeline(agents, events, {
-            ...(request.since === undefined ? {} : { since: request.since }),
-        });
+        return buildTimeline(
+            agents,
+            events,
+            request.since === undefined ? {} : { since: request.since },
+        );
     }
 
     async transferSession(
@@ -1306,16 +1292,23 @@ export class InMemorySessionStore implements SessionStore {
         const session = this.get(sessionId);
         if (session === undefined) return false;
         const snapshot = session.snapshot();
+        if (snapshot.projectId === undefined) return false;
+        const project = this.#projects.getProject(snapshot.projectId);
         if (
+            project?.remoteSource?.kind !== "github" ||
             snapshot.ownerInstanceId !== creator.instanceId ||
             snapshot.profileId !== creator.profileId
         ) {
-            throw new Error("That session belongs to another human profile.");
+            return false;
         }
-        if (snapshot.projectId === undefined) return false;
-        const project = this.#projects.getProject(snapshot.projectId);
-        if (project?.remoteSource?.kind !== "github") return false;
-        await this.#projects.refreshGitCredential(snapshot.projectId, creator, githubToken);
+        if (
+            project.createdBy?.instanceId === creator.instanceId &&
+            project.createdBy.profileId === creator.profileId
+        ) {
+            await this.#projects.refreshGitCredential(snapshot.projectId, creator, githubToken);
+        } else {
+            await this.#projects.registerGitCredential(snapshot.projectId, creator, githubToken);
+        }
         session.refreshGitCommandSecret();
         return true;
     }
