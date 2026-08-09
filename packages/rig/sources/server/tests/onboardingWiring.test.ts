@@ -26,7 +26,15 @@ describe("onboarding daemon wiring", () => {
             },
         });
         let providersConfigured = false;
+        let murmurConfigured = false;
         const onboarding = new OnboardingService({
+            murmurConfigured: () => murmurConfigured,
+            onboardMurmur: async (request) => {
+                murmurConfigured = true;
+                return request.enabled
+                    ? Promise.reject(new Error("This fixture only exercises opt-out."))
+                    : { enabled: false };
+            },
             persistence: store,
             profileComplete: () =>
                 profiles.list().some((profile) => profile.parentInstanceId === LOCAL_INSTANCE_ID),
@@ -62,7 +70,17 @@ describe("onboarding daemon wiring", () => {
                 status: 201,
             });
             await expect(send(started.socketPath, "GET", "/onboarding")).resolves.toMatchObject({
-                body: { state: "complete" },
+                body: { state: "murmur_setup" },
+                status: 200,
+            });
+            await expect(
+                send(started.socketPath, "PUT", "/onboarding/murmur", { enabled: false }),
+            ).resolves.toMatchObject({
+                body: { enabled: false },
+                status: 200,
+            });
+            await expect(send(started.socketPath, "GET", "/onboarding")).resolves.toMatchObject({
+                body: { onboardingVersion: 2, state: "complete" },
                 status: 200,
             });
         } finally {

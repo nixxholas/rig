@@ -1,8 +1,11 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+import { rigProfileIdSchema, rigProfileSchema } from "./ProfileProtocol.js";
+import { sharingIdentitySchema } from "./SharingProtocol.js";
+
 const exact = { additionalProperties: false } as const;
 
-export const CURRENT_ONBOARDING_VERSION = 1;
+export const CURRENT_ONBOARDING_VERSION = 2;
 
 const onboardingVersionSchema = Type.Integer({
     maximum: Number.MAX_SAFE_INTEGER,
@@ -31,5 +34,42 @@ export const onboardingStatusSchema = Type.Union([
         },
         exact,
     ),
+    Type.Object(
+        {
+            onboardingVersion: onboardingVersionSchema,
+            state: Type.Literal("murmur_setup"),
+        },
+        exact,
+    ),
 ]);
 export type OnboardingStatus = Static<typeof onboardingStatusSchema>;
+
+export const onboardMurmurRequestSchema = Type.Union([
+    Type.Object({ enabled: Type.Literal(false) }, exact),
+    Type.Object(
+        {
+            enabled: Type.Literal(true),
+            profileId: rigProfileIdSchema,
+        },
+        exact,
+    ),
+]);
+export type OnboardMurmurRequest = Static<typeof onboardMurmurRequestSchema>;
+
+export const onboardMurmurResponseSchema = Type.Union([
+    Type.Object(
+        {
+            enabled: Type.Literal(false),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            enabled: Type.Literal(true),
+            publicKey: sharingIdentitySchema,
+            profile: rigProfileSchema,
+        },
+        exact,
+    ),
+]);
+export type OnboardMurmurResponse = Static<typeof onboardMurmurResponseSchema>;

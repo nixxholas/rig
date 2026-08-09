@@ -13,7 +13,7 @@ import {
 
 const endpoint = "http://rig.test";
 const token = "secret";
-const complete = { onboardingVersion: 1, state: "complete" } as const;
+const complete = { onboardingVersion: 2, state: "complete" } as const;
 
 describe("resolveRigOnboarding", () => {
     it("returns a missing CLI before attempting daemon discovery", async () => {

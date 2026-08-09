@@ -30,6 +30,7 @@ import type { DocumentEvent } from "./DocumentProtocol.js";
 import type { HappyCloudChangedEvent } from "./HappyCloudProtocol.js";
 import type { P2pStatusChangedEvent } from "./P2pProtocol.js";
 import type { RigProfileChangedEvent } from "./ProfileProtocol.js";
+import type { SharingChangedEvent } from "./SharingProtocol.js";
 import { rigProfileIdSchema } from "./ProfileProtocol.js";
 import { p2pInstanceIdSchema } from "./P2pIdentityProtocol.js";
 
@@ -694,6 +695,7 @@ export type GlobalLiveEvent =
     | HappyCloudChangedEvent
     | P2pStatusChangedEvent
     | RigProfileChangedEvent
+    | SharingChangedEvent
     | PluginsChangedEvent
     | PresenceChangedEvent
     | SlotsChangedEvent
@@ -733,6 +735,7 @@ export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDeliver
 export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
     return (
         event.type === "plugins_changed" ||
+        event.type === "sharing_changed" ||
         event.type === "profile_changed" ||
         event.type === "p2p_status_changed" ||
         event.type === "happy_cloud_changed" ||

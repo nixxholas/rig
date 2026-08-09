@@ -2692,6 +2692,94 @@ export const rigProfileChangedEventSchema = Type.Object(
     rigProfileExact,
 );
 export type RigProfileChangedEvent = Static<typeof rigProfileChangedEventSchema>;
+export const sharingIdentitySchema = Type.String({
+    minLength: 43,
+    maxLength: 43,
+    pattern: "^[A-Za-z0-9_-]+$",
+});
+export type SharingIdentity = Static<typeof sharingIdentitySchema>;
+export const sharingConnectionSchema = Type.Union([
+    Type.Literal("connecting"),
+    Type.Literal("connected"),
+    Type.Literal("disconnected"),
+]);
+export type SharingConnection = Static<typeof sharingConnectionSchema>;
+export const sharingContactSchema = Type.Object(
+    {
+        identity: sharingIdentitySchema,
+        profile: Type.Union([rigProfileSchema, Type.Null()]),
+        status: Type.Union([Type.Literal("active"), Type.Literal("removing")]),
+    },
+    rigProfileExact,
+);
+export type SharingContact = Static<typeof sharingContactSchema>;
+export const sharingContactRequestSchema = Type.Object(
+    {
+        id: Type.String({ minLength: 1, maxLength: 256 }),
+        identity: sharingIdentitySchema,
+        profile: Type.Union([rigProfileSchema, Type.Null()]),
+        sessionId: sharingIdentitySchema,
+    },
+    rigProfileExact,
+);
+export type SharingContactRequest = Static<typeof sharingContactRequestSchema>;
+export const sharingOutgoingContactRequestSchema = Type.Object(
+    {
+        id: sharingIdentitySchema,
+        identity: sharingIdentitySchema,
+        sessionId: sharingIdentitySchema,
+    },
+    rigProfileExact,
+);
+export type SharingOutgoingContactRequest = Static<typeof sharingOutgoingContactRequestSchema>;
+export const sharingSnapshotSchema = Type.Object(
+    {
+        connection: sharingConnectionSchema,
+        contacts: Type.Array(sharingContactSchema, { maxItems: 10_000 }),
+        identity: sharingIdentitySchema,
+        incomingRequests: Type.Array(sharingContactRequestSchema, { maxItems: 1_000 }),
+        outgoingRequests: Type.Array(sharingOutgoingContactRequestSchema, {
+            maxItems: 1_000,
+        }),
+        profileId: Type.Union([rigProfileIdSchema, Type.Null()]),
+        version: Type.String({ minLength: 1, maxLength: 256 }),
+    },
+    rigProfileExact,
+);
+export type SharingSnapshot = Static<typeof sharingSnapshotSchema>;
+export const createSharingInvitationResponseSchema = Type.Object(
+    {
+        expiresAt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        invitation: sharingIdentitySchema,
+    },
+    rigProfileExact,
+);
+export type CreateSharingInvitationResponse = Static<typeof createSharingInvitationResponseSchema>;
+export const requestSharingContactRequestSchema = Type.Object(
+    { invitation: sharingIdentitySchema },
+    rigProfileExact,
+);
+export type RequestSharingContactRequest = Static<typeof requestSharingContactRequestSchema>;
+export const sharingOutgoingContactRequestResponseSchema = Type.Object(
+    { request: sharingOutgoingContactRequestSchema },
+    rigProfileExact,
+);
+export type SharingOutgoingContactRequestResponse = Static<
+    typeof sharingOutgoingContactRequestResponseSchema
+>;
+export const sharingChangedEventSchema = Type.Object(
+    {
+        createdAt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        data: Type.Object(
+            { version: Type.String({ minLength: 1, maxLength: 256 }) },
+            rigProfileExact,
+        ),
+        id: Type.String({ minLength: 1, maxLength: 256 }),
+        type: Type.Literal("sharing_changed"),
+    },
+    rigProfileExact,
+);
+export type SharingChangedEvent = Static<typeof sharingChangedEventSchema>;
 export const p2pPeerStatusSchema = Type.Object(
     {
         address: Type.String({ minLength: 1 }),
@@ -2879,7 +2967,7 @@ export const p2pStatusChangedEventSchema = Type.Object(
 export type P2pStatusChangedEvent = Static<typeof p2pStatusChangedEventSchema>;
 
 /** Advance when a newly required onboarding step is introduced. */
-export const CURRENT_ONBOARDING_VERSION = 1;
+export const CURRENT_ONBOARDING_VERSION = 2;
 const onboardingExact = { additionalProperties: false } as const;
 const onboardingVersionSchema = Type.Integer({
     maximum: Number.MAX_SAFE_INTEGER,
@@ -2907,8 +2995,40 @@ export const onboardingStatusSchema = Type.Union([
         },
         onboardingExact,
     ),
+    Type.Object(
+        {
+            onboardingVersion: onboardingVersionSchema,
+            state: Type.Literal("murmur_setup"),
+        },
+        onboardingExact,
+    ),
 ]);
 export type OnboardingStatus = Static<typeof onboardingStatusSchema>;
+
+export const onboardMurmurRequestSchema = Type.Union([
+    Type.Object({ enabled: Type.Literal(false) }, onboardingExact),
+    Type.Object(
+        {
+            enabled: Type.Literal(true),
+            profileId: rigProfileIdSchema,
+        },
+        onboardingExact,
+    ),
+]);
+export type OnboardMurmurRequest = Static<typeof onboardMurmurRequestSchema>;
+
+export const onboardMurmurResponseSchema = Type.Union([
+    Type.Object({ enabled: Type.Literal(false) }, onboardingExact),
+    Type.Object(
+        {
+            enabled: Type.Literal(true),
+            publicKey: sharingIdentitySchema,
+            profile: rigProfileSchema,
+        },
+        onboardingExact,
+    ),
+]);
+export type OnboardMurmurResponse = Static<typeof onboardMurmurResponseSchema>;
 
 export type GlobalEvent =
     | ComputePreparationEvent
@@ -2917,6 +3037,7 @@ export type GlobalEvent =
     | HappyCloudChangedEvent
     | P2pStatusChangedEvent
     | RigProfileChangedEvent
+    | SharingChangedEvent
     | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"project_updated", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"workspace_created", { mutationId?: MutationId; workspace: ProjectWorkspace }>

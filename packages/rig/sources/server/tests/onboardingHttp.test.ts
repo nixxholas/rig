@@ -16,8 +16,11 @@ describe("onboarding HTTP", () => {
 
     it("serves the onboarding status through the service", async () => {
         const onboarding: OnboardingServiceContract = {
+            onboardMurmur: vi.fn<OnboardingServiceContract["onboardMurmur"]>(async () => ({
+                enabled: false,
+            })),
             status: vi.fn<OnboardingServiceContract["status"]>(async () => ({
-                onboardingVersion: 1,
+                onboardingVersion: 2,
                 state: "complete",
             })),
         };
@@ -27,7 +30,7 @@ describe("onboarding HTTP", () => {
         close.push(started.close);
 
         expect(await send(started.socketPath, "GET", "/onboarding")).toEqual({
-            body: { onboardingVersion: 1, state: "complete" },
+            body: { onboardingVersion: 2, state: "complete" },
             status: 200,
         });
         expect(onboarding.status).toHaveBeenCalledOnce();
@@ -35,8 +38,11 @@ describe("onboarding HTTP", () => {
 
     it("keeps onboarding local and method-safe", async () => {
         const onboarding: OnboardingServiceContract = {
+            onboardMurmur: vi.fn<OnboardingServiceContract["onboardMurmur"]>(async () => ({
+                enabled: false,
+            })),
             status: vi.fn<OnboardingServiceContract["status"]>(async () => ({
-                onboardingVersion: 1,
+                onboardingVersion: 2,
                 state: "provider_setup",
             })),
         };
@@ -57,6 +63,42 @@ describe("onboarding HTTP", () => {
         expect(onboarding.status).not.toHaveBeenCalled();
     });
 
+    it("persists a local Murmur onboarding choice", async () => {
+        const onboarding: OnboardingServiceContract = {
+            onboardMurmur: vi.fn<OnboardingServiceContract["onboardMurmur"]>(async () => ({
+                enabled: false,
+            })),
+            status: vi.fn<OnboardingServiceContract["status"]>(async () => ({
+                onboardingVersion: 2,
+                state: "murmur_setup",
+            })),
+        };
+        const started = await startServer(
+            createProtocolHttpServer({ onboarding, token: "secret" }),
+        );
+        close.push(started.close);
+
+        expect(
+            await send(
+                started.socketPath,
+                "PUT",
+                "/onboarding/murmur",
+                undefined,
+                JSON.stringify({ enabled: false }),
+            ),
+        ).toEqual({ body: { enabled: false }, status: 200 });
+        expect(onboarding.onboardMurmur).toHaveBeenCalledWith({ enabled: false });
+        expect(
+            await send(
+                started.socketPath,
+                "PUT",
+                "/onboarding/murmur",
+                "aprimaryinstance000000001",
+                JSON.stringify({ enabled: false }),
+            ),
+        ).toMatchObject({ status: 403 });
+    });
+
     it("reports when daemon-owned onboarding is unavailable", async () => {
         const started = await startServer(createProtocolHttpServer({ token: "secret" }));
         close.push(started.close);
@@ -73,6 +115,7 @@ async function send(
     method: string,
     path: string,
     peerId?: string,
+    body?: string,
 ): Promise<{ body: unknown; status: number }> {
     return await new Promise((resolve, reject) => {
         const outgoing = request(
@@ -80,6 +123,12 @@ async function send(
                 headers: {
                     authorization: "Bearer secret",
                     ...(peerId === undefined ? {} : { "x-rig-p2p-peer": peerId }),
+                    ...(body === undefined
+                        ? {}
+                        : {
+                              "content-length": Buffer.byteLength(body),
+                              "content-type": "application/json",
+                          }),
                 },
                 method,
                 path,
@@ -100,7 +149,7 @@ async function send(
             },
         );
         outgoing.once("error", reject);
-        outgoing.end();
+        outgoing.end(body);
     });
 }
 

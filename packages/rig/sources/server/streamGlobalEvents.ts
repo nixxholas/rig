@@ -185,7 +185,8 @@ function liveEventKey(event: GlobalLiveEvent): string {
         event.type === "plugins_changed" ||
         event.type === "slots_changed" ||
         event.type === "applets_changed" ||
-        event.type === "worklets_changed"
+        event.type === "worklets_changed" ||
+        event.type === "sharing_changed"
     ) {
         return event.type;
     }

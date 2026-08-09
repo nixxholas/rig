@@ -7,9 +7,9 @@ import {
 } from "../sources/ServerCompatibility.js";
 
 describe("serverCompatibility", () => {
-    it("requires protocol v16 without a legacy compatibility path", () => {
-        expect(MINIMUM_RIG_PROTOCOL_VERSION).toBe(16);
-        expect(serverCompatibility(15)).toMatchObject({
+    it("requires protocol v17 without a legacy compatibility path", () => {
+        expect(MINIMUM_RIG_PROTOCOL_VERSION).toBe(17);
+        expect(serverCompatibility(16)).toMatchObject({
             status: "server_outdated",
         });
     });

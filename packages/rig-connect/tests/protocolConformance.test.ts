@@ -37,6 +37,8 @@ import {
     moveFolderItemRequestSchema as daemonMoveFolderItemRequestSchema,
     moveFolderRequestSchema as daemonMoveFolderRequestSchema,
     moveSessionRequestSchema as daemonMoveSessionRequestSchema,
+    onboardMurmurRequestSchema as daemonOnboardMurmurRequestSchema,
+    onboardMurmurResponseSchema as daemonOnboardMurmurResponseSchema,
     onboardingStatusSchema as daemonOnboardingStatusSchema,
     sessionScopeSchema as daemonSessionScopeSchema,
     updateFolderRequestSchema as daemonUpdateFolderRequestSchema,
@@ -92,6 +94,8 @@ import {
     moveFolderItemRequestSchema,
     moveFolderRequestSchema,
     rigProfileSchema,
+    onboardMurmurRequestSchema,
+    onboardMurmurResponseSchema,
     onboardingStatusSchema,
     moveSessionRequestSchema,
     projectWorkspaceSchema,
@@ -227,6 +231,16 @@ type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
 type _OnboardingStatus = Assignable<local.OnboardingStatus, daemon.OnboardingStatus>;
 type _DaemonOnboardingStatus = Assignable<daemon.OnboardingStatus, local.OnboardingStatus>;
+type _OnboardMurmurRequest = Assignable<local.OnboardMurmurRequest, daemon.OnboardMurmurRequest>;
+type _DaemonOnboardMurmurRequest = Assignable<
+    daemon.OnboardMurmurRequest,
+    local.OnboardMurmurRequest
+>;
+type _OnboardMurmurResponse = Assignable<local.OnboardMurmurResponse, daemon.OnboardMurmurResponse>;
+type _DaemonOnboardMurmurResponse = Assignable<
+    daemon.OnboardMurmurResponse,
+    local.OnboardMurmurResponse
+>;
 type _Folder = Assignable<local.Folder, daemon.Folder>;
 type _FolderExact = Assignable<daemon.Folder, local.Folder>;
 type _FolderItem = Assignable<local.FolderItem, daemon.FolderItem>;
@@ -482,10 +496,12 @@ describe("protocol conformance", () => {
     it("keeps onboarding schemas structurally identical to the daemon", () => {
         expect(CURRENT_ONBOARDING_VERSION).toBe(DAEMON_CURRENT_ONBOARDING_VERSION);
         expect(onboardingStatusSchema).toStrictEqual(daemonOnboardingStatusSchema);
+        expect(onboardMurmurRequestSchema).toStrictEqual(daemonOnboardMurmurRequestSchema);
+        expect(onboardMurmurResponseSchema).toStrictEqual(daemonOnboardMurmurResponseSchema);
 
         const profileRequired = {
-            onboardingVersion: 1,
-            state: "profile_required",
+            onboardingVersion: 2,
+            state: "murmur_setup",
         };
         expect(Value.Decode(onboardingStatusSchema, profileRequired)).toEqual(profileRequired);
         expect(Value.Decode(daemonOnboardingStatusSchema, profileRequired)).toEqual(

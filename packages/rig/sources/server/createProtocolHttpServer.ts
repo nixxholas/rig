@@ -121,6 +121,12 @@ import type {
     UpdateGlobalSecurityPolicyResponse,
     SetSessionDraftRequest,
     UpdateSessionRequest,
+    CreateSharingInvitationResponse,
+    OnboardMurmurRequest,
+    OnboardMurmurResponse,
+    RequestSharingContactRequest,
+    SharingOutgoingContactRequestResponse,
+    SharingSnapshot,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
 } from "../protocol/index.js";
@@ -146,6 +152,9 @@ import {
     updateRigProfileRequestSchema,
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
+    onboardMurmurRequestSchema,
+    requestSharingContactRequestSchema,
+    sharingIdentitySchema,
 } from "../protocol/index.js";
 import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
 import type { OnboardingServiceContract } from "../onboarding/OnboardingService.js";
@@ -321,6 +330,7 @@ import {
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import type { PrepareP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
+import type { SharingServiceContract } from "../sharing/index.js";
 
 export interface ProtocolHttpServerOptions {
     inferenceMaxRetries?: number;
@@ -344,6 +354,7 @@ export interface ProtocolHttpServerOptions {
     /** Authorizes a peer to create and operate its remote projects, workspaces, and sessions. */
     canP2pPeerUseRemoteWork?: (peerId: string) => boolean;
     profiles?: RigProfileStore;
+    sharing?: SharingServiceContract;
     replaceP2pCredentials?: (
         authenticatedOwnerId: string,
         envelope: P2pEncryptedCredentialSnapshot,
@@ -422,6 +433,7 @@ export function createProtocolHttpServer(
         canP2pPeerProvision: options.canP2pPeerProvision,
         canP2pPeerUseRemoteWork: options.canP2pPeerUseRemoteWork,
         profiles: options.profiles,
+        sharing: options.sharing,
         replaceP2pCredentials: options.replaceP2pCredentials,
         resolveModelCatalog: options.resolveModelCatalog,
         prepareP2pRequest: options.prepareP2pRequest,
@@ -526,6 +538,7 @@ interface ProtocolServerRuntimeConfig {
     p2pNode: (() => DaemonConfig["p2p"]) | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
     profiles: RigProfileStore | undefined;
+    sharing: SharingServiceContract | undefined;
     replaceP2pCredentials: ProtocolHttpServerOptions["replaceP2pCredentials"];
     resolveModelCatalog: ProtocolHttpServerOptions["resolveModelCatalog"];
     prepareP2pRequest: PrepareP2pHttpRequest | undefined;
@@ -669,9 +682,10 @@ async function handleRequest(
         );
         return;
     }
-    if (route.name === "onboarding") {
-        if (request.method !== "GET") {
-            response.setHeader("allow", "GET");
+    if (route.name === "onboarding" || route.name === "onboarding-murmur") {
+        const expectedMethod = route.name === "onboarding" ? "GET" : "PUT";
+        if (request.method !== expectedMethod) {
+            response.setHeader("allow", expectedMethod);
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
@@ -684,7 +698,25 @@ async function handleRequest(
             sendJson(response, 503, { error: "Rig onboarding is unavailable." });
             return;
         }
-        sendJson(response, 200, await onboarding.status());
+        if (route.name === "onboarding") {
+            sendJson(response, 200, await onboarding.status());
+            return;
+        }
+        const body = await readJson<unknown>(request, 8 * 1024);
+        if (!Value.Check(onboardMurmurRequestSchema, body)) {
+            sendJson(response, 400, { error: "The Murmur onboarding choice is invalid." });
+            return;
+        }
+        try {
+            sendJson<OnboardMurmurResponse>(
+                response,
+                200,
+                await onboarding.onboardMurmur(body as OnboardMurmurRequest),
+            );
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
         return;
     }
 
@@ -737,6 +769,82 @@ async function handleRequest(
             }
             sendJson(response, 409, { error: errorToMessage(error) });
         }
+        return;
+    }
+    if (
+        route.name === "sharing" ||
+        route.name === "sharing-invitations" ||
+        route.name === "sharing-contact-requests" ||
+        route.name === "sharing-contact-request" ||
+        route.name === "sharing-contact"
+    ) {
+        if (p2pPeerId(request) !== undefined) {
+            sendJson(response, 403, { error: "Sharing is available only on the local Rig." });
+            return;
+        }
+        const sharing = runtimeConfig.sharing;
+        if (sharing === undefined) {
+            sendJson(response, 503, { error: "Sharing is unavailable." });
+            return;
+        }
+        try {
+            if (route.name === "sharing" && request.method === "GET") {
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                return;
+            }
+            if (route.name === "sharing-invitations" && request.method === "POST") {
+                sendJson<CreateSharingInvitationResponse>(
+                    response,
+                    201,
+                    await sharing.createInvitation(),
+                );
+                return;
+            }
+            if (route.name === "sharing-contact-requests" && request.method === "POST") {
+                const body = await readJson<unknown>(request, 8 * 1024);
+                if (!Value.Check(requestSharingContactRequestSchema, body)) {
+                    sendJson(response, 400, { error: "The contact invitation is invalid." });
+                    return;
+                }
+                sendJson<SharingOutgoingContactRequestResponse>(response, 202, {
+                    request: await sharing.requestContact(
+                        (body as RequestSharingContactRequest).invitation,
+                    ),
+                });
+                return;
+            }
+            if (
+                route.name === "sharing-contact-request" &&
+                route.operation === "accept" &&
+                request.method === "POST"
+            ) {
+                await sharing.acceptContact(route.requestId);
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                return;
+            }
+            if (
+                route.name === "sharing-contact-request" &&
+                route.operation === undefined &&
+                request.method === "DELETE"
+            ) {
+                await sharing.rejectContact(route.requestId);
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                return;
+            }
+            if (route.name === "sharing-contact" && request.method === "DELETE") {
+                await sharing.removeContact(route.identity);
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                return;
+            }
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            const message = errorToMessage(error);
+            sendJson(response, message === "Contact request not found." ? 404 : 409, {
+                error: message,
+            });
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
         return;
     }
     if (route.name === "profiles" || route.name === "profile") {
@@ -4839,6 +4947,7 @@ function matchRoute(pathname: string):
               | "inference-credentials"
               | "installation"
               | "onboarding"
+              | "onboarding-murmur"
               | "p2p-status"
               | "p2p-invitations"
               | "p2p-joins"
@@ -4850,6 +4959,9 @@ function matchRoute(pathname: string):
               | "models"
               | "presence"
               | "profiles"
+              | "sharing"
+              | "sharing-invitations"
+              | "sharing-contact-requests"
               | "plugin-catalog"
               | "documents"
               | "folders"
@@ -4877,6 +4989,17 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
       }
     | { name: "profile"; profileId: string; sessionId?: undefined }
+    | {
+          name: "sharing-contact-request";
+          operation?: "accept";
+          requestId: string;
+          sessionId?: undefined;
+      }
+    | {
+          identity: string;
+          name: "sharing-contact";
+          sessionId?: undefined;
+      }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
     | {
           name: "applet-context" | "applet-open" | "applet-revert" | "applet-versions";
@@ -5052,6 +5175,7 @@ function matchRoute(pathname: string):
     if (pathname === "/inference-credentials") return { name: "inference-credentials" };
     if (pathname === "/installation") return { name: "installation" };
     if (pathname === "/onboarding") return { name: "onboarding" };
+    if (pathname === "/onboarding/murmur") return { name: "onboarding-murmur" };
     if (pathname === "/p2p/status") return { name: "p2p-status" };
     if (pathname === "/p2p/invitations") return { name: "p2p-invitations" };
     if (pathname === "/p2p/joins") return { name: "p2p-joins" };
@@ -5086,6 +5210,32 @@ function matchRoute(pathname: string):
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/presence") return { name: "presence" };
     if (pathname === "/profiles") return { name: "profiles" };
+    if (pathname === "/sharing") return { name: "sharing" };
+    if (pathname === "/sharing/invitations") return { name: "sharing-invitations" };
+    if (pathname === "/sharing/contact-requests") {
+        return { name: "sharing-contact-requests" };
+    }
+    const sharingContactRequest = /^\/sharing\/contact-requests\/([^/]+)(?:\/(accept))?$/u.exec(
+        pathname,
+    );
+    if (sharingContactRequest !== null) {
+        const requestId = decodeUrlComponent(sharingContactRequest[1]);
+        if (requestId !== undefined && requestId.length <= 256) {
+            return {
+                name: "sharing-contact-request",
+                ...(sharingContactRequest[2] === "accept" ? { operation: "accept" as const } : {}),
+                requestId,
+            };
+        }
+    }
+    const sharingContact = /^\/sharing\/contacts\/([^/]+)$/u.exec(pathname);
+    if (
+        sharingContact !== null &&
+        sharingContact[1] !== undefined &&
+        Value.Check(sharingIdentitySchema, sharingContact[1])
+    ) {
+        return { identity: sharingContact[1], name: "sharing-contact" };
+    }
     const profile = /^\/profiles\/([^/]+)$/u.exec(pathname);
     if (
         profile !== null &&
@@ -5990,6 +6140,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     }
     if (route.name === "config") return request.method === "PATCH";
     if (route.name === "onboarding") return request.method === "GET";
+    if (route.name === "onboarding-murmur") return request.method === "PUT";
     if (route.name === "global-instructions") return request.method === "PUT";
     if (route.name === "global-security-policy") return request.method === "PUT";
     if (route.name === "debug-inspector") return request.method === "POST";
@@ -5999,6 +6150,13 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "plugins") return request.method === "POST";
     if (route.name === "profiles") return request.method === "POST";
     if (route.name === "profile") return request.method === "PATCH" || request.method === "PUT";
+    if (route.name === "sharing") return false;
+    if (route.name === "sharing-invitations") return request.method === "POST";
+    if (route.name === "sharing-contact-requests") return request.method === "POST";
+    if (route.name === "sharing-contact-request") {
+        return request.method === "POST" || request.method === "DELETE";
+    }
+    if (route.name === "sharing-contact") return request.method === "DELETE";
     if (route.name === "plugin-catalog") return false;
     if (route.name === "plugin-uninstall") return request.method === "DELETE";
     if (route.name === "plugin-app-tool-call" || route.name === "plugin-app-storage") {

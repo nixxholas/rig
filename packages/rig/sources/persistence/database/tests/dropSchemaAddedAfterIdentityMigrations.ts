@@ -15,6 +15,8 @@ import { sessionShareEntryLog } from "../migrations/19-session-share-entry-log.j
 export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase): void {
     dropFolderItemsAndDocumentsSchema(database);
     dropSessionScopeSchema(database);
+    database.run(sql.raw("DROP TABLE IF EXISTS sharing_settings"));
+    database.run(sql.raw("DROP TABLE IF EXISTS sharing_profile_binding"));
     for (const table of database.all<{ name: string }>(
         sql.raw(
             `SELECT name FROM sqlite_master

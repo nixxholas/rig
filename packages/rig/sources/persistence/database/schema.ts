@@ -863,3 +863,19 @@ export const durableGlobalEvents = sqliteTable("durable_global_events", {
 export const durableGlobalEventState = sqliteTable("durable_global_event_state", {
     trimmedThroughCursor: text("trimmed_through_cursor").primaryKey(),
 });
+
+export const sharingProfileBinding = sqliteTable("sharing_profile_binding", {
+    singletonId: integer("singleton_id").notNull().primaryKey(),
+    profileId: text("profile_id")
+        .notNull()
+        .unique()
+        .references(() => rigProfiles.id, { onDelete: "restrict" }),
+    createdAtMs: integer("created_at_ms").notNull(),
+    murmurIdentity: text("murmur_identity"),
+});
+
+export const sharingSettings = sqliteTable("sharing_settings", {
+    singletonId: integer("singleton_id").notNull().primaryKey(),
+    enabled: integer("enabled", { mode: "boolean" }).notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});

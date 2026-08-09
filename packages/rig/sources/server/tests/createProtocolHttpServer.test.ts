@@ -3534,8 +3534,11 @@ describe("createProtocolHttpServer", () => {
     it("rejects new mutations as soon as shutdown begins", async () => {
         const taskDrain = new TrackedTaskDrain();
         const onboarding: OnboardingServiceContract = {
+            onboardMurmur: vi.fn<OnboardingServiceContract["onboardMurmur"]>(async () => ({
+                enabled: false,
+            })),
             status: vi.fn<OnboardingServiceContract["status"]>(async () => ({
-                onboardingVersion: 1,
+                onboardingVersion: 2,
                 state: "complete",
             })),
         };

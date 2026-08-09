@@ -44,7 +44,7 @@ The resulting `RigOnboardingState` is one closed TypeBox-validated union:
 - `rig_not_installed`, `rig_not_running`, or `rig_unreachable`;
 - `version_mismatch`, with `upgrade: "rig" | "happy"` and either the incompatible protocol range
   or the CLI/data-schema facts and message that require a Rig upgrade;
-- the daemon-owned `complete`, `provider_setup`, or `profile_required` status.
+- the daemon-owned `complete`, `provider_setup`, `profile_required`, or `murmur_setup` status.
 
 This keeps process discovery in the native layer without making each Happy surface reproduce the
 onboarding decision tree. The exported `localRigOnboardingInspectionSchema` validates native bridge
@@ -53,6 +53,17 @@ results, and `rigOnboardingStateSchema` validates the complete result.
 After connecting, `getOnboardingStatus` materializes the current status from `GET /onboarding`.
 Callers query it after completing a step; onboarding has no live subscription or change event. Rig
 checks only whether at least one provider is configured and does not run inference.
+
+When the status is `murmur_setup`, the application records the person's explicit choice:
+
+```ts
+const result = await rig.onboardMurmur(
+    enabled ? { enabled: true, profileId: selectedProfile.id } : { enabled: false },
+);
+```
+
+Opting out completes onboarding without generating Murmur keys. Opting in lazily creates or
+restores the private identity and returns its public key plus the exact existing Rig profile.
 
 ## Discovering a running Rig
 
@@ -251,6 +262,46 @@ already sees state that reflects it. `onError` reports a failure that ended the 
 good; ordinary disconnections are not failures and are handled by reconnecting. Group
 subscriptions also receive recoverable protocol diagnostics there while their connection state
 stays live.
+
+## Sharing contacts
+
+Sharing uses Murmur for a private, durable person-to-person identity and contact handshake. It
+reuses a local Rig human profile—the same profile used for P2P and message attribution—instead of
+maintaining a second Sharing profile. The first binding is permanent for that Murmur identity.
+The Murmur handshake carries the profile's bounded text metadata but excludes its photo bytes;
+photos continue through Rig's existing profile path.
+
+```ts
+const sharing = rig.connectSharing({
+    onChange(snapshot) {
+        renderContacts(snapshot);
+    },
+});
+
+const profiles = await rig.listProfiles();
+const murmur = await rig.onboardMurmur({
+    enabled: true,
+    profileId: profiles[0]!.id,
+});
+console.log(murmur.publicKey, murmur.profile);
+
+const { invitation, expiresAt } = await rig.createSharingInvitation();
+const outgoing = await rig.requestSharingContact(invitationFromAnotherPerson);
+
+await rig.acceptSharingContactRequest(incomingRequestId);
+await rig.rejectSharingContactRequest(otherIncomingRequestId);
+await rig.removeSharingContact(contactIdentity);
+```
+
+The authoritative snapshot contains the Murmur identity, selected profile ID, connection state,
+confirmed contacts, and incoming and outgoing requests. Contact and request profiles may be `null`
+when a remote application sent data outside Rig's profile contract; such a request cannot be
+accepted. A remote profile is display metadata asserted by that authenticated Murmur identity; its
+profile ID and parent Rig ID are not authorization credentials. Invitations are opaque, one-use,
+five-minute capabilities and should be transported as secrets. Sharing handshake methods await
+their external result and callers should refresh the snapshot after an ambiguous transport
+failure. `connectSharing` follows `sharing_changed` on the same global stream as chats and
+refetches the bounded snapshot after reconnect gaps.
 
 ## The chat state
 

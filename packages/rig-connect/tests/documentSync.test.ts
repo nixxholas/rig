@@ -48,7 +48,7 @@ function liveHello(
     return `event: hello\ndata: ${JSON.stringify({
         cursor,
         gap,
-        protocolVersion: 16,
+        protocolVersion: 17,
         resumed,
     })}\n\n`;
 }

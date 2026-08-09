@@ -105,11 +105,17 @@ import type {
     P2pStatus,
     CreateP2pInvitationResponse,
     JoinP2pInvitationResponse,
+    OnboardMurmurRequest,
+    OnboardMurmurResponse,
     OnboardingStatus,
     P2pPairingState,
     CreateRigProfileRequest,
     RigProfile,
     RigProfileResponse,
+    SharingOutgoingContactRequest,
+    SharingOutgoingContactRequestResponse,
+    SharingSnapshot,
+    CreateSharingInvitationResponse,
     UpdateRigProfileRequest,
 } from "./protocol.js";
 import {
@@ -122,12 +128,19 @@ import {
     happyCloudStatusSchema,
     p2pStatusChangedEventSchema,
     p2pStatusSchema,
+    onboardMurmurRequestSchema,
+    onboardMurmurResponseSchema,
     onboardingStatusSchema,
     createRigProfileRequestSchema,
     listRigProfilesResponseSchema,
     rigProfileIdSchema,
     rigProfileChangedEventSchema,
     rigProfileResponseSchema,
+    sharingChangedEventSchema,
+    sharingIdentitySchema,
+    sharingOutgoingContactRequestResponseSchema,
+    sharingSnapshotSchema,
+    createSharingInvitationResponseSchema,
     updateRigProfileRequestSchema,
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
@@ -387,6 +400,17 @@ export interface RigProfilesConnection {
     close: () => void;
     /** Empty until the first authoritative profile snapshot has loaded. */
     profiles: () => readonly RigProfile[];
+}
+
+export interface RigSharingSubscriptionOptions {
+    onChange: (snapshot: SharingSnapshot) => void;
+    onError?: (error: unknown) => void;
+}
+
+export interface RigSharingConnection {
+    close: () => void;
+    /** Absent until the first authoritative Sharing snapshot has loaded. */
+    snapshot: () => SharingSnapshot | undefined;
 }
 
 export interface RigInboxSubscriptionOptions {
@@ -792,9 +816,9 @@ export type GroupTarget =
 /**
  * One shared Rig connection.
  *
- * Every action returns a mutation identity synchronously, after its prediction
- * is already visible. Delivery, retries, reconciliation, and rejection are
- * handled in the background.
+ * Optimistic entity mutations return a mutation identity synchronously after
+ * their prediction is visible. External capability operations, including P2P
+ * pairing and Sharing contact handshakes, await their protocol result.
  */
 export interface RigConnection {
     /** Current result of the daemon protocol handshake. */
@@ -817,8 +841,34 @@ export interface RigConnection {
     connectP2p: (options: RigP2pSubscriptionOptions) => RigP2pConnection;
     /** Materializes the current daemon-owned onboarding requirement. */
     getOnboardingStatus: (options?: { signal?: AbortSignal }) => Promise<OnboardingStatus>;
+    /** Persists the Murmur opt-in or opt-out and lazily creates an identity when enabled. */
+    onboardMurmur: (
+        request: OnboardMurmurRequest,
+        options?: { signal?: AbortSignal },
+    ) => Promise<OnboardMurmurResponse>;
     /** Follows the human profiles whose identities appear on messages. */
     connectProfiles: (options: RigProfilesSubscriptionOptions) => RigProfilesConnection;
+    connectSharing: (options: RigSharingSubscriptionOptions) => RigSharingConnection;
+    getSharing: (options?: { signal?: AbortSignal }) => Promise<SharingSnapshot>;
+    createSharingInvitation: (options?: {
+        signal?: AbortSignal;
+    }) => Promise<CreateSharingInvitationResponse>;
+    requestSharingContact: (
+        invitation: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<SharingOutgoingContactRequest>;
+    acceptSharingContactRequest: (
+        requestId: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<SharingSnapshot>;
+    rejectSharingContactRequest: (
+        requestId: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<SharingSnapshot>;
+    removeSharingContact: (
+        identity: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<SharingSnapshot>;
     listProfiles: (options?: { signal?: AbortSignal }) => Promise<readonly RigProfile[]>;
     createProfile: (
         request: CreateRigProfileRequest,
@@ -1249,6 +1299,22 @@ interface ProfilesEntry {
     subscribers: Set<ProfilesSubscriber>;
 }
 
+interface SharingSubscriber extends RigSharingSubscriptionOptions {
+    closed: boolean;
+}
+
+interface SharingEntry {
+    controller: AbortController;
+    detachRoot: () => void;
+    lastLoadError?: unknown;
+    loading?: Promise<void>;
+    recoveryScheduled: boolean;
+    reloadPending: boolean;
+    snapshot?: SharingSnapshot;
+    started: boolean;
+    subscribers: Set<SharingSubscriber>;
+}
+
 interface MutationRequest {
     body?: unknown;
     headers?: Readonly<Record<string, string>>;
@@ -1340,6 +1406,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let happyCloudEntry: HappyCloudEntry | undefined;
     let p2pEntry: P2pEntry | undefined;
     let profilesEntry: ProfilesEntry | undefined;
+    let sharingEntry: SharingEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
     let folderEntry: FolderEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
@@ -1432,6 +1499,23 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         for (const subscriber of [...entry.subscribers]) {
             if (!subscriber.closed) subscriber.onChange(entry.profiles);
         }
+    };
+
+    const publishSharing = (entry: SharingEntry): void => {
+        if (closed || entry.snapshot === undefined) return;
+        for (const subscriber of [...entry.subscribers]) {
+            if (!subscriber.closed) subscriber.onChange(entry.snapshot);
+        }
+    };
+
+    const applySharing = (entry: SharingEntry, snapshot: SharingSnapshot): void => {
+        if (entry.snapshot !== undefined && entry.snapshot.version > snapshot.version) return;
+        const changed =
+            entry.snapshot === undefined ||
+            entry.snapshot.version !== snapshot.version ||
+            JSON.stringify(entry.snapshot) !== JSON.stringify(snapshot);
+        entry.snapshot = snapshot;
+        if (changed) publishSharing(entry);
     };
 
     const applyProfiles = (entry: ProfilesEntry, incoming: readonly RigProfile[]): boolean => {
@@ -2887,6 +2971,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (profilesEntry !== undefined && profilesEntry.started) {
                         void loadProfiles(profilesEntry);
                     }
+                    if (sharingEntry !== undefined && sharingEntry.started) {
+                        void loadSharing(sharingEntry);
+                    }
                     if (groupsEntry !== undefined) {
                         publishGroups(groupsEntry, groupsEntry.store.setConnection("live"));
                     }
@@ -2924,6 +3011,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (profilesEntry !== undefined && profilesEntry.started) {
                     void loadProfiles(profilesEntry);
+                }
+                if (sharingEntry !== undefined && sharingEntry.started) {
+                    void loadSharing(sharingEntry);
                 }
                 for (const entry of documentEntries.values()) {
                     if (entry.started) void requestDocumentReload(entry);
@@ -3001,6 +3091,20 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         return;
                     }
                     void loadProfiles(entry);
+                    return;
+                }
+                if (event.type === "sharing_changed") {
+                    const entry = sharingEntry;
+                    if (entry === undefined || !entry.started) return;
+                    try {
+                        Value.Decode(sharingChangedEventSchema, event);
+                    } catch {
+                        for (const subscriber of [...entry.subscribers]) {
+                            subscriber.onError?.(new Error("Rig sent an invalid Sharing update."));
+                        }
+                        return;
+                    }
+                    void loadSharing(entry);
                     return;
                 }
                 if (event.type === "p2p_status_changed") {
@@ -3509,6 +3613,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             profilesEntry.controller.abort();
             profilesEntry.detachRoot();
             profilesEntry = undefined;
+        }
+        if (sharingEntry !== undefined && sharingEntry.subscribers.size === 0) {
+            sharingEntry.controller.abort();
+            sharingEntry.detachRoot();
+            sharingEntry = undefined;
         }
         if (
             groupsEntry !== undefined &&
@@ -5098,6 +5207,44 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         }
     };
 
+    const onboardMurmur: RigConnection["onboardMurmur"] = async (
+        onboardingRequest,
+        operationOptions = {},
+    ) => {
+        if (!Value.Check(onboardMurmurRequestSchema, onboardingRequest)) {
+            throw new Error("The Murmur onboarding choice is invalid.");
+        }
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            const response = await requestJson("onboarding/murmur", {
+                body: JSON.stringify(onboardingRequest),
+                headers: { "content-type": "application/json" },
+                method: "PUT",
+                signal: operation.signal,
+            });
+            if (response.status >= 400) {
+                throw new MutationHttpError(
+                    response.status,
+                    humanMutationError(response.data, response.status),
+                    undefined,
+                    response.data,
+                );
+            }
+            let result: OnboardMurmurResponse;
+            try {
+                result = Value.Decode(onboardMurmurResponseSchema, response.data);
+            } catch {
+                throw new Error("Rig returned an invalid Murmur onboarding response.");
+            }
+            if (result.enabled && sharingEntry !== undefined) {
+                void loadSharing(sharingEntry);
+            }
+            return result;
+        } finally {
+            operation.detach();
+        }
+    };
+
     const createProfilesEntry = (): ProfilesEntry => {
         if (profilesEntry !== undefined) return profilesEntry;
         const linked = linkedController(rootController.signal);
@@ -5310,6 +5457,262 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             "PATCH",
             profile,
             operationOptions.signal,
+        );
+    };
+
+    const createSharingEntry = (): SharingEntry => {
+        if (sharingEntry !== undefined) return sharingEntry;
+        const linked = linkedController(rootController.signal);
+        sharingEntry = {
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            recoveryScheduled: false,
+            reloadPending: false,
+            started: false,
+            subscribers: new Set(),
+        };
+        return sharingEntry;
+    };
+
+    const readSharing = async (signal: AbortSignal): Promise<SharingSnapshot> => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const response = await request(endpointUrl(options.endpoint, "sharing"), {
+            headers: {
+                accept: "application/json",
+                authorization: `Bearer ${options.token}`,
+            },
+            signal,
+        });
+        const bytes = await readBoundedResponseBytes(
+            response,
+            MAXIMUM_PROFILE_RESPONSE_BYTES,
+            "Sharing contact data",
+        );
+        const text = new TextDecoder().decode(bytes);
+        let data: unknown;
+        try {
+            data = text.length === 0 ? undefined : (JSON.parse(text) as unknown);
+        } catch {
+            data = text;
+        }
+        if (!response.ok) {
+            throw new MutationHttpError(
+                response.status,
+                humanMutationError(data, response.status),
+                undefined,
+                data,
+            );
+        }
+        try {
+            return Value.Decode(sharingSnapshotSchema, data);
+        } catch {
+            throw new Error("Rig returned invalid Sharing contact data.");
+        }
+    };
+
+    const loadSharing = (entry: SharingEntry): Promise<void> => {
+        if (entry.loading !== undefined) {
+            entry.reloadPending = true;
+            return entry.loading;
+        }
+        let shouldRecover = false;
+        const loading = readSharing(entry.controller.signal).then((snapshot) => {
+            if (entry.controller.signal.aborted || sharingEntry !== entry) return;
+            delete entry.lastLoadError;
+            applySharing(entry, snapshot);
+        });
+        entry.loading = loading;
+        void loading
+            .catch((error: unknown) => {
+                if (entry.controller.signal.aborted || sharingEntry !== entry) return;
+                entry.lastLoadError = error;
+                for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                shouldRecover = true;
+            })
+            .finally(() => {
+                if (entry.loading === loading) delete entry.loading;
+                if (entry.controller.signal.aborted || sharingEntry !== entry) return;
+                if (entry.reloadPending) {
+                    entry.reloadPending = false;
+                    void loadSharing(entry);
+                } else if (shouldRecover) {
+                    scheduleSharingRecovery(entry);
+                }
+            });
+        return loading;
+    };
+
+    const scheduleSharingRecovery = (entry: SharingEntry): void => {
+        if (entry.recoveryScheduled || entry.controller.signal.aborted) return;
+        entry.recoveryScheduled = true;
+        void wait(MAXIMUM_MUTATION_RETRY_MS, entry.controller.signal).then(() => {
+            entry.recoveryScheduled = false;
+            if (
+                entry.controller.signal.aborted ||
+                sharingEntry !== entry ||
+                entry.subscribers.size === 0
+            ) {
+                return;
+            }
+            void loadSharing(entry);
+        });
+    };
+
+    const startSharingEntry = (entry: SharingEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (liveStreamOpen) void loadSharing(entry);
+    };
+
+    const connectSharing: RigConnection["connectSharing"] = (subscription) => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createSharingEntry();
+        const subscriber: SharingSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        if (entry.snapshot !== undefined) subscriber.onChange(entry.snapshot);
+        if (entry.lastLoadError !== undefined) subscriber.onError?.(entry.lastLoadError);
+        startSharingEntry(entry);
+        return {
+            snapshot: () => (subscriber.closed ? undefined : entry.snapshot),
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                releaseUnusedEntries();
+            },
+        };
+    };
+
+    const getSharing: RigConnection["getSharing"] = async (operationOptions = {}) => {
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            const snapshot = await readSharing(operation.signal);
+            const entry = sharingEntry;
+            if (entry !== undefined) applySharing(entry, snapshot);
+            return snapshot;
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const requestSharing = async <Result>(
+        path: string,
+        method: "DELETE" | "POST" | "PUT",
+        schema: TSchema,
+        operationOptions: { signal?: AbortSignal },
+        body?: unknown,
+    ): Promise<Result> => {
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            const response = await requestJson(path, {
+                ...(body === undefined
+                    ? {}
+                    : {
+                          body: JSON.stringify(body),
+                          headers: { "content-type": "application/json" },
+                      }),
+                method,
+                signal: operation.signal,
+            });
+            if (response.status >= 400) {
+                throw new MutationHttpError(
+                    response.status,
+                    humanMutationError(response.data, response.status),
+                    undefined,
+                    response.data,
+                );
+            }
+            try {
+                return Value.Decode(schema, response.data) as Result;
+            } catch {
+                throw new Error("Rig returned an invalid Sharing response.");
+            }
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const applySharingMutationSnapshot = (snapshot: SharingSnapshot): SharingSnapshot => {
+        const entry = sharingEntry;
+        if (entry !== undefined) applySharing(entry, snapshot);
+        return snapshot;
+    };
+
+    const createSharingInvitation: RigConnection["createSharingInvitation"] = (
+        operationOptions = {},
+    ) =>
+        requestSharing<CreateSharingInvitationResponse>(
+            "sharing/invitations",
+            "POST",
+            createSharingInvitationResponseSchema,
+            operationOptions,
+        );
+
+    const requestSharingContact: RigConnection["requestSharingContact"] = async (
+        invitation,
+        operationOptions = {},
+    ) => {
+        if (!Value.Check(sharingIdentitySchema, invitation)) {
+            throw new Error("The Sharing invitation is invalid.");
+        }
+        const response = await requestSharing<SharingOutgoingContactRequestResponse>(
+            "sharing/contact-requests",
+            "POST",
+            sharingOutgoingContactRequestResponseSchema,
+            operationOptions,
+            { invitation },
+        );
+        const entry = sharingEntry;
+        if (entry !== undefined) void loadSharing(entry);
+        return response.request;
+    };
+
+    const finishSharingRequest = async (
+        requestId: string,
+        method: "DELETE" | "POST",
+        operation: "accept" | "reject",
+        operationOptions: { signal?: AbortSignal },
+    ): Promise<SharingSnapshot> => {
+        if (requestId.length < 1 || requestId.length > 256) {
+            throw new Error("The Sharing contact request ID is invalid.");
+        }
+        return applySharingMutationSnapshot(
+            await requestSharing<SharingSnapshot>(
+                `sharing/contact-requests/${encodeURIComponent(requestId)}${
+                    operation === "accept" ? "/accept" : ""
+                }`,
+                method,
+                sharingSnapshotSchema,
+                operationOptions,
+            ),
+        );
+    };
+
+    const acceptSharingContactRequest: RigConnection["acceptSharingContactRequest"] = (
+        requestId,
+        operationOptions = {},
+    ) => finishSharingRequest(requestId, "POST", "accept", operationOptions);
+
+    const rejectSharingContactRequest: RigConnection["rejectSharingContactRequest"] = (
+        requestId,
+        operationOptions = {},
+    ) => finishSharingRequest(requestId, "DELETE", "reject", operationOptions);
+
+    const removeSharingContact: RigConnection["removeSharingContact"] = async (
+        identity,
+        operationOptions = {},
+    ) => {
+        if (!Value.Check(sharingIdentitySchema, identity)) {
+            throw new Error("The Sharing contact identity is invalid.");
+        }
+        return applySharingMutationSnapshot(
+            await requestSharing<SharingSnapshot>(
+                `sharing/contacts/${encodeURIComponent(identity)}`,
+                "DELETE",
+                sharingSnapshotSchema,
+                operationOptions,
+            ),
         );
     };
 
@@ -6928,6 +7331,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             profilesEntry?.detachRoot();
             profilesEntry?.subscribers.clear();
             profilesEntry = undefined;
+            sharingEntry?.controller.abort();
+            sharingEntry?.detachRoot();
+            sharingEntry?.subscribers.clear();
+            sharingEntry = undefined;
             if (providerUsageEntry !== undefined) {
                 if (providerUsageEntry.timer !== undefined) {
                     clearTimeout(providerUsageEntry.timer);
@@ -6971,6 +7378,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectHappyCloud,
         connectP2p,
         connectProfiles,
+        connectSharing,
         connectInbox,
         connectPlugins,
         connectWorklets,
@@ -6980,6 +7388,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectTimeline,
         createP2pInvitation,
         createProfile,
+        createSharingInvitation,
         createWorkspace,
         createSession,
         detachSecret,
@@ -6991,7 +7400,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         getHappyCloudSessionBlob,
         getHappyCloudStatus,
         getOnboardingStatus,
+        onboardMurmur,
         getP2pPairing,
+        getSharing,
         joinP2pInvitation,
         folders,
         listProfiles,
@@ -7002,6 +7413,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         renameGroup,
         resolveExternalToolCall,
         resetSession,
+        requestSharingContact,
+        acceptSharingContactRequest,
+        rejectSharingContactRequest,
+        removeSharingContact,
         rewindSession,
         runShellCommand,
         sendMessage,

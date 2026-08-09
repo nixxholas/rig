@@ -1,9 +1,35 @@
 export type { EventId } from "./EventId.js";
 export {
     CURRENT_ONBOARDING_VERSION,
+    onboardMurmurRequestSchema,
+    onboardMurmurResponseSchema,
     onboardingStatusSchema,
+    type OnboardMurmurRequest,
+    type OnboardMurmurResponse,
     type OnboardingStatus,
 } from "./OnboardingProtocol.js";
+export {
+    createSharingInvitationResponseSchema,
+    requestSharingContactRequestSchema,
+    sharingChangedEventSchema,
+    sharingConnectionSchema,
+    sharingContactRequestSchema,
+    sharingContactSchema,
+    sharingIdentitySchema,
+    sharingOutgoingContactRequestResponseSchema,
+    sharingOutgoingContactRequestSchema,
+    sharingSnapshotSchema,
+    type CreateSharingInvitationResponse,
+    type RequestSharingContactRequest,
+    type SharingChangedEvent,
+    type SharingConnection,
+    type SharingContact,
+    type SharingContactRequest,
+    type SharingIdentity,
+    type SharingOutgoingContactRequest,
+    type SharingOutgoingContactRequestResponse,
+    type SharingSnapshot,
+} from "./SharingProtocol.js";
 export {
     createRigProfileRequestSchema,
     listRigProfilesResponseSchema,

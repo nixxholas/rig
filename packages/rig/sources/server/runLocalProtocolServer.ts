@@ -1,6 +1,6 @@
 import { chmod, open } from "node:fs/promises";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
@@ -89,6 +89,7 @@ import {
 } from "../credentials/index.js";
 import { OnboardingService } from "../onboarding/OnboardingService.js";
 import { prepareRemoteWorkGitSecret } from "./prepareRemoteWorkGitSecret.js";
+import { SharingLifecycleService, SharingService } from "../sharing/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -163,6 +164,7 @@ async function runOwnedLocalProtocolServer(
     let p2pCredentialStore: P2pCredentialStore | undefined;
     let rigProfiles: RigProfileStore | undefined;
     let onboarding: OnboardingService | undefined;
+    let sharing: SharingLifecycleService | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -715,7 +717,7 @@ async function runOwnedLocalProtocolServer(
             runtimeDirectory: join(paths.directory, "p2p-credential-runtime"),
             store: p2pCredentialStore,
         });
-        rigProfiles = new RigProfileStore({
+        const profilesStore = new RigProfileStore({
             database: activeStore,
             localInstanceId: p2pIdentity.instanceId,
             publish: (event) => {
@@ -724,11 +726,54 @@ async function runOwnedLocalProtocolServer(
                 p2pProfileReplicator?.syncProfile(event.data.profileId, event.data.version);
             },
         });
+        rigProfiles = profilesStore;
+        const sharingLifecycle = new SharingLifecycleService({
+            database: activeStore,
+            open: () =>
+                SharingService.open({
+                    database: activeStore,
+                    directory: dirname(paths.databasePath),
+                    onError: (error) => {
+                        if (isDatabaseFailure(error)) {
+                            fatalDatabaseFailure ??= error;
+                            stopServer("Database failure while synchronizing Sharing.");
+                            return;
+                        }
+                        daemonLog.record(
+                            "warning",
+                            "sharing_sync_failed",
+                            "Sharing could not synchronize contacts through Murmur.",
+                            { error: errorToMessage(error) },
+                        );
+                    },
+                    profiles: profilesStore,
+                    publish: (event) => {
+                        activeStore.globalEventQueue.publishLive(event);
+                        activeStore.liveEvents.publish(event);
+                    },
+                }),
+            profiles: profilesStore,
+        });
+        sharing = sharingLifecycle;
+        shutdown.register("sharing", () => sharingLifecycle.close());
+        try {
+            await sharingLifecycle.start();
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            daemonLog.record(
+                "warning",
+                "sharing_initialization_failed",
+                "Sharing is unavailable because its private identity store could not be opened.",
+                { error: errorToMessage(error) },
+            );
+        }
         onboarding = new OnboardingService({
+            murmurConfigured: () => sharingLifecycle.configured(),
+            onboardMurmur: (request) => sharingLifecycle.onboardMurmur(request),
             persistence: activeStore,
             profileComplete: () =>
-                rigProfiles
-                    ?.list()
+                profilesStore
+                    .list()
                     .some((profile) => profile.parentInstanceId === p2pIdentity.instanceId) ===
                 true,
             providersConfigured: () => modelCatalog.models.length > 0,
@@ -1015,6 +1060,7 @@ async function runOwnedLocalProtocolServer(
                 p2pNode: () => ({ ...p2pNode }),
                 p2pStatus: () => p2pNetwork?.status() ?? { name: p2pNode.name, transports: [] },
                 ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
+                ...(sharing === undefined ? {} : { sharing }),
                 replaceP2pCredentials: (authenticatedOwnerId, envelope) => {
                     if (
                         store === undefined ||

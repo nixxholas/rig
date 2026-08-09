@@ -75,7 +75,7 @@ function hello(
             since: 0,
         },
         projects: [],
-        protocolVersion: 16,
+        protocolVersion: 17,
         sessions,
         sessionsComplete: true,
         terminalGroups: [],

@@ -49,6 +49,9 @@ import { remoteWorkspaces } from "./migrations/44-remote-workspaces.js";
 import { folderItemsAndDocuments } from "./migrations/45-folder-items-and-documents.js";
 import { folderItemMutationRetention } from "./migrations/46-folder-item-mutation-retention.js";
 import { onboardingState } from "./migrations/47-onboarding-state.js";
+import { sharingProfile } from "./migrations/48-sharing-profile.js";
+import { sharingMurmurIdentity } from "./migrations/49-sharing-murmur-identity.js";
+import { sharingSettings } from "./migrations/50-sharing-settings.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -105,6 +108,9 @@ const migrations: readonly SessionDatabaseMigration[] = [
     folderItemsAndDocuments,
     folderItemMutationRetention,
     onboardingState,
+    sharingProfile,
+    sharingMurmurIdentity,
+    sharingSettings,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

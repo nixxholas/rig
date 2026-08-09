@@ -4,11 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { connectRig, onboardingStatusSchema, type OnboardingStatus } from "@/index.js";
 
 const providerSetup: OnboardingStatus = {
-    onboardingVersion: 1,
+    onboardingVersion: 2,
     state: "provider_setup",
 };
 const profileRequired: OnboardingStatus = {
-    onboardingVersion: 1,
+    onboardingVersion: 2,
     state: "profile_required",
 };
 
@@ -44,7 +44,7 @@ describe("onboarding status", () => {
     it("validates responses and preserves caller cancellation", async () => {
         const invalid = connectRig({
             endpoint: "http://rig.test",
-            fetch: async () => Response.json({ onboardingVersion: 1, state: "unknown" }),
+            fetch: async () => Response.json({ onboardingVersion: 2, state: "unknown" }),
             token: "secret",
         });
         await expect(invalid.getOnboardingStatus()).rejects.toThrow(
@@ -91,5 +91,33 @@ describe("onboarding status", () => {
         bodyController.abort(bodyReason);
         await expect(delayedStatus).rejects.toBe(bodyReason);
         delayedBody.close();
+    });
+
+    it("submits and validates the explicit Murmur choice", async () => {
+        const calls: { body: unknown; method: string | undefined; path: string }[] = [];
+        const rig = connectRig({
+            endpoint: "http://rig.test",
+            fetch: async (input, init) => {
+                calls.push({
+                    body: JSON.parse(String(init?.body)),
+                    method: init?.method,
+                    path: new URL(String(input)).pathname,
+                });
+                return Response.json({ enabled: false });
+            },
+            token: "secret",
+        });
+
+        await expect(rig.onboardMurmur({ enabled: false })).resolves.toEqual({
+            enabled: false,
+        });
+        expect(calls).toEqual([
+            {
+                body: { enabled: false },
+                method: "PUT",
+                path: "/onboarding/murmur",
+            },
+        ]);
+        rig.close();
     });
 });

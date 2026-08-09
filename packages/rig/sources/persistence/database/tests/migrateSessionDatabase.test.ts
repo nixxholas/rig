@@ -101,6 +101,8 @@ describe("migrateSessionDatabase", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database);
         opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN owner_instance_id"));
+        opened.database.run(sql.raw("DROP TABLE sharing_settings"));
+        opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
         dropFolderItemsAndDocumentsSchema(opened.database);
         opened.database.run(sql.raw("PRAGMA user_version = 38"));
 
@@ -172,6 +174,8 @@ describe("migrateSessionDatabase", () => {
         // with it rather than letting its later migration replay into tables it already created.
         opened.database.run(sql.raw("DROP TABLE worklet_versions"));
         opened.database.run(sql.raw("DROP TABLE worklets"));
+        opened.database.run(sql.raw("DROP TABLE sharing_settings"));
+        opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
         opened.database.run(sql.raw("DROP TABLE rig_profiles"));
         opened.database.run(sql.raw("DROP TABLE session_mutations"));
         opened.database.run(sql.raw("DROP TABLE folder_mutations"));

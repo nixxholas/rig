@@ -1,9 +1,15 @@
-import { CURRENT_ONBOARDING_VERSION, type OnboardingStatus } from "../protocol/index.js";
+import {
+    CURRENT_ONBOARDING_VERSION,
+    type OnboardMurmurRequest,
+    type OnboardMurmurResponse,
+    type OnboardingStatus,
+} from "../protocol/index.js";
 import { onboardingMarkCompleted } from "../persistence/onboarding/onboardingMarkCompleted.js";
 import { queryOnboardingState } from "../persistence/onboarding/queryOnboardingState.js";
 import type { TX } from "../persistence/Transaction.js";
 
 export interface OnboardingServiceContract {
+    onboardMurmur(request: OnboardMurmurRequest): Promise<OnboardMurmurResponse>;
     status(): Promise<OnboardingStatus>;
 }
 
@@ -14,6 +20,8 @@ export interface OnboardingPersistence {
 
 export interface OnboardingServiceOptions {
     currentVersion?: number;
+    murmurConfigured: () => boolean;
+    onboardMurmur: (request: OnboardMurmurRequest) => Promise<OnboardMurmurResponse>;
     persistence: OnboardingPersistence;
     profileComplete: () => boolean;
     /** Whether the daemon's current model catalog exposes at least one available model. */
@@ -23,17 +31,21 @@ export interface OnboardingServiceOptions {
 /**
  * Answers which onboarding step comes next and records completion durably.
  *
- * Onboarding proves each requirement once. A provider only has to be configured;
- * inference is not verified, and a provider failing later never reopens onboarding.
+ * Onboarding proves each requirement once. After provider and profile setup, the
+ * person must explicitly enable or disable Murmur before the version completes.
  */
 export class OnboardingService implements OnboardingServiceContract {
     readonly #currentVersion: number;
+    readonly #murmurConfigured: () => boolean;
+    readonly #onboardMurmur: (request: OnboardMurmurRequest) => Promise<OnboardMurmurResponse>;
     readonly #persistence: OnboardingPersistence;
     readonly #profileComplete: () => boolean;
     readonly #providersConfigured: () => boolean | Promise<boolean>;
 
     constructor(options: OnboardingServiceOptions) {
         this.#currentVersion = options.currentVersion ?? CURRENT_ONBOARDING_VERSION;
+        this.#murmurConfigured = options.murmurConfigured;
+        this.#onboardMurmur = options.onboardMurmur;
         this.#persistence = options.persistence;
         this.#profileComplete = options.profileComplete;
         this.#providersConfigured = options.providersConfigured;
@@ -47,8 +59,26 @@ export class OnboardingService implements OnboardingServiceContract {
         }
         if (this.#completed()) return this.#status("complete");
         if (!this.#profileComplete()) return this.#status("profile_required");
+        if (!this.#murmurConfigured()) return this.#status("murmur_setup");
         this.#markCompleted();
         return this.#status("complete");
+    }
+
+    async onboardMurmur(request: OnboardMurmurRequest): Promise<OnboardMurmurResponse> {
+        if (!this.#completed()) {
+            if (!(await this.#providersConfigured())) {
+                throw new Error("Configure a provider before setting up Murmur.");
+            }
+            if (!this.#profileComplete()) {
+                throw new Error("Create a human profile before setting up Murmur.");
+            }
+        }
+        const result = await this.#onboardMurmur(request);
+        if (!this.#murmurConfigured()) {
+            throw new Error("Murmur onboarding did not persist a choice.");
+        }
+        this.#markCompleted();
+        return result;
     }
 
     #completed(): boolean {
