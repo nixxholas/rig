@@ -407,15 +407,16 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        await session.runShellCommand({
-            command: "sleep 60",
-            commandId: "active-abort-background",
-        });
-        if (runtime === undefined) throw new Error("Runtime was not created.");
-        expect(runtime.processManager.activeCount()).toBe(1);
-
         const submitted = session.submit({ text: "Keep running until I abort." });
         await started.promise;
+        if (runtime === undefined) throw new Error("Runtime was not created.");
+        const background = runtime.processManager.start({
+            command: "sleep 60",
+            cwd: tmpdir(),
+            maxOutputBytes: 4_096,
+        });
+        background.detached = true;
+        expect(runtime.processManager.activeCount()).toBe(1);
 
         try {
             await expect(session.abort()).resolves.toMatchObject({
@@ -430,7 +431,7 @@ describe("InMemorySession abort", () => {
             });
             await session.beginShutdown();
         }
-    }, 10_000);
+    });
 
     it("continues the same run immediately when aborting with pending steering", async () => {
         const started = deferred<void>();
