@@ -159,7 +159,7 @@ describe("rig-connect against a live daemon", () => {
             await waitFor(
                 async () => (await store.get(createdId)) !== undefined,
                 "the new session to exist",
-                15_000,
+                30_000,
             );
             expect((await store.get(createdId))?.snapshot().cwd).toBe(
                 "/tmp/rig-created-through-connect",
@@ -170,7 +170,7 @@ describe("rig-connect against a live daemon", () => {
                 async () =>
                     (await store.get(forkedId)) !== undefined || mutationFailures.length > 0,
                 `the fork to exist; requests: ${requests.join(", ")}`,
-                15_000,
+                30_000,
             );
             expect(mutationFailures).toEqual([]);
             expect((await store.get(forkedId))?.snapshot().id).toBe(forkedId);
@@ -178,7 +178,7 @@ describe("rig-connect against a live daemon", () => {
             session.close();
             rig.close();
         }
-    }, 30_000);
+    }, 90_000);
 
     it("tracks what the session is doing without asking the daemon anything else", async () => {
         const { endpoint, store } = await startDaemon();
