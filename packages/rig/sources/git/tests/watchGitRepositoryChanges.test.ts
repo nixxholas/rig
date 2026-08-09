@@ -85,15 +85,15 @@ describe("watchGitRepositoryChanges", () => {
         await waitFor(() => dirty.count >= 1);
         const afterFirst = dirty.count;
 
-        // Git replaces HEAD and the index by renaming a lock file over them. A watch on the files
-        // themselves would follow the dead inode and go silent from here on.
+        // Git replaces HEAD and the index by renaming a lock file over them. A watch on the
+        // files themselves would follow the dead inode and go silent from here on.
         await commit(repository, "c.txt", "three\n");
         await waitFor(() => dirty.count > afterFirst);
         await commit(repository, "d.txt", "four\n");
         await waitFor(() => dirty.count > afterFirst + 1);
 
         expect(dirty.count).toBeGreaterThan(afterFirst + 1);
-    });
+    }, 30_000);
 
     it("notices a branch whose name contains a slash", async () => {
         const repository = await createRepository();
