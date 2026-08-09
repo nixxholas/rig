@@ -38,7 +38,7 @@ afterEach(async () => {
 });
 
 describe("IrohNetwork", () => {
-    it("connects and keeps pinging when both endpoint identities are allowlisted", async () => {
+    it("connects, keeps pinging, and publishes liveness when both peers are trusted", async () => {
         const firstKey = SecretKey.generate();
         const secondKey = SecretKey.generate();
         const firstIdentity = createP2pInstanceIdentity();
@@ -103,7 +103,10 @@ describe("IrohNetwork", () => {
         await vi.waitFor(() =>
             expect(first.status().peers[0]!.lastSeenAt).toBeGreaterThan(firstPingAt),
         );
-        expect(firstStatusChanged).toHaveBeenCalledTimes(publishedAfterConnect);
+        expect(firstStatusChanged).toHaveBeenCalledTimes(publishedAfterConnect + 1);
+        expect(firstStatusChanged.mock.calls.at(-1)?.[0].peers[0]?.lastSeenAt).toBeGreaterThan(
+            firstPingAt,
+        );
         await vi.waitFor(() => expect(updateSecondPeerAddress).toHaveBeenCalled());
         const learnedTicket = updateSecondPeerAddress.mock.calls[0]![2];
         expect(EndpointTicket.fromString(learnedTicket).endpointAddr().id().toString()).toBe(
@@ -203,6 +206,86 @@ describe("IrohNetwork", () => {
             await serverEndpoint.close();
             await serverTask;
         }
+    });
+
+    it("keeps a peer connected while application data arrives despite stalled pongs", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const [rawClientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const clientEndpoint = endpointWithStalledPongs(rawClientEndpoint);
+        const clientId = rawClientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        const clientStatuses: string[] = [];
+        let receivedChunks = 0;
+        let releaseResponse!: () => void;
+        const responseReleased = new Promise<void>((resolve) => {
+            releaseResponse = resolve;
+        });
+        const client = await IrohNetwork.create({
+            config: {},
+            endpointIds: [serverId],
+            endpoint: clientEndpoint,
+            handshakeTimeoutMs: 100,
+            identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
+            onStatusChange: (status) => {
+                clientStatuses.push(
+                    status.state === "ready" ? status.peers[0]!.status : status.state,
+                );
+            },
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 5,
+            pingTimeoutMs: 15,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            config: {},
+            endpointIds: [clientId],
+            endpoint: serverEndpoint,
+            handshakeTimeoutMs: 100,
+            identity: serverIdentity,
+            idleTimeoutMs: 40,
+            knownPeer: () => namedPeer(clientIdentity, "Client Rig"),
+            peerAddresses: new Map([[clientId, rawClientEndpoint.addr()]]),
+            pingIntervalMs: 5,
+            relayMode: RelayMode.disabled(),
+            secretKey: serverKey,
+            serveRequest: async () => ({
+                body: (async function* () {
+                    for (let index = 0; index < 70; index += 1) {
+                        await new Promise((resolve) => setTimeout(resolve, 5));
+                        yield Buffer.from([index]);
+                    }
+                    await responseReleased;
+                })(),
+                headers: { "content-type": "application/octet-stream" },
+                status: 200,
+            }),
+        });
+        networks.push(server);
+
+        const response = await client.fetch(
+            serverIdentity.instanceId,
+            { body: new Uint8Array(), headers: {}, method: "GET", path: "/active" },
+            new AbortController().signal,
+        );
+        const consuming = (async () => {
+            for await (const _chunk of response.body) receivedChunks += 1;
+        })();
+        await vi.waitFor(() => expect(receivedChunks).toBe(70));
+
+        expect(client.status().peers[0]).toMatchObject({ status: "connected" });
+        expect(clientStatuses).not.toContain("unreachable");
+
+        releaseResponse();
+        await consuming;
     });
 
     it("rejects a transport-authenticated endpoint that presents the wrong stable key", async () => {
@@ -1430,6 +1513,61 @@ function observeEndpointConnections(endpoint: Endpoint): {
             },
         }),
     };
+}
+
+function endpointWithStalledPongs(endpoint: Endpoint): Endpoint {
+    return new Proxy(endpoint, {
+        get(target, property) {
+            if (property === "connect") {
+                return async (...args: Parameters<Endpoint["connect"]>) => {
+                    const connection = await target.connect(...args);
+                    let openedStreams = 0;
+                    return new Proxy(connection, {
+                        get(connectionTarget, connectionProperty) {
+                            if (connectionProperty === "openBi") {
+                                return async () => {
+                                    const stream = await connectionTarget.openBi();
+                                    openedStreams += 1;
+                                    if (openedStreams === 1) return stream;
+                                    return {
+                                        recv: new Proxy(stream.recv, {
+                                            get(recvTarget, recvProperty) {
+                                                if (recvProperty === "readToEnd") {
+                                                    return (limit: number) =>
+                                                        limit === 16
+                                                            ? new Promise<number[]>(() => undefined)
+                                                            : recvTarget.readToEnd(limit);
+                                                }
+                                                const value = Reflect.get(
+                                                    recvTarget,
+                                                    recvProperty,
+                                                    recvTarget,
+                                                );
+                                                return typeof value === "function"
+                                                    ? value.bind(recvTarget)
+                                                    : value;
+                                            },
+                                        }),
+                                        send: stream.send,
+                                    };
+                                };
+                            }
+                            const value = Reflect.get(
+                                connectionTarget,
+                                connectionProperty,
+                                connectionTarget,
+                            );
+                            return typeof value === "function"
+                                ? value.bind(connectionTarget)
+                                : value;
+                        },
+                    });
+                };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+    });
 }
 
 async function fetchBody(network: IrohNetwork, peerId: string, path: string): Promise<string> {

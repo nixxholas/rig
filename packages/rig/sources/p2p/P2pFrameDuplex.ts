@@ -29,9 +29,13 @@ export interface P2pFrameDuplex {
 
 export class P2pFrameWriteTimeoutError extends Error {}
 
-export function createIrohFrameReader(recv: RecvStream): P2pFrameReader {
+export function createIrohFrameReader(recv: RecvStream, onReceive?: () => void): P2pFrameReader {
     return {
-        read: async (length) => new Uint8Array(await recv.readExact(length)),
+        read: async (length) => {
+            const bytes = new Uint8Array(await recv.readExact(length));
+            if (bytes.byteLength > 0) onReceive?.();
+            return bytes;
+        },
     };
 }
 
@@ -42,8 +46,12 @@ export function createIrohFrameWriter(send: SendStream): P2pFrameWriter {
     };
 }
 
-export function createIrohFrameDuplex(recv: RecvStream, send: SendStream): P2pFrameDuplex {
-    return { recv: createIrohFrameReader(recv), send: createIrohFrameWriter(send) };
+export function createIrohFrameDuplex(
+    recv: RecvStream,
+    send: SendStream,
+    onReceive?: () => void,
+): P2pFrameDuplex {
+    return { recv: createIrohFrameReader(recv, onReceive), send: createIrohFrameWriter(send) };
 }
 
 export async function readBytes(recv: P2pFrameReader, length: number): Promise<Uint8Array> {

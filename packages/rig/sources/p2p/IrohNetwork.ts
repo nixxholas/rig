@@ -167,6 +167,9 @@ export class IrohNetwork implements P2pTransport {
     readonly #peerDiscoveryProbes = new Set<string>();
     readonly #peerNeedsDiscovery = new Set<string>();
     readonly #peerTickets = new Map<string, string>();
+    readonly #peerActivityRevisions = new Map<string, number>();
+    readonly #peerLastActivityAt = new Map<string, number>();
+    readonly #peerLastActivityPublishedAt = new Map<string, number>();
     readonly #peerStatuses = new Map<string, P2pPeerStatus>();
     readonly #peerIdentities = new Map<string, P2pPeerIdentity>();
     readonly #peerNames = new Map<string, string>();
@@ -219,8 +222,7 @@ export class IrohNetwork implements P2pTransport {
         }
         this.#pingIntervalMs = options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
         this.#idleTimeoutMs = Math.max(
-            options.idleTimeoutMs ?? 0,
-            DEFAULT_IDLE_TIMEOUT_MS,
+            options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
             this.#pingIntervalMs * 3,
         );
         this.#pingTimeoutMs = options.pingTimeoutMs ?? DEFAULT_PING_TIMEOUT_MS;
@@ -396,7 +398,11 @@ export class IrohNetwork implements P2pTransport {
             );
             signal.addEventListener("abort", abort, { once: true });
             await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_HTTP]), signal);
-            const duplex = createIrohFrameDuplex(peerStream.stream.recv, peerStream.stream.send);
+            const duplex = createIrohFrameDuplex(
+                peerStream.stream.recv,
+                peerStream.stream.send,
+                () => this.#recordPeerActivity(endpointId),
+            );
             await withAbort(
                 withDeadline(
                     writeP2pHttpRequest(duplex.send, request, { finish: false }),
@@ -452,7 +458,11 @@ export class IrohNetwork implements P2pTransport {
             );
             signal.addEventListener("abort", abort, { once: true });
             await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_TUNNEL]), signal);
-            const duplex = createIrohFrameDuplex(peerStream.stream.recv, peerStream.stream.send);
+            const duplex = createIrohFrameDuplex(
+                peerStream.stream.recv,
+                peerStream.stream.send,
+                () => this.#recordPeerActivity(endpointId),
+            );
             await withAbort(writeP2pTunnelRequest(duplex.send, request), signal);
             const response = await withAbort(
                 withDeadline(
@@ -609,9 +619,10 @@ export class IrohNetwork implements P2pTransport {
                 "The peer did not finish its signed identity hello stream in time.",
             );
             this.#rememberPeer(remoteId, authenticated);
+            this.#recordPeerActivity(remoteId);
             this.#authenticatedConnections.add(connection);
             tracked = true;
-            await this.#serveConnection(connection, authenticated.instanceId);
+            await this.#serveConnection(connection, authenticated.instanceId, remoteId);
         } catch {
             connection?.close(CLOSE_SHUTDOWN, []);
         } finally {
@@ -621,9 +632,14 @@ export class IrohNetwork implements P2pTransport {
         }
     }
 
-    async #serveConnection(connection: Connection, peerId: string): Promise<void> {
+    async #serveConnection(
+        connection: Connection,
+        peerId: string,
+        endpointId: string,
+    ): Promise<void> {
         const streams = new Set<Promise<void>>();
         const controller = new AbortController();
+        let accepting: ReturnType<Connection["acceptBi"]> | undefined;
         if (typeof connection.closed === "function") {
             void connection.closed().then(
                 (reason) => controller.abort(new Error(reason)),
@@ -636,14 +652,26 @@ export class IrohNetwork implements P2pTransport {
                     await Promise.race(streams);
                     continue;
                 }
-                const stream = await withDeadline(
-                    connection.acceptBi(),
-                    this.#idleTimeoutMs,
-                    "The peer did not open a P2P stream in time.",
-                );
-                const serving = this.#serveStream(peerId, stream, controller.signal).catch(
-                    () => undefined,
-                );
+                accepting ??= connection.acceptBi();
+                const stream =
+                    streams.size === 0
+                        ? await withDeadline(
+                              accepting,
+                              this.#idleTimeoutMs,
+                              "The peer did not open a P2P stream in time.",
+                          )
+                        : await Promise.race([
+                              accepting,
+                              Promise.race(streams).then(() => undefined),
+                          ]);
+                if (stream === undefined) continue;
+                accepting = undefined;
+                const serving = this.#serveStream(
+                    peerId,
+                    endpointId,
+                    stream,
+                    controller.signal,
+                ).catch(() => undefined);
                 streams.add(serving);
                 void serving.then(
                     () => streams.delete(serving),
@@ -663,6 +691,7 @@ export class IrohNetwork implements P2pTransport {
 
     async #serveStream(
         peerId: string,
+        endpointId: string,
         stream: Awaited<ReturnType<Connection["acceptBi"]>>,
         connectionSignal: AbortSignal,
     ): Promise<void> {
@@ -675,6 +704,7 @@ export class IrohNetwork implements P2pTransport {
                     "The peer did not identify its P2P request in time.",
                 )
             )[0];
+            this.#recordPeerActivity(endpointId);
         } catch (error) {
             cancelIrohStream(stream);
             throw error;
@@ -718,7 +748,9 @@ export class IrohNetwork implements P2pTransport {
             return;
         }
         this.#incomingHttpRequestCount += 1;
-        const duplex = createIrohFrameDuplex(stream.recv, stream.send);
+        const duplex = createIrohFrameDuplex(stream.recv, stream.send, () =>
+            this.#recordPeerActivity(endpointId),
+        );
         const controller = new AbortController();
         const abortFromConnection = (): void => controller.abort(connectionSignal.reason);
         if (connectionSignal.aborted) abortFromConnection();
@@ -927,34 +959,50 @@ export class IrohNetwork implements P2pTransport {
         while (!this.#abort.signal.aborted) {
             let shared: IrohSharedConnection | undefined;
             try {
-                this.#setPeerStatus(endpointId, this.#statusFor(endpointId, "connecting"));
+                if (!this.#hasRecentPeerActivity(endpointId)) {
+                    this.#setPeerStatus(endpointId, this.#statusFor(endpointId, "connecting"));
+                }
                 shared = await this.#outgoingConnection(endpointId, this.#abort.signal);
                 const authenticated = shared.identity;
-                consecutiveFailures = 0;
-                this.#peerNeedsDiscovery.delete(endpointId);
-                retryMs = INITIAL_RETRY_MS;
                 let consecutivePingFailures = 0;
                 while (!this.#abort.signal.aborted) {
+                    const lastActivityAt = this.#peerLastActivityAt.get(endpointId);
+                    if (lastActivityAt !== undefined) {
+                        const quietForMs = Date.now() - lastActivityAt;
+                        if (quietForMs < this.#pingIntervalMs) {
+                            consecutiveFailures = 0;
+                            consecutivePingFailures = 0;
+                            this.#peerNeedsDiscovery.delete(endpointId);
+                            retryMs = INITIAL_RETRY_MS;
+                            await this.#wait(this.#pingIntervalMs - quietForMs);
+                            continue;
+                        }
+                    }
                     const startedAt = Date.now();
+                    const activityRevision = this.#peerActivityRevisions.get(endpointId) ?? 0;
                     try {
                         await exchangePing(shared.connection, this.#pingTimeoutMs);
                         consecutivePingFailures = 0;
                     } catch (error) {
+                        if (
+                            (this.#peerActivityRevisions.get(endpointId) ?? 0) !== activityRevision
+                        ) {
+                            consecutiveFailures = 0;
+                            consecutivePingFailures = 0;
+                            this.#peerNeedsDiscovery.delete(endpointId);
+                            retryMs = INITIAL_RETRY_MS;
+                            continue;
+                        }
                         if (isConnectionClosed(shared.connection)) throw error;
                         consecutivePingFailures += 1;
                         if (consecutivePingFailures >= 2) throw error;
                         await this.#wait(INITIAL_RETRY_MS);
                         continue;
                     }
-                    this.#setPeerStatus(endpointId, {
-                        address: endpointId,
-                        lastSeenAt: Date.now(),
-                        name: this.#peerName(endpointId),
-                        peerId: authenticated.instanceId,
-                        publicKey: authenticated.publicKey,
-                        rttMs: Date.now() - startedAt,
-                        status: "connected",
-                    });
+                    consecutiveFailures = 0;
+                    this.#peerNeedsDiscovery.delete(endpointId);
+                    retryMs = INITIAL_RETRY_MS;
+                    this.#recordPeerActivity(endpointId, Date.now() - startedAt, authenticated);
                     await this.#wait(this.#pingIntervalMs);
                 }
             } catch (error) {
@@ -966,10 +1014,12 @@ export class IrohNetwork implements P2pTransport {
                 if (consecutiveFailures >= 2 && this.#peerAddresses.has(endpointId)) {
                     this.#peerNeedsDiscovery.add(endpointId);
                 }
-                this.#setPeerStatus(endpointId, {
-                    ...this.#statusFor(endpointId, "unreachable"),
-                    error: errorToMessage(error),
-                });
+                if (!this.#hasRecentPeerActivity(endpointId)) {
+                    this.#setPeerStatus(endpointId, {
+                        ...this.#statusFor(endpointId, "unreachable"),
+                        error: errorToMessage(error),
+                    });
+                }
                 await this.#wait(retryMs);
                 retryMs = Math.min(MAXIMUM_RETRY_MS, retryMs * 2);
             }
@@ -1053,6 +1103,7 @@ export class IrohNetwork implements P2pTransport {
             entry.connection = connection;
             this.#authenticatedConnections.add(connection);
             this.#rememberPeer(endpointId, identity);
+            this.#recordPeerActivity(endpointId);
             if (typeof connection.closed === "function") {
                 void connection.closed().then(
                     () => this.#retireOutgoingConnection(endpointId, entry, "closed"),
@@ -1342,6 +1393,50 @@ export class IrohNetwork implements P2pTransport {
             throw new Error("The configured Iroh peer has no trusted display name.");
         }
         return name;
+    }
+
+    #hasRecentPeerActivity(endpointId: string): boolean {
+        const lastActivityAt = this.#peerLastActivityAt.get(endpointId);
+        return lastActivityAt !== undefined && Date.now() - lastActivityAt < this.#pingIntervalMs;
+    }
+
+    #recordPeerActivity(
+        endpointId: string,
+        rttMs?: number,
+        authenticated = this.#peerIdentities.get(endpointId),
+    ): void {
+        if (authenticated === undefined) return;
+        const now = Date.now();
+        this.#peerActivityRevisions.set(
+            endpointId,
+            (this.#peerActivityRevisions.get(endpointId) ?? 0) + 1,
+        );
+        this.#peerLastActivityAt.set(endpointId, now);
+        const previous = this.#peerStatuses.get(endpointId);
+        const statusChanged =
+            previous?.status !== "connected" ||
+            previous.error !== undefined ||
+            previous.name !== this.#peerName(endpointId);
+        this.#setPeerStatus(endpointId, {
+            address: endpointId,
+            lastSeenAt: now,
+            name: this.#peerName(endpointId),
+            peerId: authenticated.instanceId,
+            publicKey: authenticated.publicKey,
+            ...(rttMs === undefined
+                ? previous?.rttMs === undefined
+                    ? {}
+                    : { rttMs: previous.rttMs }
+                : { rttMs }),
+            status: "connected",
+        });
+        const lastPublishedAt = this.#peerLastActivityPublishedAt.get(endpointId) ?? 0;
+        if (statusChanged) {
+            this.#peerLastActivityPublishedAt.set(endpointId, now);
+        } else if (now - lastPublishedAt >= this.#pingIntervalMs) {
+            this.#peerLastActivityPublishedAt.set(endpointId, now);
+            this.#publishStatus();
+        }
     }
 
     #setPeerStatus(endpointId: string, status: P2pPeerStatus): void {
