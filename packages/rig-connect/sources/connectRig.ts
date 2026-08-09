@@ -116,6 +116,7 @@ import type {
     SharingOutgoingContactRequestResponse,
     SharingSnapshot,
     CreateSharingInvitationResponse,
+    FolderShareStatus,
     UpdateRigProfileRequest,
 } from "./protocol.js";
 import {
@@ -141,6 +142,8 @@ import {
     sharingOutgoingContactRequestResponseSchema,
     sharingSnapshotSchema,
     createSharingInvitationResponseSchema,
+    createFolderShareRequestSchema,
+    folderShareStatusSchema,
     updateRigProfileRequestSchema,
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
@@ -854,6 +857,12 @@ export interface RigConnection {
     createSharingInvitation: (options?: {
         signal?: AbortSignal;
     }) => Promise<CreateSharingInvitationResponse>;
+    /** Creates one Murmur group whose invitation descriptor carries the folder's current tree. */
+    shareFolder: (
+        folderId: string,
+        contacts: readonly string[],
+        options?: { signal?: AbortSignal },
+    ) => Promise<FolderShareStatus>;
     requestSharingContact: (
         invitation: string,
         options?: { signal?: AbortSignal },
@@ -4649,6 +4658,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 name: folderRequest.name.trim(),
                 orderKey: "\uffff",
                 path: "",
+                shared: false,
                 updatedAt: createdAt,
                 version: 0,
                 ...(folderRequest.description === undefined
@@ -5649,6 +5659,26 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             createSharingInvitationResponseSchema,
             operationOptions,
         );
+
+    const shareFolder: RigConnection["shareFolder"] = (
+        folderId,
+        contacts,
+        operationOptions = {},
+    ) => {
+        const body = { contacts: [...contacts], folderId };
+        if (!Value.Check(createFolderShareRequestSchema, body)) {
+            return Promise.reject(
+                new Error("A folder share needs a folder and at least one Sharing contact."),
+            );
+        }
+        return requestSharing<FolderShareStatus>(
+            "sharing/folders",
+            "POST",
+            folderShareStatusSchema,
+            operationOptions,
+            body,
+        );
+    };
 
     const requestSharingContact: RigConnection["requestSharingContact"] = async (
         invitation,
@@ -7418,6 +7448,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         acceptSharingContactRequest,
         rejectSharingContactRequest,
         removeSharingContact,
+        shareFolder,
         rewindSession,
         runShellCommand,
         sendMessage,

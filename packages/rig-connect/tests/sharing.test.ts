@@ -23,6 +23,7 @@ function sharing(version: string, contacts = 0): SharingSnapshot {
             profile: null,
             status: "active" as const,
         })),
+        folderShares: [],
         identity: IDENTITY,
         incomingRequests: [],
         outgoingRequests: [],
@@ -122,6 +123,14 @@ describe("Sharing connection", () => {
                     request: { id: IDENTITY, identity: REMOTE, sessionId: IDENTITY },
                 });
             }
+            if (path === "/sharing/folders") {
+                return Response.json({
+                    groupId: IDENTITY,
+                    members: [IDENTITY, REMOTE],
+                    rootFolderId: "afolder000000000000000001",
+                    status: "syncing",
+                });
+            }
             return Response.json(current);
         });
         const rig = connectRig({ endpoint: "http://rig.test", fetch, token: "secret" });
@@ -143,6 +152,13 @@ describe("Sharing connection", () => {
         await expect(rig.acceptSharingContactRequest("request-1")).resolves.toEqual(current);
         await expect(rig.rejectSharingContactRequest("request-2")).resolves.toEqual(current);
         await expect(rig.removeSharingContact(REMOTE)).resolves.toEqual(current);
+        await expect(rig.shareFolder("afolder000000000000000001", [REMOTE])).resolves.toMatchObject(
+            {
+                groupId: IDENTITY,
+                rootFolderId: "afolder000000000000000001",
+                status: "syncing",
+            },
+        );
 
         expect(requests).toEqual([
             {
@@ -170,6 +186,14 @@ describe("Sharing connection", () => {
                 body: undefined,
                 method: "DELETE",
                 path: `/sharing/contacts/${REMOTE}`,
+            },
+            {
+                body: {
+                    contacts: [REMOTE],
+                    folderId: "afolder000000000000000001",
+                },
+                method: "POST",
+                path: "/sharing/folders",
             },
         ]);
         rig.close();

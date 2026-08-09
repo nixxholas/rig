@@ -747,6 +747,7 @@ async function runOwnedLocalProtocolServer(
                 SharingService.open({
                     database: activeStore,
                     directory: dirname(paths.databasePath),
+                    folders: activeStore,
                     onError: (error) => {
                         if (isDatabaseFailure(error)) {
                             fatalDatabaseFailure ??= error;
@@ -769,6 +770,10 @@ async function runOwnedLocalProtocolServer(
             profiles: profilesStore,
         });
         sharing = sharingLifecycle;
+        const unsubscribeFolderSharing = activeStore.liveEvents.subscribe(({ event }) => {
+            if (event.type === "folders_changed") sharingLifecycle.foldersChanged();
+        });
+        shutdown.register("folder sharing observer", async () => unsubscribeFolderSharing());
         shutdown.register("sharing", () => sharingLifecycle.close());
         try {
             await sharingLifecycle.start();

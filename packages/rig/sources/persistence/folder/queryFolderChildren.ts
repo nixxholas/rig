@@ -15,7 +15,11 @@ export interface FolderChildOrder {
  */
 export function queryFolderChildren(tx: TX, parentId: string | null): readonly FolderChildOrder[] {
     const childFolders = tx
-        .select({ id: folders.id, orderKey: folders.orderKey })
+        .select({
+            id: folders.id,
+            orderKey: folders.orderKey,
+            sharedGroupId: folders.sharedGroupId,
+        })
         .from(folders)
         .where(
             and(
@@ -25,7 +29,13 @@ export function queryFolderChildren(tx: TX, parentId: string | null): readonly F
         )
         .orderBy(asc(folders.orderKey), asc(folders.id))
         .all();
-    if (parentId === null) return childFolders;
+    if (parentId === null) {
+        return childFolders.sort(
+            (left, right) =>
+                Number(right.sharedGroupId !== null) - Number(left.sharedGroupId !== null) ||
+                compareChildren(left, right),
+        );
+    }
 
     const childItems = tx
         .select({ id: folderItems.id, orderKey: folderItems.orderKey })

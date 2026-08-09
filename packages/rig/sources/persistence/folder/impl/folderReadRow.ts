@@ -15,6 +15,7 @@ export function folderReadRow(row: FolderRow): Folder {
         ...(row.parentId === null ? {} : { parentId: row.parentId }),
         path: row.path,
         ...(row.rules === null ? {} : { rules: row.rules }),
+        shared: row.sharedGroupId !== null,
         updatedAt: row.updatedAtMs,
         version: row.version,
     };

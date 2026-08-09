@@ -35,6 +35,7 @@ describe("folder persistence", () => {
             name: "Media",
             orderKey: "a0",
             path: "/folders/media",
+            shared: false,
             updatedAt: 1,
             version: 1,
         });

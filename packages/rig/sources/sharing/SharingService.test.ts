@@ -1,5 +1,6 @@
 import {
     contactSessionDescriptor,
+    type CreateMurmurSessionOptions,
     type MurmurContact,
     type MurmurContactProfile,
     type MurmurContactRequested,
@@ -316,6 +317,19 @@ class FakeMurmurClient implements SharingMurmurClient {
         return INVITATION;
     }
 
+    async createSession(options: CreateMurmurSessionOptions): Promise<MurmurSession> {
+        const session: MurmurSession = {
+            bufferedEvents: 0,
+            committer: this.identity,
+            descriptor: options.descriptor,
+            id: SESSION,
+            members: [this.identity, ...(options.contacts ?? []).map((member) => member)],
+            status: "creating",
+        };
+        this.#sessions.push(session);
+        return session;
+    }
+
     async rejectContact(sessionId: Uint8Array): Promise<void> {
         const index = this.#incoming.findIndex((request) =>
             Buffer.from(request.sessionId).equals(Buffer.from(sessionId)),
@@ -355,6 +369,14 @@ class FakeMurmurClient implements SharingMurmurClient {
 
     async sessions(_options?: MurmurSessionListOptions): Promise<MurmurSessionPage> {
         return { cursor: null, sessions: this.#sessions };
+    }
+
+    async send(): Promise<string> {
+        return "delivery-1";
+    }
+
+    async session(id: Uint8Array): Promise<MurmurSession | undefined> {
+        return this.#sessions.find((session) => Buffer.from(session.id).equals(Buffer.from(id)));
     }
 
     async sync(options: MurmurSyncOptions = {}): Promise<void> {

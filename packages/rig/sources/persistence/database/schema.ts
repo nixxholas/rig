@@ -220,11 +220,82 @@ export const folders = sqliteTable(
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
         archivedAtMs: integer("archived_at_ms"),
+        /** Murmur MLS session identity for a shared root; null for ordinary folders. */
+        sharedGroupId: text("shared_group_id"),
     },
     (table) => [
         foreignKey({ columns: [table.parentId], foreignColumns: [table.id] }),
         index("folders_parent_order").on(table.parentId, table.orderKey),
     ],
+);
+
+export const folderShares = sqliteTable("folder_shares", {
+    groupId: text("group_id").primaryKey(),
+    shareId: text("share_id").notNull().unique(),
+    rootFolderId: text("root_folder_id")
+        .notNull()
+        .unique()
+        .references(() => folders.id),
+    stateJson: text("state_json").notNull(),
+    logicalClock: integer("logical_clock").notNull(),
+    status: text("status", { enum: ["syncing", "synced", "error"] }).notNull(),
+    error: text("error"),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+    lastSyncedAtMs: integer("last_synced_at_ms"),
+});
+
+export const folderShareIntents = sqliteTable("folder_share_intents", {
+    shareId: text("share_id").primaryKey(),
+    rootFolderId: text("root_folder_id")
+        .notNull()
+        .unique()
+        .references(() => folders.id),
+    stateJson: text("state_json").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+});
+
+export const folderShareNodes = sqliteTable(
+    "folder_share_nodes",
+    {
+        groupId: text("group_id")
+            .notNull()
+            .references(() => folderShares.groupId, { onDelete: "cascade" }),
+        folderId: text("folder_id").notNull(),
+        nodeJson: text("node_json"),
+        logicalClock: integer("logical_clock").notNull(),
+        sender: text("sender").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.groupId, table.folderId] })],
+);
+
+export const folderShareUpdates = sqliteTable(
+    "folder_share_updates",
+    {
+        deliveryId: text("delivery_id").primaryKey(),
+        groupId: text("group_id")
+            .notNull()
+            .references(() => folderShares.groupId, { onDelete: "cascade" }),
+        operationId: text("operation_id").notNull(),
+        sender: text("sender").notNull(),
+        logicalClock: integer("logical_clock").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [unique().on(table.groupId, table.operationId)],
+);
+
+export const folderShareOutbox = sqliteTable(
+    "folder_share_outbox",
+    {
+        operationId: text("operation_id").primaryKey(),
+        groupId: text("group_id")
+            .notNull()
+            .references(() => folderShares.groupId, { onDelete: "cascade" }),
+        payloadJson: text("payload_json").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [index("folder_share_outbox_pending").on(table.createdAtMs, table.operationId)],
 );
 
 export const sessions = sqliteTable(

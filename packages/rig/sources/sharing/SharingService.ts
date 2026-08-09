@@ -4,6 +4,7 @@ import {
     DISCOVERY_INVITATION_TTL_MILLISECONDS,
     MurmurClient,
     isContactSessionDescriptor,
+    type CreateMurmurSessionOptions,
     type MurmurContact,
     type MurmurContactProfile,
     type MurmurContactRequested,
@@ -26,6 +27,7 @@ import {
     createEventIdFactory,
     rigProfileSchema,
     type CreateSharingInvitationResponse,
+    type FolderShareStatus,
     type RigProfile,
     type SharingChangedEvent,
     type SharingConnection,
@@ -35,6 +37,11 @@ import {
     type SharingSnapshot,
 } from "../protocol/index.js";
 import type { RigProfileStore } from "../profiles/index.js";
+import {
+    FOLDER_SHARING_MURMUR_SERVICE_ID,
+    FolderSharingService,
+    type FolderSharingStore,
+} from "./FolderSharingService.js";
 
 export const DEFAULT_MURMUR_RELAY_URL = "https://murmur.cluster-fluster.com/";
 
@@ -57,6 +64,7 @@ export interface SharingMurmurClient {
     close(): void;
     contactRequests(): Promise<readonly MurmurContactRequested[]>;
     contacts(): Promise<readonly MurmurContact[]>;
+    createSession(options: CreateMurmurSessionOptions): Promise<MurmurSession>;
     createInvitation(signal?: AbortSignal): Promise<Uint8Array>;
     rejectContact(sessionId: Uint8Array): Promise<void>;
     removeContact(identity: Uint8Array): Promise<void>;
@@ -70,12 +78,15 @@ export interface SharingMurmurClient {
         signal?: AbortSignal,
     ): Promise<MurmurSession>;
     sessions(options?: MurmurSessionListOptions): Promise<MurmurSessionPage>;
+    send(id: Uint8Array, bytes: Uint8Array): Promise<string>;
+    session(id: Uint8Array): Promise<MurmurSession | undefined>;
     sync(options?: MurmurSyncOptions): Promise<void>;
 }
 
 export interface SharingServiceOptions {
     client: SharingMurmurClient;
     database: SharingDatabase;
+    folderSharing?: FolderSharingService;
     now?: () => number;
     onError?: (error: unknown) => void;
     profiles: RigProfileStore;
@@ -83,14 +94,20 @@ export interface SharingServiceOptions {
     store?: SqliteMurmurStore;
 }
 
-export interface OpenSharingServiceOptions extends Omit<SharingServiceOptions, "client" | "store"> {
+export interface OpenSharingServiceOptions extends Omit<
+    SharingServiceOptions,
+    "client" | "folderSharing" | "store"
+> {
     directory: string;
+    folders?: FolderSharingStore;
     relay?: string | URL;
 }
 
 export interface SharingServiceContract {
     acceptContact(requestId: string): Promise<void>;
     createInvitation(signal?: AbortSignal): Promise<CreateSharingInvitationResponse>;
+    createFolderShare(folderId: string, contacts: readonly string[]): Promise<FolderShareStatus>;
+    foldersChanged(): void;
     rejectContact(requestId: string): Promise<void>;
     removeContact(identity: string): Promise<void>;
     requestContact(
@@ -106,6 +123,7 @@ export class SharingService implements SharingServiceContract {
     readonly #client: SharingMurmurClient;
     readonly #database: SharingDatabase;
     readonly #identity: string;
+    readonly #folderSharing: FolderSharingService | undefined;
     readonly #nextEventId: () => string;
     readonly #now: () => number;
     readonly #onError: (error: unknown) => void;
@@ -124,6 +142,7 @@ export class SharingService implements SharingServiceContract {
         this.#client = options.client;
         this.#database = options.database;
         this.#identity = encodeBytes(options.client.identity);
+        this.#folderSharing = options.folderSharing;
         this.#now = options.now ?? Date.now;
         this.#nextEventId = createEventIdFactory({ now: this.#now });
         this.#onError = options.onError ?? (() => undefined);
@@ -142,12 +161,42 @@ export class SharingService implements SharingServiceContract {
     static async open(options: OpenSharingServiceOptions): Promise<SharingService> {
         const store = new SqliteMurmurStore(join(options.directory, "sharing-murmur.sqlite"));
         let client: MurmurClient | undefined;
+        let service: SharingService | undefined;
+        const folderSharing =
+            options.folders === undefined
+                ? undefined
+                : new FolderSharingService({
+                      database: options.database,
+                      folders: options.folders,
+                      ...(options.now === undefined ? {} : { now: options.now }),
+                      onChanged: () => {
+                          if (service !== undefined) service.#changed();
+                      },
+                      ...(options.onError === undefined ? {} : { onError: options.onError }),
+                  });
         try {
             client = await MurmurClient.open({
                 relay: options.relay ?? DEFAULT_MURMUR_RELAY_URL,
+                ...(folderSharing === undefined
+                    ? {}
+                    : {
+                          services: [
+                              {
+                                  id: FOLDER_SHARING_MURMUR_SERVICE_ID,
+                                  service: folderSharing,
+                              },
+                          ],
+                      }),
                 store,
             });
-            return new SharingService({ ...options, client, store });
+            folderSharing?.attach(client);
+            service = new SharingService({
+                ...options,
+                client,
+                ...(folderSharing === undefined ? {} : { folderSharing }),
+                store,
+            });
+            return service;
         } catch (error) {
             try {
                 client?.close();
@@ -162,12 +211,14 @@ export class SharingService implements SharingServiceContract {
         if (this.#closing) throw new Error("Sharing is closing.");
         if (this.#started) return;
         this.#started = true;
-        this.#sync = this.#client
-            .sync({
+        this.#sync = (async () => {
+            await this.#folderSharing?.recover();
+            await this.#client.sync({
                 abort: this.#abort.signal,
                 onConnected: () => {
                     this.#connection = "connected";
                     this.#changed();
+                    this.#folderSharing?.foldersChanged();
                 },
                 onContactAdded: () => this.#scheduleChanged(),
                 onContactRemoved: () => this.#scheduleChanged(),
@@ -177,19 +228,20 @@ export class SharingService implements SharingServiceContract {
                     this.#changed();
                 },
                 onUpdates: () => undefined,
-            })
-            .catch((error: unknown) => {
-                if (this.#abort.signal.aborted) return;
-                this.#connection = "disconnected";
-                this.#changed();
-                this.#onError(error);
             });
+        })().catch((error: unknown) => {
+            if (this.#abort.signal.aborted) return;
+            this.#connection = "disconnected";
+            this.#changed();
+            this.#onError(error);
+        });
     }
 
     async snapshot(): Promise<SharingSnapshot> {
         return this.#run(async () => {
-            const [contacts, incomingRequests, sessions] = await Promise.all([
+            const [contacts, folderShares, incomingRequests, sessions] = await Promise.all([
                 this.#client.contacts(),
+                this.#folderSharing?.statuses() ?? Promise.resolve([]),
                 this.#client.contactRequests(),
                 this.#listSessions(),
             ]);
@@ -216,6 +268,7 @@ export class SharingService implements SharingServiceContract {
             return {
                 connection: this.#connection,
                 contacts: contacts.map(toSharingContact),
+                folderShares,
                 identity: this.#identity,
                 incomingRequests: incomingRequests.map(toSharingContactRequest),
                 outgoingRequests,
@@ -249,6 +302,18 @@ export class SharingService implements SharingServiceContract {
         });
     }
 
+    createFolderShare(folderId: string, contacts: readonly string[]): Promise<FolderShareStatus> {
+        const folderSharing = this.#folderSharing;
+        if (folderSharing === undefined) {
+            return Promise.reject(new Error("Folder Sharing is unavailable."));
+        }
+        return this.#run(() => folderSharing.create(folderId, contacts));
+    }
+
+    foldersChanged(): void {
+        this.#folderSharing?.foldersChanged();
+    }
+
     async requestContact(
         invitation: string,
         signal?: AbortSignal,
@@ -257,10 +322,7 @@ export class SharingService implements SharingServiceContract {
         return this.#run(async () => {
             const decodedInvitation = decodeBytes(invitation);
             const operationSignal = this.#operationSignal(signal);
-            const bundle = await this.#client.resolveInvitation(
-                decodedInvitation,
-                operationSignal,
-            );
+            const bundle = await this.#client.resolveInvitation(decodedInvitation, operationSignal);
             const identity = encodeBytes(bundle.identityKey);
             const session = await this.#client.requestContact(
                 decodedInvitation,

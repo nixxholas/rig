@@ -199,6 +199,8 @@ function statusForCode(code: FolderErrorCode): number {
             return 404;
         case "cycle":
         case "invalid_request":
+        case "shared_folder_boundary":
+        case "shared_folder_contents_forbidden":
             return 400;
         case "version_conflict":
             return 409;

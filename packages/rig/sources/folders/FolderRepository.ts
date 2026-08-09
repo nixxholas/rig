@@ -17,16 +17,27 @@ import {
     type ListFoldersResponse,
     type MoveFolderItemRequest,
     type MoveFolderRequest,
+    MAX_SHARED_FOLDER_NODES,
+    type SharedFolderNode,
+    type SharedFolderState,
     type UpdateFolderRequest,
 } from "../protocol/index.js";
 import { folderArchive } from "../persistence/folder/folderArchive.js";
 import { folderCreate, type FolderCreateResult } from "../persistence/folder/folderCreate.js";
 import { folderMove } from "../persistence/folder/folderMove.js";
+import { folderMarkShared } from "../persistence/folder/folderMarkShared.js";
+import { folderRestoreShared } from "../persistence/folder/folderRestoreShared.js";
 import { folderUpdate } from "../persistence/folder/folderUpdate.js";
 import { advanceFolderCatalogRevision } from "../persistence/folder/advanceFolderCatalogRevision.js";
 import { queryFolderCatalogRevision } from "../persistence/folder/queryFolderCatalogRevision.js";
 import { queryFolder } from "../persistence/folder/queryFolder.js";
 import { queryFolders } from "../persistence/folder/queryFolders.js";
+import {
+    queryFolderShareRootProblem,
+    queryFolderSharedGroup,
+    queryFolderSubtreeHasContents,
+    querySharedFolderRoot,
+} from "../persistence/folder/queryFolderSharedGroup.js";
 import { folderItemArchive } from "../persistence/folderItem/folderItemArchive.js";
 import { folderItemCreate } from "../persistence/folderItem/folderItemCreate.js";
 import { folderItemMove } from "../persistence/folderItem/folderItemMove.js";
@@ -146,6 +157,12 @@ export class FolderRepository {
     }
 
     createFolderItem(folderId: string, request: CreateFolderItemRequest): FolderItem {
+        if (this.sharedFolderGroup(folderId) !== undefined) {
+            throw new FolderError(
+                "shared_folder_contents_forbidden",
+                "A shared folder can contain only folders.",
+            );
+        }
         const fingerprint = JSON.stringify({
             afterId: request.afterId ?? (request.afterId === null ? null : "omitted"),
             folderId,
@@ -234,6 +251,12 @@ export class FolderRepository {
         if (current === undefined || current.archivedAt !== undefined) return undefined;
         if (expectedVersion !== undefined && current.version !== expectedVersion) {
             throw new FolderError("version_conflict", "The folder item changed before it moved.");
+        }
+        if (this.sharedFolderGroup(request.folderId) !== undefined) {
+            throw new FolderError(
+                "shared_folder_contents_forbidden",
+                "A shared folder can contain only folders.",
+            );
         }
         if (request.afterId === itemId) {
             throw new FolderError(
@@ -333,6 +356,12 @@ export class FolderRepository {
         if (folder === undefined || folder.archivedAt !== undefined) {
             throw new FolderError("folder_not_found", "That folder was not found.");
         }
+        if (this.sharedFolderGroup(folderId) !== undefined) {
+            throw new FolderError(
+                "shared_folder_contents_forbidden",
+                "A shared folder can contain only folders.",
+            );
+        }
         return this.#revalidateStorageDirectory(folder);
     }
 
@@ -371,6 +400,18 @@ export class FolderRepository {
             const parent = this.getFolder(request.parentId);
             if (parent === undefined || parent.archivedAt !== undefined) {
                 throw new FolderError("parent_not_found", "That parent folder was not found.");
+            }
+            const sharedGroupId = this.sharedFolderGroup(request.parentId);
+            const sharedRootId =
+                sharedGroupId === undefined ? undefined : this.sharedFolderRoot(sharedGroupId);
+            if (
+                sharedRootId !== undefined &&
+                this.sharedFolderState(sharedRootId).folders.length >= MAX_SHARED_FOLDER_NODES
+            ) {
+                throw new FolderError(
+                    "invalid_request",
+                    "A shared folder cannot contain more folders.",
+                );
             }
         }
         const storage = this.#createStorageDirectory(id);
@@ -508,10 +549,43 @@ export class FolderRepository {
             );
         }
         const parentId = request.parentId ?? undefined;
+        if (current.shared && parentId !== undefined) {
+            throw new FolderError(
+                "shared_folder_boundary",
+                "A shared folder must stay at the root.",
+            );
+        }
         if (parentId !== undefined) {
             const parent = folders.find((folder) => folder.id === parentId);
             if (parent === undefined || parent.archivedAt !== undefined) {
                 throw new FolderError("parent_not_found", "That parent folder was not found.");
+            }
+            if (
+                this.sharedFolderGroup(parentId) !== undefined &&
+                queryFolderSubtreeHasContents(this.#database, folderId)
+            ) {
+                throw new FolderError(
+                    "shared_folder_contents_forbidden",
+                    "A shared folder can contain only folders.",
+                );
+            }
+            const targetGroupId = this.sharedFolderGroup(parentId);
+            const currentGroupId = this.sharedFolderGroup(folderId);
+            const targetRootId =
+                targetGroupId === undefined ? undefined : this.sharedFolderRoot(targetGroupId);
+            if (targetRootId !== undefined && targetGroupId !== currentGroupId) {
+                const arrivingCount = collectSubtree(folders, folderId).filter(
+                    (folder) => folder.archivedAt === undefined,
+                ).length;
+                if (
+                    this.sharedFolderState(targetRootId).folders.length + arrivingCount >
+                    MAX_SHARED_FOLDER_NODES
+                ) {
+                    throw new FolderError(
+                        "invalid_request",
+                        "A shared folder cannot contain more folders.",
+                    );
+                }
             }
         }
         if (request.afterId === folderId) {
@@ -581,6 +655,12 @@ export class FolderRepository {
         const folders = this.listFolders();
         const folder = folders.find((candidate) => candidate.id === folderId);
         if (folder === undefined) return undefined;
+        if (folder.shared) {
+            throw new FolderError(
+                "shared_folder_boundary",
+                "A shared folder cannot be archived while its Murmur group is active.",
+            );
+        }
         if (expectedVersion !== undefined && expectedVersion !== folder.version) {
             throw new FolderError(
                 "version_conflict",
@@ -632,6 +712,12 @@ export class FolderRepository {
                 throw error;
             }
         }
+        if (this.sharedFolderGroup(folderId) !== undefined) {
+            throw new FolderError(
+                "shared_folder_contents_forbidden",
+                "A shared folder can contain only folders.",
+            );
+        }
         const path = this.activeFolderStoragePath(folderId);
         return this.#mutate((tx) =>
             sessionMoveScope(tx, {
@@ -643,6 +729,196 @@ export class FolderRepository {
                 sessionId,
             }),
         );
+    }
+
+    /** The canonical, path-free current state of one root and every active folder below it. */
+    sharedFolderState(rootFolderId: string): SharedFolderState {
+        const folders = collectSubtree(this.listFolders(), rootFolderId).filter(
+            (folder) => folder.archivedAt === undefined,
+        );
+        if (folders.length === 0 || folders[0]?.id !== rootFolderId) {
+            throw new FolderError("folder_not_found", "That folder was not found.");
+        }
+        const positions = new Map<string, number>();
+        return {
+            folders: folders.map((folder) => {
+                const parent = folder.parentId ?? "";
+                const order = positions.get(parent) ?? 0;
+                positions.set(parent, order + 1);
+                return {
+                    ...(folder.description === undefined
+                        ? {}
+                        : { description: folder.description }),
+                    ...(folder.icon === undefined ? {} : { icon: folder.icon }),
+                    id: folder.id,
+                    name: folder.name,
+                    order,
+                    ...(folder.id === rootFolderId || folder.parentId === undefined
+                        ? {}
+                        : { parentId: folder.parentId }),
+                    ...(folder.rules === undefined ? {} : { rules: folder.rules }),
+                };
+            }),
+            rootId: rootFolderId,
+        };
+    }
+
+    sharedFolderGroup(folderId: string): string | undefined {
+        return queryFolderSharedGroup(this.#database, folderId);
+    }
+
+    sharedFolderRoot(groupId: string): string | undefined {
+        return querySharedFolderRoot(this.#database, groupId);
+    }
+
+    assertFolderShareable(folderId: string): void {
+        const problem = queryFolderShareRootProblem(this.#database, folderId);
+        switch (problem) {
+            case undefined:
+            case "not_root":
+                if (queryFolderSubtreeHasContents(this.#database, folderId)) {
+                    throw new FolderError(
+                        "shared_folder_contents_forbidden",
+                        "A shared folder can contain only folders.",
+                    );
+                }
+                return;
+            case "missing":
+                throw new FolderError("folder_not_found", "That folder was not found.");
+            case "shared":
+                throw new FolderError("shared_folder_boundary", "That folder is already shared.");
+            case "contents":
+                throw new FolderError(
+                    "shared_folder_contents_forbidden",
+                    "A shared folder can contain only folders.",
+                );
+        }
+    }
+
+    /** Pins an existing empty root to one Murmur group. */
+    markFolderShared(folderId: string, groupId: string): Folder {
+        if (this.sharedFolderGroup(folderId) === groupId) {
+            const current = this.getFolder(folderId);
+            if (current !== undefined) return current;
+        }
+        const result = this.#mutate((tx) => {
+            const outcome = folderMarkShared(tx, folderId, groupId, this.#now());
+            if (outcome.outcome === "marked") {
+                this.#advanceAndPublish(tx, undefined, "update", folderId);
+            }
+            return outcome;
+        });
+        switch (result.outcome) {
+            case "marked":
+                return this.getFolder(folderId)!;
+            case "folder_not_found":
+                throw new FolderError("folder_not_found", "That folder was not found.");
+            case "not_root":
+                throw new FolderError(
+                    "shared_folder_boundary",
+                    "A shared folder must be at the root.",
+                );
+            case "contents_forbidden":
+                throw new FolderError(
+                    "shared_folder_contents_forbidden",
+                    "A shared folder can contain only folders.",
+                );
+            case "group_conflict":
+                throw new FolderError(
+                    "shared_folder_boundary",
+                    "That folder already belongs to another Murmur group.",
+                );
+        }
+    }
+
+    /**
+     * Reconciles one Murmur group's virtual tree.
+     *
+     * Every ordinary repository mutation remains its own consistency boundary. A retry resumes from
+     * the first unapplied node, while the Murmur delivery is acknowledged only after the final
+     * state has landed.
+     */
+    applySharedFolderState(groupId: string, state: SharedFolderState): Folder {
+        validateSharedFolderState(state);
+        let rootId = this.sharedFolderRoot(groupId);
+        const rootNode = state.folders[0]!;
+        if (rootId === undefined) {
+            if (this.getFolder(rootNode.id) !== undefined) {
+                throw new FolderError(
+                    "shared_folder_boundary",
+                    "The incoming shared folder conflicts with a local folder.",
+                );
+            }
+            this.createFolder(folderRequest(rootNode));
+            this.markFolderShared(rootNode.id, groupId);
+            rootId = rootNode.id;
+        }
+        if (rootId !== state.rootId) {
+            throw new FolderError(
+                "shared_folder_boundary",
+                "The Murmur group changed its shared root identity.",
+            );
+        }
+
+        const before = collectSubtree(this.listFolders(), rootId);
+        const beforeIds = new Set(before.map((folder) => folder.id));
+        for (const node of state.folders) {
+            const current = this.getFolder(node.id);
+            if (current === undefined) {
+                this.createFolder(folderRequest(node));
+                continue;
+            }
+            if (!beforeIds.has(node.id)) {
+                throw new FolderError(
+                    "shared_folder_boundary",
+                    "The incoming shared tree conflicts with a local folder.",
+                );
+            }
+            if (current.archivedAt !== undefined) {
+                const siblings = queryFolderChildren(this.#database, node.parentId ?? null);
+                const orderKey = generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null);
+                this.#mutate((tx) => {
+                    if (
+                        folderRestoreShared(tx, node.id, node.parentId!, orderKey, this.#now()) > 0
+                    ) {
+                        this.#advanceAndPublish(tx, undefined, "update", node.id);
+                    }
+                });
+            }
+            const active = this.getFolder(node.id)!;
+            const patch = folderPatch(active, node);
+            if (Object.keys(patch).length > 0) this.updateFolder(node.id, patch);
+        }
+
+        const children = new Map<string, SharedFolderNode[]>();
+        for (const node of state.folders.slice(1)) {
+            const siblings = children.get(node.parentId!);
+            if (siblings === undefined) children.set(node.parentId!, [node]);
+            else siblings.push(node);
+        }
+        for (const [parentId, siblings] of children) {
+            siblings.sort(
+                (left, right) => left.order - right.order || compareIds(left.id, right.id),
+            );
+            let afterId: string | null = null;
+            for (const node of siblings) {
+                const current = this.getFolder(node.id);
+                if (current === undefined) continue;
+                this.moveFolder(node.id, { afterId, parentId }, current.version);
+                afterId = node.id;
+            }
+        }
+
+        const incomingIds = new Set(state.folders.map((folder) => folder.id));
+        const removed = collectSubtree(this.listFolders(), rootId).filter(
+            (folder) => folder.id !== rootId && !incomingIds.has(folder.id),
+        );
+        const removedIds = new Set(removed.map((folder) => folder.id));
+        for (const folder of removed) {
+            if (folder.parentId !== undefined && removedIds.has(folder.parentId)) continue;
+            this.archiveFolder(folder.id, folder.version);
+        }
+        return this.getFolder(rootId)!;
     }
 
     sessionScopeMutationApplied(sessionId: string, mutationId: string): boolean {
@@ -1025,6 +1301,74 @@ function collectSubtree(folders: readonly Folder[], rootId: string): readonly Fo
         subtree.push(folder);
     }
     return subtree;
+}
+
+export function validateSharedFolderState(state: SharedFolderState): void {
+    if (state.folders.length > MAX_SHARED_FOLDER_NODES) {
+        throw new FolderError("invalid_request", "A shared folder contains too many folders.");
+    }
+    if (state.folders[0]?.id !== state.rootId || state.folders[0]?.parentId !== undefined) {
+        throw new FolderError(
+            "invalid_request",
+            "A shared folder snapshot must start with its root.",
+        );
+    }
+    const known = new Set<string>();
+    const positions = new Map<string, Set<number>>();
+    for (const folder of state.folders) {
+        if (known.has(folder.id)) {
+            throw new FolderError(
+                "invalid_request",
+                "A shared folder snapshot contains the same folder twice.",
+            );
+        }
+        if (
+            folder.id !== state.rootId &&
+            (folder.parentId === undefined || !known.has(folder.parentId))
+        ) {
+            throw new FolderError(
+                "invalid_request",
+                "A shared folder snapshot must place every parent before its children.",
+            );
+        }
+        const parentId = folder.parentId ?? "";
+        const siblingPositions = positions.get(parentId) ?? new Set<number>();
+        if (siblingPositions.has(folder.order)) {
+            throw new FolderError(
+                "invalid_request",
+                "A shared folder snapshot contains an ambiguous sibling order.",
+            );
+        }
+        siblingPositions.add(folder.order);
+        positions.set(parentId, siblingPositions);
+        known.add(folder.id);
+    }
+}
+
+function folderRequest(node: SharedFolderNode): CreateFolderRequest {
+    return {
+        ...(node.description === undefined ? {} : { description: node.description }),
+        ...(node.icon === undefined ? {} : { icon: node.icon }),
+        id: node.id,
+        name: node.name,
+        ...(node.parentId === undefined ? {} : { parentId: node.parentId }),
+        ...(node.rules === undefined ? {} : { rules: node.rules }),
+    };
+}
+
+function folderPatch(folder: Folder, node: SharedFolderNode): UpdateFolderRequest {
+    return {
+        ...(folder.description === node.description
+            ? {}
+            : { description: node.description ?? null }),
+        ...(folder.icon === node.icon ? {} : { icon: node.icon ?? null }),
+        ...(folder.name === node.name ? {} : { name: node.name }),
+        ...(folder.rules === node.rules ? {} : { rules: node.rules ?? null }),
+    };
+}
+
+function compareIds(left: string, right: string): number {
+    return left < right ? -1 : left > right ? 1 : 0;
 }
 
 /**

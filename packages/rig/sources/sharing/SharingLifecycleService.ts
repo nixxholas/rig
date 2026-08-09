@@ -83,6 +83,14 @@ export class SharingLifecycleService implements SharingServiceContract {
         return this.#requireService().createInvitation(signal);
     }
 
+    createFolderShare(folderId: string, contacts: readonly string[]) {
+        return this.#requireService().createFolderShare(folderId, contacts);
+    }
+
+    foldersChanged(): void {
+        this.#service?.foldersChanged();
+    }
+
     rejectContact(requestId: string): Promise<void> {
         return this.#requireService().rejectContact(requestId);
     }

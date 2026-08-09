@@ -31,6 +31,10 @@ export function queryFolders(tx: TX): readonly Folder[] {
         if (siblings === undefined) children.set(parentId, [folder]);
         else siblings.push(folder);
     }
+    roots.sort(
+        (left, right) =>
+            Number(right.shared) - Number(left.shared) || compareFolderOrder(left, right),
+    );
     const arranged: Folder[] = [];
     const placed = new Set<string>();
     const visit = (folder: Folder): void => {
@@ -41,4 +45,11 @@ export function queryFolders(tx: TX): readonly Folder[] {
     };
     for (const root of roots) visit(root);
     return arranged;
+}
+
+function compareFolderOrder(left: Folder, right: Folder): number {
+    return (
+        (left.orderKey < right.orderKey ? -1 : left.orderKey > right.orderKey ? 1 : 0) ||
+        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+    );
 }

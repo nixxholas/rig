@@ -144,6 +144,7 @@ function fakeService(
     const snapshot: SharingSnapshot = {
         connection: "connecting",
         contacts: [],
+        folderShares: [],
         identity: IDENTITY,
         incomingRequests: [],
         outgoingRequests: [],
@@ -155,6 +156,10 @@ function fakeService(
         bindProfile: vi.fn(onBind),
         close: vi.fn(async () => undefined),
         createInvitation: vi.fn(async () => ({ expiresAt: 1, invitation: IDENTITY })),
+        createFolderShare: vi.fn(async () => {
+            throw new Error("Not implemented by this fixture.");
+        }),
+        foldersChanged: vi.fn(),
         rejectContact: vi.fn(async () => undefined),
         removeContact: vi.fn(async () => undefined),
         requestContact: vi.fn(async () => ({

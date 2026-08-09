@@ -54,6 +54,8 @@ export interface FolderNode {
     readonly sessions: readonly FolderSession[];
     /** Standing instructions every agent working in this folder must follow. */
     readonly rules?: string;
+    /** This root is backed by one Murmur folder-sharing group. */
+    readonly shared: boolean;
     readonly updatedAt: number;
 }
 

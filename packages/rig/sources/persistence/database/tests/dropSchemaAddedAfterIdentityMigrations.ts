@@ -13,6 +13,7 @@ import { sessionShareEntryLog } from "../migrations/19-session-share-entry-log.j
  * `CREATE TABLE` or `ADD COLUMN` meets its own output and the rewind fails.
  */
 export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase): void {
+    database.run(sql.raw("DROP TRIGGER IF EXISTS folders_shared_subtree_contents_update"));
     dropFolderItemsAndDocumentsSchema(database);
     dropSessionScopeSchema(database);
     database.run(sql.raw("DROP TABLE IF EXISTS sharing_settings"));
@@ -56,6 +57,7 @@ export function dropFolderItemsAndDocumentsSchema(database: SessionDatabase): vo
 
 /** Rebuilds migration 36's checked table into the migration 35 shape before older rewinds. */
 export function dropSessionScopeSchema(database: SessionDatabase): void {
+    database.run(sql.raw("DROP TRIGGER IF EXISTS folders_shared_subtree_contents_update"));
     const stored = database.get<{ sql: string }>(
         sql.raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"),
     );

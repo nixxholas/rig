@@ -294,7 +294,11 @@ await rig.removeSharingContact(contactIdentity);
 ```
 
 The authoritative snapshot contains the Murmur identity, selected profile ID, connection state,
-confirmed contacts, and incoming and outgoing requests. Contact and request profiles may be `null`
+confirmed contacts, folder-share synchronization status, and incoming and outgoing requests.
+After contacts are confirmed, `shareFolder(folderId, contactIdentities)` creates one typed Murmur
+group whose encrypted invitation descriptor carries the folder's current virtual subtree. Later
+folder additions, removals, moves, ordering, and metadata changes synchronize through that group.
+Contact and request profiles may be `null`
 when a remote application sent data outside Rig's profile contract; such a request cannot be
 accepted. A remote profile is display metadata asserted by that authenticated Murmur identity; its
 profile ID and parent Rig ID are not authorization credentials. Invitations are opaque, one-use,

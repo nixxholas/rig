@@ -1728,6 +1728,8 @@ export const folderSchema = Type.Object(
         path: Type.String(),
         /** Standing instructions every agent working in this folder must follow. */
         rules: Type.Optional(Type.String()),
+        /** True only for the root represented by one Murmur folder-sharing group. */
+        shared: Type.Boolean(),
         updatedAt: Type.Number(),
         version: Type.Number(),
     },
@@ -1896,6 +1898,8 @@ export const folderErrorCodeSchema = Type.Union([
     Type.Literal("cycle"),
     Type.Literal("version_conflict"),
     Type.Literal("storage_unavailable"),
+    Type.Literal("shared_folder_boundary"),
+    Type.Literal("shared_folder_contents_forbidden"),
 ]);
 export type FolderErrorCode = Static<typeof folderErrorCodeSchema>;
 
@@ -2733,10 +2737,39 @@ export const sharingOutgoingContactRequestSchema = Type.Object(
     rigProfileExact,
 );
 export type SharingOutgoingContactRequest = Static<typeof sharingOutgoingContactRequestSchema>;
+export const folderShareStatusSchema = Type.Object(
+    {
+        error: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000 })),
+        groupId: sharingIdentitySchema,
+        lastSyncedAt: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+        members: Type.Array(sharingIdentitySchema, { maxItems: 256 }),
+        rootFolderId: Type.String({ minLength: 1, maxLength: 128 }),
+        status: Type.Union([
+            Type.Literal("syncing"),
+            Type.Literal("synced"),
+            Type.Literal("error"),
+        ]),
+    },
+    exact,
+);
+export type FolderShareStatus = Static<typeof folderShareStatusSchema>;
+export const createFolderShareRequestSchema = Type.Object(
+    {
+        contacts: Type.Array(sharingIdentitySchema, {
+            minItems: 1,
+            maxItems: 255,
+            uniqueItems: true,
+        }),
+        folderId: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    exact,
+);
+export type CreateFolderShareRequest = Static<typeof createFolderShareRequestSchema>;
 export const sharingSnapshotSchema = Type.Object(
     {
         connection: sharingConnectionSchema,
         contacts: Type.Array(sharingContactSchema, { maxItems: 10_000 }),
+        folderShares: Type.Array(folderShareStatusSchema, { maxItems: 1_000 }),
         identity: sharingIdentitySchema,
         incomingRequests: Type.Array(sharingContactRequestSchema, { maxItems: 1_000 }),
         outgoingRequests: Type.Array(sharingOutgoingContactRequestSchema, {

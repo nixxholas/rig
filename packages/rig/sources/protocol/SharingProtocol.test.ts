@@ -20,6 +20,7 @@ describe("Sharing protocol", () => {
             Value.Check(sharingSnapshotSchema, {
                 connection: "connected",
                 contacts: [{ identity, profile, status: "active" }],
+                folderShares: [],
                 identity,
                 incomingRequests: [{ id: "request-1", identity, profile, sessionId: identity }],
                 outgoingRequests: [{ id: identity, identity, sessionId: identity }],
@@ -42,6 +43,7 @@ describe("Sharing protocol", () => {
             Value.Check(sharingSnapshotSchema, {
                 connection: "connected",
                 contacts: [],
+                folderShares: [],
                 identity: "short",
                 incomingRequests: [],
                 outgoingRequests: [],

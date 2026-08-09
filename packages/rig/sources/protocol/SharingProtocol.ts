@@ -49,10 +49,41 @@ export const sharingOutgoingContactRequestSchema = Type.Object(
 );
 export type SharingOutgoingContactRequest = Static<typeof sharingOutgoingContactRequestSchema>;
 
+export const folderShareStatusSchema = Type.Object(
+    {
+        error: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000 })),
+        groupId: sharingIdentitySchema,
+        lastSyncedAt: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+        members: Type.Array(sharingIdentitySchema, { maxItems: 256 }),
+        rootFolderId: Type.String({ minLength: 1, maxLength: 128 }),
+        status: Type.Union([
+            Type.Literal("syncing"),
+            Type.Literal("synced"),
+            Type.Literal("error"),
+        ]),
+    },
+    exact,
+);
+export type FolderShareStatus = Static<typeof folderShareStatusSchema>;
+
+export const createFolderShareRequestSchema = Type.Object(
+    {
+        contacts: Type.Array(sharingIdentitySchema, {
+            minItems: 1,
+            maxItems: 255,
+            uniqueItems: true,
+        }),
+        folderId: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    exact,
+);
+export type CreateFolderShareRequest = Static<typeof createFolderShareRequestSchema>;
+
 export const sharingSnapshotSchema = Type.Object(
     {
         connection: sharingConnectionSchema,
         contacts: Type.Array(sharingContactSchema, { maxItems: 10_000 }),
+        folderShares: Type.Array(folderShareStatusSchema, { maxItems: 1_000 }),
         identity: sharingIdentitySchema,
         incomingRequests: Type.Array(sharingContactRequestSchema, { maxItems: 1_000 }),
         outgoingRequests: Type.Array(sharingOutgoingContactRequestSchema, {

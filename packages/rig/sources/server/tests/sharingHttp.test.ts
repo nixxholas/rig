@@ -13,6 +13,7 @@ const REMOTE = "B".repeat(43);
 const snapshot: SharingSnapshot = {
     connection: "connected",
     contacts: [],
+    folderShares: [],
     identity: IDENTITY,
     incomingRequests: [],
     outgoingRequests: [],
@@ -34,6 +35,13 @@ describe("Sharing HTTP API", () => {
                 expiresAt: 301_000,
                 invitation: IDENTITY,
             })),
+            createFolderShare: vi.fn(async () => ({
+                groupId: IDENTITY,
+                members: [IDENTITY, REMOTE],
+                rootFolderId: "afolder000000000000000001",
+                status: "syncing" as const,
+            })),
+            foldersChanged: vi.fn(),
             rejectContact: vi.fn(async () => undefined),
             removeContact: vi.fn(async () => undefined),
             requestContact: vi.fn(
@@ -72,6 +80,28 @@ describe("Sharing HTTP API", () => {
             await send(
                 started.socketPath,
                 "POST",
+                "/sharing/folders",
+                JSON.stringify({
+                    contacts: [REMOTE],
+                    folderId: "afolder000000000000000001",
+                }),
+            ),
+        ).toEqual({
+            body: {
+                groupId: IDENTITY,
+                members: [IDENTITY, REMOTE],
+                rootFolderId: "afolder000000000000000001",
+                status: "syncing",
+            },
+            status: 201,
+        });
+        expect(sharing.createFolderShare).toHaveBeenCalledWith("afolder000000000000000001", [
+            REMOTE,
+        ]);
+        expect(
+            await send(
+                started.socketPath,
+                "POST",
                 "/sharing/contact-requests",
                 JSON.stringify({ invitation: IDENTITY }),
             ),
@@ -100,6 +130,13 @@ describe("Sharing HTTP API", () => {
                 expiresAt: 1,
                 invitation: IDENTITY,
             })),
+            createFolderShare: vi.fn(async () => ({
+                groupId: IDENTITY,
+                members: [],
+                rootFolderId: "afolder000000000000000001",
+                status: "syncing" as const,
+            })),
+            foldersChanged: vi.fn(),
             rejectContact: vi.fn(async () => undefined),
             removeContact: vi.fn(async () => undefined),
             requestContact: vi.fn(async () => ({

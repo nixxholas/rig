@@ -613,6 +613,7 @@ describe("protocol conformance", () => {
             orderKey: "a0",
             path: "/work/folders/folder-1",
             rules: "Keep the exports out of the working directory.",
+            shared: false,
             updatedAt: 2,
             version: 3,
         };

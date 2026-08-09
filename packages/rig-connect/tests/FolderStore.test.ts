@@ -17,6 +17,7 @@ function folder(id: string, overrides: Partial<Folder> = {}): Folder {
         name: id,
         orderKey: id,
         path: `/work/folders/${id}`,
+        shared: false,
         updatedAt: 1,
         version: 1,
         ...overrides,
@@ -124,6 +125,18 @@ function outline(store: FolderStore): string[] {
 }
 
 describe("FolderStore", () => {
+    it("pins shared folders above ordinary root ordering", () => {
+        const store = new FolderStore();
+
+        store.replaceFolders([
+            folder("ordinary", { orderKey: "a" }),
+            folder("shared", { orderKey: "z", shared: true }),
+        ]);
+
+        expect(store.folders().map((folder) => folder.id)).toEqual(["shared", "ordinary"]);
+        expect(store.folders()[0]?.shared).toBe(true);
+    });
+
     it("projects nested folders, their independently ordered chats, and global Unsorted", () => {
         const store = new FolderStore();
         store.applyHello(

@@ -34,6 +34,7 @@ import type {
     SecretSummary,
     SessionAgentMetadata,
     SessionSummary,
+    SharedFolderState,
     SessionScope,
     SubagentSummary,
     TimelineAgent,
@@ -1064,6 +1065,30 @@ export class InMemorySessionStore implements SessionStore {
             void session.recordFolderArchived().catch(rethrowDatabaseFailure);
         }
         return archived;
+    }
+
+    sharedFolderState(rootFolderId: string) {
+        return this.#folders.sharedFolderState(rootFolderId);
+    }
+
+    sharedFolderGroup(folderId: string): string | undefined {
+        return this.#folders.sharedFolderGroup(folderId);
+    }
+
+    sharedFolderRoot(groupId: string): string | undefined {
+        return this.#folders.sharedFolderRoot(groupId);
+    }
+
+    assertFolderShareable(folderId: string): void {
+        this.#folders.assertFolderShareable(folderId);
+    }
+
+    markFolderShared(folderId: string, groupId: string): Folder {
+        return this.#folders.markFolderShared(folderId, groupId);
+    }
+
+    applySharedFolderState(groupId: string, state: SharedFolderState): Folder {
+        return this.#folders.applySharedFolderState(groupId, state);
     }
 
     getDocument(documentId: string): Document | undefined {

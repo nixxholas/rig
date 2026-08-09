@@ -689,7 +689,9 @@ export class FolderStore {
                     : ROOT;
             mapList(childrenOf, parentId).push(folder);
         }
-        for (const siblings of childrenOf.values()) siblings.sort(byOrderKey);
+        for (const [parentId, siblings] of childrenOf) {
+            siblings.sort(parentId === ROOT ? bySharedRootOrder : byOrderKey);
+        }
         const folders = this.#nodesUnder(
             ROOT,
             childrenOf,
@@ -759,6 +761,7 @@ export class FolderStore {
             orderKey: folder.orderKey,
             path: folder.path,
             sessions,
+            shared: folder.shared,
             updatedAt: folder.updatedAt,
             ...(folder.archivedAt === undefined ? {} : { archivedAt: folder.archivedAt }),
             ...(folder.description === undefined ? {} : { description: folder.description }),
@@ -831,6 +834,13 @@ export class FolderStore {
         this.#sessionValues.set(session.id, { source: session, value });
         return value;
     }
+}
+
+function bySharedRootOrder(
+    left: Pick<Folder, "id" | "orderKey" | "shared">,
+    right: Pick<Folder, "id" | "orderKey" | "shared">,
+): number {
+    return Number(right.shared) - Number(left.shared) || byOrderKey(left, right);
 }
 
 function isVisible(folder: Folder | undefined): boolean {

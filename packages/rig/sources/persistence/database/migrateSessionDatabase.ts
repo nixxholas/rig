@@ -53,6 +53,7 @@ import { sharingProfile } from "./migrations/48-sharing-profile.js";
 import { sharingMurmurIdentity } from "./migrations/49-sharing-murmur-identity.js";
 import { sharingSettings } from "./migrations/50-sharing-settings.js";
 import { folderChildOrderSpace } from "./migrations/51-folder-child-order-space.js";
+import { folderSharing } from "./migrations/52-folder-sharing.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -113,6 +114,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     sharingMurmurIdentity,
     sharingSettings,
     folderChildOrderSpace,
+    folderSharing,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

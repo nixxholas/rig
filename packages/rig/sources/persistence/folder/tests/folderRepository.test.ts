@@ -604,6 +604,85 @@ describe("FolderRepository", () => {
             "folder_not_found",
         );
     });
+
+    it("pins shared roots first and keeps their entire tree folder-only", () => {
+        const { database, repository } = createRepository();
+        const ordinary = repository.createFolder({ name: "Ordinary" });
+        const shared = repository.createFolder({ name: "Shared" });
+        const child = repository.createFolder({ name: "Child", parentId: shared.id });
+
+        const marked = repository.markFolderShared(shared.id, "A".repeat(43));
+
+        expect(marked.shared).toBe(true);
+        expect(ids(repository.listFolders())).toEqual([shared.id, child.id, ordinary.id]);
+        expect(
+            failureCode(() =>
+                repository.moveFolder(shared.id, {
+                    afterId: null,
+                    parentId: ordinary.id,
+                }),
+            ),
+        ).toBe("shared_folder_boundary");
+
+        const documentId = createId();
+        database
+            .insert(documents)
+            .values({
+                createdAtMs: 1,
+                createdByInstanceId: "alocalinstance00000000001",
+                firstRetainedVersion: 2,
+                id: documentId,
+                mimeType: "application/x-board",
+                stateJson: "{}",
+                updatedAtMs: 1,
+                version: 1,
+            })
+            .run();
+        expect(
+            failureCode(() =>
+                repository.createFolderItem(child.id, {
+                    target: { documentId, kind: "document" },
+                }),
+            ),
+        ).toBe("shared_folder_contents_forbidden");
+    });
+
+    it("imports and reconciles a Murmur folder-group state", () => {
+        const { repository } = createRepository();
+        const rootId = createId();
+        const firstId = createId();
+        const secondId = createId();
+        const groupId = "B".repeat(43);
+
+        repository.applySharedFolderState(groupId, {
+            folders: [
+                { id: rootId, name: "Shared", order: 0 },
+                { id: firstId, name: "First", order: 0, parentId: rootId },
+                { id: secondId, name: "Second", order: 1, parentId: rootId },
+            ],
+            rootId,
+        });
+
+        expect(repository.getFolder(rootId)?.shared).toBe(true);
+        expect(childrenOf(repository.listFolders(), rootId)).toEqual([firstId, secondId]);
+
+        repository.applySharedFolderState(groupId, {
+            folders: [
+                { id: rootId, name: "Renamed", order: 0 },
+                { id: secondId, name: "Second", order: 0, parentId: rootId },
+            ],
+            rootId,
+        });
+
+        expect(repository.getFolder(rootId)?.name).toBe("Renamed");
+        expect(
+            repository
+                .listFolders()
+                .filter((folder) => folder.parentId === rootId && folder.archivedAt === undefined)
+                .map((folder) => folder.id),
+        ).toEqual([secondId]);
+        expect(repository.getFolder(firstId)?.archivedAt).toBeDefined();
+    });
 });
 
 function createRepository(): {

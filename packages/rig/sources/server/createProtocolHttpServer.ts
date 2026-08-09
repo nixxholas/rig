@@ -122,6 +122,8 @@ import type {
     SetSessionDraftRequest,
     UpdateSessionRequest,
     CreateSharingInvitationResponse,
+    CreateFolderShareRequest,
+    FolderShareStatus,
     OnboardMurmurRequest,
     OnboardMurmurResponse,
     RequestSharingContactRequest,
@@ -153,6 +155,7 @@ import {
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
     onboardMurmurRequestSchema,
+    createFolderShareRequestSchema,
     requestSharingContactRequestSchema,
     sharingIdentitySchema,
 } from "../protocol/index.js";
@@ -777,6 +780,7 @@ async function handleRequest(
     if (
         route.name === "sharing" ||
         route.name === "sharing-invitations" ||
+        route.name === "sharing-folder-shares" ||
         route.name === "sharing-contact-requests" ||
         route.name === "sharing-contact-request" ||
         route.name === "sharing-contact"
@@ -800,6 +804,22 @@ async function handleRequest(
                     response,
                     201,
                     await sharing.createInvitation(),
+                );
+                return;
+            }
+            if (route.name === "sharing-folder-shares" && request.method === "POST") {
+                const body = await readJson<unknown>(request, 64 * 1024);
+                if (!Value.Check(createFolderShareRequestSchema, body)) {
+                    sendJson(response, 400, {
+                        error: "A folder share needs a folder and at least one contact.",
+                    });
+                    return;
+                }
+                const input = body as CreateFolderShareRequest;
+                sendJson<FolderShareStatus>(
+                    response,
+                    201,
+                    await sharing.createFolderShare(input.folderId, input.contacts),
                 );
                 return;
             }
@@ -4847,6 +4867,7 @@ function matchRoute(pathname: string):
               | "profiles"
               | "sharing"
               | "sharing-invitations"
+              | "sharing-folder-shares"
               | "sharing-contact-requests"
               | "plugin-catalog"
               | "documents"
@@ -5098,6 +5119,7 @@ function matchRoute(pathname: string):
     if (pathname === "/profiles") return { name: "profiles" };
     if (pathname === "/sharing") return { name: "sharing" };
     if (pathname === "/sharing/invitations") return { name: "sharing-invitations" };
+    if (pathname === "/sharing/folders") return { name: "sharing-folder-shares" };
     if (pathname === "/sharing/contact-requests") {
         return { name: "sharing-contact-requests" };
     }
@@ -6040,6 +6062,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "profile") return request.method === "PATCH" || request.method === "PUT";
     if (route.name === "sharing") return false;
     if (route.name === "sharing-invitations") return request.method === "POST";
+    if (route.name === "sharing-folder-shares") return request.method === "POST";
     if (route.name === "sharing-contact-requests") return request.method === "POST";
     if (route.name === "sharing-contact-request") {
         return request.method === "POST" || request.method === "DELETE";

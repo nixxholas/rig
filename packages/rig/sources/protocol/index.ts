@@ -9,7 +9,9 @@ export {
     type OnboardingStatus,
 } from "./OnboardingProtocol.js";
 export {
+    createFolderShareRequestSchema,
     createSharingInvitationResponseSchema,
+    folderShareStatusSchema,
     requestSharingContactRequestSchema,
     sharingChangedEventSchema,
     sharingConnectionSchema,
@@ -19,7 +21,9 @@ export {
     sharingOutgoingContactRequestResponseSchema,
     sharingOutgoingContactRequestSchema,
     sharingSnapshotSchema,
+    type CreateFolderShareRequest,
     type CreateSharingInvitationResponse,
+    type FolderShareStatus,
     type RequestSharingContactRequest,
     type SharingChangedEvent,
     type SharingConnection,
@@ -232,6 +236,19 @@ export {
     type MoveFolderRequest,
     type UpdateFolderRequest,
 } from "./FolderProtocol.js";
+export {
+    folderShareDescriptorSchema,
+    folderShareOperationSchema,
+    folderSharePacketSchema,
+    MAX_SHARED_FOLDER_NODES,
+    sharedFolderNodeSchema,
+    sharedFolderStateSchema,
+    type FolderShareDescriptor,
+    type FolderShareOperation,
+    type FolderSharePacket,
+    type SharedFolderNode,
+    type SharedFolderState,
+} from "./FolderSharingProtocol.js";
 export {
     createDocumentRequestSchema,
     documentCreatedBySchema,

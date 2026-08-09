@@ -30,6 +30,7 @@ function folder(id: string, version = 1): Folder {
         name: id,
         orderKey: "a",
         path: `/folders/${id}`,
+        shared: false,
         updatedAt: version,
         version,
     };

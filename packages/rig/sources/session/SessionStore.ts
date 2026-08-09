@@ -30,6 +30,7 @@ import type {
     SecretSummary,
     SubagentSummary,
     SessionSummary,
+    SharedFolderState,
     TimelineAgent,
     TransferSessionRequest,
     TransferSessionResponse,
@@ -167,6 +168,12 @@ export interface SessionStore {
         expectedVersion?: number,
         mutationId?: string,
     ): Folder | undefined;
+    sharedFolderState(rootFolderId: string): SharedFolderState;
+    sharedFolderGroup(folderId: string): string | undefined;
+    sharedFolderRoot(groupId: string): string | undefined;
+    assertFolderShareable(folderId: string): void;
+    markFolderShared(folderId: string, groupId: string): Folder;
+    applySharedFolderState(groupId: string, state: SharedFolderState): Folder;
     getDocument(documentId: string): Document | undefined;
     createDocument(request: CreateDocumentRequest, createdBy: DocumentCreatedBy): Document;
     writeDocument(
