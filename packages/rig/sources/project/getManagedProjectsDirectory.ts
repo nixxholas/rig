@@ -12,5 +12,5 @@ export function getManagedProjectsDirectory(
         }
         return resolve(configuredDirectory);
     }
-    return join(homeDirectory, "Projects");
+    return join(homeDirectory, "Happy", "Projects");
 }

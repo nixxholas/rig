@@ -101,7 +101,7 @@ describe("projects", () => {
         expect(created).toMatchObject({
             id: projectId,
             initializationStatus: "initializing",
-            path: join(await realpath(fixture.home), "Projects", "Managed Repository"),
+            path: join(await realpath(fixture.home), "Happy", "Projects", "Managed Repository"),
             presence: "missing",
             remoteSource: { kind: "github", repository: "slopus/rig" },
             requiredSecretKind: "github",
@@ -116,6 +116,7 @@ describe("projects", () => {
         expect(clones[0]).toMatchObject({
             destination: join(
                 await realpath(fixture.home),
+                "Happy",
                 "Projects",
                 ".rig",
                 "clones",
@@ -257,7 +258,7 @@ describe("projects", () => {
             projectClone: async () => {
                 cloneAttempts += 1;
                 const wrong = await createRepository(
-                    join(fixture.home, "Projects"),
+                    join(await realpath(fixture.home), "Happy", "Projects"),
                     "Interrupted clone",
                 );
                 await git(wrong, [

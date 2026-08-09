@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { getManagedProjectsDirectory } from "../getManagedProjectsDirectory.js";
 
 describe("getManagedProjectsDirectory", () => {
-    it("uses the Projects folder in the user's home directory", () => {
-        expect(getManagedProjectsDirectory({}, "/Users/steve")).toBe("/Users/steve/Projects");
+    it("uses the Projects folder inside the user's Happy directory", () => {
+        expect(getManagedProjectsDirectory({}, "/Users/steve")).toBe(
+            "/Users/steve/Happy/Projects",
+        );
     });
 
     it("accepts only an absolute override", () => {
