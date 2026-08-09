@@ -164,6 +164,7 @@ export type {
 } from "./protocol.js";
 export { FolderStore } from "./FolderStore.js";
 export type {
+    FolderChild,
     FolderDelta,
     FolderNode,
     FolderSession,

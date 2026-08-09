@@ -475,6 +475,65 @@ describe("FolderRepository", () => {
         expect(repository.folderCatalog().revision).toBe(6);
     });
 
+    it("shares one order-key space between child folders and folder items", () => {
+        const { database, repository } = createRepository();
+        const parent = repository.createFolder({ name: "Parent" });
+        const first = repository.createFolder({ name: "First", parentId: parent.id });
+        const documentId = createId();
+        database
+            .insert(documents)
+            .values({
+                createdAtMs: 1,
+                createdByInstanceId: "alocalinstance00000000001",
+                firstRetainedVersion: 2,
+                id: documentId,
+                mimeType: "application/x-board",
+                stateJson: "{}",
+                updatedAtMs: 1,
+                version: 1,
+            })
+            .run();
+
+        const firstItem = repository.createFolderItem(parent.id, {
+            target: { documentId, kind: "document" },
+        });
+        const second = repository.createFolder({ name: "Second", parentId: parent.id });
+        const inserted = repository.createFolderItem(parent.id, {
+            afterId: first.id,
+            target: { documentId, kind: "document" },
+        });
+
+        repository.moveFolder(second.id, { afterId: inserted.id, parentId: parent.id });
+
+        const catalog = repository.folderCatalog();
+        const ordered = [
+            ...catalog.folders
+                .filter((folder) => folder.parentId === parent.id)
+                .map((folder) => ({ id: `folder:${folder.id}`, orderKey: folder.orderKey })),
+            ...catalog.items
+                .filter((item) => item.folderId === parent.id)
+                .map((item) => ({ id: `item:${item.id}`, orderKey: item.orderKey })),
+        ]
+            .sort(
+                (left, right) =>
+                    (left.orderKey < right.orderKey
+                        ? -1
+                        : left.orderKey > right.orderKey
+                          ? 1
+                          : 0) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+            )
+            .map((child) => child.id);
+
+        expect(ordered).toEqual([
+            `folder:${first.id}`,
+            `item:${inserted.id}`,
+            `folder:${second.id}`,
+            `item:${firstItem.id}`,
+        ]);
+        expect(sortsBefore(first.orderKey, firstItem.orderKey)).toBe(true);
+        expect(sortsBefore(inserted.orderKey, second.orderKey)).toBe(true);
+    });
+
     it("keeps an item's create receipt under unrelated mutation pressure", () => {
         const { database, repository } = createRepository();
         const folder = repository.createFolder({ name: "Source" });

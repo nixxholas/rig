@@ -745,7 +745,7 @@ export interface DocumentUpdatesLoadOptions {
  *
  * Each call applies its prediction immediately and returns the mutation identity used to reconcile
  * the daemon's response and live echo. The daemon still derives authoritative order keys, which is
- * why moves name their destination and preceding item rather than inventing an order key.
+ * why moves name their destination and preceding folder or item rather than inventing an order key.
  */
 export interface RigFolders {
     /**
@@ -758,7 +758,8 @@ export interface RigFolders {
     /** Changes a folder's own fields. An explicit `null` clears one. */
     update(folderId: string, request: UpdateFolderRequest): MutationId;
     /**
-     * Applies one drag-and-drop: the folder it was dropped into and the sibling it landed below.
+     * Applies one drag-and-drop: the folder it was dropped into and the folder or item it landed
+     * below.
      *
      * `parentId` is `null` at the root and `afterId` is `null` when it landed first. Rig derives
      * the order key from that pair.
@@ -766,7 +767,7 @@ export interface RigFolders {
     move(folderId: string, request: MoveFolderRequest): MutationId;
     /** Puts a folder away together with everything nested under it. */
     archive(folderId: string): MutationId;
-    /** Links one project, workspace, or document into this folder's direct item list. */
+    /** Links one project, workspace, or document into this folder's shared direct-child list. */
     linkItem(
         folderId: string,
         request: CreateFolderItemRequest,

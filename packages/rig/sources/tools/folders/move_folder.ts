@@ -21,7 +21,7 @@ export const moveFolderTool = defineTool({
             after_id: Type.Optional(
                 Type.String({
                     description:
-                        "Sibling it lands below. Omit to place it first among its new siblings.",
+                        "Folder or item it lands below. Omit to place it first among its new folder's direct children.",
                 }),
             ),
         },

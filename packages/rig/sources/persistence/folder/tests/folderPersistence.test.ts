@@ -46,7 +46,7 @@ describe("folder persistence", () => {
         opened.client.close();
     });
 
-    it("gives every new folder the last order key among its own siblings", () => {
+    it("gives every new folder the last order key among its shared direct children", () => {
         const opened = openFolderDatabase();
         folderCreate(opened.database, { id: "a", name: "A", now: 1, path: "/folders/a" });
         folderCreate(opened.database, { id: "b", name: "B", now: 1, path: "/folders/b" });

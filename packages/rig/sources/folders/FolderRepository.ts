@@ -54,6 +54,10 @@ import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { getFoldersDirectory } from "./getFoldersDirectory.js";
 import { getUnsortedDirectory } from "./getUnsortedDirectory.js";
+import {
+    queryFolderChildren,
+    type FolderChildOrder,
+} from "../persistence/folder/queryFolderChildren.js";
 
 type FolderMutationAction = "archive" | "create" | "move" | "update";
 const MAX_FOLDER_MUTATION_RECEIPTS = 10_000;
@@ -169,12 +173,13 @@ export class FolderRepository {
         if (this.getFolderItem(id) !== undefined) {
             throw new FolderError("invalid_request", "That folder item ID is already in use.");
         }
+        if (this.getFolder(id) !== undefined) {
+            throw new FolderError("invalid_request", "That folder item ID is already in use.");
+        }
         if (!queryFolderItemTargetExists(this.#database, request.target)) {
             throw new FolderError("target_not_found", "That folder item target was not found.");
         }
-        const siblings = queryFolderItems(this.#database, folderId).filter(
-            (item) => item.archivedAt === undefined,
-        );
+        const siblings = queryFolderChildren(this.#database, folderId);
         const appendedKey = generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null);
         let orderKey = appendedKey;
         if (request.afterId !== undefined) {
@@ -193,7 +198,7 @@ export class FolderRepository {
             } catch {
                 throw new FolderError(
                     "sibling_not_found",
-                    "That preceding item was not found in the folder.",
+                    "That preceding folder or item was not found in the folder.",
                 );
             }
         }
@@ -207,6 +212,9 @@ export class FolderRepository {
             });
             if (outcome.outcome === "folder_not_found") {
                 throw new FolderError("folder_not_found", "That folder was not found.");
+            }
+            if (outcome.outcome === "id_conflict") {
+                throw new FolderError("invalid_request", "That folder item ID is already in use.");
             }
             this.#recordItemReceipt(tx, request.mutationId, "create", fingerprint, id);
             this.#advanceItemAndPublish(tx, request.mutationId);
@@ -227,15 +235,15 @@ export class FolderRepository {
         if (expectedVersion !== undefined && current.version !== expectedVersion) {
             throw new FolderError("version_conflict", "The folder item changed before it moved.");
         }
-        const siblings = queryFolderItems(this.#database, request.folderId).filter(
-            (item) => item.archivedAt === undefined && item.id !== itemId,
-        );
-        if (
-            request.afterId !== null &&
-            !siblings.some((sibling) => sibling.id === request.afterId)
-        ) {
-            throw new FolderError("sibling_not_found", "That preceding item was not found.");
+        if (request.afterId === itemId) {
+            throw new FolderError(
+                "invalid_request",
+                "A folder item cannot be placed after itself.",
+            );
         }
+        const siblings = queryFolderChildren(this.#database, request.folderId).filter(
+            (child) => child.id !== itemId,
+        );
         const placeholder =
             request.folderId === current.folderId
                 ? current
@@ -243,7 +251,15 @@ export class FolderRepository {
                       id: itemId,
                       orderKey: generateKeyBetween(siblings.at(-1)?.orderKey ?? null, null),
                   };
-        const orderKey = orderKeyAfter([...siblings, placeholder], itemId, request.afterId);
+        let orderKey: string;
+        try {
+            orderKey = orderKeyAfter([...siblings, placeholder], itemId, request.afterId);
+        } catch {
+            throw new FolderError(
+                "sibling_not_found",
+                "That preceding folder or item was not found in the folder.",
+            );
+        }
         if (request.folderId === current.folderId && orderKey === current.orderKey) {
             this.#mutate((tx) =>
                 this.#recordItemReceipt(tx, request.mutationId, "move", fingerprint, itemId),
@@ -346,6 +362,9 @@ export class FolderRepository {
             this.#validateStorageDirectory(id, existing.path);
             this.#rememberNoopMutation(request.mutationId, "create", id);
             return existing;
+        }
+        if (this.getFolderItem(id) !== undefined) {
+            throw new FolderError("invalid_request", "That folder ID is already in use.");
         }
         const name = this.#folderName(request.name);
         if (request.parentId !== undefined) {
@@ -498,7 +517,12 @@ export class FolderRepository {
         if (request.afterId === folderId) {
             throw new FolderError("invalid_request", "A folder cannot be placed after itself.");
         }
-        const orderKey = orderKeyForDrop(folders, current, parentId, request.afterId);
+        const orderKey = orderKeyForDrop(
+            queryFolderChildren(this.#database, parentId ?? null),
+            current,
+            parentId,
+            request.afterId,
+        );
         if (parentId === current.parentId && orderKey === current.orderKey) {
             this.#rememberNoopMutation(request.mutationId, "move", folderId);
             return current;
@@ -977,6 +1001,8 @@ export class FolderRepository {
             case "parent_not_found":
             case "parent_archived":
                 throw new FolderError("parent_not_found", "That parent folder was not found.");
+            case "id_conflict":
+                throw new FolderError("invalid_request", "That folder ID is already in use.");
         }
     }
 }
@@ -1004,31 +1030,26 @@ function collectSubtree(folders: readonly Folder[], rootId: string): readonly Fo
 /**
  * The order key one drop lands on.
  *
- * `afterId` is the sibling the folder was dropped below, and `null` means it landed first. A drop
- * that changes nothing keeps the key the folder already has.
+ * `afterId` is the folder or item the folder was dropped below, and `null` means it landed first.
+ * A drop that changes nothing keeps the key the folder already has.
  */
 /**
  * Where a dropped folder lands among its new siblings.
  *
  * Ordering is the same fractional indexing every ordered list in Rig uses, so a drop is described
- * by the sibling it landed below and the key is derived from that, never sent by a client. A folder
- * dropped into another parent joins that parent's siblings first, since the key it carried was only
- * ever meaningful beside the folders it used to sit with.
+ * by the child it landed below and the key is derived from that, never sent by a client. A folder
+ * dropped into another parent joins that parent's direct children first, since the key it carried
+ * was only ever meaningful beside the children it used to sit with.
  */
 function orderKeyForDrop(
-    folders: readonly Folder[],
+    children: readonly FolderChildOrder[],
     folder: Folder,
     parentId: string | undefined,
     afterId: string | null,
 ): string {
-    const siblings = folders.filter(
-        (candidate) =>
-            candidate.archivedAt === undefined &&
-            candidate.parentId === parentId &&
-            candidate.id !== folder.id,
-    );
+    const siblings = children.filter((candidate) => candidate.id !== folder.id);
     // A folder arriving from another parent carries a key that only ever meant something beside the
-    // folders it used to sit with, so it joins the new row at the end and is placed from there.
+    // children it used to sit with, so it joins the new row at the end and is placed from there.
     const arriving =
         parentId === folder.parentId
             ? folder

@@ -116,7 +116,7 @@ function outline(store: FolderStore): string[] {
     const visit = (nodes: ReturnType<FolderStore["folders"]>, depth: number): void => {
         for (const node of nodes) {
             result.push(`${"/".repeat(depth)}${node.name}`);
-            visit(node.children, depth + 1);
+            visit(node.folders, depth + 1);
         }
     };
     visit(store.folders(), 0);
@@ -153,6 +153,37 @@ describe("FolderStore", () => {
             "folder-b",
         ]);
         expect(store.unsorted().map((item) => item.id)).toEqual(["unsorted-a", "unsorted-b"]);
+    });
+
+    it("merges child folders and items into one ordered view and accepts either as an anchor", () => {
+        const store = new FolderStore();
+        store.applyHello(
+            hello(
+                [
+                    folder("parent", { orderKey: "a" }),
+                    folder("child", { orderKey: "a", parentId: "parent" }),
+                ],
+                [],
+                [item("item", "parent", "b")],
+            ),
+        );
+
+        const childIds = (node: ReturnType<FolderStore["folders"]>[number]): string[] =>
+            node.children.map((child) =>
+                child.kind === "folder" ? `folder:${child.folder.id}` : `item:${child.item.id}`,
+            );
+        const parent = store.folders()[0]!;
+        expect(childIds(parent)).toEqual(["folder:child", "item:item"]);
+        expect(parent.folders.map((folder) => folder.id)).toEqual(["child"]);
+        expect(parent.items.map((value) => value.id)).toEqual(["item"]);
+
+        const itemMove = store.applyOptimisticItemMove("item", "parent", "child");
+        expect(childIds(store.folders()[0]!)).toEqual(["folder:child", "item:item"]);
+        itemMove.undo();
+
+        const folderMove = store.applyOptimisticMove("child", "parent", "item");
+        expect(childIds(store.folders()[0]!)).toEqual(["item:item", "folder:child"]);
+        folderMove.undo();
     });
 
     it("moves a streamed chat atomically between Unsorted and one folder", () => {

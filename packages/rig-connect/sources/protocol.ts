@@ -1720,7 +1720,7 @@ export const folderSchema = Type.Object(
         icon: Type.Optional(Type.String()),
         id: Type.String(),
         name: Type.String(),
-        /** Fractional index ordering this folder among its siblings. */
+        /** Fractional index ordering this folder among every direct child of its parent. */
         orderKey: Type.String(),
         /** Absent for a folder at the root of the tree. */
         parentId: Type.Optional(Type.String()),
@@ -1737,8 +1737,8 @@ export type Folder = Static<typeof folderSchema>;
 
 /**
  * One thing linked into a folder. The linked thing keeps its own identity and
- * ordering elsewhere; this row only gives that thing a position in this
- * folder's direct item list.
+ * ordering elsewhere; this row gives that thing a position in this folder's
+ * shared list of direct items and child folders.
  */
 export const folderItemTargetSchema = Type.Union([
     Type.Object(
@@ -1771,6 +1771,7 @@ export const folderItemSchema = Type.Object(
         createdAt: Type.Number(),
         folderId: Type.String(),
         id: Type.String(),
+        /** Shared fractional index ordering this item with the folder's child folders. */
         orderKey: Type.String(),
         target: folderItemTargetSchema,
         updatedAt: Type.Number(),
@@ -1840,8 +1841,8 @@ export type UpdateFolderRequest = Static<typeof updateFolderRequestSchema>;
 
 /**
  * One drag-and-drop. `parentId` is the folder it was dropped into, `null` for the root, and
- * `afterId` is the sibling it was dropped below, `null` when it landed first. Rig derives the
- * fractional order key from that pair, so a client never invents one.
+ * `afterId` is the folder or item it was dropped below, `null` when it landed first. Rig derives
+ * the shared fractional order key from that pair, so a client never invents one.
  */
 export const moveFolderRequestSchema = Type.Object(
     {

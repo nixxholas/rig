@@ -1,5 +1,6 @@
 import type {
     FolderDelta,
+    FolderChild,
     FolderNode,
     FolderSession,
     FolderSessionSource,
@@ -22,6 +23,7 @@ import { sessionUnreadAfterEvent } from "./sessionUnread.js";
 const ROOT = "";
 const EMPTY_SESSIONS: readonly FolderSession[] = [];
 const EMPTY_ITEMS: readonly FolderItem[] = [];
+const EMPTY_CHILDREN: readonly FolderChild[] = [];
 
 /** Projects the flat folder/session catalog into the one tree a folder view renders. */
 export class FolderStore {
@@ -34,7 +36,8 @@ export class FolderStore {
     #nodes = new Map<
         string,
         {
-            children: readonly FolderNode[];
+            children: readonly FolderChild[];
+            folders: readonly FolderNode[];
             items: readonly FolderItem[];
             sessions: readonly FolderSession[];
             source: Folder;
@@ -334,16 +337,9 @@ export class FolderStore {
     ): { deltas: readonly FolderDelta[]; undo: () => void } {
         const known = this.#folders.get(folderId);
         if (known === undefined) return { deltas: [], undo: () => undefined };
-        const siblings = [...this.#folders.values()]
-            .filter(
-                (folder) =>
-                    folder.id !== folderId &&
-                    folder.archivedAt === undefined &&
-                    folder.parentId === (parentId ?? undefined),
-            )
-            .sort(byOrderKey);
+        const siblings = this.#orderedChildren(parentId, folderId);
         const afterIndex =
-            afterId === null ? -1 : siblings.findIndex((folder) => folder.id === afterId);
+            afterId === null ? -1 : siblings.findIndex((child) => child.id === afterId);
         const after = afterIndex < 0 ? undefined : siblings[afterIndex];
         const before = siblings[afterIndex + 1];
         const orderKey =
@@ -528,20 +524,13 @@ export class FolderStore {
     }
 
     optimisticItemOrderKey(folderId: string, afterId?: string | null, excludeId?: string): string {
-        const siblings = [...this.#items.values()]
-            .filter(
-                (item) =>
-                    item.id !== excludeId &&
-                    item.folderId === folderId &&
-                    this.#isVisibleItem(item),
-            )
-            .sort(byOrderKey);
+        const siblings = this.#orderedChildren(folderId, excludeId);
         const afterIndex =
             afterId === undefined
                 ? siblings.length - 1
                 : afterId === null
                   ? -1
-                  : siblings.findIndex((item) => item.id === afterId);
+                  : siblings.findIndex((child) => child.id === afterId);
         const after = afterIndex < 0 ? undefined : siblings[afterIndex];
         const before = siblings[afterIndex + 1];
         return after === undefined
@@ -730,7 +719,7 @@ export class FolderStore {
         );
         open.delete(parentId);
         const previous =
-            parentId === ROOT ? this.#view.folders : this.#nodes.get(parentId)?.children;
+            parentId === ROOT ? this.#view.folders : this.#nodes.get(parentId)?.folders;
         return previous !== undefined && sameItems(previous, nodes) ? previous : nodes;
     }
 
@@ -741,7 +730,7 @@ export class FolderStore {
         sessionsByFolder: Map<string, FolderSession[]>,
         open: Set<string>,
     ): FolderNode {
-        const children = this.#nodesUnder(
+        const folders = this.#nodesUnder(
             folder.id,
             childrenOf,
             itemsByFolder,
@@ -753,16 +742,18 @@ export class FolderStore {
         const cached = this.#nodes.get(folder.id);
         if (
             cached?.source === folder &&
-            cached.children === children &&
+            cached.folders === folders &&
             sameItems(cached.items, items) &&
             sameItems(cached.sessions, sessions)
         ) {
             return cached.value;
         }
+        const children = mergeChildren(folders, items);
         const value: FolderNode = {
             children,
             createdAt: folder.createdAt,
             id: folder.id,
+            folders,
             items,
             name: folder.name,
             orderKey: folder.orderKey,
@@ -775,8 +766,31 @@ export class FolderStore {
             ...(folder.parentId === undefined ? {} : { parentId: folder.parentId }),
             ...(folder.rules === undefined ? {} : { rules: folder.rules }),
         };
-        this.#nodes.set(folder.id, { children, items, sessions, source: folder, value });
+        this.#nodes.set(folder.id, { children, folders, items, sessions, source: folder, value });
         return value;
+    }
+
+    #orderedChildren(parentId: string | null, excludeId?: string): readonly OrderedChild[] {
+        const folders = [...this.#folders.values()]
+            .filter(
+                (folder) =>
+                    folder.id !== excludeId &&
+                    folder.archivedAt === undefined &&
+                    folder.parentId === (parentId ?? undefined),
+            )
+            .map((folder) => ({ id: folder.id, orderKey: folder.orderKey }));
+        const items =
+            parentId === null
+                ? []
+                : [...this.#items.values()]
+                      .filter(
+                          (item) =>
+                              item.id !== excludeId &&
+                              item.folderId === parentId &&
+                              this.#isVisibleItem(item),
+                      )
+                      .map((item) => ({ id: item.id, orderKey: item.orderKey }));
+        return [...folders, ...items].sort(byOrderKey);
     }
 
     #session(session: FolderSessionSource): FolderSession {
@@ -863,4 +877,24 @@ function sameItems<T>(left: readonly T[], right: readonly T[]): boolean {
 
 function sameValue(left: unknown, right: unknown): boolean {
     return JSON.stringify(left) === JSON.stringify(right);
+}
+
+interface OrderedChild {
+    readonly id: string;
+    readonly orderKey: string;
+}
+
+function mergeChildren(
+    folders: readonly FolderNode[],
+    items: readonly FolderItem[],
+): readonly FolderChild[] {
+    if (folders.length === 0 && items.length === 0) return EMPTY_CHILDREN;
+    return [
+        ...folders.map((folder) => ({ folder, kind: "folder" as const })),
+        ...items.map((item) => ({ item, kind: "item" as const })),
+    ].sort((left, right) => byOrderKey(childOrder(left), childOrder(right)));
+}
+
+function childOrder(child: FolderChild): OrderedChild {
+    return child.kind === "folder" ? child.folder : child.item;
 }

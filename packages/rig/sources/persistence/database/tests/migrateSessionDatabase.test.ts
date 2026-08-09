@@ -80,6 +80,87 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
+    it("normalizes folder and item keys into one space per parent", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database);
+        opened.client.pragma("foreign_keys = OFF");
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO folders
+                    (id, parent_id, name, order_key, path, version, created_at_ms, updated_at_ms)
+                VALUES
+                    ('root-folder', NULL, 'Root', 'a0', '/root', 1, 1, 1),
+                    ('parent-folder', 'root-folder', 'Parent', 'a0', '/parent', 1, 1, 1),
+                    ('child-a', 'parent-folder', 'Child A', 'a0', '/child-a', 1, 1, 1),
+                    ('child-b', 'parent-folder', 'Child B', 'a1', '/child-b', 1, 1, 1)
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO folder_items
+                    (id, folder_id, project_id, order_key, version, created_at_ms, updated_at_ms)
+                VALUES
+                    ('item-a', 'parent-folder', 'missing-project-a', 'a0', 1, 1, 1),
+                    ('item-b', 'parent-folder', 'missing-project-b', 'a1', 1, 1, 1)
+            `),
+        );
+
+        opened.database.run(sql.raw("PRAGMA user_version = 50"));
+        migrateSessionDatabase(opened.database);
+
+        const folders = opened.database.all<{ id: string; order_key: string }>(
+            sql.raw(
+                "SELECT id, order_key FROM folders WHERE parent_id = 'parent-folder' ORDER BY order_key",
+            ),
+        );
+        const items = opened.database.all<{ id: string; order_key: string }>(
+            sql.raw(
+                "SELECT id, order_key FROM folder_items WHERE folder_id = 'parent-folder' ORDER BY order_key",
+            ),
+        );
+        expect(folders.map((row) => row.id)).toEqual(["child-a", "child-b"]);
+        expect(items.map((row) => row.id)).toEqual(["item-a", "item-b"]);
+        expect(new Set([...folders, ...items].map((row) => row.order_key)).size).toBe(4);
+        expect(folders.at(-1)!.order_key < items[0]!.order_key).toBe(true);
+
+        opened.client.close();
+    });
+
+    it("rejects legacy folder and item ID collisions before enabling shared anchors", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database);
+        opened.client.pragma("foreign_keys = OFF");
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO folders
+                    (id, parent_id, name, order_key, path, version, created_at_ms, updated_at_ms)
+                VALUES
+                    ('collision', NULL, 'Collision', 'a0', '/collision', 1, 1, 1),
+                    ('parent-for-item', NULL, 'Parent', 'a1', '/parent-for-item', 1, 1, 1)
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO folder_items
+                    (id, folder_id, project_id, order_key, version, created_at_ms, updated_at_ms)
+                VALUES ('collision', 'parent-for-item', 'missing-project', 'a0', 1, 1, 1)
+            `),
+        );
+        opened.database.run(sql.raw("PRAGMA user_version = 50"));
+
+        expect(() => migrateSessionDatabase(opened.database)).toThrow(
+            "Cannot enable shared folder ordering because a folder and folder item have the same ID.",
+        );
+        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({ user_version: 50 });
+        expect(
+            opened.database.get<{ order_key: string }>(
+                sql.raw("SELECT order_key FROM folder_items WHERE id = 'collision'"),
+            ),
+        ).toEqual({ order_key: "a0" });
+
+        opened.client.close();
+    });
+
     it("seeds one singleton onboarding state row", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database);

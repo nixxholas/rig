@@ -13,15 +13,26 @@ export type { Folder };
 export type { FolderItem };
 
 /**
- * One folder with the folders nested inside it already joined.
+ * One direct child in a folder's shared ordering space.
+ *
+ * The wrapper keeps folders and links distinguishable without changing either wire shape. Use
+ * `folder` for a nested folder child and `item` for a linked target child.
+ */
+export type FolderChild =
+    | { readonly folder: FolderNode; readonly kind: "folder" }
+    | { readonly item: FolderItem; readonly kind: "item" };
+
+/**
+ * One folder with its direct folders and items already joined.
  *
  * The daemon reports the tree as a flat list every client then has to assemble; doing it once here
- * is the point of the library. `children` is ordered the way the folders should be drawn, and
- * `path` is the flat storage directory the folder owns, which never moves when the tree does.
+ * is the point of the library. `children` is the shared order the folder should be drawn in;
+ * `folders` and `items` are filtered views of that same list. `path` is the flat storage directory
+ * the folder owns, which never moves when the tree does.
  */
 export interface FolderNode {
     readonly archivedAt?: number;
-    readonly children: readonly FolderNode[];
+    readonly children: readonly FolderChild[];
     readonly createdAt: number;
     /** What the folder is for, shown to people and given to agents working inside it. */
     readonly description?: string;
@@ -29,13 +40,15 @@ export interface FolderNode {
     readonly icon?: string;
     readonly id: string;
     readonly name: string;
-    /** Where this folder sits among its siblings. Only the daemon ever writes it. */
+    /** Where this folder sits among every direct child of its parent. */
     readonly orderKey: string;
     /** Absent for a folder at the root of the tree. */
     readonly parentId?: string;
     /** Flat storage directory holding this folder's files. */
     readonly path: string;
-    /** Things linked into this folder, ordered independently of every other folder. */
+    /** Direct child folders, filtered from `children`. */
+    readonly folders: readonly FolderNode[];
+    /** Things linked into this folder, filtered from `children`. */
     readonly items: readonly FolderItem[];
     /** Chats directly contained by this folder, ordered independently of every other folder. */
     readonly sessions: readonly FolderSession[];
