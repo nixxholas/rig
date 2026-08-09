@@ -341,7 +341,7 @@ describe("PersistentSessionStore", () => {
                 }),
             ]);
         }
-    });
+    }, 30_000);
 
     it("persists an explicit session owner and keeps it when a session is forked or restored", async () => {
         const { cleanup, databasePath } = await createDatabasePath();

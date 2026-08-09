@@ -148,7 +148,11 @@ async function createFixture(): Promise<{
     };
     cleanups.push(async () => {
         tracker.dispose();
-        await rm(root, { force: true, recursive: true });
+        try {
+            await store.close();
+        } finally {
+            await rm(root, { force: true, recursive: true });
+        }
     });
     return { marked, projectId, sessionId: session.snapshot().id, store, tracker };
 }
