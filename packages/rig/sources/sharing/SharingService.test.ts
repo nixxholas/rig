@@ -4,12 +4,13 @@ import {
     type MurmurContact,
     type MurmurContactProfile,
     type MurmurContactRequested,
+    type MurmurOutgoingContactRequest,
     type MurmurSession,
     type MurmurSessionListOptions,
     type MurmurSessionPage,
     type MurmurSyncOptions,
 } from "@slopus/murmur";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { RigProfileStore } from "../profiles/index.js";
 import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
@@ -244,6 +245,41 @@ describe("SharingService", () => {
             database.close();
         }
     });
+
+    it("restarts Murmur synchronization after an unexpected failure", async () => {
+        vi.useFakeTimers();
+        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: "alocalinstance00000000001",
+            publish: () => undefined,
+        });
+        const errors: unknown[] = [];
+        const client = new FakeMurmurClient({
+            syncErrors: [new Error("invalid relay response")],
+        });
+        const sharing = new SharingService({
+            client,
+            database,
+            onError: (error) => errors.push(error),
+            profiles,
+            publish: () => undefined,
+        });
+        try {
+            sharing.start();
+            await vi.waitFor(() => expect(client.syncCalls).toBe(1));
+            expect((await sharing.snapshot()).connection).toBe("disconnected");
+            expect(errors).toHaveLength(1);
+
+            await vi.advanceTimersByTimeAsync(1_000);
+            await vi.waitFor(() => expect(client.syncCalls).toBe(2));
+            expect((await sharing.snapshot()).connection).toBe("connected");
+        } finally {
+            await sharing.close();
+            database.close();
+            vi.useRealTimers();
+        }
+    });
 });
 
 class FakeMurmurClient implements SharingMurmurClient {
@@ -251,11 +287,14 @@ class FakeMurmurClient implements SharingMurmurClient {
     readonly identity: Uint8Array;
     invitationSignal: AbortSignal | undefined;
     readonly localProfiles: MurmurContactProfile[] = [];
+    syncCalls = 0;
     readonly #contactsGate: Promise<void> | undefined;
     readonly #incoming: MurmurContactRequested[];
     readonly #invitationWaitsForAbort: boolean;
     readonly #contacts: MurmurContact[] = [];
+    readonly #outgoing: MurmurOutgoingContactRequest[] = [];
     readonly #sessions: MurmurSession[] = [];
+    readonly #syncErrors: unknown[];
 
     constructor(
         options: {
@@ -263,12 +302,14 @@ class FakeMurmurClient implements SharingMurmurClient {
             identity?: Uint8Array;
             incoming?: MurmurContactRequested[];
             invitationWaitsForAbort?: boolean;
+            syncErrors?: unknown[];
         } = {},
     ) {
         this.#contactsGate = options.contactsGate;
         this.identity = options.identity ?? SELF;
         this.#incoming = [...(options.incoming ?? [])];
         this.#invitationWaitsForAbort = options.invitationWaitsForAbort ?? false;
+        this.#syncErrors = [...(options.syncErrors ?? [])];
     }
 
     async acceptContact(sessionId: Uint8Array, profile: MurmurContactProfile): Promise<void> {
@@ -346,6 +387,10 @@ class FakeMurmurClient implements SharingMurmurClient {
         this.#contacts.splice(index, 1);
     }
 
+    async outgoingContactRequests(): Promise<readonly MurmurOutgoingContactRequest[]> {
+        return this.#outgoing;
+    }
+
     async resolveInvitation(): Promise<{ readonly identityKey: Uint8Array }> {
         return { identityKey: REMOTE };
     }
@@ -363,7 +408,11 @@ class FakeMurmurClient implements SharingMurmurClient {
             members: [SELF],
             status: "creating",
         };
-        this.#sessions.push({ ...session, members: [SELF, REMOTE] });
+        this.#outgoing.push({
+            createdAt: 1_000,
+            identity: REMOTE,
+            sessionId: SESSION,
+        });
         return session;
     }
 
@@ -380,6 +429,9 @@ class FakeMurmurClient implements SharingMurmurClient {
     }
 
     async sync(options: MurmurSyncOptions = {}): Promise<void> {
+        this.syncCalls += 1;
+        const error = this.#syncErrors.shift();
+        if (error !== undefined) throw error;
         await options.onConnected?.();
         if (options.abort?.aborted === true) return;
         await new Promise<void>((resolve) => {

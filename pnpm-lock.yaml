@@ -196,8 +196,8 @@ importers:
         specifier: 1.3.6
         version: 1.3.6
       '@slopus/murmur':
-        specifier: 0.4.0
-        version: 0.4.0
+        specifier: 0.4.1
+        version: 0.4.1
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -1860,8 +1860,8 @@ packages:
   '@slopus/ghostty-wasm@1.3.6':
     resolution: {integrity: sha512-S8KS9VyGgv451D8ZrRoS5vAg1Eqk8dZJWzM28HrjXVmD1B8g3Ec1QsjUWAIVqReuZyZqLFxZfjH6rU0N/f7n2Q==}
 
-  '@slopus/murmur@0.4.0':
-    resolution: {integrity: sha512-pDrGzXfx0YEKdDH9rA9gtqUdcehHKZgOP+WSM4ESph4Pu8/A9DrZh1e1FavK/c5Oac5LMLdo3k7C2UFJ5XczuQ==}
+  '@slopus/murmur@0.4.1':
+    resolution: {integrity: sha512-hBVbAcBN4baaUH8smxQ88QxIP9N0Ph75Aw2Fs5Um4sulFhF9Z6oOA2V9Nf6NpeYXIkF97CByQdwMeybKTwPBBw==}
     engines: {node: '>=20'}
 
   '@smithy/abort-controller@2.2.0':
@@ -5225,7 +5225,7 @@ snapshots:
 
   '@slopus/ghostty-wasm@1.3.6': {}
 
-  '@slopus/murmur@0.4.0':
+  '@slopus/murmur@0.4.1':
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.7

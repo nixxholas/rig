@@ -3,11 +3,11 @@ import { join } from "node:path";
 import {
     DISCOVERY_INVITATION_TTL_MILLISECONDS,
     MurmurClient,
-    isContactSessionDescriptor,
     type CreateMurmurSessionOptions,
     type MurmurContact,
     type MurmurContactProfile,
     type MurmurContactRequested,
+    type MurmurOutgoingContactRequest,
     type MurmurSession,
     type MurmurSessionListOptions,
     type MurmurSessionPage,
@@ -45,6 +45,9 @@ import {
 
 export const DEFAULT_MURMUR_RELAY_URL = "https://murmur.cluster-fluster.com/";
 
+const SYNC_RETRY_INITIAL_MILLISECONDS = 1_000;
+const SYNC_RETRY_MAXIMUM_MILLISECONDS = 60_000;
+
 const sharingMurmurProfileSchema = Type.Object(
     {
         profile: rigProfileSchema,
@@ -66,6 +69,7 @@ export interface SharingMurmurClient {
     contacts(): Promise<readonly MurmurContact[]>;
     createSession(options: CreateMurmurSessionOptions): Promise<MurmurSession>;
     createInvitation(signal?: AbortSignal): Promise<Uint8Array>;
+    outgoingContactRequests(): Promise<readonly MurmurOutgoingContactRequest[]>;
     rejectContact(sessionId: Uint8Array): Promise<void>;
     removeContact(identity: Uint8Array): Promise<void>;
     resolveInvitation(
@@ -211,67 +215,63 @@ export class SharingService implements SharingServiceContract {
         if (this.#closing) throw new Error("Sharing is closing.");
         if (this.#started) return;
         this.#started = true;
-        this.#sync = (async () => {
+        this.#sync = this.#synchronize();
+    }
+
+    async #synchronize(): Promise<void> {
+        try {
             await this.#folderSharing?.recover();
-            await this.#client.sync({
-                abort: this.#abort.signal,
-                onConnected: () => {
-                    this.#connection = "connected";
-                    this.#changed();
-                    this.#folderSharing?.foldersChanged();
-                },
-                onContactAdded: () => this.#scheduleChanged(),
-                onContactRemoved: () => this.#scheduleChanged(),
-                onContactRequested: () => this.#scheduleChanged(),
-                onDisconnected: () => {
-                    this.#connection = "disconnected";
-                    this.#changed();
-                },
-                onUpdates: () => undefined,
-            });
-        })().catch((error: unknown) => {
+        } catch (error: unknown) {
             if (this.#abort.signal.aborted) return;
-            this.#connection = "disconnected";
-            this.#changed();
+            this.#setConnection("disconnected");
             this.#onError(error);
-        });
+        }
+        let retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
+        while (!this.#abort.signal.aborted) {
+            try {
+                await this.#client.sync({
+                    abort: this.#abort.signal,
+                    onConnected: () => {
+                        retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
+                        this.#setConnection("connected");
+                        this.#folderSharing?.foldersChanged();
+                    },
+                    onContactAdded: () => this.#scheduleChanged(),
+                    onContactRemoved: () => this.#scheduleChanged(),
+                    onContactRequested: () => this.#scheduleChanged(),
+                    onDisconnected: () => {
+                        this.#setConnection("disconnected");
+                    },
+                    onUpdates: () => undefined,
+                });
+                if (this.#abort.signal.aborted) return;
+                throw new Error("Murmur synchronization stopped unexpectedly.");
+            } catch (error: unknown) {
+                if (this.#abort.signal.aborted) return;
+                this.#setConnection("disconnected");
+                this.#onError(error);
+            }
+            await this.#waitForSyncRetry(retryMilliseconds);
+            retryMilliseconds = Math.min(SYNC_RETRY_MAXIMUM_MILLISECONDS, retryMilliseconds * 2);
+            if (!this.#abort.signal.aborted) this.#setConnection("connecting");
+        }
     }
 
     async snapshot(): Promise<SharingSnapshot> {
         return this.#run(async () => {
-            const [contacts, folderShares, incomingRequests, sessions] = await Promise.all([
+            const [contacts, folderShares, incomingRequests, outgoingRequests] = await Promise.all([
                 this.#client.contacts(),
                 this.#folderSharing?.statuses() ?? Promise.resolve([]),
                 this.#client.contactRequests(),
-                this.#listSessions(),
+                this.#client.outgoingContactRequests(),
             ]);
-            const knownSessionIds = new Set([
-                ...contacts.map((contact) => encodeBytes(contact.sessionId)),
-                ...incomingRequests.map((request) => encodeBytes(request.sessionId)),
-            ]);
-            const outgoingRequests: SharingOutgoingContactRequest[] = [];
-            for (const session of sessions) {
-                const sessionId = encodeBytes(session.id);
-                if (
-                    knownSessionIds.has(sessionId) ||
-                    !isContactSessionDescriptor(session.descriptor) ||
-                    session.status === "removed"
-                ) {
-                    continue;
-                }
-                const identity = session.members
-                    .map(encodeBytes)
-                    .find((candidate) => candidate !== this.#identity);
-                if (identity === undefined) continue;
-                outgoingRequests.push({ id: sessionId, identity, sessionId });
-            }
             return {
                 connection: this.#connection,
                 contacts: contacts.map(toSharingContact),
                 folderShares,
                 identity: this.#identity,
                 incomingRequests: incomingRequests.map(toSharingContactRequest),
-                outgoingRequests,
+                outgoingRequests: outgoingRequests.map(toSharingOutgoingContactRequest),
                 profileId: this.#database.query(querySharingProfileId) ?? null,
                 version: this.#version,
             };
@@ -419,18 +419,27 @@ export class SharingService implements SharingServiceContract {
             : AbortSignal.any([signal, this.#abort.signal]);
     }
 
-    async #listSessions(): Promise<readonly MurmurSession[]> {
-        const sessions: MurmurSession[] = [];
-        let after: string | undefined;
-        do {
-            const page = await this.#client.sessions({
-                ...(after === undefined ? {} : { after }),
-                limit: 256,
-            });
-            sessions.push(...page.sessions);
-            after = page.cursor ?? undefined;
-        } while (after !== undefined && sessions.length < 10_000);
-        return sessions;
+    async #waitForSyncRetry(milliseconds: number): Promise<void> {
+        await new Promise<void>((resolve) => {
+            let finished = false;
+            const finish = (): void => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                this.#abort.signal.removeEventListener("abort", finish);
+                resolve();
+            };
+            const timer = setTimeout(finish, milliseconds);
+            timer.unref?.();
+            this.#abort.signal.addEventListener("abort", finish, { once: true });
+            if (this.#abort.signal.aborted) finish();
+        });
+    }
+
+    #setConnection(connection: SharingConnection): void {
+        if (this.#connection === connection) return;
+        this.#connection = connection;
+        this.#changed();
     }
 
     #scheduleChanged(): void {
@@ -486,6 +495,17 @@ function toSharingContactRequest(request: MurmurContactRequested): SharingContac
         identity: encodeBytes(request.identity),
         profile: decodeProfile(request.profile),
         sessionId: encodeBytes(request.sessionId),
+    };
+}
+
+function toSharingOutgoingContactRequest(
+    request: MurmurOutgoingContactRequest,
+): SharingOutgoingContactRequest {
+    const sessionId = encodeBytes(request.sessionId);
+    return {
+        id: sessionId,
+        identity: encodeBytes(request.identity),
+        sessionId,
     };
 }
 
