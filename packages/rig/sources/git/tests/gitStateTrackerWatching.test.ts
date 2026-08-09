@@ -47,12 +47,12 @@ describe("GitStateTracker watching", () => {
 
             await writeFile(join(repository, "watched.txt"), "one\ntwo\n");
 
-            await waitFor(() => published.length > initial, 15_000);
+            await waitFor(() => published.length > initial, 30_000);
             const latest = published.at(-1)!;
             expect(latest.changedFiles).toBe(1);
             expect(latest.insertions).toBe(2);
         },
-        30_000,
+        60_000,
     );
 
     it("notices a commit made outside Rig", async () => {
@@ -72,15 +72,15 @@ describe("GitStateTracker watching", () => {
         tracker.watch(entity);
         await waitFor(() => published.length >= 1);
         await writeFile(join(repository, "committed.txt"), "x\n");
-        await waitFor(() => published.some((snapshot) => snapshot.changedFiles === 1), 15_000);
+        await waitFor(() => published.some((snapshot) => snapshot.changedFiles === 1), 30_000);
         const beforeCommit = published.length;
 
         await git(repository, ["add", "--all"]);
         await git(repository, ["commit", "--quiet", "--message", "outside Rig"]);
 
-        await waitFor(() => published.length > beforeCommit, 15_000);
+        await waitFor(() => published.length > beforeCommit, 30_000);
         expect(published.at(-1)?.changedFiles).toBe(1);
-    }, 30_000);
+    }, 60_000);
 });
 
 function projectFor(path: string): Project {

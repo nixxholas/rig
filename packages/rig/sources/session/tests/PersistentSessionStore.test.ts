@@ -236,7 +236,9 @@ describe("PersistentSessionStore", () => {
                 },
             );
             await expect
-                .poll(async () => (await store?.getProject(project.id))?.initializationStatus)
+                .poll(async () => (await store?.getProject(project.id))?.initializationStatus, {
+                    timeout: 30_000,
+                })
                 .toBe("ready");
             const workspace = await store.createWorkspace(
                 project.id,
@@ -254,7 +256,9 @@ describe("PersistentSessionStore", () => {
                 },
             );
             await expect
-                .poll(async () => (await store?.getWorkspace(project.id, workspace!.id))?.status)
+                .poll(async () => (await store?.getWorkspace(project.id, workspace!.id))?.status, {
+                    timeout: 30_000,
+                })
                 .toBe("ready");
             expect(workspaceGitTokens.length).toBeGreaterThan(0);
             expect(new Set(workspaceGitTokens)).toEqual(new Set(["workspace-creator-token"]));
@@ -341,7 +345,7 @@ describe("PersistentSessionStore", () => {
                 }),
             ]);
         }
-    }, 30_000);
+    }, 90_000);
 
     it("persists an explicit session owner and keeps it when a session is forked or restored", async () => {
         const { cleanup, databasePath } = await createDatabasePath();

@@ -660,7 +660,7 @@ async function createHarness(): Promise<Harness> {
     });
     cleanups.push(async () => {
         await manager.close();
-        await opened.client.close();
+        await opened.database.close();
     });
     return {
         environment,
