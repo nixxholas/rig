@@ -60,6 +60,10 @@ export interface SharingMurmurClient {
     createInvitation(signal?: AbortSignal): Promise<Uint8Array>;
     rejectContact(sessionId: Uint8Array): Promise<void>;
     removeContact(identity: Uint8Array): Promise<void>;
+    resolveInvitation(
+        invitation: Uint8Array,
+        signal?: AbortSignal,
+    ): Promise<{ readonly identityKey: Uint8Array }>;
     requestContact(
         invitation: Uint8Array,
         profile: MurmurContactProfile,
@@ -251,17 +255,18 @@ export class SharingService implements SharingServiceContract {
     ): Promise<SharingOutgoingContactRequest> {
         const profile = encodeProfile(this.#profile());
         return this.#run(async () => {
-            const session = await this.#client.requestContact(
-                decodeBytes(invitation),
-                profile,
-                this.#operationSignal(signal),
+            const decodedInvitation = decodeBytes(invitation);
+            const operationSignal = this.#operationSignal(signal);
+            const bundle = await this.#client.resolveInvitation(
+                decodedInvitation,
+                operationSignal,
             );
-            const identity = session.members
-                .map(encodeBytes)
-                .find((member) => member !== this.#identity);
-            if (identity === undefined) {
-                throw new Error("Murmur did not identify the requested contact.");
-            }
+            const identity = encodeBytes(bundle.identityKey);
+            const session = await this.#client.requestContact(
+                decodedInvitation,
+                profile,
+                operationSignal,
+            );
             this.#changed();
             const sessionId = encodeBytes(session.id);
             return { id: sessionId, identity, sessionId };

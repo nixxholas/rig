@@ -332,6 +332,10 @@ class FakeMurmurClient implements SharingMurmurClient {
         this.#contacts.splice(index, 1);
     }
 
+    async resolveInvitation(): Promise<{ readonly identityKey: Uint8Array }> {
+        return { identityKey: REMOTE };
+    }
+
     async requestContact(
         _invitation: Uint8Array,
         profile: MurmurContactProfile,
@@ -342,10 +346,10 @@ class FakeMurmurClient implements SharingMurmurClient {
             committer: SELF,
             descriptor: contactSessionDescriptor(),
             id: SESSION,
-            members: [SELF, REMOTE],
+            members: [SELF],
             status: "creating",
         };
-        this.#sessions.push(session);
+        this.#sessions.push({ ...session, members: [SELF, REMOTE] });
         return session;
     }
 
