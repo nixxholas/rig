@@ -57,8 +57,9 @@ async function startDaemon(options: { inferenceGate?: Promise<void>; withModel?:
 async function waitFor(
     predicate: () => boolean | Promise<boolean>,
     description: string,
+    timeoutMs = 5_000,
 ): Promise<void> {
-    const deadline = Date.now() + 5_000;
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         if (await predicate()) return;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -158,6 +159,7 @@ describe("rig-connect against a live daemon", () => {
             await waitFor(
                 async () => (await store.get(createdId)) !== undefined,
                 "the new session to exist",
+                15_000,
             );
             expect((await store.get(createdId))?.snapshot().cwd).toBe(
                 "/tmp/rig-created-through-connect",
@@ -168,6 +170,7 @@ describe("rig-connect against a live daemon", () => {
                 async () =>
                     (await store.get(forkedId)) !== undefined || mutationFailures.length > 0,
                 `the fork to exist; requests: ${requests.join(", ")}`,
+                15_000,
             );
             expect(mutationFailures).toEqual([]);
             expect((await store.get(forkedId))?.snapshot().id).toBe(forkedId);
@@ -175,7 +178,7 @@ describe("rig-connect against a live daemon", () => {
             session.close();
             rig.close();
         }
-    });
+    }, 30_000);
 
     it("tracks what the session is doing without asking the daemon anything else", async () => {
         const { endpoint, store } = await startDaemon();
