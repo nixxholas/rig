@@ -1520,7 +1520,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     parameters: Type.Object({ command: Type.String() }),
                 },
             ],
@@ -1580,7 +1579,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     parameters: Type.Object({ command: Type.String() }),
                 },
             ],
@@ -1710,7 +1708,6 @@ describe("ClaudeSession", () => {
             tools: [
                 {
                     name: "Bash",
-                    type: "local",
                     parameters: Type.Object({ command: Type.String() }),
                 },
             ],
