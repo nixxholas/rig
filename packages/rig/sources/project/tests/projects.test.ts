@@ -57,6 +57,66 @@ afterEach(async () => {
 });
 
 describe("projects", () => {
+    it("drains owned project initialization before closing", async () => {
+        const cloneStarted = deferred<void>();
+        const releaseClone = deferred<void>();
+        const root = await mkdtemp(join(tmpdir(), "rig-project-close-test-"));
+        const opened = await openSessionDatabase(":memory:");
+        await migrateSessionDatabase(opened.database);
+        const repository = new ProjectRepository({
+            cloneRemote: async () => {
+                cloneStarted.resolve();
+                await releaseClone.promise;
+            },
+            database: opened.database,
+            homeDirectory: root,
+            localInstanceId: TEST_LOCAL_INSTANCE_ID,
+            resolveProfile: () => ({
+                createdAt: 1,
+                email: "steve@example.test",
+                id: "aclosingprofile00000000001",
+                name: "Steve Korshakov",
+                parentInstanceId: TEST_LOCAL_INSTANCE_ID,
+                updatedAt: 1,
+                version: 1,
+            }),
+            stateDirectory: join(root, "state"),
+        });
+        cleanups.push(async () => {
+            releaseClone.resolve();
+            await repository.close();
+            await opened.database.close();
+            await rm(root, { force: true, recursive: true });
+        });
+
+        const profileId = "aclosingprofile00000000001";
+        await repository.createRemoteProject(
+            {
+                identity: profileId,
+                name: "Closing Project",
+                source: { kind: "github", repository: "slopus/rig" },
+            },
+            {
+                createdBy: {
+                    instanceId: TEST_LOCAL_INSTANCE_ID,
+                    profileId,
+                },
+            },
+        );
+        await cloneStarted.promise;
+
+        let closed = false;
+        const closing = repository.close().then(() => {
+            closed = true;
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(closed).toBe(false);
+
+        releaseClone.resolve();
+        await closing;
+        expect(closed).toBe(true);
+    });
+
     it("creates one managed project immediately while its repository clones in the background", async () => {
         const clones: {
             gitAuthentication?: {
@@ -315,8 +375,10 @@ describe("projects", () => {
     });
 
     it("reconciles concurrent managed project reservations by identity and path", async () => {
+        const releaseClone = deferred<void>();
+        cleanups.push(async () => releaseClone.resolve());
         const fixture = await createFixture({
-            projectClone: async () => await new Promise<void>(() => undefined),
+            projectClone: async () => await releaseClone.promise,
         });
         const profile = await createLocalProfile(fixture.store);
         const projectId = createId();
@@ -2116,9 +2178,10 @@ describe("projects", () => {
             clientSubmissionId: "waiting-restart-message",
             text: "Resume after restart.",
         });
-        await fixture.store.close();
+        const closing = fixture.store.close();
         releaseWorktreeAdd.resolve();
         await worktreeAddFinished.promise;
+        await closing;
 
         const restarted = await fixture.restart();
         const restored = await restarted.get(session.id);

@@ -114,7 +114,7 @@ import {
 import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
 import type { GitCommandRunner } from "../git/types.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
-import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
+import { TrackedTaskDrain, type TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { folderProjectName, projectStorageKey, validateProjectName } from "./projectIdentity.js";
 import { loadConfig } from "../config/loadConfig.js";
 import { runWorkspaceSetupCommands } from "./runWorkspaceSetupCommands.js";
@@ -232,7 +232,8 @@ export class ProjectRepository {
         | ((error: unknown, projectId: string, workspaceId: string) => void)
         | undefined;
     readonly #stateDirectory: string;
-    readonly #taskDrain: TaskDrain | undefined;
+    readonly #ownedTaskDrain: TrackedTaskDrain | undefined;
+    readonly #taskDrain: TaskDrain;
     readonly #transactionRunner: (<T>(body: (tx: TX) => T | Promise<T>) => Promise<T>) | undefined;
     readonly #workspacesDirectory: string;
     readonly #resolveGitSecret: ((kind: "github") => string | undefined) | undefined;
@@ -271,7 +272,8 @@ export class ProjectRepository {
         this.#onEvent = options.onEvent;
         this.#onWorkspaceBranchError = options.onWorkspaceBranchError;
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
-        this.#taskDrain = options.taskDrain;
+        this.#ownedTaskDrain = options.taskDrain === undefined ? new TrackedTaskDrain() : undefined;
+        this.#taskDrain = options.taskDrain ?? this.#ownedTaskDrain!;
         this.#transactionRunner = options.transaction;
         this.#resolveGitSecret = options.resolveGitSecret;
         this.#resolveProfile = options.resolveProfile;
@@ -655,6 +657,7 @@ export class ProjectRepository {
 
     async close(): Promise<void> {
         this.#closed = true;
+        this.#ownedTaskDrain?.beginClose();
         this.#gitCredentialBroker.close();
         this.#pendingInitializations.length = 0;
         for (const controller of this.#workspaceSetupControllers.values()) {
@@ -666,6 +669,7 @@ export class ProjectRepository {
         for (const stop of this.#workspaceSyncStops.values()) stop();
         this.#workspaceSyncStops.clear();
         this.#workspaceSyncChain.clear();
+        await this.#ownedTaskDrain?.drain();
     }
 
     async getProject(projectId: string): Promise<Project | undefined> {
@@ -774,7 +778,7 @@ export class ProjectRepository {
         let next = 0;
         const worker = async (): Promise<void> => {
             for (;;) {
-                if (this.#closed || this.#taskDrain?.closing === true) return;
+                if (this.#closed || this.#taskDrain.closing) return;
                 const workspace = workspaces[next++];
                 if (workspace === undefined) return;
                 await this.#initializeWorkspace(workspace);
@@ -812,7 +816,7 @@ export class ProjectRepository {
                 // The repository is closed only after the drain finishes, so checking that alone
                 // would let this optional sweep keep claiming targets during shutdown and hold it
                 // open for a Git timeout per remaining project.
-                if (this.#closed || this.#taskDrain?.closing === true) return;
+                if (this.#closed || this.#taskDrain.closing) return;
                 const target = targets[next++];
                 if (target === undefined) return;
                 if (target.kind === "project") {
@@ -1842,7 +1846,7 @@ export class ProjectRepository {
             if (projectId === undefined) return;
             this.#activeInitializations += 1;
             const initialize = () => this.#initialize(projectId);
-            const task = this.#taskDrain?.run(initialize) ?? initialize();
+            const task = this.#taskDrain.run(initialize);
             let initializationRejected = false;
             void task
                 .catch((error: unknown) => {
@@ -2462,7 +2466,7 @@ export class ProjectRepository {
 
     #runBackgroundTask(task: () => Promise<void>): void {
         if (this.#closed) return;
-        const promise = this.#taskDrain?.run(task) ?? task();
+        const promise = this.#taskDrain.run(task);
         void promise.catch((error: unknown) => {
             if (!isDatabaseFailure(error) || this.#closed) return;
             setImmediate(() => {
