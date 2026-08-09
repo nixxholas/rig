@@ -948,6 +948,10 @@ export interface StartInspectorResponse {
     inspectorUrl: string;
 }
 
+export interface StopInspectorResponse {
+    stopped: boolean;
+}
+
 export interface ListExternalToolCallsResponse {
     calls: readonly ExternalToolCall[];
 }

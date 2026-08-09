@@ -99,6 +99,7 @@ import type {
     SetGoalRequest,
     ShutdownServerResponse,
     StartInspectorResponse,
+    StopInspectorResponse,
     SteerMessageResponse,
     StopBackgroundProcessResponse,
     StopWorkflowResponse,
@@ -376,6 +377,7 @@ export interface ProtocolHttpServerOptions {
     onShutdown?: () => void;
     onReloadHappy?: () => boolean | Promise<boolean>;
     onStartInspector?: () => StartInspectorResponse | Promise<StartInspectorResponse>;
+    onStopInspector?: () => StopInspectorResponse | Promise<StopInspectorResponse>;
     plugins?: Pick<
         PluginContext,
         | "callAppTool"
@@ -441,6 +443,7 @@ export function createProtocolHttpServer(
         onboarding: options.onboarding,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
+        onStopInspector: options.onStopInspector,
         plugins: options.plugins,
         ...(options.worklets === undefined ? {} : { worklets: options.worklets }),
     };
@@ -545,6 +548,7 @@ interface ProtocolServerRuntimeConfig {
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
     onboarding: OnboardingServiceContract | undefined;
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
+    onStopInspector: (() => StopInspectorResponse | Promise<StopInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
     plugins:
         | Pick<
@@ -1833,6 +1837,15 @@ async function handleRequest(
             return;
         }
         sendJson<StartInspectorResponse>(response, 200, await runtimeConfig.onStartInspector());
+        return;
+    }
+
+    if (request.method === "DELETE" && route.name === "debug-inspector") {
+        if (runtimeConfig.onStopInspector === undefined) {
+            sendJson(response, 409, { error: "This daemon cannot stop a debugger." });
+            return;
+        }
+        sendJson<StopInspectorResponse>(response, 200, await runtimeConfig.onStopInspector());
         return;
     }
 
@@ -6016,7 +6029,9 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "onboarding-murmur") return request.method === "PUT";
     if (route.name === "global-instructions") return request.method === "PUT";
     if (route.name === "global-security-policy") return request.method === "PUT";
-    if (route.name === "debug-inspector") return request.method === "POST";
+    if (route.name === "debug-inspector") {
+        return request.method === "POST" || request.method === "DELETE";
+    }
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
     if (route.name === "happy-cloud-commands") return request.method === "POST";

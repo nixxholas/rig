@@ -104,6 +104,7 @@ import type {
     SessionTerminalHeartbeatResponse,
     ShutdownServerResponse,
     StartInspectorResponse,
+    StopInspectorResponse,
     SetGoalRequest,
     SetSessionDraftRequest,
     SteerMessageRequest,
@@ -1183,6 +1184,10 @@ export class ProtocolHttpClient {
 
     startInspector(): Promise<StartInspectorResponse> {
         return this.#requestJson("POST", "/debug/inspector");
+    }
+
+    stopInspector(): Promise<StopInspectorResponse> {
+        return this.#requestJson("DELETE", "/debug/inspector");
     }
 
     submitMessage(

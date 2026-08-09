@@ -448,6 +448,7 @@ export type {
     ShellCommandState,
     ShellCommandStartedEvent,
     StopBackgroundProcessResponse,
+    StopInspectorResponse,
     SessionUsageGroup,
     SubagentChangedEvent,
     SubagentSummary,

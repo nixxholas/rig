@@ -53,7 +53,12 @@ import {
     type SqliteProcessLock,
 } from "../persistence/database/acquireSqliteProcessLock.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import { getNodeInspectorUrl, openNodeInspector, registerRigDebugRoot } from "../debug/index.js";
+import {
+    closeNodeInspector,
+    getNodeInspectorUrl,
+    openNodeInspector,
+    registerRigDebugRoot,
+} from "../debug/index.js";
 import { RigUserError } from "../RigUserError.js";
 import type { HappySyncService } from "../happy/index.js";
 import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDirectory.js";
@@ -249,6 +254,15 @@ async function runOwnedLocalProtocolServer(
             socketPath,
             startedAt,
         });
+    };
+    let inspectorOperation = Promise.resolve();
+    const inspectorSerialize = <Result>(operation: () => Promise<Result>): Promise<Result> => {
+        const result = inspectorOperation.then(operation);
+        inspectorOperation = result.then(
+            () => undefined,
+            () => undefined,
+        );
+        return result;
     };
     let initialization = Promise.resolve();
     let fatalDatabaseFailure: unknown;
@@ -1228,11 +1242,20 @@ async function runOwnedLocalProtocolServer(
                               });
                           },
                       }),
-                onStartInspector: async () => {
-                    const inspectorUrl = openNodeInspector();
-                    await writeServerRegistry();
-                    return { inspectorUrl };
-                },
+                onStartInspector: () =>
+                    inspectorSerialize(async () => {
+                        const inspectorUrl = openNodeInspector();
+                        await writeServerRegistry();
+                        return { inspectorUrl };
+                    }),
+                onStopInspector: () =>
+                    inspectorSerialize(async () => {
+                        const stopped = closeNodeInspector();
+                        // Reconcile the registry even when the inspector was already
+                        // closed through another in-process path.
+                        await writeServerRegistry();
+                        return { stopped };
+                    }),
                 onShutdown: () => stopServer("Shutdown requested through the daemon protocol."),
                 store,
                 taskDrain,
