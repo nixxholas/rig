@@ -333,7 +333,7 @@ import {
 import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import type { PrepareP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
-import type { SharingServiceContract } from "../sharing/index.js";
+import type { SharingLifecycleServiceContract } from "../sharing/index.js";
 
 export interface ProtocolHttpServerOptions {
     inferenceMaxRetries?: number;
@@ -357,7 +357,7 @@ export interface ProtocolHttpServerOptions {
     /** Authorizes a peer to create and operate its remote projects, workspaces, and sessions. */
     canP2pPeerUseRemoteWork?: (peerId: string) => boolean;
     profiles?: RigProfileStore;
-    sharing?: SharingServiceContract;
+    sharing?: SharingLifecycleServiceContract;
     replaceP2pCredentials?: (
         authenticatedOwnerId: string,
         envelope: P2pEncryptedCredentialSnapshot,
@@ -543,7 +543,7 @@ interface ProtocolServerRuntimeConfig {
     p2pNode: (() => DaemonConfig["p2p"]) | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
     profiles: RigProfileStore | undefined;
-    sharing: SharingServiceContract | undefined;
+    sharing: SharingLifecycleServiceContract | undefined;
     replaceP2pCredentials: ProtocolHttpServerOptions["replaceP2pCredentials"];
     resolveModelCatalog: ProtocolHttpServerOptions["resolveModelCatalog"];
     prepareP2pRequest: PrepareP2pHttpRequest | undefined;
@@ -797,6 +797,10 @@ async function handleRequest(
         try {
             if (route.name === "sharing" && request.method === "GET") {
                 sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                return;
+            }
+            if (route.name === "sharing" && request.method === "DELETE") {
+                sendJson<SharingSnapshot>(response, 200, await sharing.reset());
                 return;
             }
             if (route.name === "sharing-invitations" && request.method === "POST") {
@@ -6060,7 +6064,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "plugins") return request.method === "POST";
     if (route.name === "profiles") return request.method === "POST";
     if (route.name === "profile") return request.method === "PATCH" || request.method === "PUT";
-    if (route.name === "sharing") return false;
+    if (route.name === "sharing") return request.method === "DELETE";
     if (route.name === "sharing-invitations") return request.method === "POST";
     if (route.name === "sharing-folder-shares") return request.method === "POST";
     if (route.name === "sharing-contact-requests") return request.method === "POST";

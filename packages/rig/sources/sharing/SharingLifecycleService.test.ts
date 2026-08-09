@@ -7,6 +7,7 @@ import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { SharingLifecycleService, type ManagedSharingService } from "./SharingLifecycleService.js";
 
 const IDENTITY = "A".repeat(43);
+const REPLACEMENT_IDENTITY = "B".repeat(43);
 const LOCAL_INSTANCE_ID = "alocalinstance00000000001";
 
 describe("SharingLifecycleService", () => {
@@ -68,6 +69,7 @@ describe("SharingLifecycleService", () => {
             database: fixture.database,
             open: restoredOpen,
             profiles: fixture.profiles,
+            resetState: async () => undefined,
         });
         try {
             await restored.start();
@@ -82,6 +84,7 @@ describe("SharingLifecycleService", () => {
                 database: fixture.database,
                 open: disabledOpen,
                 profiles: fixture.profiles,
+                resetState: async () => undefined,
             });
             await disabled.start();
             expect(disabledOpen).not.toHaveBeenCalled();
@@ -108,6 +111,32 @@ describe("SharingLifecycleService", () => {
             fixture.database.close();
         }
     });
+
+    it("closes and clears Murmur before reopening the same profile with a new identity", async () => {
+        const fixture = createFixture();
+        const profile = fixture.profiles.create({
+            email: "steve@example.test",
+            name: "Steve",
+        });
+        await fixture.lifecycle.onboardMurmur({ enabled: true, profileId: profile.id });
+        const replacement = fakeService(profile.id, () => undefined, REPLACEMENT_IDENTITY);
+        fixture.open.mockResolvedValueOnce(replacement);
+        try {
+            await expect(fixture.lifecycle.reset()).resolves.toMatchObject({
+                contacts: [],
+                identity: REPLACEMENT_IDENTITY,
+                profileId: profile.id,
+            });
+            expect(fixture.service.close).toHaveBeenCalledOnce();
+            expect(fixture.resetState).toHaveBeenCalledOnce();
+            expect(fixture.open).toHaveBeenCalledTimes(2);
+            expect(replacement.bindProfile).toHaveBeenCalledWith(profile.id);
+            expect(replacement.start).toHaveBeenCalledOnce();
+        } finally {
+            await fixture.lifecycle.close();
+            fixture.database.close();
+        }
+    });
 });
 
 function createFixture() {
@@ -124,11 +153,18 @@ function createFixture() {
         database.transaction((tx) => sharingProfileBind(tx, profileId, IDENTITY, 1));
     });
     const open = vi.fn(async () => service);
+    const resetState = vi.fn(async () => undefined);
     return {
         database,
-        lifecycle: new SharingLifecycleService({ database, open, profiles }),
+        lifecycle: new SharingLifecycleService({
+            database,
+            open,
+            profiles,
+            resetState,
+        }),
         open,
         profiles,
+        resetState,
         service,
     };
 }
@@ -136,6 +172,7 @@ function createFixture() {
 function fakeService(
     profileId: string | null,
     onBind: (profileId: string) => void = () => undefined,
+    identity = IDENTITY,
 ): ManagedSharingService & {
     bindProfile: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
@@ -145,7 +182,7 @@ function fakeService(
         connection: "connecting",
         contacts: [],
         folderShares: [],
-        identity: IDENTITY,
+        identity,
         incomingRequests: [],
         outgoingRequests: [],
         profileId,

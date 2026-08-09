@@ -76,7 +76,7 @@
         "@pydantic/monty": "0.0.18",
         "@sinclair/typebox": "^0.34.49",
         "@slopus/ghostty-wasm": "1.3.6",
-        "@slopus/murmur": "0.4.1",
+        "@slopus/murmur": "0.4.2",
         "@types/node": "^24.0.10",
         "@vscode/ripgrep": "1.18.0",
         "better-sqlite3": "^13.0.2",

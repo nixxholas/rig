@@ -94,7 +94,7 @@ import {
 } from "../credentials/index.js";
 import { OnboardingService } from "../onboarding/OnboardingService.js";
 import { prepareRemoteWorkGitSecret } from "./prepareRemoteWorkGitSecret.js";
-import { SharingLifecycleService, SharingService } from "../sharing/index.js";
+import { resetMurmurStore, SharingLifecycleService, SharingService } from "../sharing/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -768,6 +768,10 @@ async function runOwnedLocalProtocolServer(
                     },
                 }),
             profiles: profilesStore,
+            resetState: async () => {
+                await resetMurmurStore(dirname(paths.databasePath));
+                activeStore.resetSharingState();
+            },
         });
         sharing = sharingLifecycle;
         const unsubscribeFolderSharing = activeStore.liveEvents.subscribe(({ event }) => {

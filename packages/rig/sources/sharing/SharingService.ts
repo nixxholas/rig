@@ -11,6 +11,8 @@ import {
     type MurmurSession,
     type MurmurSessionListOptions,
     type MurmurSessionPage,
+    type MurmurSynchronizeOptions,
+    type MurmurSynchronizeResult,
     type MurmurSyncOptions,
 } from "@slopus/murmur";
 import { Type } from "@sinclair/typebox";
@@ -61,6 +63,14 @@ interface SharingDatabase {
     transaction<Result>(operation: (tx: TX) => Result): Result;
 }
 
+interface SharingFolderService {
+    create(rootFolderId: string, contacts: readonly string[]): Promise<FolderShareStatus>;
+    drain(): Promise<void>;
+    foldersChanged(): void;
+    recover(): Promise<void>;
+    statuses(): Promise<FolderShareStatus[]>;
+}
+
 export interface SharingMurmurClient {
     readonly identity: Uint8Array;
     acceptContact(sessionId: Uint8Array, profile: MurmurContactProfile): Promise<void>;
@@ -84,13 +94,14 @@ export interface SharingMurmurClient {
     sessions(options?: MurmurSessionListOptions): Promise<MurmurSessionPage>;
     send(id: Uint8Array, bytes: Uint8Array): Promise<string>;
     session(id: Uint8Array): Promise<MurmurSession | undefined>;
+    synchronize(options?: MurmurSynchronizeOptions): Promise<MurmurSynchronizeResult>;
     sync(options?: MurmurSyncOptions): Promise<void>;
 }
 
 export interface SharingServiceOptions {
     client: SharingMurmurClient;
     database: SharingDatabase;
-    folderSharing?: FolderSharingService;
+    folderSharing?: SharingFolderService;
     now?: () => number;
     onError?: (error: unknown) => void;
     profiles: RigProfileStore;
@@ -127,7 +138,7 @@ export class SharingService implements SharingServiceContract {
     readonly #client: SharingMurmurClient;
     readonly #database: SharingDatabase;
     readonly #identity: string;
-    readonly #folderSharing: FolderSharingService | undefined;
+    readonly #folderSharing: SharingFolderService | undefined;
     readonly #nextEventId: () => string;
     readonly #now: () => number;
     readonly #onError: (error: unknown) => void;
@@ -229,6 +240,7 @@ export class SharingService implements SharingServiceContract {
         let retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
         while (!this.#abort.signal.aborted) {
             try {
+                await this.#client.synchronize({ signal: this.#abort.signal });
                 await this.#client.sync({
                     abort: this.#abort.signal,
                     onConnected: () => {
@@ -372,6 +384,11 @@ export class SharingService implements SharingServiceContract {
         if (this.#publishTimer !== undefined) {
             clearTimeout(this.#publishTimer);
             this.#publishTimer = undefined;
+        }
+        try {
+            await this.#folderSharing?.drain();
+        } catch (error: unknown) {
+            this.#onError(error);
         }
         this.#abort.abort();
         await this.#sync;

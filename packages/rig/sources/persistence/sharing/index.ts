@@ -7,3 +7,4 @@ export {
 export { querySharingSettings, type SharingSettings } from "./querySharingSettings.js";
 export { sharingProfileBind } from "./sharingProfileBind.js";
 export { sharingSettingsSet } from "./sharingSettingsSet.js";
+export { sharingStateReset } from "./sharingStateReset.js";

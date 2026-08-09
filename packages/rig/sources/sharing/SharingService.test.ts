@@ -8,6 +8,8 @@ import {
     type MurmurSession,
     type MurmurSessionListOptions,
     type MurmurSessionPage,
+    type MurmurSynchronizeOptions,
+    type MurmurSynchronizeResult,
     type MurmurSyncOptions,
 } from "@slopus/murmur";
 import { describe, expect, it, vi } from "vitest";
@@ -280,6 +282,50 @@ describe("SharingService", () => {
             vi.useRealTimers();
         }
     });
+
+    it("drains queued folder work before closing Murmur", async () => {
+        const database = new PersistentSessionStore({ databasePath: ":memory:" });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: "alocalinstance00000000001",
+            publish: () => undefined,
+        });
+        const client = new FakeMurmurClient();
+        let releaseDrain!: () => void;
+        const drain = vi.fn(
+            () =>
+                new Promise<void>((resolve) => {
+                    releaseDrain = resolve;
+                }),
+        );
+        const sharing = new SharingService({
+            client,
+            database,
+            folderSharing: {
+                create: async () => {
+                    throw new Error("Not used");
+                },
+                drain,
+                foldersChanged: () => undefined,
+                recover: async () => undefined,
+                statuses: async () => [],
+            },
+            profiles,
+            publish: () => undefined,
+        });
+        try {
+            const closing = sharing.close();
+            await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
+            expect(client.closed).toBe(false);
+
+            releaseDrain();
+            await closing;
+            expect(client.closed).toBe(true);
+        } finally {
+            await sharing.close();
+            database.close();
+        }
+    });
 });
 
 class FakeMurmurClient implements SharingMurmurClient {
@@ -426,6 +472,22 @@ class FakeMurmurClient implements SharingMurmurClient {
 
     async session(id: Uint8Array): Promise<MurmurSession | undefined> {
         return this.#sessions.find((session) => Buffer.from(session.id).equals(Buffer.from(id)));
+    }
+
+    async synchronize(_options?: MurmurSynchronizeOptions): Promise<MurmurSynchronizeResult> {
+        return {
+            inbox: {
+                cursor: null,
+                exhausted: true,
+                processed: 0,
+                rejected: 0,
+            },
+            issues: [],
+            pendingOutboxes: 0,
+            published: 0,
+            terminalPublicationFailures: 0,
+            transientPublicationFailures: 0,
+        };
     }
 
     async sync(options: MurmurSyncOptions = {}): Promise<void> {

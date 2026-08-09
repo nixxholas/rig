@@ -879,6 +879,8 @@ export interface RigConnection {
         identity: string,
         options?: { signal?: AbortSignal },
     ) => Promise<SharingSnapshot>;
+    /** Destroys local Murmur contacts, sessions, and folder shares, then creates a new identity. */
+    resetSharing: (options?: { signal?: AbortSignal }) => Promise<SharingSnapshot>;
     listProfiles: (options?: { signal?: AbortSignal }) => Promise<readonly RigProfile[]>;
     createProfile: (
         request: CreateRigProfileRequest,
@@ -5747,6 +5749,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         );
     };
 
+    const resetSharing: RigConnection["resetSharing"] = async (operationOptions = {}) =>
+        applySharingMutationSnapshot(
+            await requestSharing<SharingSnapshot>(
+                "sharing",
+                "DELETE",
+                sharingSnapshotSchema,
+                operationOptions,
+            ),
+        );
+
     const getHappyCloudStatus: RigConnection["getHappyCloudStatus"] = (operationOptions = {}) =>
         requestHappyCloud(
             "happy-cloud/status",
@@ -7448,6 +7460,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         acceptSharingContactRequest,
         rejectSharingContactRequest,
         removeSharingContact,
+        resetSharing,
         shareFolder,
         rewindSession,
         runShellCommand,

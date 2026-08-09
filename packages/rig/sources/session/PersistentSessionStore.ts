@@ -91,6 +91,7 @@ import type { DurableUserInputCall } from "../user-input/index.js";
 import type { DurableWait, ScheduledMessage } from "../scheduling/index.js";
 import type { GitCommandRunner } from "../git/types.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
+import { sharingStateReset } from "../persistence/sharing/index.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import {
@@ -260,6 +261,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #createRuntime: InMemorySessionOptions["createRuntime"];
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #createPresenceEventId = createEventIdFactory();
+    readonly #createSharingResetEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     #database: SessionDatabase;
     readonly dataEpoch: string;
@@ -1334,6 +1336,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     applySharedFolderState(groupId: string, state: SharedFolderState): Folder {
         return this.#folders.applySharedFolderState(groupId, state);
+    }
+
+    resetSharingState(): void {
+        this.#transaction((tx) => {
+            const now = this.#now();
+            const revision = sharingStateReset(tx, now);
+            if (revision === undefined) return;
+            this.#publishGlobalEvent({
+                createdAt: now,
+                data: { revision },
+                id: this.#createSharingResetEventId(),
+                type: "folders_changed",
+            });
+        });
     }
 
     getDocument(documentId: string): Document | undefined {

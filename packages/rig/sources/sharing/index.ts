@@ -14,6 +14,8 @@ export {
 } from "./SharingService.js";
 export {
     SharingLifecycleService,
+    type SharingLifecycleServiceContract,
     type ManagedSharingService,
     type SharingLifecycleServiceOptions,
 } from "./SharingLifecycleService.js";
+export { resetMurmurStore } from "./resetMurmurStore.js";

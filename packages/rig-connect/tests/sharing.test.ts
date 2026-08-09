@@ -152,6 +152,7 @@ describe("Sharing connection", () => {
         await expect(rig.acceptSharingContactRequest("request-1")).resolves.toEqual(current);
         await expect(rig.rejectSharingContactRequest("request-2")).resolves.toEqual(current);
         await expect(rig.removeSharingContact(REMOTE)).resolves.toEqual(current);
+        await expect(rig.resetSharing()).resolves.toEqual(current);
         await expect(rig.shareFolder("afolder000000000000000001", [REMOTE])).resolves.toMatchObject(
             {
                 groupId: IDENTITY,
@@ -186,6 +187,11 @@ describe("Sharing connection", () => {
                 body: undefined,
                 method: "DELETE",
                 path: `/sharing/contacts/${REMOTE}`,
+            },
+            {
+                body: undefined,
+                method: "DELETE",
+                path: "/sharing",
             },
             {
                 body: {

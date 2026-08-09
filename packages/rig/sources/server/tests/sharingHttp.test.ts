@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SharingOutgoingContactRequest, SharingSnapshot } from "../../protocol/index.js";
-import type { SharingServiceContract } from "../../sharing/index.js";
+import type { SharingLifecycleServiceContract } from "../../sharing/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -29,7 +29,7 @@ describe("Sharing HTTP API", () => {
     });
 
     it("exposes invitations, contact requests, and removal", async () => {
-        const sharing: SharingServiceContract = {
+        const sharing: SharingLifecycleServiceContract = {
             acceptContact: vi.fn(async () => undefined),
             createInvitation: vi.fn(async () => ({
                 expiresAt: 301_000,
@@ -43,6 +43,7 @@ describe("Sharing HTTP API", () => {
             })),
             foldersChanged: vi.fn(),
             rejectContact: vi.fn(async () => undefined),
+            reset: vi.fn(async () => snapshot),
             removeContact: vi.fn(async () => undefined),
             requestContact: vi.fn(
                 async (): Promise<SharingOutgoingContactRequest> => ({
@@ -121,10 +122,15 @@ describe("Sharing HTTP API", () => {
             await send(started.socketPath, "DELETE", `/sharing/contacts/${REMOTE}`),
         ).toMatchObject({ status: 200 });
         expect(sharing.removeContact).toHaveBeenCalledWith(REMOTE);
+        expect(await send(started.socketPath, "DELETE", "/sharing")).toEqual({
+            body: snapshot,
+            status: 200,
+        });
+        expect(sharing.reset).toHaveBeenCalledOnce();
     });
 
     it("rejects malformed Sharing input before calling the service", async () => {
-        const sharing: SharingServiceContract = {
+        const sharing: SharingLifecycleServiceContract = {
             acceptContact: vi.fn(async () => undefined),
             createInvitation: vi.fn(async () => ({
                 expiresAt: 1,
@@ -138,6 +144,7 @@ describe("Sharing HTTP API", () => {
             })),
             foldersChanged: vi.fn(),
             rejectContact: vi.fn(async () => undefined),
+            reset: vi.fn(async () => snapshot),
             removeContact: vi.fn(async () => undefined),
             requestContact: vi.fn(async () => ({
                 id: IDENTITY,

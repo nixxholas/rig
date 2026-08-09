@@ -4,7 +4,11 @@ import {
     querySharingSettings,
     sharingSettingsSet,
 } from "../persistence/sharing/index.js";
-import type { OnboardMurmurRequest, OnboardMurmurResponse } from "../protocol/index.js";
+import type {
+    OnboardMurmurRequest,
+    OnboardMurmurResponse,
+    SharingSnapshot,
+} from "../protocol/index.js";
 import type { RigProfileStore } from "../profiles/index.js";
 import type { SharingServiceContract } from "./SharingService.js";
 
@@ -18,6 +22,7 @@ export interface SharingLifecycleServiceOptions {
     now?: () => number;
     open: () => Promise<ManagedSharingService>;
     profiles: RigProfileStore;
+    resetState: () => Promise<void>;
 }
 
 export interface ManagedSharingService extends SharingServiceContract {
@@ -26,11 +31,16 @@ export interface ManagedSharingService extends SharingServiceContract {
     start(): void;
 }
 
-export class SharingLifecycleService implements SharingServiceContract {
+export interface SharingLifecycleServiceContract extends SharingServiceContract {
+    reset(): Promise<SharingSnapshot>;
+}
+
+export class SharingLifecycleService implements SharingLifecycleServiceContract {
     readonly #database: SharingLifecycleDatabase;
     readonly #now: () => number;
     readonly #open: () => Promise<ManagedSharingService>;
     readonly #profiles: RigProfileStore;
+    readonly #resetState: () => Promise<void>;
     #closePromise: Promise<void> | undefined;
     #closing = false;
     #service: ManagedSharingService | undefined;
@@ -41,6 +51,7 @@ export class SharingLifecycleService implements SharingServiceContract {
         this.#now = options.now ?? Date.now;
         this.#open = options.open;
         this.#profiles = options.profiles;
+        this.#resetState = options.resetState;
     }
 
     configured(): boolean {
@@ -97,6 +108,33 @@ export class SharingLifecycleService implements SharingServiceContract {
 
     removeContact(identity: string): Promise<void> {
         return this.#requireService().removeContact(identity);
+    }
+
+    reset(): Promise<SharingSnapshot> {
+        if (this.#closing) return Promise.reject(new Error("Sharing is closing."));
+        return this.#transition(async () => {
+            if (!this.enabled()) throw new Error("Sharing is disabled.");
+            const profileId = this.#database.query(querySharingProfileId);
+            if (profileId === undefined) {
+                throw new Error("Enabled Sharing is missing its bound human profile.");
+            }
+            const previous = this.#service;
+            this.#service = undefined;
+            await previous?.close();
+            await this.#resetState();
+
+            const service = await this.#open();
+            try {
+                service.bindProfile(profileId);
+                service.start();
+                const snapshot = await service.snapshot();
+                this.#service = service;
+                return snapshot;
+            } catch (error) {
+                await service.close();
+                throw error;
+            }
+        });
     }
 
     requestContact(invitation: string, signal?: AbortSignal) {
