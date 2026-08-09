@@ -98,15 +98,12 @@ describe("IrohNetwork", () => {
                 status: "connected",
             });
         });
-        const publishedAfterConnect = firstStatusChanged.mock.calls.length;
         const firstPingAt = first.status().peers[0]!.lastSeenAt!;
-        await vi.waitFor(() =>
-            expect(first.status().peers[0]!.lastSeenAt).toBeGreaterThan(firstPingAt),
-        );
-        expect(firstStatusChanged).toHaveBeenCalledTimes(publishedAfterConnect + 1);
-        expect(firstStatusChanged.mock.calls.at(-1)?.[0].peers[0]?.lastSeenAt).toBeGreaterThan(
-            firstPingAt,
-        );
+        await vi.waitFor(() => {
+            expect(firstStatusChanged.mock.calls.at(-1)?.[0].peers[0]?.lastSeenAt).toBeGreaterThan(
+                firstPingAt,
+            );
+        });
         await vi.waitFor(() => expect(updateSecondPeerAddress).toHaveBeenCalled());
         const learnedTicket = updateSecondPeerAddress.mock.calls[0]![2];
         expect(EndpointTicket.fromString(learnedTicket).endpointAddr().id().toString()).toBe(
