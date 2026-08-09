@@ -1,9 +1,8 @@
 import { createClient, type Client } from "@libsql/client";
-import { _createClient as createSqliteClient } from "@libsql/client/sqlite3";
-import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { sql } from "drizzle-orm";
 
+import { createHeldMemorySqliteClient } from "./createHeldMemorySqliteClient.js";
 import { createSessionDatabase, SessionDatabase } from "./SessionDatabase.js";
 
 export {
@@ -59,17 +58,7 @@ function sqliteUrl(path: string): string {
 
 function createSessionClient(path: string): Client {
     if (path === ":memory:") {
-        // The public client rejects mode=memory URLs, while plain :memory: can lose state when
-        // libSQL rotates its underlying connection after a transaction. Use a named shared-cache
-        // database through the expanded sqlite3 client configuration instead.
-        return createSqliteClient({
-            scheme: "file",
-            path: `file:rig-memory-${randomUUID()}?mode=memory&cache=shared`,
-            authority: undefined,
-            tls: false,
-            intMode: "number",
-            concurrency: 1,
-        } as Parameters<typeof createSqliteClient>[0]);
+        return createHeldMemorySqliteClient("rig-memory");
     }
     return createClient({
         intMode: "number",

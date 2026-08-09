@@ -1,6 +1,5 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -10,9 +9,9 @@ import {
     type StoreTransaction,
 } from "@slopus/murmur";
 import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
-import { _createClient as createSqliteClient } from "@libsql/client/sqlite3";
 
 import { asyncLock, type AsyncLock } from "../../concurrency/index.js";
+import { createHeldMemorySqliteClient } from "../database/createHeldMemorySqliteClient.js";
 import { runSqliteTransaction } from "./runSqliteTransaction.js";
 
 interface MurmurStoreRow {
@@ -173,17 +172,7 @@ function toUint8Array(value: ArrayBuffer | Uint8Array): Uint8Array {
 
 function createMurmurClient(path: string): Client {
     if (path === ":memory:") {
-        // The public client rejects mode=memory URLs, while plain :memory: loses state when libSQL
-        // rotates its underlying connection after a transaction. Use a named shared-cache database
-        // through the expanded sqlite3 client configuration instead.
-        return createSqliteClient({
-            scheme: "file",
-            path: `file:rig-murmur-memory-${randomUUID()}?mode=memory&cache=shared`,
-            authority: undefined,
-            tls: false,
-            intMode: "number",
-            concurrency: 1,
-        } as Parameters<typeof createSqliteClient>[0]);
+        return createHeldMemorySqliteClient("rig-murmur-memory");
     }
     return createClient({
         intMode: "number",
