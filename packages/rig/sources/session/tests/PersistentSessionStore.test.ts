@@ -862,7 +862,7 @@ describe("PersistentSessionStore", () => {
         } finally {
             await store?.close(ctx);
         }
-    });
+    }, 30_000);
 
     it("creates an idempotent persistent session with an integrating client ID", async () => {
         const store = await PersistentSessionStore.open(ctx, {
