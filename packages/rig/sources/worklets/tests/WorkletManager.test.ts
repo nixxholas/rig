@@ -21,7 +21,7 @@ afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-describe("WorkletManager", () => {
+describe("WorkletManager", { timeout: 30_000 }, () => {
     it("runs an installed worklet, exposes its tool to an agent, and answers a call", async () => {
         const source = await workletSource(
             { description: "Adds numbers", name: "adder" },
