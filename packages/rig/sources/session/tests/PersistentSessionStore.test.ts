@@ -841,15 +841,18 @@ describe("PersistentSessionStore", () => {
             databasePath: ":memory:",
         });
         try {
-            for (let index = 0; index < 501; index += 1) {
-                await store.createWithId(ctx, `session-${String(index)}`, {
+            const archived = await store.transaction(ctx, async (transactionCtx) => {
+                for (let index = 0; index < 501; index += 1) {
+                    await store.createWithId(transactionCtx, `session-${String(index)}`, {
+                        cwd: "/tmp/rig-complete-session-list",
+                    });
+                }
+                const session = await store.createWithId(transactionCtx, "archived-session", {
                     cwd: "/tmp/rig-complete-session-list",
                 });
-            }
-            const archived = await store.createWithId(ctx, "archived-session", {
-                cwd: "/tmp/rig-complete-session-list",
+                await session.setArchived(transactionCtx, true);
+                return session;
             });
-            await archived.setArchived(ctx, true);
 
             expect(await store.listActive(ctx)).toHaveLength(501);
             expect(await store.list(ctx, { limit: 500 })).toHaveLength(500);
