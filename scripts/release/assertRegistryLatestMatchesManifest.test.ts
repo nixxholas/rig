@@ -17,20 +17,30 @@ describe("assertRegistryLatestMatchesManifest", () => {
         );
     });
 
-    it("accepts an immediately previous patch when a failed release tag was verified", () => {
+    it("accepts consecutive unpublished patches when every failed release tag was verified", () => {
         assert.doesNotThrow(() =>
-            assertRegistryLatestMatchesManifest(MANIFEST, '"0.0.4"', {
-                allowImmediatelyPreviousTaggedPatch: true,
+            assertRegistryLatestMatchesManifest(MANIFEST, '"0.0.3"', {
+                isTaggedUnpublishedVersion: (version) => version === "0.0.4" || version === "0.0.5",
             }),
         );
     });
 
-    it("rejects larger or non-adjacent drift during tagged release recovery", () => {
-        for (const latest of ["0.0.3", "0.0.6", "0.1.4", "0.0.4-beta.1"]) {
+    it("rejects a gap in the unpublished release tag chain", () => {
+        assert.throws(
+            () =>
+                assertRegistryLatestMatchesManifest(MANIFEST, '"0.0.2"', {
+                    isTaggedUnpublishedVersion: (version) => version !== "0.0.4",
+                }),
+            /worktree but npm latest/u,
+        );
+    });
+
+    it("rejects forward, cross-minor, prerelease, or excessive drift during recovery", () => {
+        for (const latest of ["0.0.6", "0.1.4", "0.0.4-beta.1", "0.0.101"]) {
             assert.throws(
                 () =>
                     assertRegistryLatestMatchesManifest(MANIFEST, JSON.stringify(latest), {
-                        allowImmediatelyPreviousTaggedPatch: true,
+                        isTaggedUnpublishedVersion: () => true,
                     }),
                 /worktree but npm latest/u,
             );

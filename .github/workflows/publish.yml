@@ -82,7 +82,7 @@ jobs:
               run: |
                   mkdir -p "$HOME"
                   pnpm run test:scripts
-                  pnpm --recursive --filter './packages/**' --filter '!@slopus/rig-dev' run test
+                  pnpm --recursive --workspace-concurrency=1 --filter './packages/**' --filter '!@slopus/rig-dev' run test
 
             - name: Build the package
               run: |

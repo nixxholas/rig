@@ -114,23 +114,27 @@ async function release(): Promise<void> {
             ["view", initialManifest.name, "dist-tags.latest", "--json"],
             { captureOutput: true },
         ).stdout;
-        const currentTagExists =
-            runCommand("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${releaseTag}`], {
-                allowFailure: true,
-                captureOutput: true,
-            }).status === 0;
-        const currentTagIsAncestor =
-            currentTagExists &&
-            runCommand("git", ["merge-base", "--is-ancestor", releaseTag, "HEAD"], {
-                allowFailure: true,
-                captureOutput: true,
-            }).status === 0;
+        const isTaggedUnpublishedVersion = (version: string): boolean => {
+            const tag = `${releasePackage.tagPrefix}${version}`;
+            const tagExists =
+                runCommand("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], {
+                    allowFailure: true,
+                    captureOutput: true,
+                }).status === 0;
+            return (
+                tagExists &&
+                runCommand("git", ["merge-base", "--is-ancestor", tag, "HEAD"], {
+                    allowFailure: true,
+                    captureOutput: true,
+                }).status === 0
+            );
+        };
         assertRegistryLatestMatchesManifest(initialManifest, latest, {
-            allowImmediatelyPreviousTaggedPatch: currentTagIsAncestor,
+            isTaggedUnpublishedVersion,
         });
-        if (currentTagIsAncestor && JSON.parse(latest) !== initialManifest.version) {
+        if (JSON.parse(latest) !== initialManifest.version) {
             console.log(
-                `Recovering after tagged ${releaseTag} was not published; npm remains one patch behind.`,
+                `Recovering after tagged releases through ${releaseTag} were not published.`,
             );
         }
     }
