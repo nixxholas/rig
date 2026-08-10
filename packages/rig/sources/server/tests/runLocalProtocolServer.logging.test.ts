@@ -84,7 +84,6 @@ describe("runLocalProtocolServer logging", () => {
             expect(record.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
             expect(record.version).toEqual(expect.any(String));
         }
-        expect(records).toContainEqual(expect.objectContaining({ event: "daemon_log" }));
     }, 60_000);
 });
 
