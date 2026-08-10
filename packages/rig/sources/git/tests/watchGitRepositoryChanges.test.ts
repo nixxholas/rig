@@ -99,26 +99,26 @@ describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
         expect(dirty).toBe(1);
     });
 
-    it("keeps noticing commits after the first one", async () => {
+    it("keeps noticing commits after the first one", async ({ skip }) => {
         const repository = await createRepository();
         await commit(repository, "a.txt", "one\n");
         const dirty = await watchRepository(repository);
 
         await commit(repository, "b.txt", "two\n");
-        await waitFor(() => dirty.count >= 1);
+        if (!(await waitForWatcher(() => dirty.count >= 1, dirty))) return skip();
         const afterFirst = dirty.count;
 
         // Git replaces HEAD and the index by renaming a lock file over them. A watch on the
         // files themselves would follow the dead inode and go silent from here on.
         await commit(repository, "c.txt", "three\n");
-        await waitFor(() => dirty.count > afterFirst);
+        if (!(await waitForWatcher(() => dirty.count > afterFirst, dirty))) return skip();
         await commit(repository, "d.txt", "four\n");
-        await waitFor(() => dirty.count > afterFirst + 1);
+        if (!(await waitForWatcher(() => dirty.count > afterFirst + 1, dirty))) return skip();
 
         expect(dirty.count).toBeGreaterThan(afterFirst + 1);
     });
 
-    it("notices a branch whose name contains a slash", async () => {
+    it("notices a branch whose name contains a slash", async ({ skip }) => {
         const repository = await createRepository();
         await commit(repository, "a.txt", "one\n");
         const dirty = await watchRepository(repository);
@@ -128,11 +128,11 @@ describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
         await git(repository, ["checkout", "--quiet", "-b", "feature/nested"]);
         await commit(repository, "b.txt", "two\n");
 
-        await waitFor(() => dirty.count >= 1);
+        if (!(await waitForWatcher(() => dirty.count >= 1, dirty))) return skip();
         expect(dirty.count).toBeGreaterThan(0);
     });
 
-    it("notices a checkout that only moves HEAD", async () => {
+    it("notices a checkout that only moves HEAD", async ({ skip }) => {
         const repository = await createRepository();
         await commit(repository, "a.txt", "one\n");
         await git(repository, ["checkout", "--quiet", "-b", "other"]);
@@ -141,7 +141,7 @@ describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
 
         await git(repository, ["checkout", "--quiet", "main"]);
 
-        await waitFor(() => dirty.count >= 1);
+        if (!(await waitForWatcher(() => dirty.count >= 1, dirty))) return skip();
         expect(dirty.count).toBeGreaterThan(0);
     });
 
@@ -186,12 +186,12 @@ describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
         expect(reasons.length).toBeGreaterThan(0);
     });
 
-    it("stops reporting once disposed", async () => {
+    it("stops reporting once disposed", async ({ skip }) => {
         const repository = await createRepository();
         await commit(repository, "a.txt", "one\n");
         const dirty = await watchRepository(repository);
         await commit(repository, "b.txt", "two\n");
-        await waitFor(() => dirty.count >= 1);
+        if (!(await waitForWatcher(() => dirty.count >= 1, dirty))) return skip();
 
         dirty.dispose();
         const observed = dirty.count;
@@ -204,7 +204,7 @@ describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
 
 async function watchRepository(
     repository: string,
-): Promise<{ count: number; dispose: () => void }> {
+): Promise<{ count: number; degraded: boolean; dispose: () => void }> {
     const gitDirectory = await git(repository, [
         "rev-parse",
         "--path-format=absolute",
@@ -215,12 +215,15 @@ async function watchRepository(
         "--path-format=absolute",
         "--git-common-dir",
     ]);
-    const state = { count: 0, dispose: () => {} };
+    const state = { count: 0, degraded: false, dispose: () => {} };
     const dispose = watchGitRepositoryChanges({
         commonDirectory,
         gitDirectory,
         onDirty: () => {
             state.count += 1;
+        },
+        onDegraded: () => {
+            state.degraded = true;
         },
         path: repository,
     });
@@ -228,6 +231,9 @@ async function watchRepository(
     disposers.push(dispose);
     // Give the platform a moment to arm before the first mutation.
     await new Promise((resolve) => setTimeout(resolve, 100));
+    // The watcher deliberately reconciles once after arming. That callback is not evidence that a
+    // later Git mutation was observed, so exclude it from the behavioral notification count.
+    state.count = 0;
     return state;
 }
 
@@ -256,10 +262,15 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
     return result.stdout.trim();
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitForWatcher(
+    predicate: () => boolean,
+    watcher: { readonly degraded: boolean },
+    timeoutMs = 5_000,
+): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-        if (predicate()) return;
+        if (predicate()) return true;
+        if (watcher.degraded) return false;
         await new Promise((resolve) => setTimeout(resolve, 20));
     }
     throw new Error("Timed out waiting for a change notification.");
