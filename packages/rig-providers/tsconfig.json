@@ -4,7 +4,7 @@
         "paths": {
             "@/*": ["./sources/*"]
         },
-        "types": ["node", "vitest/importMeta"]
+        "types": ["node", "vitest/import-meta"]
     },
     "include": ["sources/**/*.ts", "tests/**/*.ts"]
 }

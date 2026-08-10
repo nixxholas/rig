@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -7,7 +9,6 @@ import {
 } from "../../protocol/FolderSharingProtocol.js";
 import { folderShareIntents } from "../database/schema.js";
 import { inDatabase } from "../database/inDatabase.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export interface FolderShareIntent {
     rootFolderId: string;
@@ -16,10 +17,11 @@ export interface FolderShareIntent {
 }
 
 export async function folderSharePutIntent(
-    tx: DatabaseScope,
+    ctx: Context,
     input: FolderShareIntent & { now: number },
 ): Promise<void> {
-    await inDatabase(tx, async (tx) => {
+    await inDatabase(ctx, "rig.sql.folderShare.folderSharePutIntent", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(folderShareIntents)
             .values({
@@ -40,16 +42,16 @@ export async function folderSharePutIntent(
     });
 }
 
-export async function folderShareDeleteIntent(tx: DatabaseScope, shareId: string): Promise<void> {
-    await inDatabase(tx, async (tx) => {
+export async function folderShareDeleteIntent(ctx: Context, shareId: string): Promise<void> {
+    await inDatabase(ctx, "rig.sql.folderShare.folderShareDeleteIntent", async (ctx) => {
+        const tx = ctx.tx;
         await tx.delete(folderShareIntents).where(eq(folderShareIntents.shareId, shareId)).run();
     });
 }
 
-export async function queryFolderShareIntents(
-    tx: DatabaseScope,
-): Promise<readonly FolderShareIntent[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryFolderShareIntents(ctx: Context): Promise<readonly FolderShareIntent[]> {
+    return await inDatabase(ctx, "rig.sql.folderShare.queryFolderShareIntents", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx.select().from(folderShareIntents).all();
         return rows.map((row) => {
             const state: unknown = JSON.parse(row.stateJson);
@@ -66,10 +68,10 @@ export async function queryFolderShareIntents(
 }
 
 export async function queryFolderShareIntentByRoot(
-    tx: DatabaseScope,
+    ctx: Context,
     rootFolderId: string,
 ): Promise<FolderShareIntent | undefined> {
-    return (await queryFolderShareIntents(tx)).find(
-        (intent) => intent.rootFolderId === rootFolderId,
+    return await ctx.span("rig.sql.folderShare.queryFolderShareIntentByRoot", async (ctx) =>
+        (await queryFolderShareIntents(ctx)).find((intent) => intent.rootFolderId === rootFolderId),
     );
 }

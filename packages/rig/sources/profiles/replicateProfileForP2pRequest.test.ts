@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { P2pNetwork } from "../p2p/index.js";
@@ -11,24 +12,28 @@ import { RigProfileStore } from "./RigProfileStore.js";
 
 const LOCAL_INSTANCE = "alocalparent00000000000001";
 const PEER_INSTANCE = "asecondary000000000000001";
+const ctx = createTestRootContext();
 
 describe("replicateProfileForP2pRequest", () => {
     let database: PersistentSessionStore | undefined;
 
-    afterEach(async () => await database?.close());
+    afterEach(async () => await database?.close(ctx));
 
     it("registers a local profile before forwarding an attributed message", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const requests: P2pHttpRequest[] = [];
         const network = {
             fetch: vi.fn(
                 async (
+                    _ctx: unknown,
                     _peerId: string,
                     request: P2pHttpRequest,
                 ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
@@ -44,7 +49,7 @@ describe("replicateProfileForP2pRequest", () => {
             ),
         } as unknown as P2pNetwork;
 
-        await replicateProfileForP2pRequest({
+        await replicateProfileForP2pRequest(ctx, {
             body: Buffer.from(JSON.stringify({ identity: profile.id, text: "Hello" })),
             network,
             path: "/sessions/asession/messages",
@@ -58,24 +63,27 @@ describe("replicateProfileForP2pRequest", () => {
     });
 
     it("accepts a newer authoritative profile returned by a concurrent first registration", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         let authoritativeProfile = profile;
         const requests: P2pHttpRequest[] = [];
         const network = {
             fetch: vi.fn(
                 async (
+                    _ctx: unknown,
                     _peerId: string,
                     request: P2pHttpRequest,
                 ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
                     requests.push(request);
                     if (request.method === "GET") {
-                        authoritativeProfile = (await profiles.update(profile.id, {
+                        authoritativeProfile = (await profiles.update(ctx, profile.id, {
                             name: "Stephen",
                         }))!;
                         return {
@@ -92,7 +100,7 @@ describe("replicateProfileForP2pRequest", () => {
         } as unknown as P2pNetwork;
 
         await expect(
-            replicateProfileForP2pRequest({
+            replicateProfileForP2pRequest(ctx, {
                 body: Buffer.from(JSON.stringify({ identity: profile.id, text: "Hello" })),
                 network,
                 path: "/sessions/asession/messages",
@@ -109,13 +117,15 @@ describe("replicateProfileForP2pRequest", () => {
     });
 
     it("does not rewrite an identical replica and rejects conflicting state", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const fetch = vi.fn(async () => ({
             response: response(200, { profile }),
             transport: "iroh" as const,
@@ -130,14 +140,14 @@ describe("replicateProfileForP2pRequest", () => {
             signal: new AbortController().signal,
         };
 
-        await replicateProfileForP2pRequest(input);
+        await replicateProfileForP2pRequest(ctx, input);
         expect(fetch).toHaveBeenCalledTimes(1);
 
         fetch.mockResolvedValueOnce({
             response: response(200, { profile: { ...profile, name: "Impostor" } }),
             transport: "iroh",
         });
-        await expect(replicateProfileForP2pRequest(input)).rejects.toBeInstanceOf(
+        await expect(replicateProfileForP2pRequest(ctx, input)).rejects.toBeInstanceOf(
             P2pProfileReplicationError,
         );
     });

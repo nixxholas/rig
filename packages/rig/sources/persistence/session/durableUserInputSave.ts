@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import { durableUserInputs } from "../database/schema.js";
 import type { DurableUserInputCall } from "../../user-input/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function durableUserInputSave(
-    tx: DatabaseScope,
+    ctx: Context,
     call: DurableUserInputCall,
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.durable_user_input_save", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(durableUserInputs)
             .values({

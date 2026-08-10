@@ -2,10 +2,14 @@ import { connect, createServer } from "node:net";
 import { once } from "node:events";
 import { Transform } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import { DirectTlsNetwork } from "./DirectTlsNetwork.js";
+
+const ctx = createTestRootContext();
 
 describe("direct TLS P2P transport", () => {
     it("authenticates both stable identities and forwards streaming HTTP in either direction", async () => {
@@ -49,7 +53,15 @@ describe("direct TLS P2P transport", () => {
             serveRequest: async (peerId) => response(peerId),
         });
         try {
+            await vi.waitFor(
+                () => {
+                    expect(first.peerApiAvailable(secondIdentity.instanceId)).toBe(true);
+                    expect(second.peerApiAvailable(firstIdentity.instanceId)).toBe(true);
+                },
+                { timeout: 3_000 },
+            );
             const firstResponse = await first.fetch(
+                ctx,
                 secondIdentity.instanceId,
                 { body: new Uint8Array(), headers: {}, method: "GET", path: "/health" },
                 new AbortController().signal,
@@ -58,6 +70,7 @@ describe("direct TLS P2P transport", () => {
             expect(await collect(firstResponse.body)).toBe(firstIdentity.instanceId);
 
             const secondResponse = await second.fetch(
+                ctx,
                 firstIdentity.instanceId,
                 { body: new Uint8Array(), headers: {}, method: "GET", path: "/health" },
                 new AbortController().signal,
@@ -122,6 +135,7 @@ describe("direct TLS P2P transport", () => {
         const controller = new AbortController();
         try {
             const tunnel = await client.openTunnel(
+                ctx,
                 serverIdentity.instanceId,
                 {
                     headers: {
@@ -149,6 +163,7 @@ describe("direct TLS P2P transport", () => {
 
             await expect(
                 client.openTunnel(
+                    ctx,
                     serverIdentity.instanceId,
                     {
                         headers: {},
@@ -201,6 +216,7 @@ describe("direct TLS P2P transport", () => {
         try {
             await expect(
                 first.fetch(
+                    ctx,
                     secondIdentity.instanceId,
                     { body: new Uint8Array(), headers: {}, method: "GET", path: "/health" },
                     new AbortController().signal,
@@ -286,6 +302,7 @@ describe("direct TLS P2P transport", () => {
                 Promise.all(
                     controllers.map((controller) =>
                         client.fetch(
+                            ctx,
                             serverIdentity.instanceId,
                             {
                                 body: Buffer.alloc(0),
@@ -302,6 +319,7 @@ describe("direct TLS P2P transport", () => {
 
             await expect(
                 client.fetch(
+                    ctx,
                     serverIdentity.instanceId,
                     { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/health" },
                     new AbortController().signal,

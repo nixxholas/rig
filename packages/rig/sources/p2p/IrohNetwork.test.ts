@@ -1,3 +1,5 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
 import {
     Endpoint,
     EndpointAddr,
@@ -24,6 +26,7 @@ import { runP2pInitiatorHello, runP2pResponderHello } from "./P2pHelloProtocol.j
 import { createP2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.js";
 import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
+const ctx = createTestRootContext();
 const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const networks: IrohNetwork[] = [];
 const directories: string[] = [];
@@ -31,7 +34,7 @@ const databases: OpenSessionDatabase[] = [];
 
 afterEach(async () => {
     await Promise.all(networks.splice(0).map((network) => network.close()));
-    for (const opened of databases.splice(0)) await opened.client.close();
+    for (const opened of databases.splice(0)) await opened.database.close(opened.ctx);
     await Promise.all(
         directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
     );
@@ -98,6 +101,8 @@ describe("IrohNetwork", () => {
                 status: "connected",
             });
         });
+        expect(first.peerApiAvailable(secondIdentity.instanceId)).toBe(false);
+        expect(second.peerApiAvailable(firstIdentity.instanceId)).toBe(false);
         const firstPingAt = first.status().peers[0]!.lastSeenAt!;
         await vi.waitFor(() => {
             expect(firstStatusChanged.mock.calls.at(-1)?.[0].peers[0]?.lastSeenAt).toBeGreaterThan(
@@ -269,6 +274,7 @@ describe("IrohNetwork", () => {
         networks.push(server);
 
         const response = await client.fetch(
+            ctx,
             serverIdentity.instanceId,
             { body: new Uint8Array(), headers: {}, method: "GET", path: "/active" },
             new AbortController().signal,
@@ -299,8 +305,15 @@ describe("IrohNetwork", () => {
         const serverId = serverEndpoint.id().toString();
         const directory = await createTestSocketDirectory();
         directories.push(directory);
-        const trust = await openTrustStore();
-        await trust.verifyOrPin(pinnedClientIdentity, "iroh", clientId, undefined, "Client Rig");
+        const { ctx: trustCtx, store: trust } = await openTrustStore();
+        await trust.verifyOrPin(
+            trustCtx,
+            pinnedClientIdentity,
+            "iroh",
+            clientId,
+            undefined,
+            "Client Rig",
+        );
 
         const client = await IrohNetwork.create({
             config: {},
@@ -324,8 +337,10 @@ describe("IrohNetwork", () => {
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
             secretKey: serverKey,
-            commitPeer: (identity, endpointId) => trust.verifyOrPin(identity, "iroh", endpointId),
-            validatePeer: (identity, endpointId) => trust.validate(identity, "iroh", endpointId),
+            commitPeer: (identity, endpointId) =>
+                trust.verifyOrPin(trustCtx, identity, "iroh", endpointId),
+            validatePeer: (identity, endpointId) =>
+                trust.validate(trustCtx, identity, "iroh", endpointId),
         });
         networks.push(server);
 
@@ -355,7 +370,7 @@ describe("IrohNetwork", () => {
         const serverId = serverEndpoint.id().toString();
         const directory = await createTestSocketDirectory();
         directories.push(directory);
-        const clientTrust = await openTrustStore();
+        const { ctx: clientTrustCtx, store: clientTrust } = await openTrustStore();
         const serverTask = (async () => {
             const incoming = await serverEndpoint.acceptNext();
             if (incoming === null) return;
@@ -375,7 +390,7 @@ describe("IrohNetwork", () => {
         })();
         const client = await IrohNetwork.create({
             commitPeer: (identity, endpointId) =>
-                clientTrust.verifyOrPin(identity, "iroh", endpointId),
+                clientTrust.verifyOrPin(clientTrustCtx, identity, "iroh", endpointId),
             config: {},
             endpointIds: [serverId],
             endpoint: clientEndpoint,
@@ -386,7 +401,7 @@ describe("IrohNetwork", () => {
             relayMode: RelayMode.disabled(),
             secretKey: clientKey,
             validatePeer: (identity, endpointId) =>
-                clientTrust.validate(identity, "iroh", endpointId),
+                clientTrust.validate(clientTrustCtx, identity, "iroh", endpointId),
         });
         networks.push(client);
 
@@ -396,7 +411,7 @@ describe("IrohNetwork", () => {
                 status: "unreachable",
             }),
         );
-        expect(await clientTrust.peerForBinding("iroh", serverId)).toBeUndefined();
+        expect(await clientTrust.peerForBinding(clientTrustCtx, "iroh", serverId)).toBeUndefined();
         await serverTask;
         await serverEndpoint.close();
     });
@@ -481,8 +496,12 @@ describe("IrohNetwork", () => {
         await vi.waitFor(() =>
             expect(client.status().peers[0]).toMatchObject({ status: "connected" }),
         );
+        await vi.waitFor(() =>
+            expect(client.peerApiAvailable(serverIdentity.instanceId)).toBe(true),
+        );
         const pingBeforeStream = client.status().peers[0]!.lastSeenAt!;
         const responsePromise = client.fetch(
+            ctx,
             serverIdentity.instanceId,
             {
                 body: Buffer.from("hello"),
@@ -514,6 +533,7 @@ describe("IrohNetwork", () => {
 
         const cancellation = new AbortController();
         const cancelledResponse = await client.fetch(
+            ctx,
             serverIdentity.instanceId,
             { body: new Uint8Array(), headers: {}, method: "GET", path: "/cancel" },
             cancellation.signal,
@@ -701,6 +721,7 @@ describe("IrohNetwork", () => {
         const signalCancellation = new AbortController();
         const [iteratorResponse, signalResponse, survivorResponse] = await Promise.all([
             client.fetch(
+                ctx,
                 serverIdentity.instanceId,
                 {
                     body: new Uint8Array(),
@@ -711,6 +732,7 @@ describe("IrohNetwork", () => {
                 new AbortController().signal,
             ),
             client.fetch(
+                ctx,
                 serverIdentity.instanceId,
                 {
                     body: new Uint8Array(),
@@ -721,6 +743,7 @@ describe("IrohNetwork", () => {
                 signalCancellation.signal,
             ),
             client.fetch(
+                ctx,
                 serverIdentity.instanceId,
                 { body: new Uint8Array(), headers: {}, method: "GET", path: "/survivor" },
                 new AbortController().signal,
@@ -805,11 +828,13 @@ describe("IrohNetwork", () => {
 
         const responses = await Promise.all([
             client.fetch(
+                ctx,
                 serverIdentity.instanceId,
                 { body: new Uint8Array(), headers: {}, method: "GET", path: "/stream/one" },
                 new AbortController().signal,
             ),
             client.fetch(
+                ctx,
                 serverIdentity.instanceId,
                 { body: new Uint8Array(), headers: {}, method: "GET", path: "/stream/two" },
                 new AbortController().signal,
@@ -1259,6 +1284,7 @@ describe("IrohNetwork", () => {
         await vi.waitFor(() => expect(connectCount).toBe(1));
         const cancellation = new AbortController();
         const request = network.fetch(
+            ctx,
             peerIdentity.instanceId,
             { body: new Uint8Array(), headers: {}, method: "GET", path: "/health" },
             cancellation.signal,
@@ -1475,11 +1501,15 @@ describe("IrohNetwork", () => {
     });
 });
 
-async function openTrustStore(): Promise<P2pPeerTrustStore> {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+async function openTrustStore(): Promise<{
+    ctx: OpenSessionDatabase["ctx"];
+    store: P2pPeerTrustStore;
+}> {
+    const rootCtx = createTestRootContext();
+    const opened = await openSessionDatabase(rootCtx, ":memory:");
+    await migrateSessionDatabase(opened.ctx);
     databases.push(opened);
-    return P2pPeerTrustStore.fromDatabase(opened.database);
+    return { ctx: opened.ctx, store: P2pPeerTrustStore.fromDatabase(opened.database) };
 }
 
 function namedPeer(
@@ -1569,6 +1599,7 @@ function endpointWithStalledPongs(endpoint: Endpoint): Endpoint {
 
 async function fetchBody(network: IrohNetwork, peerId: string, path: string): Promise<string> {
     const response = await network.fetch(
+        ctx,
         peerId,
         { body: new Uint8Array(), headers: {}, method: "GET", path },
         new AbortController().signal,

@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, sql } from "drizzle-orm";
 
 import { folders } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /** An absent field is left as it is; an explicit `null` clears it. */
 export interface FolderUpdateInput {
@@ -13,13 +14,14 @@ export interface FolderUpdateInput {
 }
 
 export async function folderUpdate(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     input: FolderUpdateInput,
     now: number,
     version?: number,
 ): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.folderUpdate", async (ctx) => {
+        const tx = ctx.tx;
         return Number(
             (
                 await tx

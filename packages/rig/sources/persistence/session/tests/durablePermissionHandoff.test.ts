@@ -4,13 +4,14 @@ import { describe, expect, it } from "vitest";
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
 import { externalToolCalls, projects, sessions } from "../../database/schema.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { durablePermissionHandoff } from "../durablePermissionHandoff.js";
 
 describe("durablePermissionHandoff", () => {
     it("rolls back the external call when the permission input cannot be saved", async () => {
-        const opened = await openSessionDatabase(":memory:");
-        await migrateSessionDatabase(opened.database);
-        await opened.database
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+        await migrateSessionDatabase(opened.ctx);
+        await opened.ctx.tx
             .insert(projects)
             .values({
                 createdAtMs: 1,
@@ -33,7 +34,7 @@ describe("durablePermissionHandoff", () => {
                 worktreeSupport: "unknown",
             })
             .run();
-        await opened.database
+        await opened.ctx.tx
             .insert(sessions)
             .values({
                 agentId: "agent-1",
@@ -71,7 +72,7 @@ describe("durablePermissionHandoff", () => {
 
         await expect(
             durablePermissionHandoff(
-                opened.database,
+                opened.ctx,
                 {
                     arguments: {},
                     batchId: "batch-1",
@@ -107,12 +108,12 @@ describe("durablePermissionHandoff", () => {
             ),
         ).rejects.toThrow();
         expect(
-            await opened.database
+            await opened.ctx.tx
                 .select()
                 .from(externalToolCalls)
                 .where(eq(externalToolCalls.id, "external-call-1"))
                 .all(),
         ).toEqual([]);
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 });

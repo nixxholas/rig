@@ -1,17 +1,19 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import { queuedRuns } from "../database/schema.js";
 import type { PersistedQueuedRun } from "../../session/InMemorySession.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function sessionSaveQueuedRun(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     run: PersistedQueuedRun,
     createdAt: number,
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.session_save_queued_run", async (ctx) => {
+        const tx = ctx.tx;
         const integrationConfigJson =
             run.effort === undefined &&
             run.externalTools === undefined &&

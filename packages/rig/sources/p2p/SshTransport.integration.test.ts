@@ -6,10 +6,14 @@ import { join } from "node:path";
 import { Server, utils } from "ssh2";
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
 import type { P2pTrustedPeer } from "./P2pPeer.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import { SshBridgeResponder } from "./SshBridgeResponder.js";
 import { SshTransport } from "./SshTransport.js";
+
+const ctx = createTestRootContext();
 
 describe("SSH P2P transport with a real SSH connection", () => {
     it("pins the host key, authenticates both Rig identities, and forwards HTTP", async () => {
@@ -83,6 +87,7 @@ describe("SSH P2P transport with a real SSH connection", () => {
         });
         try {
             const response = await transport.fetch(
+                ctx,
                 responderIdentity.instanceId,
                 { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/health" },
                 new AbortController().signal,

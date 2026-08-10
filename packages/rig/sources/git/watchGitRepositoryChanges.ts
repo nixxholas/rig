@@ -73,6 +73,11 @@ export function watchGitRepositoryChanges(options: GitRepositoryWatchOptions): (
         arm(target.directory, target.recursive, target.accept);
     }
 
+    // `fs.watch` has no readiness event. Reconcile once after all watches are installed so a
+    // mutation that races the caller's preceding scan with kernel watch activation is not lost.
+    // GitStateTracker coalesces this with any notification that is already pending.
+    options.onDirty();
+
     return () => {
         for (const watcher of watchers) {
             try {

@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { RigProfileChangedEvent } from "../protocol/index.js";
@@ -6,28 +7,31 @@ import { RigProfileStore } from "./RigProfileStore.js";
 
 const LOCAL_INSTANCE = "alocalparent00000000000001";
 const REMOTE_INSTANCE = "aremoteparent0000000000001";
+const ctx = createTestRootContext();
 
 describe("RigProfileStore", () => {
     let database: PersistentSessionStore | undefined;
 
     afterEach(async () => {
-        await database?.close();
+        await database?.close(ctx);
     });
 
     it("creates and updates a parent-owned profile after committing it", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const events: RigProfileChangedEvent[] = [];
         let now = 1_000;
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             now: () => now,
-            publish: (event) => {
+            publish: (_ctx, event) => {
                 events.push(event);
             },
         });
 
-        const created = await profiles.create({
+        const created = await profiles.create(ctx, {
             email: "steve@example.test",
             name: "Steve 🧑‍💻",
         });
@@ -38,7 +42,7 @@ describe("RigProfileStore", () => {
             parentInstanceId: LOCAL_INSTANCE,
             updatedAt: 1_000,
         });
-        expect(await profiles.list()).toEqual([created]);
+        expect(await profiles.list(ctx)).toEqual([created]);
         expect(events).toEqual([
             expect.objectContaining({
                 createdAt: 1_000,
@@ -49,7 +53,7 @@ describe("RigProfileStore", () => {
         ]);
 
         now = 2_000;
-        const updated = await profiles.update(created.id, {
+        const updated = await profiles.update(ctx, created.id, {
             email: "steve@happy.engineering",
             name: "Steve Korshakov",
             photo: {
@@ -69,12 +73,14 @@ describe("RigProfileStore", () => {
             updatedAt: 2_000,
         });
         expect(updated?.version).toBe(2);
-        expect(await profiles.get(created.id)).toEqual(updated);
+        expect(await profiles.get(ctx, created.id)).toEqual(updated);
         expect(events).toHaveLength(2);
     });
 
     it("replicates only the authenticated parent's profile and keeps newer state", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
@@ -90,21 +96,23 @@ describe("RigProfileStore", () => {
             version: 2,
         } as const;
 
-        expect(await profiles.replicate(profile, REMOTE_INSTANCE)).toEqual(profile);
-        expect(await profiles.owns(profile.id, REMOTE_INSTANCE)).toBe(true);
+        expect(await profiles.replicate(ctx, profile, REMOTE_INSTANCE)).toEqual(profile);
+        expect(await profiles.owns(ctx, profile.id, REMOTE_INSTANCE)).toBe(true);
         expect(
-            await profiles.replicate({ ...profile, name: "Old", version: 1 }, REMOTE_INSTANCE),
+            await profiles.replicate(ctx, { ...profile, name: "Old", version: 1 }, REMOTE_INSTANCE),
         ).toEqual(profile);
-        await expect(profiles.replicate(profile, "aotherparent00000000000001")).rejects.toThrow(
-            "not owned by its authenticated parent",
-        );
         await expect(
-            profiles.replicate({ ...profile, name: "Conflicting content" }, REMOTE_INSTANCE),
+            profiles.replicate(ctx, profile, "aotherparent00000000000001"),
+        ).rejects.toThrow("not owned by its authenticated parent");
+        await expect(
+            profiles.replicate(ctx, { ...profile, name: "Conflicting content" }, REMOTE_INSTANCE),
         ).rejects.toThrow("version was reused");
     });
 
     it("does not let the local Rig mutate a replicated profile", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
@@ -119,9 +127,9 @@ describe("RigProfileStore", () => {
             updatedAt: 1_000,
             version: 1,
         } as const;
-        await profiles.replicate(profile, REMOTE_INSTANCE);
+        await profiles.replicate(ctx, profile, REMOTE_INSTANCE);
 
-        await expect(profiles.update(profile.id, { name: "Claimed locally" })).rejects.toThrow(
+        await expect(profiles.update(ctx, profile.id, { name: "Claimed locally" })).rejects.toThrow(
             "Only a profile's parent Rig may change it.",
         );
     });

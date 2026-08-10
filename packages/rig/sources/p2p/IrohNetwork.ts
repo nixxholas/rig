@@ -7,6 +7,8 @@ import type {
 } from "@number0/iroh/index.js";
 import { finished } from "node:stream/promises";
 
+import type { Context } from "@steve.kite/stdlib";
+
 import type { ConfigIrohTransport } from "../config/types.js";
 import { errorToMessage } from "../errorToMessage.js";
 import type { P2pPeerStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
@@ -52,7 +54,7 @@ const STREAM_KIND_PING = 1;
 const STREAM_KIND_HTTP = 2;
 const STREAM_KIND_HELLO = 3;
 const STREAM_KIND_TUNNEL = 4;
-const PONG = Buffer.from([STREAM_KIND_PING]);
+const PING_CAPABILITIES_VERSION = 1;
 const CLOSE_CANCELLED = 499n;
 const CLOSE_UNAUTHORIZED = 403n;
 const CLOSE_SHUTDOWN = 0n;
@@ -170,6 +172,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #peerActivityRevisions = new Map<string, number>();
     readonly #peerLastActivityAt = new Map<string, number>();
     readonly #peerLastActivityPublishedAt = new Map<string, number>();
+    readonly #peerApiAvailable = new Map<string, boolean>();
     readonly #peerStatuses = new Map<string, P2pPeerStatus>();
     readonly #peerIdentities = new Map<string, P2pPeerIdentity>();
     readonly #peerNames = new Map<string, string>();
@@ -358,132 +361,146 @@ export class IrohNetwork implements P2pTransport {
         };
     }
 
+    peerApiAvailable(peerId: string): boolean {
+        for (const [endpointId, identity] of this.#peerIdentities) {
+            if (identity.instanceId === peerId)
+                return this.#peerApiAvailable.get(endpointId) === true;
+        }
+        return false;
+    }
+
     async fetch(
+        ctx: Context,
         peerId: string,
         request: P2pHttpRequest,
         signal: AbortSignal,
     ): Promise<P2pHttpResponse> {
-        const endpointId = this.#endpointForPeer(peerId);
-        if (this.#httpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
-            throw new Error("Too many P2P HTTP requests are already active.");
-        }
-        this.#httpRequestCount += 1;
-        let peerStream: IrohPeerStream | undefined;
-        let released = false;
-        const release = (completed = false): void => {
-            if (released) return;
-            released = true;
-            signal.removeEventListener("abort", abort);
-            if (peerStream !== undefined) {
-                if (completed) {
-                    this.#track(
-                        finishIrohHttpStream(
-                            peerStream.stream,
-                            this.#responseWriteProgressTimeoutMs,
-                        ),
-                    );
-                } else cancelIrohStream(peerStream.stream);
-                this.#releaseOutgoingApplicationStream(peerStream.entry);
+        return await ctx.span("rig.p2p.iroh.fetch", async () => {
+            const endpointId = this.#endpointForPeer(peerId);
+            if (this.#httpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
+                throw new Error("Too many P2P HTTP requests are already active.");
             }
-            this.#httpRequestCount -= 1;
-        };
-        const abort = (): void => release(false);
-        try {
-            signal.throwIfAborted();
-            peerStream = await this.#openPeerStream(
-                endpointId,
-                peerId,
-                signal,
-                "The peer did not open an HTTP stream in time.",
-            );
-            signal.addEventListener("abort", abort, { once: true });
-            await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_HTTP]), signal);
-            const duplex = createIrohFrameDuplex(
-                peerStream.stream.recv,
-                peerStream.stream.send,
-                () => this.#recordPeerActivity(endpointId),
-            );
-            await withAbort(
-                withDeadline(
-                    writeP2pHttpRequest(duplex.send, request, { finish: false }),
-                    REQUEST_BODY_TIMEOUT_MS,
-                    "The P2P HTTP request took too long to send.",
-                ),
-                signal,
-            );
-            return await withAbort(
-                withDeadline(
-                    readP2pHttpResponse(duplex.recv, release),
-                    RESPONSE_HEAD_TIMEOUT_MS,
-                    "The peer did not return HTTP response headers in time.",
-                ),
-                signal,
-            );
-        } catch (error) {
-            release(false);
-            throw error;
-        }
+            this.#httpRequestCount += 1;
+            let peerStream: IrohPeerStream | undefined;
+            let released = false;
+            const release = (completed = false): void => {
+                if (released) return;
+                released = true;
+                signal.removeEventListener("abort", abort);
+                if (peerStream !== undefined) {
+                    if (completed) {
+                        this.#track(
+                            finishIrohHttpStream(
+                                peerStream.stream,
+                                this.#responseWriteProgressTimeoutMs,
+                            ),
+                        );
+                    } else cancelIrohStream(peerStream.stream);
+                    this.#releaseOutgoingApplicationStream(peerStream.entry);
+                }
+                this.#httpRequestCount -= 1;
+            };
+            const abort = (): void => release(false);
+            try {
+                signal.throwIfAborted();
+                peerStream = await this.#openPeerStream(
+                    endpointId,
+                    peerId,
+                    signal,
+                    "The peer did not open an HTTP stream in time.",
+                );
+                signal.addEventListener("abort", abort, { once: true });
+                await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_HTTP]), signal);
+                const duplex = createIrohFrameDuplex(
+                    peerStream.stream.recv,
+                    peerStream.stream.send,
+                    () => this.#recordPeerActivity(endpointId),
+                );
+                await withAbort(
+                    withDeadline(
+                        writeP2pHttpRequest(duplex.send, request, { finish: false }),
+                        REQUEST_BODY_TIMEOUT_MS,
+                        "The P2P HTTP request took too long to send.",
+                    ),
+                    signal,
+                );
+                return await withAbort(
+                    withDeadline(
+                        readP2pHttpResponse(duplex.recv, release),
+                        RESPONSE_HEAD_TIMEOUT_MS,
+                        "The peer did not return HTTP response headers in time.",
+                    ),
+                    signal,
+                );
+            } catch (error) {
+                release(false);
+                throw error;
+            }
+        });
     }
 
     async openTunnel(
+        ctx: Context,
         peerId: string,
         request: P2pTunnelRequestHead,
         signal: AbortSignal,
     ): Promise<P2pTunnelConnection> {
-        const endpointId = this.#endpointForPeer(peerId);
-        if (this.#httpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
-            throw new Error("Too many P2P tunnels are already active.");
-        }
-        this.#httpRequestCount += 1;
-        let peerStream: IrohPeerStream | undefined;
-        let released = false;
-        const release = (): void => {
-            if (released) return;
-            released = true;
-            signal.removeEventListener("abort", abort);
-            if (peerStream !== undefined) {
-                cancelIrohStream(peerStream.stream);
-                this.#releaseOutgoingApplicationStream(peerStream.entry);
+        return await ctx.span("rig.p2p.iroh.openTunnel", async () => {
+            const endpointId = this.#endpointForPeer(peerId);
+            if (this.#httpRequestCount >= MAXIMUM_HTTP_REQUESTS) {
+                throw new Error("Too many P2P tunnels are already active.");
             }
-            this.#httpRequestCount -= 1;
-        };
-        const abort = (): void => release();
-        try {
-            signal.throwIfAborted();
-            peerStream = await this.#openPeerStream(
-                endpointId,
-                peerId,
-                signal,
-                "The peer did not open a tunnel stream in time.",
-            );
-            signal.addEventListener("abort", abort, { once: true });
-            await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_TUNNEL]), signal);
-            const duplex = createIrohFrameDuplex(
-                peerStream.stream.recv,
-                peerStream.stream.send,
-                () => this.#recordPeerActivity(endpointId),
-            );
-            await withAbort(writeP2pTunnelRequest(duplex.send, request), signal);
-            const response = await withAbort(
-                withDeadline(
-                    readP2pTunnelResponse(duplex.recv),
-                    RESPONSE_HEAD_TIMEOUT_MS,
-                    "The peer did not return tunnel response headers in time.",
-                ),
-                signal,
-            );
-            if (response.status !== (request.method === "GET" ? 101 : 200)) {
-                release();
-                return { response, stream: createClosedP2pTunnelStream() };
-            }
-            return {
-                response,
-                stream: createP2pTunnelStream(duplex, { close: release, signal }),
+            this.#httpRequestCount += 1;
+            let peerStream: IrohPeerStream | undefined;
+            let released = false;
+            const release = (): void => {
+                if (released) return;
+                released = true;
+                signal.removeEventListener("abort", abort);
+                if (peerStream !== undefined) {
+                    cancelIrohStream(peerStream.stream);
+                    this.#releaseOutgoingApplicationStream(peerStream.entry);
+                }
+                this.#httpRequestCount -= 1;
             };
-        } catch (error) {
-            release();
-            throw error;
-        }
+            const abort = (): void => release();
+            try {
+                signal.throwIfAborted();
+                peerStream = await this.#openPeerStream(
+                    endpointId,
+                    peerId,
+                    signal,
+                    "The peer did not open a tunnel stream in time.",
+                );
+                signal.addEventListener("abort", abort, { once: true });
+                await withAbort(peerStream.stream.send.writeAll([STREAM_KIND_TUNNEL]), signal);
+                const duplex = createIrohFrameDuplex(
+                    peerStream.stream.recv,
+                    peerStream.stream.send,
+                    () => this.#recordPeerActivity(endpointId),
+                );
+                await withAbort(writeP2pTunnelRequest(duplex.send, request), signal);
+                const response = await withAbort(
+                    withDeadline(
+                        readP2pTunnelResponse(duplex.recv),
+                        RESPONSE_HEAD_TIMEOUT_MS,
+                        "The peer did not return tunnel response headers in time.",
+                    ),
+                    signal,
+                );
+                if (response.status !== (request.method === "GET" ? 101 : 200)) {
+                    release();
+                    return { response, stream: createClosedP2pTunnelStream() };
+                }
+                return {
+                    response,
+                    stream: createP2pTunnelStream(duplex, { close: release, signal }),
+                };
+            } catch (error) {
+                release();
+                throw error;
+            }
+        });
     }
 
     async close(): Promise<void> {
@@ -711,13 +728,21 @@ export class IrohNetwork implements P2pTransport {
         }
         if (kind === STREAM_KIND_PING) {
             try {
-                await withDeadline(
-                    stream.recv.readToEnd(0),
-                    this.#pingTimeoutMs,
-                    "The peer did not finish its ping request in time.",
+                const request = Buffer.from(
+                    await withDeadline(
+                        stream.recv.readToEnd(1),
+                        this.#pingTimeoutMs,
+                        "The peer did not finish its ping request in time.",
+                    ),
                 );
+                const requestsCapabilities =
+                    request.length === 1 && request[0] === PING_CAPABILITIES_VERSION;
                 await withDeadline(
-                    stream.send.writeAll([...PONG]),
+                    stream.send.writeAll(
+                        requestsCapabilities
+                            ? [STREAM_KIND_PING, this.#serveRequest === undefined ? 0 : 1]
+                            : [STREAM_KIND_PING],
+                    ),
                     this.#pingTimeoutMs,
                     "The peer did not accept its pong in time.",
                 );
@@ -967,7 +992,7 @@ export class IrohNetwork implements P2pTransport {
                 let consecutivePingFailures = 0;
                 while (!this.#abort.signal.aborted) {
                     const lastActivityAt = this.#peerLastActivityAt.get(endpointId);
-                    if (lastActivityAt !== undefined) {
+                    if (lastActivityAt !== undefined && this.#peerApiAvailable.has(endpointId)) {
                         const quietForMs = Date.now() - lastActivityAt;
                         if (quietForMs < this.#pingIntervalMs) {
                             consecutiveFailures = 0;
@@ -980,8 +1005,9 @@ export class IrohNetwork implements P2pTransport {
                     }
                     const startedAt = Date.now();
                     const activityRevision = this.#peerActivityRevisions.get(endpointId) ?? 0;
+                    let apiExposed: boolean | undefined;
                     try {
-                        await exchangePing(shared.connection, this.#pingTimeoutMs);
+                        apiExposed = await exchangePing(shared.connection, this.#pingTimeoutMs);
                         consecutivePingFailures = 0;
                     } catch (error) {
                         if (
@@ -1002,7 +1028,12 @@ export class IrohNetwork implements P2pTransport {
                     consecutiveFailures = 0;
                     this.#peerNeedsDiscovery.delete(endpointId);
                     retryMs = INITIAL_RETRY_MS;
-                    this.#recordPeerActivity(endpointId, Date.now() - startedAt, authenticated);
+                    this.#recordPeerActivity(
+                        endpointId,
+                        Date.now() - startedAt,
+                        authenticated,
+                        apiExposed,
+                    );
                     await this.#wait(this.#pingIntervalMs);
                 }
             } catch (error) {
@@ -1404,8 +1435,10 @@ export class IrohNetwork implements P2pTransport {
         endpointId: string,
         rttMs?: number,
         authenticated = this.#peerIdentities.get(endpointId),
+        apiExposed?: boolean,
     ): void {
         if (authenticated === undefined) return;
+        if (apiExposed !== undefined) this.#peerApiAvailable.set(endpointId, apiExposed);
         const now = Date.now();
         this.#peerActivityRevisions.set(
             endpointId,
@@ -1521,7 +1554,10 @@ class IrohEndpointRestartDeferredError extends Error {
     }
 }
 
-async function exchangePing(connection: Connection, timeoutMs: number): Promise<void> {
+async function exchangePing(
+    connection: Connection,
+    timeoutMs: number,
+): Promise<boolean | undefined> {
     let stream: Awaited<ReturnType<Connection["openBi"]>> | undefined;
     let opening: ReturnType<Connection["openBi"]> | undefined;
     try {
@@ -1532,7 +1568,7 @@ async function exchangePing(connection: Connection, timeoutMs: number): Promise<
             "The peer did not open a ping stream in time.",
         );
         await withDeadline(
-            stream.send.writeAll([STREAM_KIND_PING]),
+            stream.send.writeAll([STREAM_KIND_PING, PING_CAPABILITIES_VERSION]),
             timeoutMs,
             "The peer did not accept a ping in time.",
         );
@@ -1548,7 +1584,15 @@ async function exchangePing(connection: Connection, timeoutMs: number): Promise<
                 "The peer did not answer its ping in time.",
             ),
         );
-        if (!response.equals(PONG)) throw new Error("The peer returned an invalid pong.");
+        if (response.length === 1 && response[0] === STREAM_KIND_PING) return undefined;
+        if (
+            response.length !== 2 ||
+            response[0] !== STREAM_KIND_PING ||
+            (response[1] !== 0 && response[1] !== 1)
+        ) {
+            throw new Error("The peer returned an invalid pong.");
+        }
+        return response[1] === 1;
     } catch (error) {
         if (stream !== undefined) cancelIrohStream(stream);
         else if (opening !== undefined) void opening.then(cancelIrohStream, () => undefined);

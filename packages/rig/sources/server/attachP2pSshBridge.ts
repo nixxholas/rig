@@ -9,6 +9,7 @@ export function attachP2pSshBridge(
     server: Server,
     token: string,
     accept: ((stream: Duplex) => Promise<void>) | undefined,
+    resolveAccept?: () => ((stream: Duplex) => Promise<void>) | undefined,
 ): void {
     const bridges = new Set<Duplex>();
     server.on("connect", (request, client, head) => {
@@ -19,7 +20,8 @@ export function attachP2pSshBridge(
             );
             return;
         }
-        if (accept === undefined) {
+        const activeAccept = resolveAccept?.() ?? accept;
+        if (activeAccept === undefined) {
             client.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
             return;
         }
@@ -29,7 +31,7 @@ export function attachP2pSshBridge(
         client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         if (head.byteLength > 0) client.unshift(head);
         client.resume();
-        void accept(client).catch(() => client.destroy());
+        void activeAccept(client).catch(() => client.destroy());
     });
     server.once("close", () => {
         for (const bridge of bridges) bridge.destroy();

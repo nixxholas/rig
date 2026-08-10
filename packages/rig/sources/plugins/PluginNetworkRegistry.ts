@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Context } from "@steve.kite/stdlib";
 
 import { Value } from "@sinclair/typebox/value";
 import type {
@@ -182,6 +183,7 @@ export class PluginNetworkRegistry implements ManagedNetworkInterceptor {
     }
 
     async interceptHttp(
+        _ctx: Context,
         request: ManagedNetworkHttpRequest,
     ): Promise<HappyNetworkRequestCompletion> {
         const owners = this.#matchingOwners(request.hostname);

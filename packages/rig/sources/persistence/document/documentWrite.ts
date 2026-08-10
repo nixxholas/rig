@@ -1,4 +1,5 @@
 import { and, asc, eq, lt, sql } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     DOCUMENT_UPDATE_RETENTION_MAX_BYTES,
@@ -17,7 +18,7 @@ export type DocumentWriteResult =
     | { outcome: "written"; version: number };
 
 export async function documentWrite(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         expectedVersion: number;
         fingerprint: string;
@@ -32,7 +33,8 @@ export async function documentWrite(
         updateJson: string;
     },
 ): Promise<DocumentWriteResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.documents.write", async (ctx) => {
+        const tx = ctx.tx;
         if (input.mutationId !== undefined) {
             const receipt = await tx
                 .select()
@@ -95,7 +97,7 @@ export async function documentWrite(
                 version,
             })
             .run();
-        await trimUpdates(tx, input.id);
+        await trimUpdates(ctx, input.id);
         if (input.mutationId !== undefined) {
             await tx
                 .insert(documentMutations)
@@ -108,13 +110,14 @@ export async function documentWrite(
                     resultVersion: version,
                 })
                 .run();
-            await pruneReceipts(tx, input.id);
+            await pruneReceipts(ctx, input.id);
         }
         return { outcome: "written", version };
     });
 }
 
-async function trimUpdates(tx: TX, documentId: string): Promise<void> {
+async function trimUpdates(ctx: Context, documentId: string): Promise<void> {
+    const tx = ctx.tx;
     const rows = await tx
         .select({ byteLength: documentUpdates.byteLength, version: documentUpdates.version })
         .from(documentUpdates)

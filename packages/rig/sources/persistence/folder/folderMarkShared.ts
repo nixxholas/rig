@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { folderItems, folders, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { queryFolderChildren } from "./queryFolderChildren.js";
 
@@ -15,12 +16,13 @@ export type FolderMarkSharedResult =
 
 /** Marks an empty root as one Murmur group and moves it before every other root. */
 export async function folderMarkShared(
-    tx: DatabaseScope,
+    ctx: Context,
     folderId: string,
     groupId: string,
     now: number,
 ): Promise<FolderMarkSharedResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.folder.folderMarkShared", async (ctx) => {
+        const tx = ctx.tx;
         const folder = await tx
             .select({
                 archivedAtMs: folders.archivedAtMs,
@@ -56,7 +58,7 @@ export async function folderMarkShared(
         ) {
             return { outcome: "contents_forbidden" };
         }
-        const first = (await queryFolderChildren(tx, null)).find(
+        const first = (await queryFolderChildren(ctx, null)).find(
             (candidate) => candidate.id !== folderId,
         );
         const orderKey = generateKeyBetween(null, first?.orderKey ?? null);

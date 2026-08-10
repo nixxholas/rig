@@ -1,9 +1,12 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { describe, expect, it } from "vitest";
 
 import { createInferenceStream, defineModel, defineProvider } from "@slopus/rig-execution";
 import { Agent } from "./Agent.js";
 import { createNodeAgentContext } from "./context/createNodeAgentContext.js";
 import { NativeProcessManager } from "../processes/index.js";
+
+const ctx = createTestRootContext();
 
 describe("Agent model context replacement", () => {
     it("replaces only model context while idle and preserves visible messages", () => {
@@ -26,7 +29,7 @@ describe("Agent model context replacement", () => {
             release = resolve;
         });
         const { agent, model } = createAgent(blocked);
-        const running = agent.send("Start.");
+        const running = agent.send(ctx, "Start.");
         await Promise.resolve();
 
         expect(() => agent.replaceContextMessages([user("replacement", "Replacement.")])).toThrow(
@@ -83,7 +86,7 @@ function createAgent(blocked: Promise<void> = Promise.resolve()) {
     });
     return {
         agent: new Agent({
-            context: createNodeAgentContext({
+            context: createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: "/tmp/rig-agent-context-replacement",
                 processManager: new NativeProcessManager(),
             }),

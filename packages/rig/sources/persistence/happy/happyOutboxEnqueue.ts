@@ -1,4 +1,5 @@
 import { count, eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import { happyOutbox } from "../database/schema.js";
 import type { HappySessionProtocolMessage } from "../../happy/types.js";
@@ -8,7 +9,7 @@ import type { DatabaseScope } from "../Transaction.js";
 export class HappySyncOutboxFullError extends Error {}
 
 export async function happyOutboxEnqueue(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         maxPendingMessages: number;
         messages: readonly HappySessionProtocolMessage[];
@@ -17,7 +18,8 @@ export async function happyOutboxEnqueue(
     },
 ): Promise<void> {
     if (input.messages.length === 0) return;
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.happy.enqueue_outbox", async (ctx) => {
+        const tx = ctx.tx;
         for (const message of input.messages) {
             await tx
                 .insert(happyOutbox)

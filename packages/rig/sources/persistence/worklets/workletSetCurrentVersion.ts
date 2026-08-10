@@ -1,17 +1,18 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import { worklets } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /** Makes an existing version current without touching any other version. */
 export async function workletSetCurrentVersion(
-    tx: DatabaseScope,
+    ctx: Context,
     name: string,
     version: number,
     now: number,
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.worklets.set_current_version", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .update(worklets)
             .set({ currentVersion: version, updatedAtMs: now })

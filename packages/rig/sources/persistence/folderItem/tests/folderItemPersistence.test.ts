@@ -1,3 +1,7 @@
+import { withDatabase } from "../../database/databaseContext.js";
+
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
+
 import { eq, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
@@ -22,19 +26,19 @@ describe("folder item persistence", () => {
         await createFolder(opened.database, "left");
         await createFolder(opened.database, "right");
 
-        await folderItemCreate(opened.database, {
+        await folderItemCreate(withDatabase(createTestRootContext(), opened.database), {
             folderId: "left",
             id: "item-a",
             now: 3,
             target: { kind: "project", projectId: "project" },
         });
-        await folderItemCreate(opened.database, {
+        await folderItemCreate(withDatabase(createTestRootContext(), opened.database), {
             folderId: "left",
             id: "item-b",
             now: 4,
             target: { kind: "project", projectId: "project" },
         });
-        await folderItemCreate(opened.database, {
+        await folderItemCreate(withDatabase(createTestRootContext(), opened.database), {
             folderId: "right",
             id: "item-c",
             now: 5,
@@ -42,11 +46,9 @@ describe("folder item persistence", () => {
         });
 
         expect(
-            (await queryFolderItems(opened.database)).map((item) => [
-                item.id,
-                item.folderId,
-                item.orderKey,
-            ]),
+            (await queryFolderItems(withDatabase(createTestRootContext(), opened.database))).map(
+                (item) => [item.id, item.folderId, item.orderKey],
+            ),
         ).toEqual([
             ["item-a", "left", "a0"],
             ["item-b", "left", "a1"],
@@ -60,7 +62,7 @@ describe("folder item persistence", () => {
         await createProject(opened.database, "project");
         await createFolder(opened.database, "left");
         await createFolder(opened.database, "right");
-        await folderItemCreate(opened.database, {
+        await folderItemCreate(withDatabase(createTestRootContext(), opened.database), {
             folderId: "left",
             id: "item",
             now: 2,
@@ -72,11 +74,22 @@ describe("folder item persistence", () => {
             .where(eq(projects.id, "project"))
             .get();
 
-        expect(await folderItemMove(opened.database, "item", "right", "a0", 3, 1)).toEqual({
+        expect(
+            await folderItemMove(
+                withDatabase(createTestRootContext(), opened.database),
+                "item",
+                "right",
+                "a0",
+                3,
+                1,
+            ),
+        ).toEqual({
             outcome: "moved",
         });
 
-        expect((await queryFolderItems(opened.database))[0]).toMatchObject({
+        expect(
+            (await queryFolderItems(withDatabase(createTestRootContext(), opened.database)))[0],
+        ).toMatchObject({
             folderId: "right",
             orderKey: "a0",
             version: 2,
@@ -95,17 +108,20 @@ describe("folder item persistence", () => {
         const opened = await fixture();
         await createProject(opened.database, "project");
         await createFolder(opened.database, "folder");
-        await folderItemCreate(opened.database, {
+        await folderItemCreate(withDatabase(createTestRootContext(), opened.database), {
             folderId: "folder",
             id: "item",
             now: 2,
             target: { kind: "project", projectId: "project" },
         });
         expect(
-            await queryFolderItemTargetExists(opened.database, {
-                kind: "project",
-                projectId: "project",
-            }),
+            await queryFolderItemTargetExists(
+                withDatabase(createTestRootContext(), opened.database),
+                {
+                    kind: "project",
+                    projectId: "project",
+                },
+            ),
         ).toBe(true);
 
         await opened.database
@@ -115,15 +131,18 @@ describe("folder item persistence", () => {
             .run();
 
         expect(
-            await queryFolderItemTargetExists(opened.database, {
-                kind: "project",
-                projectId: "project",
-            }),
+            await queryFolderItemTargetExists(
+                withDatabase(createTestRootContext(), opened.database),
+                {
+                    kind: "project",
+                    projectId: "project",
+                },
+            ),
         ).toBe(false);
         expect(
             await folderItemsWithActiveTargets(
-                opened.database,
-                await queryFolderItems(opened.database),
+                withDatabase(createTestRootContext(), opened.database),
+                await queryFolderItems(withDatabase(createTestRootContext(), opened.database)),
             ),
         ).toEqual([]);
         opened.client.close();
@@ -134,14 +153,14 @@ describe("folder item persistence", () => {
         await createProject(opened.database, "project");
         await createFolder(opened.database, "parent");
         await createFolder(opened.database, "child", "parent");
-        await folderItemCreate(opened.database, {
+        await folderItemCreate(withDatabase(createTestRootContext(), opened.database), {
             folderId: "child",
             id: "item",
             now: 2,
             target: { kind: "project", projectId: "project" },
         });
 
-        await folderArchive(opened.database, "parent", 9);
+        await folderArchive(withDatabase(createTestRootContext(), opened.database), "parent", 9);
 
         expect(
             await opened.database
@@ -158,7 +177,13 @@ describe("folder item persistence", () => {
                 .get(),
         ).toEqual({ archivedAtMs: null });
 
-        expect(await folderItemArchive(opened.database, "item", 10)).toBe(0);
+        expect(
+            await folderItemArchive(
+                withDatabase(createTestRootContext(), opened.database),
+                "item",
+                10,
+            ),
+        ).toBe(0);
         opened.client.close();
     });
 
@@ -190,8 +215,8 @@ describe("folder item persistence", () => {
 });
 
 async function fixture() {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+    const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+    await migrateSessionDatabase(withDatabase(createTestRootContext(), opened.database));
     return opened;
 }
 
@@ -200,7 +225,7 @@ async function createFolder(
     id: string,
     parentId?: string,
 ): Promise<void> {
-    await folderCreate(database, {
+    await folderCreate(withDatabase(createTestRootContext(), database), {
         id,
         name: id,
         now: 1,

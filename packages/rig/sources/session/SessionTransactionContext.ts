@@ -1,11 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { DatabaseScope, TX } from "../persistence/Transaction.js";
 import { inTx } from "../persistence/inTx.js";
-import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import {
+    getSessionDatabaseOwner,
+    type SessionDatabase,
+} from "../persistence/database/SessionDatabase.js";
 
 interface TransactionState {
     readonly callbacks: Array<() => void | Promise<void>>;
+    readonly ctx: Context;
     readonly database: SessionDatabase;
     readonly tx: TX;
     active: boolean;
@@ -35,11 +40,8 @@ export function isSessionTransactionPostCommitError(
 
 export function currentSessionTransaction(database?: SessionDatabase): TX | undefined {
     const state = transactionStorage.getStore();
-    if (
-        state === undefined ||
-        !state.active ||
-        (database !== undefined && state.database !== database)
-    ) {
+    const owner = database === undefined ? undefined : getSessionDatabaseOwner(database);
+    if (state === undefined || !state.active || (owner !== undefined && state.database !== owner)) {
         return undefined;
     }
     return state.tx;
@@ -55,11 +57,8 @@ export function deferSessionTransactionCommit(
     database?: SessionDatabase,
 ): Promise<void> {
     const state = transactionStorage.getStore();
-    if (
-        state === undefined ||
-        !state.active ||
-        (database !== undefined && state.database !== database)
-    ) {
+    const owner = database === undefined ? undefined : getSessionDatabaseOwner(database);
+    if (state === undefined || !state.active || (owner !== undefined && state.database !== owner)) {
         return runImmediately(callback, state !== undefined);
     }
     state.callbacks.push(callback);
@@ -67,28 +66,33 @@ export function deferSessionTransactionCommit(
 }
 
 export async function runSessionTransaction<T>(
-    database: SessionDatabase,
-    operation: (tx: TX) => T | Promise<T>,
+    ctx: Context,
+    operation: (ctx: Context) => T | Promise<T>,
 ): Promise<T> {
+    const database = getSessionDatabaseOwner(ctx.tx as SessionDatabase) as
+        | SessionDatabase
+        | undefined;
+    if (database === undefined) throw new Error("Context has no session database owner.");
     const existing = transactionStorage.getStore();
     if (existing?.active === true && existing.database === database) {
-        return await operation(existing.tx);
+        return await operation(existing.ctx);
     }
 
     let callbacks: Array<() => void | Promise<void>> = [];
     let transactionState: TransactionState | undefined;
     let result: T;
     try {
-        result = await inTx(database, async (tx) => {
+        result = await inTx(ctx, "rig.sql.session.transaction", async (ctx) => {
             const state: TransactionState = {
                 active: true,
                 callbacks: [],
+                ctx,
                 database,
-                tx,
+                tx: ctx.tx as TX,
             };
             transactionState = state;
             callbacks = state.callbacks;
-            return await transactionStorage.run(state, () => operation(tx));
+            return await transactionStorage.run(state, () => operation(ctx));
         });
     } finally {
         if (transactionState !== undefined) transactionState.active = false;

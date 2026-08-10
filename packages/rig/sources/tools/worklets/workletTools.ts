@@ -46,13 +46,13 @@ export const workletInstallTool = defineTool({
     shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ iconPath, path, permissions }) =>
         `install the folder ${quoteVisibleExact(path)} with icon ${quoteVisibleExact(iconPath)} as version v1 of a worklet under ${quoteVisibleExact(getWorkletsDirectory())}, and start it. ${describeWorkletPermissions(permissions)} Rig will refuse the install if these reviewed permissions differ from the staged worklet.json. ${OUTSIDE_WORKSPACE}`,
-    execute: async (args, context) => {
+    execute: async (args, context, execution) => {
         await Promise.all([
             assertShareableLocalPath(args.path, context),
             assertShareableLocalPath(args.iconPath, context),
         ]);
         const { permissions, ...request } = args;
-        return requireWorklets(context).install(request, context.fs, permissions);
+        return requireWorklets(context).install(execution.ctx, request, context.fs, permissions);
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Installed the ${result.name} worklet at version v1.`,
@@ -79,9 +79,10 @@ export const workletUpdateTool = defineTool({
     shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ name, path, permissions }) =>
         `import ${quoteVisibleExact(path)} as the next version of the worklet ${quoteVisibleExact(name)} under ${quoteVisibleExact(getWorkletsDirectory())} and restart it. ${describeWorkletPermissions(permissions)} Rig will refuse the update if these reviewed permissions differ from the staged worklet.json. ${OUTSIDE_WORKSPACE}`,
-    execute: async ({ changeDescription, name, path, permissions }, context) => {
+    execute: async ({ changeDescription, name, path, permissions }, context, execution) => {
         await assertShareableLocalPath(path, context);
         return requireWorklets(context).update(
+            execution.ctx,
             name,
             { changeDescription, path },
             context.fs,
@@ -115,8 +116,8 @@ export const workletRevertTool = defineTool({
     shouldReviewInAutoMode: () => true,
     describeAutoPermissionAction: ({ name, permissions, version }) =>
         `make version v${String(version)} of the worklet ${quoteVisibleExact(name)} current and restart it. ${describeWorkletPermissions(permissions)} Rig will refuse the revert if these reviewed permissions differ from the stored version. Access: runs the worklet in the background outside the workspace sandbox`,
-    execute: ({ name, permissions, version }, context) =>
-        requireWorklets(context).revert(name, { version }, permissions),
+    execute: ({ name, permissions, version }, context, execution) =>
+        requireWorklets(context).revert(execution.ctx, name, { version }, permissions),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
         `Reverted the ${result.name} worklet to version v${String(result.currentVersion)}.`,
@@ -138,8 +139,8 @@ export const workletUninstallTool = defineTool({
     shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ name }) =>
         `stop the worklet ${quoteVisibleExact(name)} and delete its code under ${quoteVisibleExact(getWorkletsDirectory())}, keeping its Data folder. Access: deletes files outside the workspace sandbox`,
-    execute: async ({ name }, context) => {
-        await requireWorklets(context).uninstall(name);
+    execute: async ({ name }, context, execution) => {
+        await requireWorklets(context).uninstall(execution.ctx, name);
         return { name };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
@@ -157,8 +158,8 @@ export const workletListTool = defineTool({
         { worklets: Type.Array(workletSchema) },
         { additionalProperties: false },
     ),
-    execute: async (_args, context): Promise<{ worklets: Worklet[] }> => ({
-        worklets: [...(await requireWorklets(context).list())],
+    execute: async (_args, context, execution): Promise<{ worklets: Worklet[] }> => ({
+        worklets: [...(await requireWorklets(context).list(execution.ctx))],
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
@@ -182,7 +183,8 @@ export const workletLogsTool = defineTool({
         { log: Type.String(), truncated: Type.Boolean() },
         { additionalProperties: false },
     ),
-    execute: ({ name }, context) => requireWorklets(context).readLog(name),
+    execute: ({ name }, context, execution) =>
+        requireWorklets(context).readLog(execution.ctx, name),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => (result.log.length === 0 ? "The worklet has no output yet." : result.log),
     shouldReviewInAutoMode: () => false,

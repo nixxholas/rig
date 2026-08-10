@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +26,7 @@ describe("handleHappySessionRpc", () => {
         await mkdir(join(cwd, ".git"));
         await writeFile(join(cwd, ".gitignore"), ".context/\n");
         await writeFile(join(cwd, "visible.txt"), "visible\n");
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(createTestRootContext().named("agent"), {
             cwd,
             permissionMode: "read_only",
             processManager: new NativeProcessManager(),
@@ -78,7 +79,7 @@ describe("handleHappySessionRpc", () => {
     it("runs Happy shell and file operations through Rig's permission-aware context", async () => {
         const cwd = await mkdtemp(join(tmpdir(), "rig-happy-rpc-"));
         directories.push(cwd);
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(createTestRootContext().named("agent"), {
             cwd,
             permissionMode: "workspace_write",
             processManager: new NativeProcessManager(),

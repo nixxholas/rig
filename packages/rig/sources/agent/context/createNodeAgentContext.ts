@@ -17,6 +17,7 @@ import type { SessionSecretContext } from "../../secrets/index.js";
 import { getBundledDocsRoot } from "../../execution/getBundledDocsRoot.js";
 import type { PluginContext } from "./PluginContext.js";
 import { resolve } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface CreateNodeAgentContextOptions {
     cwd: string;
@@ -33,7 +34,10 @@ export interface CreateNodeAgentContextOptions {
     workflows?: WorkflowContext;
 }
 
-export function createNodeAgentContext(options: CreateNodeAgentContextOptions): AgentContext {
+export function createNodeAgentContext(
+    ctx: Context,
+    options: CreateNodeAgentContextOptions,
+): AgentContext {
     const protectedPaths = (options.protectedPaths ?? []).map((path) => resolve(options.cwd, path));
     const permissions = createPermissionContext(options.permissionMode ?? DEFAULT_PERMISSION_MODE, {
         protectedPaths,
@@ -44,6 +48,7 @@ export function createNodeAgentContext(options: CreateNodeAgentContextOptions): 
             protectedPaths,
         }),
         bash: createNodeBashContext({
+            ctx,
             cwd: options.cwd,
             ...(options.environment === undefined ? {} : { environment: options.environment }),
             processManager: options.processManager,

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { InMemorySessionStore } from "../InMemorySessionStore.js";
+
+const ctx = createTestRootContext();
 
 /**
  * Catching a conversation up from the last message a client holds.
@@ -11,7 +14,7 @@ import { InMemorySessionStore } from "../InMemorySessionStore.js";
  */
 
 async function messageEventIds(store: InMemorySessionStore, sessionId: string): Promise<string[]> {
-    const session = (await store.get(sessionId))!;
+    const session = (await store.get(ctx, sessionId))!;
     return (session.events.since(undefined) ?? [])
         .filter((event) => event.type === "message_submitted")
         .map((event) => event.id);
@@ -19,28 +22,28 @@ async function messageEventIds(store: InMemorySessionStore, sessionId: string): 
 
 describe("paging a transcript forward", () => {
     it("resends the anchor's own turn, because the client may hold half of it", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-forward-current" });
-        await session.submit({ text: "One." });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-forward-current" });
+        await session.submit(ctx, { text: "One." });
         const newest = (await messageEventIds(store, session.id)).at(-1)!;
 
         // Even a client holding the newest message gets that turn back. The
         // anchor says which message it has, not whether its turn had finished,
         // so the turn is replaced wholesale rather than assumed complete.
-        const page = (await session.transcriptSince(newest))!;
+        const page = (await session.transcriptSince(ctx, newest))!;
         expect(JSON.stringify(page.messages)).toContain("One.");
         expect(page.complete).toBe(true);
     });
 
     it("returns the turn holding the anchor complete, not just what follows it", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-forward-midturn" });
-        await session.submit({ text: "First." });
-        await session.submit({ text: "Second." });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-forward-midturn" });
+        await session.submit(ctx, { text: "First." });
+        await session.submit(ctx, { text: "Second." });
         const [first] = await messageEventIds(store, session.id);
 
         // The anchor is the first message, so its own turn must come back whole.
-        const page = await session.transcriptSince(first!);
+        const page = await session.transcriptSince(ctx, first!);
         expect(page).toBeDefined();
         const texts = JSON.stringify(page!.messages);
         expect(texts).toContain("First.");
@@ -48,14 +51,14 @@ describe("paging a transcript forward", () => {
     });
 
     it("includes messages the client never saw", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-forward-missed" });
-        await session.submit({ text: "Held." });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-forward-missed" });
+        await session.submit(ctx, { text: "Held." });
         const anchor = (await messageEventIds(store, session.id)).at(-1)!;
-        await session.submit({ text: "Missed one." });
-        await session.submit({ text: "Missed two." });
+        await session.submit(ctx, { text: "Missed one." });
+        await session.submit(ctx, { text: "Missed two." });
 
-        const page = (await session.transcriptSince(anchor))!;
+        const page = (await session.transcriptSince(ctx, anchor))!;
         const texts = JSON.stringify(page.messages);
         expect(texts).toContain("Missed one.");
         expect(texts).toContain("Missed two.");
@@ -63,13 +66,13 @@ describe("paging a transcript forward", () => {
     });
 
     it("serves an ancient anchor while nothing has been trimmed away", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-forward-ancient" });
-        await session.submit({ text: "Only." });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-forward-ancient" });
+        await session.submit(ctx, { text: "Only." });
 
         // Older than any event this session issued, but the session still holds
         // its whole history, so paging forward from it can skip nothing.
-        const page = (await session.transcriptSince("00000000-0000-7000-8000-000000000000"))!;
+        const page = (await session.transcriptSince(ctx, "00000000-0000-7000-8000-000000000000"))!;
         expect(JSON.stringify(page.messages)).toContain("Only.");
         expect(page.complete).toBe(true);
     });

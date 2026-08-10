@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
+import { createTestRootContext } from "../../rig/sources/testing/createTestRootContext.js";
 import { connectRig, type RigSessionConnection } from "@/connectRig.js";
 import type { SessionStateResponse } from "@/protocol.js";
 
@@ -16,22 +17,23 @@ import type { SessionStateResponse } from "@/protocol.js";
  */
 
 const started: { close: () => Promise<void> }[] = [];
+const ctx = createTestRootContext();
 const stores = new Set<InMemorySessionStore>();
 
 afterEach(async () => {
     for (const server of started.splice(0)) await server.close();
-    for (const store of stores) await store.close();
+    for (const store of stores) await store.close(ctx);
     stores.clear();
 });
 
 async function startDaemon(port = 0) {
-    const store = await InMemorySessionStore.open();
+    const store = await InMemorySessionStore.open(ctx);
     stores.add(store);
     return serve(store, port);
 }
 
 async function serve(store: InMemorySessionStore, port = 0) {
-    const server = await createProtocolHttpServer({ store, token: "secret" });
+    const server = await createProtocolHttpServer(ctx, { store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
     const address = server.address() as AddressInfo;
     const stop = async () => {
@@ -61,8 +63,8 @@ function userMessages(connection: RigSessionConnection | undefined): string[] {
 describe("a chat that loses its place", () => {
     it("recovers messages sent while the client was disconnected", async () => {
         const first = await startDaemon();
-        const session = await first.store.create({ cwd: "/tmp/rig-chat-gap" });
-        await session.submit({ text: "Before the drop." });
+        const session = await first.store.create(ctx, { cwd: "/tmp/rig-chat-gap" });
+        await session.submit(ctx, { text: "Before the drop." });
         const rig = connectRig({
             endpoint: first.endpoint,
             token: "secret",
@@ -83,7 +85,7 @@ describe("a chat that loses its place", () => {
                 () => connection.session().connection === "reconnecting",
                 "the drop to be noticed",
             );
-            await session.submit({ text: "During the drop." });
+            await session.submit(ctx, { text: "During the drop." });
 
             // The same store comes back on the same port, so the session and its log
             // survive: the client's cursor is still serveable and the stream resumes.
@@ -101,14 +103,14 @@ describe("a chat that loses its place", () => {
 
     it("catches up from the message the client holds instead of resending the chat", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = await store.create({ cwd: "/tmp/rig-chat-catchup" });
+        const session = await store.create(ctx, { cwd: "/tmp/rig-chat-catchup" });
         const auth = { authorization: "Bearer secret" };
         for (const text of ["One.", "Two.", "Three.", "Four."]) {
-            await session.submit({ text });
+            await session.submit(ctx, { text });
         }
 
         const full = (await (
-            await fetch(`${endpoint}/sessions/${session.id}/state`, { headers: auth })
+            await fetch(`${endpoint}/sessions/${session.id}/state?turns=20`, { headers: auth })
         ).json()) as SessionStateResponse;
         expect(full.append).toBeUndefined();
         const messages = full.transcript!.messages;
@@ -120,7 +122,7 @@ describe("a chat that loses its place", () => {
         const anchor = full.transcript!.messageEventId![messages[1]!.id]!;
         expect(anchor).toBeDefined();
         const caught = (await (
-            await fetch(`${endpoint}/sessions/${session.id}/state?after=${anchor}`, {
+            await fetch(`${endpoint}/sessions/${session.id}/state?after=${anchor}&turns=20`, {
                 headers: auth,
             })
         ).json()) as SessionStateResponse;
@@ -133,8 +135,8 @@ describe("a chat that loses its place", () => {
 
     it("refuses a cursor it cannot serve, and serves the whole chat when asked fresh", async () => {
         const { endpoint, store } = await startDaemon();
-        const session = await store.create({ cwd: "/tmp/rig-chat-cursor" });
-        await session.submit({ text: "Only message." });
+        const session = await store.create(ctx, { cwd: "/tmp/rig-chat-cursor" });
+        await session.submit(ctx, { text: "Only message." });
         const auth = { authorization: "Bearer secret" };
 
         // A cursor from another daemon's scope is exactly what a client holds

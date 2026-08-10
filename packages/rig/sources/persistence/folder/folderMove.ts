@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, sql } from "drizzle-orm";
 
 import { folders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export type FolderMoveResult =
     | { outcome: "cycle" }
@@ -14,14 +15,15 @@ export type FolderMoveResult =
 
 /** Puts one folder under a new active parent at a new order key. */
 export async function folderMove(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     parentId: string | null,
     orderKey: string,
     now: number,
     version?: number,
 ): Promise<FolderMoveResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.folder.folderMove", async (ctx) => {
+        const tx = ctx.tx;
         const folder = await tx
             .select({ version: folders.version })
             .from(folders)

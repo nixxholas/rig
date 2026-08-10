@@ -3,6 +3,7 @@ import { basename, extname } from "node:path";
 
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 import type {
     AgentMessageDelivery,
     HappyPlugin,
@@ -72,6 +73,7 @@ import type { SessionStore } from "../session/SessionStore.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
+import { withRequestContext } from "../observability/index.js";
 import type { PluginHookConnection } from "./PluginHookRegistry.js";
 import {
     PluginComputeError,
@@ -115,60 +117,65 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
             sendJson(response, 401, { error: "This plugin connection is not authorized." });
             return;
         }
-        void handleRequest(request, response, options, executeWorkspaceCommand).catch(
-            (error: unknown) => {
-                if (isDatabaseFailure(error)) throw error;
-                if ((request.url ?? "").startsWith("/compute/")) {
-                    const computeError =
-                        error instanceof PluginComputeError
-                            ? error
-                            : new PluginComputeError({
-                                  code:
-                                      error instanceof PluginApiRequestError
-                                          ? "invalid_request"
-                                          : "invalid_response",
-                                  message: errorToMessage(error),
-                                  retryable: false,
-                              });
-                    sendJson(response, happyComputeErrorStatus(computeError.code), {
-                        code: computeError.code,
-                        ...(computeError.elapsedMs === undefined
-                            ? {}
-                            : { elapsedMs: computeError.elapsedMs }),
-                        ...(computeError.lastProgressAt === undefined
-                            ? {}
-                            : { lastProgressAt: computeError.lastProgressAt }),
-                        message: computeError.message,
-                        ...(computeError.percent === undefined
-                            ? {}
-                            : { percent: computeError.percent }),
-                        ...(computeError.phase === undefined ? {} : { phase: computeError.phase }),
-                        retryable: computeError.retryable,
-                        ...(computeError.startedAt === undefined
-                            ? {}
-                            : { startedAt: computeError.startedAt }),
-                        ...(computeError.state === undefined ? {} : { state: computeError.state }),
-                    });
-                    return;
-                }
-                sendJson(
-                    response,
-                    error instanceof PluginHookConflictError
-                        ? 409
-                        : error instanceof PluginComputeError
-                          ? happyComputeErrorStatus(error.code)
-                          : classifyPluginApiRequestError(error),
-                    {
-                        ...(error instanceof PluginComputeError ? { code: error.code } : {}),
-                        error: errorToMessage(error),
-                    },
-                );
-            },
-        );
+        const url = new URL(request.url ?? "/", "http://rig-plugin.local");
+        const route = `plugin.${url.pathname.split("/").filter(Boolean).join(".") || "root"}`;
+        void withRequestContext(
+            route,
+            { method: request.method ?? "UNKNOWN", plugin: options.pluginName },
+            (ctx) => handleRequest(ctx, request, response, options, executeWorkspaceCommand),
+        ).catch((error: unknown) => {
+            if (isDatabaseFailure(error)) throw error;
+            if ((request.url ?? "").startsWith("/compute/")) {
+                const computeError =
+                    error instanceof PluginComputeError
+                        ? error
+                        : new PluginComputeError({
+                              code:
+                                  error instanceof PluginApiRequestError
+                                      ? "invalid_request"
+                                      : "invalid_response",
+                              message: errorToMessage(error),
+                              retryable: false,
+                          });
+                sendJson(response, happyComputeErrorStatus(computeError.code), {
+                    code: computeError.code,
+                    ...(computeError.elapsedMs === undefined
+                        ? {}
+                        : { elapsedMs: computeError.elapsedMs }),
+                    ...(computeError.lastProgressAt === undefined
+                        ? {}
+                        : { lastProgressAt: computeError.lastProgressAt }),
+                    message: computeError.message,
+                    ...(computeError.percent === undefined
+                        ? {}
+                        : { percent: computeError.percent }),
+                    ...(computeError.phase === undefined ? {} : { phase: computeError.phase }),
+                    retryable: computeError.retryable,
+                    ...(computeError.startedAt === undefined
+                        ? {}
+                        : { startedAt: computeError.startedAt }),
+                    ...(computeError.state === undefined ? {} : { state: computeError.state }),
+                });
+                return;
+            }
+            sendJson(
+                response,
+                error instanceof PluginHookConflictError
+                    ? 409
+                    : error instanceof PluginComputeError
+                      ? happyComputeErrorStatus(error.code)
+                      : classifyPluginApiRequestError(error),
+                {
+                    ...(error instanceof PluginComputeError ? { code: error.code } : {}),
+                    error: errorToMessage(error),
+                },
+            );
+        });
     });
 }
 
 async function handleRequest(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     options: CreatePluginApiServerOptions,
@@ -200,7 +207,7 @@ async function handleRequest(
     }
     if (request.method === "GET" && url.pathname === "/projects") {
         sendJson<{ projects: readonly HappyProject[] }>(response, 200, {
-            projects: (await options.store.listProjects()).map(toHappyProject),
+            projects: (await options.store.listProjects(ctx)).map(toHappyProject),
         });
         return;
     }
@@ -213,7 +220,9 @@ async function handleRequest(
             "Workspace list settings",
         );
         sendJson<{ workspaces: readonly HappyWorkspace[] }>(response, 200, {
-            workspaces: (await options.store.listWorkspaces(input.projectId)).map(toHappyWorkspace),
+            workspaces: (await options.store.listWorkspaces(ctx, input.projectId)).map(
+                toHappyWorkspace,
+            ),
         });
         return;
     }
@@ -242,10 +251,10 @@ async function handleRequest(
         return;
     }
     if (request.method === "GET" && url.pathname === "/sessions") {
-        const summaries = await options.store.list();
+        const summaries = await options.store.list(ctx);
         sendJson<{ sessions: readonly HappySession[] }>(response, 200, {
             sessions: await Promise.all(
-                summaries.map((session) => toHappySession(options.store, session)),
+                summaries.map((session) => toHappySession(ctx, options.store, session)),
             ),
         });
         return;
@@ -253,12 +262,13 @@ async function handleRequest(
     if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await readJson(request, createSessionInputSchema, "Session settings");
         const session = await options.store.create(
+            ctx,
             await configureSessionRequest(body, options.defaultDocker, () =>
-                options.store.queryProjectSettings(body.cwd),
+                options.store.queryProjectSettings(ctx, body.cwd),
             ),
         );
         sendJson<{ session: HappySession }>(response, 201, {
-            session: await toHappySession(options.store, session.snapshot()),
+            session: await toHappySession(ctx, options.store, session.snapshot()),
         });
         return;
     }
@@ -359,7 +369,7 @@ async function handleRequest(
             "Slot list settings",
         );
         sendJson<{ entries: readonly HappySlotEntry[] }>(response, 200, {
-            entries: await options.store.slots.list(input),
+            entries: await options.store.slots.list(ctx, input),
         });
         return;
     }
@@ -367,7 +377,7 @@ async function handleRequest(
         const body = await readJson(request, createHappySlotEntryInputSchema, "Slot entry");
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 201, {
-                entry: await options.store.slots.create({
+                entry: await options.store.slots.create(ctx, {
                     ...body,
                     author: {
                         folder: options.pluginFolder,
@@ -608,7 +618,7 @@ async function handleRequest(
         const body = await readJson(request, updateHappySlotEntryInputSchema, "Slot entry update");
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 200, {
-                entry: await options.store.slots.update(parts[1], body),
+                entry: await options.store.slots.update(ctx, parts[1], body),
             });
         } catch (error) {
             if (error instanceof SlotEntryInvalidError) {
@@ -630,7 +640,7 @@ async function handleRequest(
     ) {
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 200, {
-                entry: await options.store.slots.remove(parts[1]),
+                entry: await options.store.slots.remove(ctx, parts[1]),
             });
         } catch (error) {
             if (error instanceof SlotEntryNotFoundError) {
@@ -647,7 +657,7 @@ async function handleRequest(
         parts[0] === "workspaces" &&
         parts[1] !== undefined
     ) {
-        const workspace = (await options.store.listWorkspaces()).find(
+        const workspace = (await options.store.listWorkspaces(ctx)).find(
             (candidate) => candidate.id === parts[1],
         );
         if (workspace === undefined) {
@@ -992,12 +1002,12 @@ async function handleRequest(
         parts[2] === "messages"
     ) {
         const body = await readJson(request, sendAgentMessageBodySchema, "Agent message");
-        const target = await options.store.findByAgentId(parts[1]);
+        const target = await options.store.findByAgentId(ctx, parts[1]);
         if (target === undefined) {
             sendJson(response, 404, { error: "No agent has that Agent ID." });
             return;
         }
-        const delivered = await target.deliverNotification({
+        const delivered = await target.deliverNotification(ctx, {
             displayText: `${options.pluginName}: ${body.message}`,
             text: [
                 `Message from the Rig plugin ${JSON.stringify(options.pluginName)}.`,
@@ -1023,7 +1033,7 @@ async function handleRequest(
         if (request.method === "POST" && parts.length === 3) {
             const body = await readJson(request, createWorkspaceBodySchema, "Workspace settings");
             try {
-                const workspace = await options.store.createWorkspace(projectId, {
+                const workspace = await options.store.createWorkspace(ctx, projectId, {
                     ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
                     ...(body.id === undefined ? {} : { id: body.id }),
                     name: body.name,
@@ -1055,6 +1065,7 @@ async function handleRequest(
                 "Workspace rename settings",
             );
             const workspace = await options.store.renameWorkspace(
+                ctx,
                 projectId,
                 workspaceId,
                 body.name,
@@ -1081,6 +1092,7 @@ async function handleRequest(
                 "Workspace archive settings",
             );
             const workspace = await options.store.archiveWorkspace(
+                ctx,
                 projectId,
                 workspaceId,
                 body.version,
@@ -1143,13 +1155,14 @@ function toHappyWorkspace(workspace: ProjectWorkspace): HappyWorkspace {
 }
 
 async function toHappySession(
+    ctx: Context,
     store: SessionStore,
     session: Pick<
         SessionSummary,
         "archived" | "cwd" | "id" | "projectId" | "status" | "title" | "workspaceId"
     >,
 ): Promise<HappySession> {
-    const agentId = (await store.get(session.id))?.agentIdentity().agentId;
+    const agentId = (await store.get(ctx, session.id))?.agentIdentity().agentId;
     if (agentId === undefined) {
         throw new Error(`Rig could not resolve the agent for session ${session.id}.`);
     }

@@ -1,4 +1,5 @@
 import type { Message } from "../agent/types.js";
+import type { Context } from "@steve.kite/stdlib";
 import {
     parseAutoPermissionReview,
     type AutoPermissionReview,
@@ -13,15 +14,18 @@ import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
  */
 export const AUTO_PERMISSION_REVIEW_TIMEOUT_MS = 90_000;
 
-export async function reviewAutoPermission(options: {
-    action: string;
-    args: unknown;
-    messages: readonly Message[];
-    reviewer: PermissionReviewAgent;
-    signal?: AbortSignal;
-    timeoutMs?: number;
-    toolName: string;
-}): Promise<AutoPermissionReview> {
+export async function reviewAutoPermission(
+    ctx: Context,
+    options: {
+        action: string;
+        args: unknown;
+        messages: readonly Message[];
+        reviewer: PermissionReviewAgent;
+        signal?: AbortSignal;
+        timeoutMs?: number;
+        toolName: string;
+    },
+): Promise<AutoPermissionReview> {
     if (options.signal?.aborted) throw new Error("Permission review was stopped.");
     const action = safeJson({
         description: options.action,
@@ -35,7 +39,7 @@ export async function reviewAutoPermission(options: {
     );
     try {
         const response = await raceWithAbort(
-            options.reviewer.review({
+            options.reviewer.review(ctx, {
                 action,
                 messages: options.messages,
                 signal: anySignal([options.signal, deadline.signal]),

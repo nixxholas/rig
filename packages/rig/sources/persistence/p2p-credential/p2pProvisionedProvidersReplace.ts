@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { p2pProvisionedProviders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import { p2pInstanceIdSchema } from "../../protocol/P2pIdentityProtocol.js";
@@ -18,7 +19,7 @@ import { queryP2pProvisionedProviders } from "./queryP2pProvisionedProviders.js"
  * cannot remove credentials supplied by another trusted Rig.
  */
 export async function p2pProvisionedProvidersReplace(
-    tx: DatabaseScope,
+    ctx: Context,
     ownerInstanceId: string,
     providers: readonly P2pProvisionedProviderRecord[],
 ): Promise<boolean> {
@@ -42,8 +43,9 @@ export async function p2pProvisionedProvidersReplace(
     ) {
         throw new Error("A P2P credential snapshot must use one source digest.");
     }
-    return await inTx(tx, async (transaction) => {
-        const current = await queryP2pProvisionedProviders(transaction, ownerInstanceId);
+    return await inTx(ctx, "rig.sql.p2pCredential.p2pProvisionedProvidersReplace", async (ctx) => {
+        const tx = ctx.tx;
+        const current = await queryP2pProvisionedProviders(ctx, ownerInstanceId);
         if (
             current.length === providers.length &&
             current.length > 0 &&
@@ -52,12 +54,12 @@ export async function p2pProvisionedProvidersReplace(
             return false;
         }
         if (current.length === 0 && providers.length === 0) return false;
-        await transaction
+        await tx
             .delete(p2pProvisionedProviders)
             .where(eq(p2pProvisionedProviders.ownerInstanceId, ownerInstanceId))
             .run();
         if (providers.length > 0) {
-            await transaction
+            await tx
                 .insert(p2pProvisionedProviders)
                 .values(
                     providers.map((provider) => ({

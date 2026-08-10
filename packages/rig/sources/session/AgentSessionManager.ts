@@ -1,4 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     createSubagentInstructions,
@@ -39,6 +40,7 @@ import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { throwIfAborted } from "../concurrency/index.js";
+import { withWorkerContext } from "../observability/index.js";
 import { resolveSharedAgentPath } from "./impl/resolveSharedAgentPath.js";
 import type { InMemorySession } from "./InMemorySession.js";
 
@@ -48,50 +50,71 @@ export const DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS = 3;
 
 export interface AgentSessionRepository {
     archiveOwnedWorkspace?(
+        ctx: Context,
         ownerSessionId: string,
         projectId: string,
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined>;
     createOwnedWorkspace?(
+        ctx: Context,
         ownerSessionId: string,
         projectId: string,
         request: CreateProjectWorkspaceRequest,
     ): Promise<ProjectWorkspace | undefined>;
     createSubagent(
+        ctx: Context,
         request: CreateSessionRequest,
         metadata: SessionAgentMetadata,
         contextMessages?: readonly Message[],
     ): Promise<InMemorySession>;
     createDelegatedSession?(
+        ctx: Context,
         request: CreateSessionRequest,
         metadata: SessionAgentMetadata,
         id: string,
     ): Promise<InMemorySession>;
-    configureWorkspaceRequest?(request: CreateSessionRequest): Promise<CreateSessionRequest>;
+    configureWorkspaceRequest?(
+        ctx: Context,
+        request: CreateSessionRequest,
+    ): Promise<CreateSessionRequest>;
     findByAgentId?(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
-    listProjects?(): Promise<readonly Project[]>;
-    registerProject?(path: string): Promise<Project>;
-    listProjectWorkspaces?(projectId: string): Promise<readonly ProjectWorkspace[]>;
-    listProjectSessions?(target: {
-        projectId: string;
-        workspaceId?: string;
-    }): Promise<readonly AgentWorkspaceSession[]>;
+    listProjects?(ctx: Context): Promise<readonly Project[]>;
+    registerProject?(ctx: Context, path: string): Promise<Project>;
+    listProjectWorkspaces?(ctx: Context, projectId: string): Promise<readonly ProjectWorkspace[]>;
+    listProjectSessions?(
+        ctx: Context,
+        target: {
+            projectId: string;
+            workspaceId?: string;
+        },
+    ): Promise<readonly AgentWorkspaceSession[]>;
     queryAgentTreeUsage?(sessionId: string): AgentTreeUsage | undefined;
     ownedWorkspace?(
+        ctx: Context,
         ownerSessionId: string,
         projectId: string,
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined>;
-    workspace?(projectId: string, workspaceId: string): Promise<ProjectWorkspace | undefined>;
+    workspace?(
+        ctx: Context,
+        projectId: string,
+        workspaceId: string,
+    ): Promise<ProjectWorkspace | undefined>;
     waitForWorkspaceReady?(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         signal?: AbortSignal,
     ): Promise<ProjectWorkspace>;
-    completeScheduledSessionTransfer?(sessionId: string, targetWorkspaceId: string): Promise<void>;
+    completeScheduledSessionTransfer?(
+        ctx: Context,
+        sessionId: string,
+        targetWorkspaceId: string,
+    ): Promise<void>;
     scheduleSessionTransfer?(
+        ctx: Context,
         sessionId: string,
         targetWorkspaceId: string,
     ): Promise<AgentSessionTransferSchedule>;
@@ -164,6 +187,7 @@ export class AgentSessionManager {
     }
 
     async createWorkspace(
+        ctx: Context,
         ownerSessionId: string,
         input: { baseRef?: string; name: string },
     ): Promise<ProjectWorkspace> {
@@ -177,7 +201,7 @@ export class AgentSessionManager {
         }
         // An agent describes the work when it asks for a workspace, so that name stands rather
         // than being replaced by whatever the first chat inside it ends up called.
-        const workspace = await create(ownerSessionId, codeSessionIdentity(owner).projectId, {
+        const workspace = await create(ctx, ownerSessionId, codeSessionIdentity(owner).projectId, {
             ...input,
             nameConfigured: true,
         });
@@ -185,13 +209,18 @@ export class AgentSessionManager {
         return workspace;
     }
 
-    async archiveWorkspace(ownerSessionId: string, workspaceId: string): Promise<ProjectWorkspace> {
+    async archiveWorkspace(
+        ctx: Context,
+        ownerSessionId: string,
+        workspaceId: string,
+    ): Promise<ProjectWorkspace> {
         const owner = this.#repository.get(ownerSessionId);
         const archive = this.#repository.archiveOwnedWorkspace;
         if (owner === undefined || archive === undefined) {
             throw new Error("This session cannot archive managed workspaces.");
         }
         const workspace = await archive(
+            ctx,
             ownerSessionId,
             codeSessionIdentity(owner).projectId,
             workspaceId,
@@ -203,6 +232,7 @@ export class AgentSessionManager {
     }
 
     async scheduleSessionTransfer(
+        ctx: Context,
         sessionId: string,
         targetWorkspaceId: string,
     ): Promise<AgentSessionTransferSchedule> {
@@ -210,10 +240,11 @@ export class AgentSessionManager {
         if (schedule === undefined) {
             throw new Error("This session cannot be transferred between workspaces.");
         }
-        return schedule(sessionId, targetWorkspaceId);
+        return schedule(ctx, sessionId, targetWorkspaceId);
     }
 
     async completeScheduledSessionTransfer(
+        ctx: Context,
         sessionId: string,
         targetWorkspaceId: string,
     ): Promise<void> {
@@ -221,14 +252,14 @@ export class AgentSessionManager {
         if (complete === undefined) {
             throw new Error("This session cannot be transferred between workspaces.");
         }
-        await complete(sessionId, targetWorkspaceId);
+        await complete(ctx, sessionId, targetWorkspaceId);
     }
 
-    async listProjects(sessionId: string): Promise<readonly AgentProject[]> {
+    async listProjects(ctx: Context, sessionId: string): Promise<readonly AgentProject[]> {
         const list = this.#repository.listProjects;
         if (list === undefined) throw new Error("This session cannot list projects.");
         const currentProjectId = codeSessionIdentity(this.#current(sessionId)).projectId;
-        return (await list()).map((project) => ({
+        return (await list(ctx)).map((project) => ({
             current: project.id === currentProjectId,
             id: project.id,
             name: project.name,
@@ -236,10 +267,10 @@ export class AgentSessionManager {
         }));
     }
 
-    async registerProject(sessionId: string, path: string): Promise<AgentProject> {
+    async registerProject(ctx: Context, sessionId: string, path: string): Promise<AgentProject> {
         const register = this.#repository.registerProject;
         if (register === undefined) throw new Error("This session cannot add projects.");
-        const project = await register(path);
+        const project = await register(ctx, path);
         return {
             current: project.id === codeSessionIdentity(this.#current(sessionId)).projectId,
             id: project.id,
@@ -249,6 +280,7 @@ export class AgentSessionManager {
     }
 
     async listWorkspaces(
+        ctx: Context,
         sessionId: string,
         projectId: string | undefined,
         options: { crossWorkspace: boolean },
@@ -256,10 +288,15 @@ export class AgentSessionManager {
         const list = this.#repository.listProjectWorkspaces;
         if (list === undefined) throw new Error("This session cannot list workspaces.");
         const target = this.#targetProjectId(sessionId, projectId, options);
-        return (await list(target)).map((workspace) => this.#agentWorkspace(sessionId, workspace));
+        return await Promise.all(
+            (await list(ctx, target)).map((workspace) =>
+                this.#agentWorkspace(ctx, sessionId, workspace),
+            ),
+        );
     }
 
     async listSessions(
+        ctx: Context,
         sessionId: string,
         target: { projectId?: string; workspaceId?: string },
         options: { crossWorkspace: boolean },
@@ -267,7 +304,7 @@ export class AgentSessionManager {
         const list = this.#repository.listProjectSessions;
         if (list === undefined) throw new Error("This session cannot list conversations.");
         const projectId = this.#targetProjectId(sessionId, target.projectId, options);
-        return await list({
+        return await list(ctx, {
             projectId,
             ...(target.workspaceId === undefined ? {} : { workspaceId: target.workspaceId }),
         });
@@ -281,6 +318,7 @@ export class AgentSessionManager {
      * the session afterwards through the ordinary agent messaging tools.
      */
     async delegate(
+        ctx: Context,
         delegatorSessionId: string,
         request: DelegatedSessionRequest,
         options: { crossWorkspace: boolean } = { crossWorkspace: true },
@@ -297,11 +335,11 @@ export class AgentSessionManager {
         }
         const snapshot = delegator.snapshot();
         const projectId = this.#targetProjectId(delegatorSessionId, request.projectId, options);
-        let workspace = await resolveWorkspace(projectId, request.workspaceId);
+        let workspace = await resolveWorkspace(ctx, projectId, request.workspaceId);
         if (workspace === undefined) {
             throw new Error("That workspace was not found in that project.");
         }
-        workspace = await this.#workspaceReady(projectId, workspace, signal);
+        workspace = await this.#workspaceReady(ctx, projectId, workspace, signal);
         if (snapshot.scope.kind === "workspace" && workspace.id === snapshot.scope.workspaceId) {
             throw new Error("That workspace is the one this session already works in.");
         }
@@ -320,7 +358,8 @@ export class AgentSessionManager {
             ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
         };
         const delegate = await create(
-            (await this.#repository.configureWorkspaceRequest?.(workspaceRequest)) ??
+            ctx,
+            (await this.#repository.configureWorkspaceRequest?.(ctx, workspaceRequest)) ??
                 workspaceRequest,
             {
                 delegatedBySessionId: delegatorSessionId,
@@ -331,7 +370,7 @@ export class AgentSessionManager {
             },
             sessionId,
         );
-        const submitted = await delegate.submit({
+        const submitted = await delegate.submit(ctx, {
             agentMessageTriggerTurn: true,
             provenance: "agent",
             text: request.prompt,
@@ -362,10 +401,18 @@ export class AgentSessionManager {
         return projectId;
     }
 
-    #agentWorkspace(sessionId: string, workspace: ProjectWorkspace): AgentWorkspace {
+    async #agentWorkspace(
+        ctx: Context,
+        sessionId: string,
+        workspace: ProjectWorkspace,
+    ): Promise<AgentWorkspace> {
         const owned =
-            this.#repository.ownedWorkspace?.(sessionId, workspace.projectId, workspace.id) !==
-            undefined;
+            (await this.#repository.ownedWorkspace?.(
+                ctx,
+                sessionId,
+                workspace.projectId,
+                workspace.id,
+            )) !== undefined;
         return {
             archived: workspace.status === "archiving" || workspace.status === "archived",
             id: workspace.id,
@@ -382,34 +429,35 @@ export class AgentSessionManager {
         delegate: InMemorySession,
         runId: string,
     ): void {
-        const monitor = async () => {
-            const completion = await delegate.waitForRun(runId);
-            if (delegator.isClosing?.() === true) return;
-            const title = delegate.agentIdentity().title ?? "the delegated conversation";
-            const output = this.#completionOutput(
-                delegate,
-                completion.status,
-                completion.errorMessage,
-            );
-            delegator.deliverNotification({
-                displayText: `Delegated work in "${title}" ${
-                    completion.status === "completed"
-                        ? "completed"
-                        : completion.status === "aborted"
-                          ? "was stopped"
-                          : "failed"
-                }.`,
-                text: [
-                    "<delegated-session-notification>",
-                    `Session: ${delegate.id}`,
-                    `Agent ID: ${delegate.agentIdentity().agentId}`,
-                    `Title: ${title}`,
-                    `Status: ${completion.status}`,
-                    `Result: ${output}`,
-                    "</delegated-session-notification>",
-                ].join("\n"),
+        const monitor = () =>
+            withWorkerContext("delegated-run-monitor", async (ctx) => {
+                const completion = await delegate.waitForRun(ctx, runId);
+                if (delegator.isClosing?.() === true) return;
+                const title = delegate.agentIdentity().title ?? "the delegated conversation";
+                const output = this.#completionOutput(
+                    delegate,
+                    completion.status,
+                    completion.errorMessage,
+                );
+                delegator.deliverNotification(ctx, {
+                    displayText: `Delegated work in "${title}" ${
+                        completion.status === "completed"
+                            ? "completed"
+                            : completion.status === "aborted"
+                              ? "was stopped"
+                              : "failed"
+                    }.`,
+                    text: [
+                        "<delegated-session-notification>",
+                        `Session: ${delegate.id}`,
+                        `Agent ID: ${delegate.agentIdentity().agentId}`,
+                        `Title: ${title}`,
+                        `Status: ${completion.status}`,
+                        `Result: ${output}`,
+                        "</delegated-session-notification>",
+                    ].join("\n"),
+                });
             });
-        };
         const task = this.#taskDrain?.run(monitor) ?? monitor();
         void task.catch((error: unknown) => {
             if (isDatabaseFailure(error)) throw error;
@@ -417,6 +465,7 @@ export class AgentSessionManager {
     }
 
     async spawnInWorkspace(
+        ctx: Context,
         parentSessionId: string,
         request: WorkspaceAgentRequest,
         signal?: AbortSignal,
@@ -428,12 +477,18 @@ export class AgentSessionManager {
         }
         const projectId = codeSessionIdentity(parent).projectId;
         throwIfAborted(signal);
-        let workspace = await resolveWorkspace(parentSessionId, projectId, request.workspaceId);
+        let workspace = await resolveWorkspace(
+            ctx,
+            parentSessionId,
+            projectId,
+            request.workspaceId,
+        );
         if (workspace === undefined) {
             throw new Error("This workspace was not created by the current session.");
         }
-        workspace = await this.#workspaceReady(projectId, workspace, signal);
+        workspace = await this.#workspaceReady(ctx, projectId, workspace, signal);
         return this.spawn(
+            ctx,
             parentSessionId,
             { ...request, cwd: workspace.path, workspaceId: workspace.id },
             signal,
@@ -441,6 +496,7 @@ export class AgentSessionManager {
     }
 
     async #workspaceReady(
+        ctx: Context,
         projectId: string,
         workspace: ProjectWorkspace,
         signal: AbortSignal | undefined,
@@ -451,7 +507,7 @@ export class AgentSessionManager {
             if (wait === undefined) {
                 throw new Error("The workspace is initializing and cannot start work yet.");
             }
-            workspace = await wait(projectId, workspace.id, signal);
+            workspace = await wait(ctx, projectId, workspace.id, signal);
         }
         if (workspace.status !== "ready") {
             throw new Error(
@@ -464,7 +520,7 @@ export class AgentSessionManager {
         return workspace;
     }
 
-    communicationContext(sessionId: string): AgentCommunicationContext {
+    communicationContext(ctx: Context, sessionId: string): AgentCommunicationContext {
         const inspectedAgentIds = new Set<string>();
         return {
             info: (agentId) => {
@@ -479,7 +535,7 @@ export class AgentSessionManager {
                         "Call agent_info with this agent ID before sending it a message.",
                     );
                 }
-                return this.#sendToAgent(sessionId, agentId, message);
+                return this.#sendToAgent(ctx, sessionId, agentId, message);
             },
             setReadOnly: async (agentId, readOnly) => {
                 if (!inspectedAgentIds.has(agentId)) {
@@ -487,12 +543,13 @@ export class AgentSessionManager {
                         "Call agent_info with this agent ID before changing its permission mode.",
                     );
                 }
-                await this.#setAgentReadOnly(sessionId, agentId, readOnly);
+                await this.#setAgentReadOnly(ctx, sessionId, agentId, readOnly);
             },
         };
     }
 
     sendScheduledMessage(
+        ctx: Context,
         senderSessionId: string,
         targetAgentId: string,
         message: string,
@@ -500,7 +557,7 @@ export class AgentSessionManager {
     ): void {
         const sender = this.#current(senderSessionId);
         const target = this.#target(targetAgentId);
-        this.#deliverAgentMessage(sender, target, message, messageId);
+        this.#deliverAgentMessage(ctx, sender, target, message, messageId);
     }
 
     assertCanScheduleMessage(senderSessionId: string, targetAgentId: string): void {
@@ -509,6 +566,7 @@ export class AgentSessionManager {
     }
 
     async changeSubagentPermissionModes(
+        ctx: Context,
         parentSessionId: string,
         permissionMode: PermissionMode,
     ): Promise<void> {
@@ -517,12 +575,13 @@ export class AgentSessionManager {
             this.#repository.listByRoot(root.id).map(async (session) => {
                 try {
                     await session.changePermissionMode(
+                        ctx,
                         { permissionMode },
                         { updateSubagents: false },
                     );
                 } catch (error) {
                     try {
-                        await session.beginShutdown();
+                        await session.beginShutdown(ctx);
                     } catch (shutdownError) {
                         throw new AggregateError(
                             [error, shutdownError],
@@ -543,6 +602,7 @@ export class AgentSessionManager {
     }
 
     async followUp(
+        ctx: Context,
         parentSessionId: string,
         target: string,
         message: string,
@@ -569,11 +629,11 @@ export class AgentSessionManager {
         if (childStatus !== "running" && childStatus !== "queued") {
             this.#assertTurnSlotAvailable(child.agentMetadata().rootSessionId);
         }
-        if (childStatus === "suspended") await child.clearSuspension();
+        if (childStatus === "suspended") await child.clearSuspension(ctx);
         this.#stoppedExplicitly.delete(child.id);
         const childPath = this.#pathFor(child);
         const parentPath = this.#pathFor(parent);
-        const submitted = await child.submit({
+        const submitted = await child.submit(ctx, {
             agentMessageTriggerTurn: true,
             ...(this.#repository.get(parentSessionId)?.activeRunDebug?.() === true
                 ? { debug: true }
@@ -606,6 +666,7 @@ export class AgentSessionManager {
     }
 
     sendMessage(
+        ctx: Context,
         senderSessionId: string,
         target: string,
         message: string,
@@ -626,7 +687,7 @@ export class AgentSessionManager {
         }
         const senderPath = this.#pathFor(sender);
         const recipientPath = this.#pathFor(recipient);
-        recipient.deliverAgentMessage({
+        recipient.deliverAgentMessage(ctx, {
             blocks: message.length === 0 ? [] : [{ type: "text", text: message }],
             id: crypto.randomUUID(),
             provenance: "agent",
@@ -653,25 +714,30 @@ export class AgentSessionManager {
     }
 
     async setSubagentReadOnly(
+        ctx: Context,
         parentSessionId: string,
         target: string,
         readOnly: boolean,
     ): Promise<ManagedSubagent> {
         const parent = this.#current(parentSessionId);
         const child = this.#resolveTarget(parentSessionId, target);
-        await this.#changeChildPermissionMode(parent, child, readOnly, {
+        await this.#changeChildPermissionMode(ctx, parent, child, readOnly, {
             updateSubagents: false,
         });
         this.recordChanged(child);
         return this.#managedSubagent(child);
     }
 
-    async interrupt(parentSessionId: string, target: string): Promise<ManagedSubagent> {
+    async interrupt(
+        ctx: Context,
+        parentSessionId: string,
+        target: string,
+    ): Promise<ManagedSubagent> {
         const child = this.#resolveTarget(parentSessionId, target);
         const previous = this.#managedSubagent(child);
-        await this.stopDescendants(child.id);
-        if (child.subagentSummary().status === "suspended") await child.clearSuspension();
-        await child.abort({ stopDescendants: false });
+        await this.stopDescendants(ctx, child.id);
+        if (child.subagentSummary().status === "suspended") await child.clearSuspension(ctx);
+        await child.abort(ctx, { stopDescendants: false });
         this.recordChanged(child);
         return previous;
     }
@@ -696,7 +762,7 @@ export class AgentSessionManager {
         return agent;
     }
 
-    async pauseDescendants(parentSessionId: string): Promise<number> {
+    async pauseDescendants(ctx: Context, parentSessionId: string): Promise<number> {
         const parent = this.#repository.get(parentSessionId);
         if (parent === undefined) return 0;
         const active = this.#activeDescendantsOf(parentSessionId).filter(
@@ -704,15 +770,18 @@ export class AgentSessionManager {
         );
         await Promise.all(
             active.map(async (child) => {
-                await child.suspendByParent();
+                await child.suspendByParent(ctx);
                 this.recordChanged(child);
             }),
         );
-        await parent.recordSubagentsSuspended(active.map((child) => this.#managedSubagent(child)));
+        await parent.recordSubagentsSuspended(
+            ctx,
+            active.map((child) => this.#managedSubagent(child)),
+        );
         return active.length;
     }
 
-    async stopDescendants(parentSessionId: string): Promise<number> {
+    async stopDescendants(ctx: Context, parentSessionId: string): Promise<number> {
         const parent = this.#repository.get(parentSessionId);
         if (parent === undefined) return 0;
         // Workflows are independently managed background runs. Interrupting the parent can
@@ -728,13 +797,13 @@ export class AgentSessionManager {
             (child) => child.subagentSummary().status === "suspended",
         );
         for (const child of suspended) {
-            await child.clearSuspension();
+            await child.clearSuspension(ctx);
             this.recordChanged(child);
         }
         for (const child of active) this.#stoppedExplicitly.add(child.id);
         await Promise.all(
             active.map(async (child) => {
-                await child.abort({ stopDescendants: false });
+                await child.abort(ctx, { stopDescendants: false });
                 this.recordChanged(child);
             }),
         );
@@ -747,14 +816,14 @@ export class AgentSessionManager {
      * Workflow children are included here: unlike an ordinary parent interruption, changing cwd,
      * secrets, and filesystem permissions makes every old descendant context unsafe to retain.
      */
-    async stopDescendantsForContextChange(parentSessionId: string): Promise<number> {
+    async stopDescendantsForContextChange(ctx: Context, parentSessionId: string): Promise<number> {
         const parent = this.#repository.get(parentSessionId);
         if (parent === undefined) return 0;
         const descendants = this.#descendantsOf(parentSessionId);
         for (const child of descendants) this.#stoppedExplicitly.add(child.id);
         await Promise.all(
             descendants.map(async (child) => {
-                await child.retireForContextChange();
+                await child.retireForContextChange(ctx);
                 this.recordChanged(child);
             }),
         );
@@ -841,6 +910,7 @@ export class AgentSessionManager {
     }
 
     async spawn(
+        ctx: Context,
         parentSessionId: string,
         request: SpawnSubagentRequest,
         signal?: AbortSignal,
@@ -941,7 +1011,7 @@ export class AgentSessionManager {
                 request.workspaceId !== undefined &&
                 (parentScope.kind !== "workspace" ||
                     request.workspaceId !== parentScope.workspaceId)
-                    ? ((await this.#repository.configureWorkspaceRequest?.(childRequest)) ??
+                    ? ((await this.#repository.configureWorkspaceRequest?.(ctx, childRequest)) ??
                       childRequest)
                     : childRequest;
             const inheritedContextMessages = (() => {
@@ -965,14 +1035,15 @@ export class AgentSessionManager {
             child =
                 request.contextMode === "parent"
                     ? await this.#repository.createSubagent(
+                          ctx,
                           configuredChildRequest,
                           metadata,
                           inheritedContextMessages,
                       )
-                    : await this.#repository.createSubagent(configuredChildRequest, metadata);
+                    : await this.#repository.createSubagent(ctx, configuredChildRequest, metadata);
             const childPath = this.#pathFor(child);
             const parentPath = this.#pathFor(parent);
-            submitted = await child.submit({
+            submitted = await child.submit(ctx, {
                 agentMessageTriggerTurn: true,
                 ...(parent.activeRunDebug?.() === true ? { debug: true } : {}),
                 ...(request.encryptedPrompt === undefined
@@ -1010,14 +1081,15 @@ export class AgentSessionManager {
             };
         }
 
-        const abortChild = () => void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
+        const abortChild = () =>
+            void Promise.resolve(child.abort(ctx)).catch(rethrowDatabaseFailure);
         signal?.addEventListener("abort", abortChild, { once: true });
 
         try {
             if (signal?.aborted) {
-                void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
+                void Promise.resolve(child.abort(ctx)).catch(rethrowDatabaseFailure);
             }
-            const completion = await child.waitForRun(submitted.runId);
+            const completion = await child.waitForRun(ctx, submitted.runId);
             this.recordChanged(child);
             return {
                 agentId: child.subagentSummary().agentId,
@@ -1026,7 +1098,7 @@ export class AgentSessionManager {
                 status: completion.status,
             };
         } catch (error) {
-            void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
+            void Promise.resolve(child.abort(ctx)).catch(rethrowDatabaseFailure);
             throw error;
         } finally {
             signal?.removeEventListener("abort", abortChild);
@@ -1175,6 +1247,7 @@ export class AgentSessionManager {
     }
 
     #sendToAgent(
+        ctx: Context,
         senderSessionId: string,
         targetAgentId: string,
         message: string,
@@ -1182,21 +1255,23 @@ export class AgentSessionManager {
     ): { delivered: true } {
         const sender = this.#current(senderSessionId);
         const target = this.#target(targetAgentId);
-        this.#deliverAgentMessage(sender, target, message, messageId);
+        this.#deliverAgentMessage(ctx, sender, target, message, messageId);
         return { delivered: true };
     }
 
     async #setAgentReadOnly(
+        ctx: Context,
         senderSessionId: string,
         targetAgentId: string,
         readOnly: boolean,
     ): Promise<void> {
         const sender = this.#current(senderSessionId);
         const target = this.#target(targetAgentId);
-        await this.#changeChildPermissionMode(sender, target, readOnly);
+        await this.#changeChildPermissionMode(ctx, sender, target, readOnly);
     }
 
     #deliverAgentMessage(
+        ctx: Context,
         sender: InMemorySession,
         target: InMemorySession,
         message: string,
@@ -1207,7 +1282,7 @@ export class AgentSessionManager {
             target.agentCommunicationLocation(),
             sender.agentCommunicationLocation(),
         );
-        target.deliverAgentMessage({
+        target.deliverAgentMessage(ctx, {
             agentSource: {
                 agentId: identity.agentId,
                 sessionId: sender.id,
@@ -1239,6 +1314,7 @@ export class AgentSessionManager {
     }
 
     async #changeChildPermissionMode(
+        ctx: Context,
         parent: InMemorySession,
         child: InMemorySession,
         readOnly: boolean | undefined,
@@ -1260,9 +1336,9 @@ export class AgentSessionManager {
         }
         const request = { permissionMode: readOnly ? ("read_only" as const) : inheritedMode };
         if (options.updateSubagents === undefined) {
-            await child.changePermissionMode(request);
+            await child.changePermissionMode(ctx, request);
         } else {
-            await child.changePermissionMode(request, options);
+            await child.changePermissionMode(ctx, request, options);
         }
     }
 
@@ -1362,6 +1438,7 @@ export class AgentSessionManager {
     }
 
     async #monitorBackground(
+        ctx: Context,
         parent: InMemorySession | undefined,
         child: InMemorySession,
         runId: string,
@@ -1371,7 +1448,7 @@ export class AgentSessionManager {
         this.#pendingBackgroundRuns.set(monitorId, child.id);
         let notificationStarted = false;
         try {
-            const completion = await child.waitForRun(runId);
+            const completion = await child.waitForRun(ctx, runId);
             this.recordChanged(child);
             if (completion.status === "aborted" && child.consumeSuspendedRun(runId)) return;
             const status = await this.#waitForSettledSubtree(child);
@@ -1386,7 +1463,7 @@ export class AgentSessionManager {
                 status === completion.status ? completion.errorMessage : undefined,
             );
             notificationStarted = true;
-            this.#deliverBackgroundCompletion(parent, child, status, output);
+            this.#deliverBackgroundCompletion(ctx, parent, child, status, output);
         } catch (error) {
             // Delivering the notification is best effort, but the database it writes through is
             // not: a subtree that cannot be recorded has nothing left to fall back on.
@@ -1402,6 +1479,7 @@ export class AgentSessionManager {
             ) {
                 notificationStarted = true;
                 this.#deliverBackgroundCompletion(
+                    ctx,
                     parent,
                     child,
                     status,
@@ -1417,6 +1495,7 @@ export class AgentSessionManager {
     }
 
     #deliverBackgroundCompletion(
+        ctx: Context,
         parent: InMemorySession,
         child: InMemorySession,
         status: Exclude<SubagentRunStatus, "running">,
@@ -1425,7 +1504,7 @@ export class AgentSessionManager {
         const summary = child.subagentSummary();
         const outcome =
             status === "completed" ? "completed" : status === "aborted" ? "was stopped" : "failed";
-        parent.deliverNotification({
+        parent.deliverNotification(ctx, {
             displayText: `Background work "${summary.description}" ${outcome}.`,
             text: [
                 "<subagent-notification>",
@@ -1465,7 +1544,10 @@ export class AgentSessionManager {
         child: InMemorySession,
         runId: string,
     ): void {
-        const monitor = () => this.#monitorBackground(parent, child, runId);
+        const monitor = () =>
+            withWorkerContext("subagent-background-monitor", (ctx) =>
+                this.#monitorBackground(ctx, parent, child, runId),
+            );
         const task = this.#taskDrain?.run(monitor) ?? monitor();
         void task.catch(rethrowDatabaseFailure);
     }

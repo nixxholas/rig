@@ -1,13 +1,15 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { sharingSettings } from "../database/schema.js";
 
 export async function sharingSettingsSet(
-    tx: DatabaseScope,
+    ctx: Context,
     enabled: boolean,
     updatedAt: number,
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.sharing.sharingSettingsSet", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(sharingSettings)
             .values({ enabled, singletonId: 1, updatedAtMs: updatedAt })

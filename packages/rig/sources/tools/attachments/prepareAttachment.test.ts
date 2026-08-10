@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -189,7 +190,7 @@ describe("prepareAttachment", () => {
                 timeoutMs: 5_000,
             });
             expect(created.exitCode).toBe(0);
-            const context = createNodeAgentContext({
+            const context = createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: root,
                 processManager: new NativeProcessManager(),
             });

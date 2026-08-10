@@ -16,8 +16,9 @@ export interface AppletCreateRecord {
 }
 
 /** Writes the applet identity together with its first version so neither exists alone. */
-export async function appletCreate(tx: DatabaseScope, record: AppletCreateRecord): Promise<void> {
-    await inTx(tx, async (transaction) => {
+export async function appletCreate(ctx: Context, record: AppletCreateRecord): Promise<void> {
+    await inTx(ctx, "rig.sql.applets.create", async (ctx) => {
+        const transaction = ctx.tx;
         await transaction
             .insert(applets)
             .values({
@@ -44,3 +45,4 @@ export async function appletCreate(tx: DatabaseScope, record: AppletCreateRecord
             .run();
     });
 }
+import type { Context } from "@steve.kite/stdlib";

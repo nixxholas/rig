@@ -31,7 +31,7 @@ describe("createWaitForWorkflowTool", () => {
         await createWaitForWorkflowTool("wait_for_workflow").execute(
             { run_id: run.runId },
             harness.context,
-            { onStatus },
+            { ctx: harness.ctx, onStatus },
         );
 
         expect(onStatus).toHaveBeenCalledWith("Waiting for the workflow to complete");

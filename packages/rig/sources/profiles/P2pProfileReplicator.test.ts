@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { P2pNetwork } from "../p2p/index.js";
@@ -11,26 +12,29 @@ import { RigProfileStore } from "./RigProfileStore.js";
 const LOCAL_INSTANCE = "alocalparent00000000000001";
 const SECONDARY_INSTANCE = "asecondary000000000000001";
 const OTHER_INSTANCE = "aotherpeer0000000000000001";
+const ctx = createTestRootContext();
 
 describe("P2pProfileReplicator", () => {
     let database: PersistentSessionStore | undefined;
     let replicator: P2pProfileReplicator | undefined;
 
     afterEach(async () => {
-        await replicator?.close();
-        await database?.close();
+        await replicator?.close(ctx);
+        await database?.close(ctx);
         vi.useRealTimers();
     });
 
     it("synchronizes updates only after a peer proves this Rig is its primary", async () => {
         vi.useFakeTimers();
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const created = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const remoteProfiles = new Map<string, RigProfile>();
         const requests: { method: string; path: string; peerId: string }[] = [];
         const firstPutStarted = deferred();
@@ -39,6 +43,7 @@ describe("P2pProfileReplicator", () => {
         const network = {
             fetch: vi.fn(
                 async (
+                    _ctx: unknown,
                     peerId: string,
                     request: P2pHttpRequest,
                 ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
@@ -95,8 +100,8 @@ describe("P2pProfileReplicator", () => {
             profiles,
         });
 
-        replicator.syncAll({ recheckTargets: true });
-        await replicator.flush();
+        replicator.syncAll(ctx, { recheckTargets: true });
+        await replicator.flush(ctx);
 
         expect(remoteProfiles.get(created.id)).toBeUndefined();
         expect(
@@ -105,7 +110,7 @@ describe("P2pProfileReplicator", () => {
                 .map(({ method, path }) => `${method} ${path}`),
         ).toEqual(["GET /config"]);
 
-        const preflight = replicateProfileToP2pPeer({
+        const preflight = replicateProfileToP2pPeer(ctx, {
             network,
             peerId: SECONDARY_INSTANCE,
             profile: created,
@@ -113,10 +118,10 @@ describe("P2pProfileReplicator", () => {
         });
         await firstPutStarted.promise;
 
-        const updated = await profiles.update(created.id, { name: "Steve 🧑‍💻" });
+        const updated = await profiles.update(ctx, created.id, { name: "Steve 🧑‍💻" });
         expect(updated).toBeDefined();
-        replicator.syncProfile(created.id, updated!.version);
-        await replicator.flush();
+        replicator.syncProfile(ctx, created.id, updated!.version);
+        await replicator.flush(ctx);
         expect(remoteProfiles.get(created.id)).toBeUndefined();
 
         releaseFirstPut.resolve();
@@ -124,7 +129,7 @@ describe("P2pProfileReplicator", () => {
         expect(remoteProfiles.get(created.id)).toEqual(created);
 
         await vi.advanceTimersByTimeAsync(1_000);
-        await replicator.flush();
+        await replicator.flush(ctx);
 
         expect(remoteProfiles.get(created.id)).toEqual(updated);
         expect(
@@ -139,17 +144,20 @@ describe("P2pProfileReplicator", () => {
 
     it("does not retry a profile that has not been registered on a secondary", async () => {
         vi.useFakeTimers();
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const created = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const requests: { method: string; path: string }[] = [];
         const network = {
             fetch: vi.fn(
                 async (
+                    _ctx: unknown,
                     _peerId: string,
                     request: P2pHttpRequest,
                 ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
@@ -181,8 +189,8 @@ describe("P2pProfileReplicator", () => {
             profiles,
         });
 
-        replicator.syncAll({ recheckTargets: true });
-        await replicator.flush();
+        replicator.syncAll(ctx, { recheckTargets: true });
+        await replicator.flush(ctx);
 
         expect(requests).toEqual([
             { method: "GET", path: "/config" },
@@ -190,7 +198,7 @@ describe("P2pProfileReplicator", () => {
         ]);
 
         await vi.advanceTimersByTimeAsync(5 * 60_000);
-        await replicator.flush();
+        await replicator.flush(ctx);
 
         expect(requests).toEqual([
             { method: "GET", path: "/config" },
@@ -200,18 +208,21 @@ describe("P2pProfileReplicator", () => {
 
     it("synchronizes an update when a secondary has already registered the profile", async () => {
         vi.useFakeTimers();
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const created = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const remoteProfiles = new Map([[created.id, created]]);
         const requests: { method: string; path: string }[] = [];
         const network = {
             fetch: vi.fn(
                 async (
+                    _ctx: unknown,
                     _peerId: string,
                     request: P2pHttpRequest,
                 ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
@@ -256,12 +267,12 @@ describe("P2pProfileReplicator", () => {
             profiles,
         });
 
-        replicator.syncAll({ recheckTargets: true });
-        await replicator.flush();
-        const updated = await profiles.update(created.id, { name: "Steve 🧑‍💻" });
+        replicator.syncAll(ctx, { recheckTargets: true });
+        await replicator.flush(ctx);
+        const updated = await profiles.update(ctx, created.id, { name: "Steve 🧑‍💻" });
         expect(updated).toBeDefined();
-        replicator.syncProfile(created.id, updated!.version);
-        await replicator.flush();
+        replicator.syncProfile(ctx, created.id, updated!.version);
+        await replicator.flush(ctx);
 
         expect(remoteProfiles.get(created.id)).toEqual(updated);
         expect(requests).toEqual([
@@ -273,18 +284,21 @@ describe("P2pProfileReplicator", () => {
     });
 
     it("catches up when message preflight registered an older profile version", async () => {
-        database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: LOCAL_INSTANCE,
             publish: () => undefined,
         });
-        const created = await profiles.create({ email: "steve@example.test", name: "Steve" });
-        const updated = (await profiles.update(created.id, { name: "Steve 🧑‍💻" }))!;
+        const created = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
+        const updated = (await profiles.update(ctx, created.id, { name: "Steve 🧑‍💻" }))!;
         let remoteProfile = created;
         const network = {
             fetch: vi.fn(
                 async (
+                    _ctx: unknown,
                     _peerId: string,
                     request: P2pHttpRequest,
                 ): Promise<{ response: P2pHttpResponse; transport: "iroh" }> => {
@@ -326,8 +340,8 @@ describe("P2pProfileReplicator", () => {
             profiles,
         });
 
-        await replicator.profileSynchronized(SECONDARY_INSTANCE, created.id, created.version);
-        await replicator.flush();
+        await replicator.profileSynchronized(ctx, SECONDARY_INSTANCE, created.id, created.version);
+        await replicator.flush(ctx);
 
         expect(remoteProfile).toEqual(updated);
     });

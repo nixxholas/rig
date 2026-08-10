@@ -4,6 +4,7 @@ import type { HappyMcpEvent, HappyMcpServerRegistration } from "happy-plugins";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { AnyDefinedTool } from "../../agent/types.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { PluginMcpRegistry, type PluginMcpRegistrationRetirement } from "../PluginMcpRegistry.js";
 
 describe("PluginMcpRegistry", () => {
@@ -246,6 +247,9 @@ function result(text: string) {
 
 function invoke(tool: AnyDefinedTool, args: unknown, signal?: AbortSignal): Promise<unknown> {
     return Promise.resolve(
-        tool.execute(args as never, {} as AgentContext, signal === undefined ? {} : { signal }),
+        tool.execute(args as never, {} as AgentContext, {
+            ctx: createTestRootContext().named("plugin-mcp-tool-test"),
+            ...(signal === undefined ? {} : { signal }),
+        }),
     );
 }

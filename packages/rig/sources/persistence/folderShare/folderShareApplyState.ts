@@ -1,3 +1,6 @@
+import type { Context } from "@steve.kite/stdlib";
+import type { DatabaseScope } from "../Transaction.js";
+
 import { and, eq, or, sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -11,7 +14,6 @@ import {
 import { folderShareNodes, folderShareUpdates, folderShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import { inDatabase } from "../database/inDatabase.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderShare } from "./queryFolderShares.js";
 
 const MAX_FOLDER_SHARE_UPDATE_RECEIPTS = 10_000;
@@ -24,12 +26,13 @@ export class FolderShareSemanticError extends Error {
 }
 
 export async function folderShareShouldApplyState(
-    tx: DatabaseScope,
+    ctx: Context,
     groupId: string,
     deliveryId: string,
     packet: FolderSharePacket,
 ): Promise<"apply" | "duplicate"> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderShare.folderShareShouldApplyState", async (ctx) => {
+        const tx = ctx.tx;
         const duplicate = await tx
             .select({ deliveryId: folderShareUpdates.deliveryId })
             .from(folderShareUpdates)
@@ -54,7 +57,7 @@ export async function folderShareShouldApplyState(
  * temporarily unreachable without erasing their registers, so later parent restoration converges.
  */
 export async function folderShareRecordAppliedState(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         deliveryId: string;
         groupId: string;
@@ -63,8 +66,9 @@ export async function folderShareRecordAppliedState(
         sender: string;
     },
 ): Promise<SharedFolderState> {
-    return await inTx(tx, async (tx) => {
-        const share = await queryFolderShare(tx, input.groupId);
+    return await inTx(ctx, "rig.sql.folderShare.folderShareRecordAppliedState", async (ctx) => {
+        const tx = ctx.tx;
+        const share = await queryFolderShare(ctx, input.groupId);
         if (share === undefined) throw new Error("The shared folder group is unknown.");
         validateOperations(share.rootFolderId, input.packet);
         if (input.packet.clock > share.logicalClock + 1) {
@@ -158,7 +162,7 @@ export async function folderShareRecordAppliedState(
 
 /** Durably consumes a validly encoded but semantically unusable authenticated update. */
 export async function folderShareRecordRejectedState(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         deliveryId: string;
         error: string;
@@ -168,7 +172,8 @@ export async function folderShareRecordRejectedState(
         sender: string;
     },
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.folderShare.folderShareRecordRejectedState", async (ctx) => {
+        const tx = ctx.tx;
         await recordReceipt(tx, input);
         await tx
             .update(folderShares)

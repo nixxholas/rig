@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import type { SessionScope } from "../../protocol/index.js";
@@ -5,7 +7,7 @@ import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../../utils/orderKeyAfter.js";
 import { folders, projectWorkspaces, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope, TX } from "../Transaction.js";
+import type { TX } from "../Transaction.js";
 import { querySessionOrderItems } from "./querySessionOrderItems.js";
 import { sessionScopeValues } from "./impl/sessionScope.js";
 import { sessionScopeFromRow } from "./impl/sessionScope.js";
@@ -24,7 +26,7 @@ export interface SessionScopeMove {
 
 /** Moves one root chat and its position into a different collection as one durable transition. */
 export async function sessionMoveScope(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         afterId?: string | null;
         cwd: string;
@@ -34,9 +36,10 @@ export async function sessionMoveScope(
         mutationId?: string;
     },
 ): Promise<SessionScopeMove> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.session.session_move_scope", async (ctx) => {
+        const tx = ctx.tx;
         if (input.mutationId !== undefined) {
-            const receipt = await querySessionMutationReceipt(tx, {
+            const receipt = await querySessionMutationReceipt(ctx, {
                 action: SESSION_SCOPE_MUTATION_ACTION,
                 mutationId: input.mutationId,
                 sessionId: input.sessionId,
@@ -79,7 +82,7 @@ export async function sessionMoveScope(
                 AND parent_session_id IS NULL
         `);
         if (current === undefined) throw new Error("The session is no longer available.");
-        const targetItems = await querySessionOrderItems(tx, input.scope);
+        const targetItems = await querySessionOrderItems(ctx, input.scope);
         const existing = targetItems.find((item) => item.id === input.sessionId);
         const orderKey =
             input.afterId === undefined
@@ -131,7 +134,7 @@ export async function sessionMoveScope(
         ).rowsAffected;
         if (changed === 0) throw new Error("The session is no longer available.");
         if (input.mutationId !== undefined) {
-            await sessionRecordMutationReceipt(tx, {
+            await sessionRecordMutationReceipt(ctx, {
                 action: SESSION_SCOPE_MUTATION_ACTION,
                 mutationId: input.mutationId,
                 now: input.now,

@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { sharingProfileBinding } from "../database/schema.js";
 
 export interface SharingProfileBinding {
@@ -10,9 +11,10 @@ export interface SharingProfileBinding {
 }
 
 export async function querySharingProfileBinding(
-    tx: DatabaseScope,
+    ctx: Context,
 ): Promise<SharingProfileBinding | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.sharing.querySharingProfileBinding", async (ctx) => {
+        const tx = ctx.tx;
         return await tx
             .select({
                 murmurIdentity: sharingProfileBinding.murmurIdentity,
@@ -24,6 +26,6 @@ export async function querySharingProfileBinding(
     });
 }
 
-export async function querySharingProfileId(tx: DatabaseScope): Promise<string | undefined> {
-    return (await querySharingProfileBinding(tx))?.profileId;
+export async function querySharingProfileId(ctx: Context): Promise<string | undefined> {
+    return (await querySharingProfileBinding(ctx))?.profileId;
 }

@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { GlobalEvent, GlobalEventQueueEntry } from "../../protocol/index.js";
 import { durableGlobalEvents } from "../database/schema.js";
@@ -14,10 +15,11 @@ export interface GlobalEventAppendOptions {
 }
 
 export async function globalEventAppend(
-    tx: DatabaseScope,
+    ctx: Context,
     options: GlobalEventAppendOptions,
 ): Promise<GlobalEventQueueEntry> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.global_events.append", async (ctx) => {
+        const tx = ctx.tx;
         const dataJson = JSON.stringify(options.event);
         await tx
             .insert(durableGlobalEvents)
@@ -43,10 +45,11 @@ export async function globalEventAppend(
  * different content is still an invariant violation.
  */
 export async function globalEventAppendReplaySafe(
-    tx: DatabaseScope,
+    ctx: Context,
     options: GlobalEventAppendOptions,
 ): Promise<GlobalEventQueueEntry | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.global_events.append_replay_safe", async (ctx) => {
+        const tx = ctx.tx;
         const dataJson = JSON.stringify(options.event);
         const inserted = await tx
             .insert(durableGlobalEvents)

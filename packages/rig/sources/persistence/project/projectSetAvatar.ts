@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, count, eq, sql } from "drizzle-orm";
 
 import type { ProjectAvatarSource } from "../../protocol/index.js";
@@ -20,10 +22,11 @@ export interface ProjectSetAvatarInput {
 }
 
 export async function projectSetAvatar(
-    tx: DatabaseScope,
+    ctx: Context,
     input: ProjectSetAvatarInput,
 ): Promise<"missing" | "preserved" | "updated"> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.project.projectSetAvatar", async (ctx) => {
+        const tx = ctx.tx;
         const latest = await tx
             .select({
                 avatarHash: projects.avatarHash,

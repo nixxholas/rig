@@ -1,4 +1,6 @@
-import { type DatabaseScope, type TX } from "./Transaction.js";
+import type { Context } from "@steve.kite/stdlib";
+
+import { withDatabase } from "./databaseContext.js";
 import {
     assertSessionDatabaseTransaction,
     currentSessionDatabaseTransaction,
@@ -7,22 +9,26 @@ import {
 } from "./database/SessionDatabase.js";
 
 export async function inTx<T>(
-    tx: DatabaseScope,
-    operation: (tx: TX) => T | Promise<T>,
+    ctx: Context,
+    name: string,
+    operation: (ctx: Context) => T | Promise<T>,
 ): Promise<T> {
-    if (isSessionDatabaseTransaction(tx)) {
-        return await operation(assertSessionDatabaseTransaction(tx).facade);
-    }
+    return await ctx.span(name, async (ctx) => {
+        const tx = ctx.tx;
+        if (isSessionDatabaseTransaction(tx)) {
+            return await operation(withDatabase(ctx, assertSessionDatabaseTransaction(tx).facade));
+        }
 
-    const owner = getSessionDatabaseOwner(tx);
-    if (owner === undefined) {
-        throw new Error("The transaction is not associated with a SessionDatabase.");
-    }
-    const current = currentSessionDatabaseTransaction(owner);
-    if (current !== undefined) return await operation(current.facade);
-    return owner.runInLock((database) =>
-        database.transaction(async (transaction) => operation(transaction), {
-            behavior: "immediate",
-        }),
-    );
+        const owner = getSessionDatabaseOwner(tx);
+        if (owner === undefined) {
+            throw new Error("The transaction is not associated with a SessionDatabase.");
+        }
+        const current = currentSessionDatabaseTransaction(owner);
+        if (current !== undefined) return await operation(withDatabase(ctx, current.facade));
+        return owner.runInLock(ctx, (ctx, database) =>
+            database.transaction(async (transaction) => operation(withDatabase(ctx, transaction)), {
+                behavior: "immediate",
+            }),
+        );
+    });
 }

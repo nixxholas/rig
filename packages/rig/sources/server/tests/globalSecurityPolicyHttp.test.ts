@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { GLOBAL_SECURITY_MD_MAX_BYTES } from "../../config/globalSecurityMdMaxBytes.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -112,7 +114,7 @@ async function startServer(): Promise<{
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
     const securityPath = join(directory, "SECURITY.md");
-    const server = await createProtocolHttpServer({
+    const server = await createProtocolHttpServer(createTestRootContext(), {
         globalSecurityPolicyPath: securityPath,
         token: "secret",
     });

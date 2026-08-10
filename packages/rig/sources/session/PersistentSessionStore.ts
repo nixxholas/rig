@@ -2,6 +2,10 @@ import { chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createId } from "@paralleldrive/cuid2";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+import { getDatabaseScope, withDatabase } from "../persistence/databaseContext.js";
+import { isSessionDatabaseTransaction } from "../persistence/database/SessionDatabase.js";
+import { withWorkerContext } from "../observability/index.js";
 
 import {
     createEventIdFactory,
@@ -200,7 +204,6 @@ import { AppletStore } from "../applets/index.js";
 import { WorkletStore } from "../worklets/index.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import type { TX } from "../persistence/Transaction.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { configureSessionRequest } from "./configureSessionRequest.js";
 import {
@@ -230,7 +233,6 @@ const UNSORTED_SWEEP_LIMIT = 100;
 /** One pass drains a useful backlog without monopolizing the synchronous database. */
 const UNSORTED_SWEEP_MAX_SESSIONS = 1_000;
 const UNSORTED_SWEEP_MAX_MS = 250;
-const TOOL_RESULT_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const TOOL_RESULT_SWEEP_BATCH_LIMIT = 10;
 const TOOL_RESULT_SWEEP_MAX_SCANNED_MESSAGES = 100;
 const TOOL_RESULT_SWEEP_MAX_MS = 250;
@@ -302,8 +304,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #unsortedSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     readonly #toolResultRetentionMs: number | undefined;
     #toolResultSweepCursor: SessionToolResultPruneCursor | undefined;
-    #toolResultSweepTimer: ReturnType<typeof setInterval> | undefined;
-    #toolResultSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
         reference: WeakRef<InMemorySession>;
@@ -319,16 +319,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly applets: AppletStore;
     readonly worklets: WorkletStore;
 
-    static async open(options: PersistentSessionStoreOptions): Promise<PersistentSessionStore> {
+    static async open(
+        ctx: Context,
+        options: PersistentSessionStoreOptions,
+    ): Promise<PersistentSessionStore> {
         if (options.databasePath !== ":memory:") {
             await mkdir(dirname(options.databasePath), { mode: 0o700, recursive: true });
         }
-        const opened = await openSessionDatabase(options.databasePath);
+        const opened = await openSessionDatabase(ctx, options.databasePath);
+        const databaseCtx = withDatabase(ctx, opened.database);
         try {
             const localInstanceId = validOwnerInstanceId(options.localInstanceId ?? createId());
-            await migrateSessionDatabase(opened.database, { localInstanceId });
-            const dataEpoch = await queryRigDataEpoch(opened.database);
-            const dataSchemaVersion = await querySessionDatabaseVersion(opened.database);
+            await migrateSessionDatabase(databaseCtx, { localInstanceId });
+            const dataEpoch = await queryRigDataEpoch(databaseCtx);
+            const dataSchemaVersion = await querySessionDatabaseVersion(databaseCtx);
             if (dataSchemaVersion !== CURRENT_SESSION_DATABASE_VERSION) {
                 throw new Error(
                     "The persistent Rig store did not reach the current schema version.",
@@ -338,21 +342,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 await chmod(options.databasePath, 0o600);
             }
             const store = new PersistentSessionStore(
+                databaseCtx,
                 options,
                 opened,
                 localInstanceId,
                 dataEpoch,
                 dataSchemaVersion,
             );
-            await store.#initialize(options);
+            await store.#initialize(databaseCtx, options);
             return store;
         } catch (error) {
-            await opened.database.close();
+            await opened.database.close(databaseCtx);
             throw error;
         }
     }
 
     private constructor(
+        ctx: Context,
         options: PersistentSessionStoreOptions,
         opened: OpenSessionDatabase,
         localInstanceId: string,
@@ -360,8 +366,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         dataSchemaVersion: number,
     ) {
         this.localInstanceId = localInstanceId;
-        this.#resolveModelCatalog =
-            options.resolveModelCatalog ?? (() => options.modelCatalog ?? createModelCatalog());
+        const defaultModelCatalog = options.modelCatalog ?? createModelCatalog(ctx);
+        this.#resolveModelCatalog = options.resolveModelCatalog ?? (() => defaultModelCatalog);
         this.#database = opened.database;
         this.dataEpoch = dataEpoch;
         this.dataSchemaVersion = dataSchemaVersion;
@@ -393,22 +399,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.happyCloud = new HappyCloudService({
             now: this.#now,
             persistence: this,
-            publish: (event) => this.#publishGlobalEvent(event),
+            publish: (requestCtx, event) => this.#publishGlobalEvent(requestCtx, event),
         });
         this.applets = new AppletStore({
+            database: this.#database,
             now: this.#now,
-            publish: (event) => this.#publishGlobalEvent(event),
-            tx: () => this.#tx(),
+            publish: (requestCtx, event) => this.#publishGlobalEvent(requestCtx, event),
         });
-        this.worklets = new WorkletStore({ tx: () => this.#tx() });
+        this.worklets = new WorkletStore({ database: this.#database });
         this.slots = new SlotEntryStore({
+            database: this.#database,
             now: this.#now,
-            publish: (event) => this.#publishGlobalEvent(event),
-            sessionExists: (tx, sessionId) => querySlotScopeTargetExists(tx, "session", sessionId),
-            tx: () => this.#tx(),
+            publish: (requestCtx, event) => this.#publishGlobalEvent(requestCtx, event),
+            sessionExists: (requestCtx, sessionId) =>
+                querySlotScopeTargetExists(requestCtx, "session", sessionId),
         });
         this.#projects = new ProjectRepository({
-            afterTransactionCommit: (callback) => this.#afterTransactionCommit(callback),
+            afterTransactionCommit: (requestCtx, callback) =>
+                this.#afterTransactionCommit(requestCtx, callback),
             ...(options.projectClone === undefined ? {} : { cloneRemote: options.projectClone }),
             database: this.#database,
             ...(options.gitCredentialBroker === undefined
@@ -419,9 +427,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(options.homeDirectory === undefined
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
-            onEvent: (event) => this.#projectEvent(event),
+            onEvent: (requestCtx, event) => this.#projectEvent(requestCtx, event),
             resolveGitSecret: (kind) => this.#secrets.resolveSpecial(kind).GH_TOKEN,
-            resolveProfile: async (profileId) => await queryRigProfile(this.#tx(), profileId),
+            resolveProfile: async (profileId) =>
+                await withWorkerContext("project-profile-resolve", (workerCtx) =>
+                    queryRigProfile(withDatabase(workerCtx, this.#database), profileId),
+                ),
             ...(options.onWorkspaceBranchError === undefined
                 ? {}
                 : { onWorkspaceBranchError: options.onWorkspaceBranchError }),
@@ -429,7 +440,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ? {}
                 : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
-            transaction: (body) => this.#transaction(body),
+            transaction: (requestCtx, body) => this.#transaction(requestCtx, body),
             ...(options.stateDirectory !== undefined
                 ? { stateDirectory: options.stateDirectory }
                 : options.databasePath === ":memory:"
@@ -445,9 +456,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             now: this.#now,
-            onEvent: (event) => this.#publishGlobalEvent(event),
-            onFolderContextChanged: async (folderIds) => {
-                await this.#afterTransactionCommit(() => {
+            onEvent: (requestCtx, event) => this.#publishGlobalEvent(requestCtx, event),
+            onFolderContextChanged: async (requestCtx, folderIds) => {
+                await this.#afterTransactionCommit(requestCtx, () => {
                     const affected = new Set(folderIds);
                     for (const session of this.#cachedSessions()) {
                         if (session.belongsToFolderContext(affected))
@@ -455,28 +466,32 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     }
                 });
             },
-            onSessionsArchived: async (sessionIds) => {
-                await this.#afterTransactionCommit(async () => {
+            onSessionsArchived: async (requestCtx, sessionIds) => {
+                await this.#afterTransactionCommit(requestCtx, async () => {
                     await Promise.all(
                         sessionIds.map(async (sessionId) => {
-                            await (await this.get(sessionId))?.recordFolderArchived();
+                            await (
+                                await this.get(requestCtx, sessionId)
+                            )?.recordFolderArchived(requestCtx);
                         }),
                     );
                 });
             },
-            transaction: (body) => this.#transaction(body),
+            transaction: (requestCtx, body) => this.#transaction(requestCtx, body),
         });
         this.#documents = new DocumentRepository({
             database: this.#database,
             now: this.#now,
-            onEvent: (event) => this.#publishGlobalEvent(event),
-            transaction: (body) => this.#transaction(body),
+            onEvent: (requestCtx, event) => this.#publishGlobalEvent(requestCtx, event),
+            transaction: (requestCtx, body) => this.#transaction(requestCtx, body),
         });
         this.#workspaceReadyWaiters = createWorkspaceReadyWaiters((projectId, workspaceId) =>
-            this.#projects.getWorkspace(projectId, workspaceId),
+            withWorkerContext("workspace-ready-query", (workerCtx) =>
+                this.#projects.getWorkspace(workerCtx, projectId, workspaceId),
+            ),
         );
         this.remoteTerminals = new ProjectRemoteTerminalStore({
-            onChange: (scope, terminals) => {
+            onChange: (requestCtx, scope, terminals) => {
                 const event = {
                     createdAt: this.#now(),
                     data: { terminals },
@@ -488,21 +503,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 this.#globalEventQueue.publishLive(event);
                 this.liveEvents.publish(event);
             },
-            resolveContext: (scope) => this.#remoteTerminalContext(scope),
+            resolveContext: (requestCtx, scope) => this.#remoteTerminalContext(requestCtx, scope),
         });
         this.#agentManager = new AgentSessionManager({
             localInstanceId: this.localInstanceId,
             repository: {
-                archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
+                archiveOwnedWorkspace: async (requestCtx, ownerSessionId, projectId, workspaceId) =>
                     (await this.#projects.getOwnedWorkspace(
+                        requestCtx,
                         ownerSessionId,
                         projectId,
                         workspaceId,
                     )) === undefined
                         ? undefined
-                        : this.#archiveWorkspace(projectId, workspaceId),
-                createOwnedWorkspace: async (ownerSessionId, projectId, request) => {
-                    const owner = (await this.get(ownerSessionId))?.snapshot();
+                        : this.#archiveWorkspace(requestCtx, projectId, workspaceId),
+                createOwnedWorkspace: async (requestCtx, ownerSessionId, projectId, request) => {
+                    const owner = (await this.get(requestCtx, ownerSessionId))?.snapshot();
                     const createdBy =
                         owner?.profileId === undefined
                             ? undefined
@@ -511,6 +527,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                                   profileId: owner.profileId,
                               };
                     return this.#projects.createWorkspace(
+                        requestCtx,
                         projectId,
                         {
                             ...request,
@@ -520,12 +537,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         createdBy === undefined ? {} : { createdBy },
                     );
                 },
-                configureWorkspaceRequest: async (request) =>
-                    await this.#configureWorkspaceRequest(request),
-                createSubagent: async (request, metadata, contextMessages) =>
-                    await this.#createSession(request, metadata, contextMessages),
-                createDelegatedSession: async (request, metadata, id) =>
-                    await this.#createSession(request, metadata, undefined, id),
+                configureWorkspaceRequest: (requestCtx, request) =>
+                    this.#configureWorkspaceRequest(requestCtx, request),
+                createSubagent: (requestCtx, request, metadata, contextMessages) =>
+                    this.#createSession(requestCtx, request, metadata, contextMessages),
+                createDelegatedSession: (requestCtx, request, metadata, id) =>
+                    this.#createSession(requestCtx, request, metadata, undefined, id),
                 findByAgentId: (agentId) =>
                     this.#cachedSessions().find(
                         (session) => session.agentIdentity().agentId === agentId,
@@ -537,22 +554,33 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                             session.isSubagent() &&
                             session.agentMetadata().rootSessionId === rootSessionId,
                     ),
-                listProjects: async () => await this.#projects.listProjects(),
-                registerProject: (path) => this.#projects.registerProject({ path }),
-                listProjectWorkspaces: async (projectId) =>
-                    await this.#projects.listWorkspaces(projectId),
-                listProjectSessions: async (target) =>
-                    await queryWorkspaceSessions(this.#tx(), target),
+                listProjects: (requestCtx) => this.#projects.listProjects(requestCtx),
+                registerProject: (requestCtx, path) =>
+                    this.#projects.registerProject(requestCtx, { path }),
+                listProjectWorkspaces: (requestCtx, projectId) =>
+                    this.#projects.listWorkspaces(requestCtx, projectId),
+                listProjectSessions: (requestCtx, target) =>
+                    queryWorkspaceSessions(requestCtx, target),
                 queryAgentTreeUsage: (sessionId) =>
                     queryLiveAgentTreeUsage(this.#cachedSessions(), sessionId),
-                ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
-                    this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
-                workspace: (projectId, workspaceId) =>
-                    this.#projects.getWorkspace(projectId, workspaceId),
-                waitForWorkspaceReady: (projectId, workspaceId, signal) =>
+                ownedWorkspace: (requestCtx, ownerSessionId, projectId, workspaceId) =>
+                    this.#projects.getOwnedWorkspace(
+                        requestCtx,
+                        ownerSessionId,
+                        projectId,
+                        workspaceId,
+                    ),
+                workspace: (requestCtx, projectId, workspaceId) =>
+                    this.#projects.getWorkspace(requestCtx, projectId, workspaceId),
+                waitForWorkspaceReady: (_requestCtx, projectId, workspaceId, signal) =>
                     this.#workspaceReadyWaiters.wait(projectId, workspaceId, signal),
-                completeScheduledSessionTransfer: async (sessionId, targetWorkspaceId) => {
+                completeScheduledSessionTransfer: async (
+                    requestCtx,
+                    sessionId,
+                    targetWorkspaceId,
+                ) => {
                     const result = await this.#executeSessionTransfer(
+                        requestCtx,
                         sessionId,
                         targetWorkspaceId,
                         true,
@@ -561,14 +589,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         throw new Error("The session is no longer available.");
                     }
                 },
-                scheduleSessionTransfer: async (sessionId, targetWorkspaceId) => {
+                scheduleSessionTransfer: async (requestCtx, sessionId, targetWorkspaceId) => {
+                    requestCtx = withDatabase(requestCtx, this.#database);
                     const session = this.#cachedSession(sessionId);
                     if (session === undefined) {
                         throw new Error("The session is no longer available.");
                     }
-                    return scheduleSessionWorkspaceTransfer({
-                        hasAttachedSessions: async (workspaceId) =>
-                            await queryWorkspaceHasAttachedSessions(this.#tx(), workspaceId),
+                    return scheduleSessionWorkspaceTransfer(requestCtx, {
+                        hasAttachedSessions: async (ctx, workspaceId) =>
+                            await queryWorkspaceHasAttachedSessions(ctx, workspaceId),
                         projects: this.#projects,
                         releaseTarget: (workspaceId, ownerSessionId) =>
                             this.#releaseWorkspaceTransferTarget(workspaceId, ownerSessionId),
@@ -583,18 +612,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
-    async #initialize(options: PersistentSessionStoreOptions): Promise<void> {
-        await this.#loadSecretRegistrations();
-        for (const secret of options.secrets ?? []) await this.registerSecret(secret);
+    async #initialize(ctx: Context, options: PersistentSessionStoreOptions): Promise<void> {
+        await this.#loadSecretRegistrations(ctx);
+        for (const secret of options.secrets ?? []) await this.registerSecret(ctx, secret);
         if (options.durableGlobalEventQueue === true) {
-            this.#globalEventQueue = await PersistentGlobalEventQueue.open(this.#database);
+            this.#globalEventQueue = await PersistentGlobalEventQueue.open(ctx, this.#database);
         }
-        await this.#repairInterruptedTitleGenerations();
-        await this.repairInterruptedSessions("crash");
-        this.#armScheduledMessageTimer();
+        await this.#repairInterruptedTitleGenerations(ctx);
+        await this.repairInterruptedSessions(ctx, "crash");
+        await this.#armScheduledMessageTimer(ctx);
         this.#armUnsortedSweepTimer();
-        if (this.#toolResultRetentionMs !== undefined) this.#armToolResultSweepTimer();
-        const recover = () => this.#recoverProjectWorkspaces();
+        const recover = () =>
+            withWorkerContext("workspace-recovery", async (ctx) =>
+                this.#recoverProjectWorkspaces(withDatabase(ctx, this.#database)),
+            );
         const recovery = this.#taskDrain?.run(recover) ?? recover();
         void recovery.catch((error: unknown) => {
             if (this.#database.closed) return;
@@ -603,29 +634,33 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async changeModel(
+        ctx: Context,
         sessionId: string,
         request: ChangeModelRequest,
     ): Promise<InMemorySession | undefined> {
-        const session = await this.get(sessionId);
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) {
             return undefined;
         }
 
-        await session.changeModel(request);
+        await session.changeModel(ctx, request);
         return session;
     }
 
     async attachSecret(
+        ctx: Context,
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
         mutationId?: string,
     ): Promise<InMemorySession | undefined> {
-        const session = await this.get(sessionId);
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
             const projectId = persistentCodeScope(session.snapshot().scope).projectId;
-            await projectSecretAttach(this.#tx(), projectId, secretId);
+            await projectSecretAttach(ctx, projectId, secretId);
             this.#secrets.reference(secretId);
             for (const candidate of this.#cachedSessions()) {
                 const candidateScope = candidate.snapshot().scope;
@@ -633,7 +668,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     (candidateScope.kind === "project" || candidateScope.kind === "workspace") &&
                     candidateScope.projectId === projectId
                 ) {
-                    await candidate.attachSecret(secretId, {
+                    await candidate.attachSecret(ctx, secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
                             : {}),
@@ -642,7 +677,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 }
             }
         } else {
-            await session.attachSecret(secretId, {
+            await session.attachSecret(ctx, secretId, {
                 ...(mutationId === undefined ? {} : { mutationId }),
                 scope,
             });
@@ -651,37 +686,44 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async changeEffort(
+        ctx: Context,
         sessionId: string,
         request: ChangeEffortRequest,
     ): Promise<InMemorySession | undefined> {
-        const session = await this.get(sessionId);
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) {
             return undefined;
         }
 
-        await session.changeEffort(request);
+        await session.changeEffort(ctx, request);
         return session;
     }
 
     async changeServiceTier(
+        ctx: Context,
         sessionId: string,
         request: ChangeServiceTierRequest,
     ): Promise<InMemorySession | undefined> {
-        const session = await this.get(sessionId);
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return undefined;
-        await session.changeServiceTier(request);
+        await session.changeServiceTier(ctx, request);
         return session;
     }
 
-    async clearMessages(sessionId: string): Promise<void> {
-        await sessionClearMessages(this.#tx(), sessionId);
+    async clearMessages(ctx: Context, sessionId: string): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await sessionClearMessages(ctx, sessionId);
     }
 
-    async deleteMessagesFrom(sessionId: string, position: number): Promise<void> {
-        await sessionRewind(this.#tx(), sessionId, position);
+    async deleteMessagesFrom(ctx: Context, sessionId: string, position: number): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await sessionRewind(ctx, sessionId, position);
     }
 
-    async close(): Promise<void> {
+    async close(ctx: Context): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         if (this.#scheduledMessageTimer !== undefined) {
             clearTimeout(this.#scheduledMessageTimer);
             this.#scheduledMessageTimer = undefined;
@@ -694,37 +736,34 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearImmediate(this.#unsortedSweepFollowup);
             this.#unsortedSweepFollowup = undefined;
         }
-        if (this.#toolResultSweepTimer !== undefined) {
-            clearInterval(this.#toolResultSweepTimer);
-            this.#toolResultSweepTimer = undefined;
-        }
-        if (this.#toolResultSweepFollowup !== undefined) {
-            clearImmediate(this.#toolResultSweepFollowup);
-            this.#toolResultSweepFollowup = undefined;
-        }
-        await this.remoteTerminals.close();
+        await this.remoteTerminals.close(ctx);
         this.#workspaceReadyWaiters.close();
-        await this.#projects.close();
+        await this.#projects.close(ctx);
         this.liveEvents.close();
         this.#globalEventQueue.deactivate();
-        await this.#database.close();
+        await this.#database.close(ctx);
     }
 
-    async #configureWorkspaceRequest(request: CreateSessionRequest): Promise<CreateSessionRequest> {
+    async #configureWorkspaceRequest(
+        ctx: Context,
+        request: CreateSessionRequest,
+    ): Promise<CreateSessionRequest> {
         const { docker: _docker, local: _local, ...base } = request;
         return await configureSessionRequest(
             base,
             this.#defaultDocker,
-            async () => await this.#projects.queryProjectSettings(request.cwd),
+            async () => await this.#projects.queryProjectSettings(ctx, request.cwd),
         );
     }
 
     async create(
+        ctx: Context,
         request: CreateSessionRequest,
         options: SessionCreationOptions = {},
     ): Promise<InMemorySession> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertAcceptingMutations();
-        return await this.#createSession(request, undefined, undefined, undefined, options);
+        return await this.#createSession(ctx, request, undefined, undefined, undefined, options);
     }
 
     /**
@@ -735,34 +774,38 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * and they reach this method directly.
      */
     async createWithId(
+        ctx: Context,
         id: string,
         request: CreateSessionRequest,
         options: SessionCreationOptions = {},
     ): Promise<InMemorySession> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertAcceptingMutations();
-        const existing = await this.get(id);
+        const existing = await this.get(ctx, id);
         if (existing !== undefined) return await retriedSession(existing, request);
-        return await this.#createSession(request, undefined, undefined, id, options);
+        return await this.#createSession(ctx, request, undefined, undefined, id, options);
     }
 
     async detachSecret(
+        ctx: Context,
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
         mutationId?: string,
     ): Promise<InMemorySession | undefined> {
-        const session = await this.get(sessionId);
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
             const projectId = persistentCodeScope(session.snapshot().scope).projectId;
-            await projectSecretDetach(this.#tx(), projectId, secretId);
+            await projectSecretDetach(ctx, projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
                 const candidateScope = candidate.snapshot().scope;
                 if (
                     (candidateScope.kind === "project" || candidateScope.kind === "workspace") &&
                     candidateScope.projectId === projectId
                 ) {
-                    await candidate.detachSecret(secretId, {
+                    await candidate.detachSecret(ctx, secretId, {
                         ...(candidate.id === sessionId && mutationId !== undefined
                             ? { mutationId }
                             : {}),
@@ -771,7 +814,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 }
             }
         } else {
-            await session.detachSecret(secretId, {
+            await session.detachSecret(ctx, secretId, {
                 ...(mutationId === undefined ? {} : { mutationId }),
                 scope,
             });
@@ -779,18 +822,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return session;
     }
 
-    async fork(sessionId: string, targetSessionId?: string): Promise<InMemorySession | undefined> {
+    async fork(
+        ctx: Context,
+        sessionId: string,
+        targetSessionId?: string,
+    ): Promise<InMemorySession | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertAcceptingMutations();
         if (targetSessionId !== undefined) {
-            const existing = await this.get(targetSessionId);
+            const existing = await this.get(ctx, targetSessionId);
             if (existing !== undefined) return existing;
         }
-        const source = await this.get(sessionId);
+        const source = await this.get(ctx, sessionId);
         if (source === undefined) return undefined;
         const sourceSnapshot = source.snapshot();
         const folderPath =
             sourceSnapshot.scope.kind === "folder"
-                ? await this.#folders.activeFolderStoragePath(sourceSnapshot.scope.folderId)
+                ? await this.#folders.activeFolderStoragePath(ctx, sourceSnapshot.scope.folderId)
                 : undefined;
         const state = source.createForkState();
         const forkState =
@@ -813,13 +861,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         if (sourceSnapshot.scope.kind === "workspace") {
             const workspace = await this.#projects.getWorkspace(
+                ctx,
                 sourceSnapshot.scope.projectId,
                 sourceSnapshot.scope.workspaceId,
             );
             if (
                 workspace === undefined ||
                 (
-                    await workspaceRunReadiness(this.#projects, {
+                    await workspaceRunReadiness(ctx, this.#projects, {
                         cwd: sourceSnapshot.cwd,
                         projectId: sourceSnapshot.scope.projectId,
                         workspaceId: sourceSnapshot.scope.workspaceId,
@@ -830,26 +879,33 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             }
         }
         let session!: InMemorySession;
-        await this.#transaction(async () => {
-            session = await InMemorySession.open({
+        await this.#transaction(ctx, async (ctx) => {
+            session = await InMemorySession.open(ctx, {
                 presence: this.presence,
                 agentManager: this.#agentManager,
                 workspaceFeatures: this.#workspaceFeatures,
-                workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
+                workspaceRunReadiness: (target) =>
+                    withWorkerContext("workspace-run-readiness", (workerCtx) =>
+                        workspaceRunReadiness(workerCtx, this.#projects, target),
+                    ),
                 createEventId: createEventIdFactory(),
                 ...(this.#createRuntime === undefined
                     ? {}
                     : { createRuntime: this.#createRuntime }),
-                deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
+                deferEventNotification: (eventCtx, notify) =>
+                    this.#afterTransactionCommit(eventCtx, notify),
                 emitCreatedEvent: false,
                 ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
                 modelCatalog: this.#modelCatalogFor(state.ownerInstanceId),
                 now: this.#now,
-                onInitialTitle: async (metadata) => await this.#inheritWorkspaceName(metadata),
+                onInitialTitle: async (metadata) =>
+                    withWorkerContext("session-initial-title", (workerCtx) =>
+                        this.#inheritWorkspaceName(workerCtx, metadata),
+                    ),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
                     : {}),
-                onAppendEvent: async (event) => await this.#appendEvent(event),
+                onAppendEvent: (eventCtx, event) => this.#appendEvent(eventCtx, event),
                 persistence: this,
                 folders: this.#folders,
                 slotStores: { entries: this.slots, applets: this.applets },
@@ -858,6 +914,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 sourceSnapshot.scope.kind === "workspace"
                     ? {
                           projectSecretIds: await this.#projectSecrets(
+                              ctx,
                               sourceSnapshot.scope.projectId,
                           ),
                       }
@@ -866,7 +923,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ...(state.profileId === undefined ? {} : { profileId: state.profileId }),
                 resolveGitAuthentication: async (projectId, creator) =>
                     await this.#projects.gitAuthentication(projectId, creator),
-                resolveProfile: async (profileId) => await queryRigProfile(this.#tx(), profileId),
+                resolveProfile: async (profileId) =>
+                    withWorkerContext("session-profile-resolve", (workerCtx) =>
+                        queryRigProfile(withDatabase(workerCtx, this.#database), profileId),
+                    ),
                 secretRegistry: this.#secrets,
                 restore: {
                     ...forkState,
@@ -876,21 +936,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                               agent: { ...forkState.agent, rootSessionId: targetSessionId },
                               id: targetSessionId,
                           }),
-                    orderKey: await this.#newLastSessionOrderKey(sourceSnapshot.scope),
+                    orderKey: await this.#newLastSessionOrderKey(ctx, sourceSnapshot.scope),
                 },
                 scope: sourceSnapshot.scope,
                 ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
             });
+            await this.saveSession(ctx, session.state());
             for (const message of forkState.messages) {
-                await this.upsertMessage(session.id, message);
+                await this.upsertMessage(ctx, session.id, message);
             }
-            await session.emitCreatedEvent();
+            await session.emitCreatedEvent(ctx);
         });
         this.#cacheSession(session);
         return session;
     }
 
     async #createSession(
+        ctx: Context,
         request: CreateSessionRequest,
         metadata?: SessionAgentMetadata,
         contextMessages?: readonly Message[],
@@ -902,11 +964,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         let session!: InMemorySession;
         let newUnsortedStorage: { created: boolean; path: string } | undefined;
         try {
-            await this.#transaction(async () => {
+            await this.#transaction(ctx, async (ctx) => {
                 const inherited =
                     metadata?.parentSessionId === undefined
                         ? undefined
-                        : (await this.get(metadata.parentSessionId))?.snapshot();
+                        : (await this.get(ctx, metadata.parentSessionId))?.snapshot();
                 if (metadata?.parentSessionId !== undefined && inherited === undefined) {
                     throw new Error("The parent session was not found.");
                 }
@@ -920,7 +982,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         : validOwnerInstanceId(options.ownerInstanceId));
                 const profileId = inherited?.profileId ?? options.profileId ?? request.identity;
                 if (profileId !== undefined) {
-                    const profile = await queryRigProfile(this.#tx(), profileId);
+                    const profile = await queryRigProfile(ctx, profileId);
                     if (profile?.parentInstanceId !== ownerInstanceId) {
                         throw new Error("The session profile is not owned by the session's Rig.");
                     }
@@ -928,6 +990,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 const inheritedWorkspace =
                     inherited?.scope.kind === "workspace"
                         ? await this.#projects.getWorkspace(
+                              ctx,
                               inherited.scope.projectId,
                               inherited.scope.workspaceId,
                           )
@@ -936,7 +999,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     inherited?.scope.kind === "workspace" &&
                     (inheritedWorkspace === undefined ||
                         (
-                            await workspaceRunReadiness(this.#projects, {
+                            await workspaceRunReadiness(ctx, this.#projects, {
                                 cwd: inherited.cwd,
                                 projectId: inherited.scope.projectId,
                                 workspaceId: inherited.scope.workspaceId,
@@ -952,6 +1015,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                                 request: {
                                     ...request,
                                     cwd: await this.#folders.activeFolderStoragePath(
+                                        ctx,
                                         request.scope.folderId,
                                     ),
                                 },
@@ -959,8 +1023,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                             };
                         }
                         if (request.scope?.kind === "unsorted") {
-                            newUnsortedStorage =
-                                this.#folders.createUnsortedSessionDirectory(sessionId);
+                            newUnsortedStorage = this.#folders.createUnsortedSessionDirectory(
+                                ctx,
+                                sessionId,
+                            );
                             return {
                                 request: {
                                     ...request,
@@ -971,6 +1037,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         }
                         if (request.workspaceId !== undefined) {
                             const ownership = await this.#projects.resolveSessionOwnership(
+                                ctx,
                                 request.cwd,
                                 request.workspaceId,
                                 request.projectId,
@@ -986,6 +1053,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                             };
                         }
                         const ownership = await this.#projects.resolve(
+                            ctx,
                             request.cwd,
                             undefined,
                             request.projectId,
@@ -1010,6 +1078,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     ) {
                         const inheritedCode = persistentCodeScope(inherited.scope);
                         const ownership = await this.#projects.resolve(
+                            ctx,
                             request.cwd,
                             request.workspaceId,
                             inheritedCode.projectId,
@@ -1030,6 +1099,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                             request: {
                                 ...inheritedRequest,
                                 cwd: await this.#folders.activeFolderStoragePath(
+                                    ctx,
                                     inherited.scope.folderId,
                                 ),
                             },
@@ -1051,22 +1121,28 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 const orderKey =
                     metadata?.type === "subagent"
                         ? ""
-                        : await this.#newLastSessionOrderKey(resolved.scope);
-                session = await InMemorySession.open({
+                        : await this.#newLastSessionOrderKey(ctx, resolved.scope);
+                session = await InMemorySession.open(ctx, {
                     presence: this.presence,
                     agentManager: this.#agentManager,
                     workspaceFeatures: this.#workspaceFeatures,
                     workspaceRunReadiness: (target) =>
-                        workspaceRunReadiness(this.#projects, target),
+                        withWorkerContext("workspace-run-readiness", (workerCtx) =>
+                            workspaceRunReadiness(workerCtx, this.#projects, target),
+                        ),
                     createEventId: createEventIdFactory(),
                     ...(this.#createRuntime === undefined
                         ? {}
                         : { createRuntime: this.#createRuntime }),
-                    deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
+                    deferEventNotification: (eventCtx, notify) =>
+                        this.#afterTransactionCommit(eventCtx, notify),
                     emitCreatedEvent: false,
                     modelCatalog: this.#modelCatalogFor(ownerInstanceId),
                     now: this.#now,
-                    onInitialTitle: async (metadata) => await this.#inheritWorkspaceName(metadata),
+                    onInitialTitle: async (metadata) =>
+                        withWorkerContext("session-initial-title", (workerCtx) =>
+                            this.#inheritWorkspaceName(workerCtx, metadata),
+                        ),
                     ...(this.#mcpToolProvider !== undefined
                         ? { mcpToolProvider: this.#mcpToolProvider }
                         : {}),
@@ -1075,30 +1151,42 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         ? { initialContextMessages: contextMessages }
                         : {}),
                     id: sessionId,
-                    onAppendEvent: async (event) => await this.#appendEvent(event),
+                    onAppendEvent: (eventCtx, event) => this.#appendEvent(eventCtx, event),
                     orderKey,
                     ownerInstanceId,
                     ...(profileId === undefined ? {} : { profileId }),
                     resolveGitAuthentication: async (candidateProjectId, creator) =>
-                        await this.#projects.gitAuthentication(candidateProjectId, creator),
+                        withWorkerContext("session-git-authentication", (workerCtx) =>
+                            this.#projects.gitAuthentication(candidateProjectId, creator),
+                        ),
                     resolveProfile: async (candidateProfileId) =>
-                        await queryRigProfile(this.#tx(), candidateProfileId),
+                        withWorkerContext("session-profile-resolve", (workerCtx) =>
+                            queryRigProfile(
+                                withDatabase(workerCtx, this.#database),
+                                candidateProfileId,
+                            ),
+                        ),
                     persistence: this,
                     folders: this.#folders,
                     slotStores: { entries: this.slots, applets: this.applets },
                     ...(projectId === undefined
                         ? {}
-                        : { projectSecretIds: await this.#projectSecrets(projectId) }),
+                        : { projectSecretIds: await this.#projectSecrets(ctx, projectId) }),
                     request: resolved.request,
                     scope: resolved.scope,
                     ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
                     secretRegistry: this.#secrets,
                 });
-                await session.emitCreatedEvent();
+                await this.saveSession(ctx, session.state());
+                await session.emitCreatedEvent(ctx);
             });
         } catch (error) {
             if (newUnsortedStorage?.created === true) {
-                this.#folders.removeNewUnsortedSessionDirectory(sessionId, newUnsortedStorage.path);
+                this.#folders.removeNewUnsortedSessionDirectory(
+                    ctx,
+                    sessionId,
+                    newUnsortedStorage.path,
+                );
             }
             throw error;
         }
@@ -1106,100 +1194,118 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return session;
     }
 
-    async deleteQueuedRun(sessionId: string, runId: string): Promise<void> {
-        await sessionDeleteQueuedRun(this.#tx(), sessionId, runId);
+    async deleteQueuedRun(ctx: Context, sessionId: string, runId: string): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await sessionDeleteQueuedRun(ctx, sessionId, runId);
     }
 
     async acceptQueuedRun(
-        input: Parameters<NonNullable<InMemorySessionPersistence["acceptQueuedRun"]>>[0],
+        ctx: Context,
+        input: Parameters<NonNullable<InMemorySessionPersistence["acceptQueuedRun"]>>[1],
     ): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         let globalEntry: GlobalEventQueueEntry | undefined;
-        await this.#transaction(async (tx) => {
-            await sessionAcceptQueuedRun(tx, {
+        await this.#transaction(ctx, async (ctx) => {
+            await sessionAcceptQueuedRun(ctx, {
                 ...input,
                 now: input.submittedAt,
                 sessionId: input.event.sessionId,
             });
             if (this.#globalEventQueue.durable) {
-                globalEntry = await this.#globalEventQueue.append(input.event, tx);
+                globalEntry = await this.#globalEventQueue.append(ctx, input.event);
             }
         });
         this.#precommittedGlobalEvents.set(input.event.id, globalEntry ?? null);
     }
 
     async failQueuedRun(
-        input: Parameters<NonNullable<InMemorySessionPersistence["failQueuedRun"]>>[0],
+        ctx: Context,
+        input: Parameters<NonNullable<InMemorySessionPersistence["failQueuedRun"]>>[1],
     ): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         let globalEntry: GlobalEventQueueEntry | undefined;
-        await this.#transaction(async (tx) => {
-            await sessionFailQueuedRun(tx, {
+        await this.#transaction(ctx, async (ctx) => {
+            await sessionFailQueuedRun(ctx, {
                 ...input,
                 now: this.#now(),
                 sessionId: input.event.sessionId,
             });
             if (this.#globalEventQueue.durable) {
-                globalEntry = await this.#globalEventQueue.append(input.event, tx);
+                globalEntry = await this.#globalEventQueue.append(ctx, input.event);
             }
         });
         this.#precommittedGlobalEvents.set(input.event.id, globalEntry ?? null);
     }
 
-    async get(sessionId: string): Promise<InMemorySession | undefined> {
+    async get(
+        ctx: Context,
+        sessionId: string,
+        options: { loadAgentTree?: boolean } = {},
+    ): Promise<InMemorySession | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         const existingReference = this.#sessions.get(sessionId);
         const existing = existingReference?.deref();
         if (existing !== undefined) {
-            await this.#loadAgentTree(existing);
-            await this.#notifySessionAccess(existing);
+            if (options.loadAgentTree !== false) await this.#loadAgentTree(ctx, existing);
+            await this.#notifySessionAccess(ctx, existing);
             return existing;
         }
         if (existingReference !== undefined) this.#sessions.delete(sessionId);
 
-        const session = await this.#loadSession(sessionId);
+        const session = await this.#loadSession(ctx, sessionId);
         if (session !== undefined) {
             this.#cacheSession(session);
-            await this.#loadAgentTree(session);
-            await this.#notifySessionAccess(session);
+            if (options.loadAgentTree !== false) await this.#loadAgentTree(ctx, session);
+            await this.#notifySessionAccess(ctx, session);
         }
         return session;
     }
 
-    async attachment(sessionId: string, attachmentId: string) {
-        const session = await this.get(sessionId);
+    async attachment(ctx: Context, sessionId: string, attachmentId: string) {
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         return (
             session?.attachment(attachmentId) ??
-            (await querySessionAttachment(this.#tx(), sessionId, attachmentId))
+            (await querySessionAttachment(ctx, sessionId, attachmentId))
         );
     }
 
-    async findByAgentId(agentId: string): Promise<InMemorySession | undefined> {
-        const sessionId = await querySessionIdByAgentId(this.#tx(), agentId);
-        return sessionId === undefined ? undefined : await this.get(sessionId);
+    async findByAgentId(ctx: Context, agentId: string): Promise<InMemorySession | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        const sessionId = await querySessionIdByAgentId(ctx, agentId);
+        return sessionId === undefined ? undefined : await this.get(ctx, sessionId);
     }
 
     get globalEventQueue(): GlobalEventQueue {
         return this.#globalEventQueue;
     }
 
-    async setDurableGlobalEventQueue(enabled: boolean): Promise<GlobalEventQueue> {
+    async setDurableGlobalEventQueue(ctx: Context, enabled: boolean): Promise<GlobalEventQueue> {
+        ctx = withDatabase(ctx, this.#database);
         if (this.#globalEventQueue.durable === enabled) return this.#globalEventQueue;
         this.#globalEventQueue.deactivate();
         this.#globalEventQueue = enabled
-            ? await PersistentGlobalEventQueue.open(this.#database, { resetStream: true })
+            ? await PersistentGlobalEventQueue.open(ctx, this.#database, {
+                  resetStream: true,
+              })
             : new InMemoryGlobalEventQueue();
         return this.#globalEventQueue;
     }
 
-    async insertQueuedRun(sessionId: string, run: PersistedQueuedRun): Promise<void> {
-        await sessionSaveQueuedRun(this.#tx(), sessionId, run, this.#now());
+    async insertQueuedRun(ctx: Context, sessionId: string, run: PersistedQueuedRun): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await sessionSaveQueuedRun(ctx, sessionId, run, this.#now());
     }
 
     async startQueuedRun(
-        input: Parameters<NonNullable<InMemorySessionPersistence["startQueuedRun"]>>[0],
+        ctx: Context,
+        input: Parameters<NonNullable<InMemorySessionPersistence["startQueuedRun"]>>[1],
     ): Promise<readonly PersistedPendingContextMessage[]> {
+        ctx = withDatabase(ctx, this.#database);
         let globalEntry: GlobalEventQueueEntry | undefined;
-        const drained = await this.#transaction(async (tx) => {
+        const drained = await this.#transaction(ctx, async (ctx) => {
             const sessionId = input.event.sessionId;
-            await sessionStartQueuedRun(tx, {
+            await sessionStartQueuedRun(ctx, {
                 activeSince: input.activeSince,
                 event: input.event,
                 now: this.#now(),
@@ -1207,41 +1313,55 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 sessionId,
             });
             if (this.#globalEventQueue.durable) {
-                globalEntry = await this.#globalEventQueue.append(input.event, tx);
+                globalEntry = await this.#globalEventQueue.append(ctx, input.event);
             }
-            return await sessionDrainPendingContextMessages(tx, sessionId, input.regularMessageIds);
+            return await sessionDrainPendingContextMessages(
+                ctx,
+                sessionId,
+                input.regularMessageIds,
+            );
         });
         this.#precommittedGlobalEvents.set(input.event.id, globalEntry ?? null);
         return drained;
     }
 
     async insertPendingContextMessage(
+        ctx: Context,
         sessionId: string,
         pending: PersistedPendingContextMessage,
     ): Promise<void> {
-        await sessionSavePendingContextMessage(this.#tx(), sessionId, pending, this.#now());
+        ctx = withDatabase(ctx, this.#database);
+        await sessionSavePendingContextMessage(ctx, sessionId, pending, this.#now());
     }
 
     async drainPendingContextMessages(
+        ctx: Context,
         sessionId: string,
         messageIds?: readonly string[],
     ): Promise<readonly PersistedPendingContextMessage[]> {
-        return await sessionDrainPendingContextMessages(this.#tx(), sessionId, messageIds);
+        ctx = withDatabase(ctx, this.#database);
+        return await sessionDrainPendingContextMessages(ctx, sessionId, messageIds);
     }
 
-    async list(options: { limit?: number } = {}): Promise<readonly SessionSummary[]> {
-        return await this.#listSessions(false, options);
+    async list(ctx: Context, options: { limit?: number } = {}): Promise<readonly SessionSummary[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#listSessions(ctx, false, options);
     }
 
-    async listActive(options: { limit?: number } = {}): Promise<readonly SessionSummary[]> {
-        return await this.#listSessions(true, options);
+    async listActive(
+        ctx: Context,
+        options: { limit?: number } = {},
+    ): Promise<readonly SessionSummary[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#listSessions(ctx, true, options);
     }
 
     async #listSessions(
+        ctx: Context,
         activeOnly: boolean,
         options: { limit?: number },
     ): Promise<readonly SessionSummary[]> {
-        const summaries = await querySessionSummaries(this.#tx(), activeOnly, options);
+        const summaries = await querySessionSummaries(ctx, activeOnly, options);
         // A scheduled wait is live activity, so the stored row cannot carry it;
         // it is overlaid from the loaded sessions, the only ones that can wait.
         let waits: Map<string, SessionActivityWait> | undefined;
@@ -1262,35 +1382,44 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async listExternalToolCalls(
+        ctx: Context,
         options: { limit?: number; status?: ExternalToolCall["status"] } = {},
     ): Promise<readonly ExternalToolCall[]> {
-        return await queryExternalToolCalls(this.#tx(), options);
+        ctx = withDatabase(ctx, this.#database);
+        return await queryExternalToolCalls(ctx, options);
     }
 
-    async listDurableUserInputs(): Promise<readonly DurableUserInputCall[]> {
-        return await queryDurableUserInputs(this.#tx());
+    async listDurableUserInputs(ctx: Context): Promise<readonly DurableUserInputCall[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await queryDurableUserInputs(ctx);
     }
 
-    async listSubagents(parentSessionId: string): Promise<readonly SubagentSummary[]> {
-        return await querySubagentSummaries(this.#tx(), parentSessionId);
+    async listSubagents(
+        ctx: Context,
+        parentSessionId: string,
+    ): Promise<readonly SubagentSummary[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await querySubagentSummaries(ctx, parentSessionId);
     }
 
-    async queryAgentTreeUsage(sessionId: string) {
-        return await queryPersistedAgentTreeUsage(this.#tx(), sessionId);
+    async queryAgentTreeUsage(ctx: Context, sessionId: string) {
+        ctx = withDatabase(ctx, this.#database);
+        return await queryPersistedAgentTreeUsage(ctx, sessionId);
     }
 
-    async timeline(request: GetTimelineRequest): Promise<readonly TimelineAgent[]> {
+    async timeline(ctx: Context, request: GetTimelineRequest): Promise<readonly TimelineAgent[]> {
+        ctx = withDatabase(ctx, this.#database);
         // One consistent read: the agents and their events must describe the
         // same moment, or a run that ended between the two queries would be
         // charted as though it never stopped.
-        return await inTx(this.#tx(), async (tx) => {
+        return await inTx(ctx, "rig.sql.session.timeline", async (ctx) => {
             const agents = await queryTimelineAgents(
-                tx,
+                ctx,
                 request.scope,
                 request.includeArchived ?? false,
             );
             const events = await queryTimelineEvents(
-                tx,
+                ctx,
                 agents.map((agent) => agent.sessionId),
             );
             return buildTimeline(
@@ -1301,19 +1430,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
-    async listSecrets(): Promise<readonly SecretSummary[]> {
+    async listSecrets(ctx: Context): Promise<readonly SecretSummary[]> {
+        ctx = withDatabase(ctx, this.#database);
         return this.#secrets.references();
     }
 
-    async getProject(projectId: string): Promise<Project | undefined> {
-        return await this.#projects.getProject(projectId);
+    async getProject(ctx: Context, projectId: string): Promise<Project | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.getProject(ctx, projectId);
     }
 
     async applyGitFacts(
+        ctx: Context,
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
     ): Promise<void> {
-        await this.#projects.applyGitFacts(target, facts);
+        ctx = withDatabase(ctx, this.#database);
+        await this.#projects.applyGitFacts(ctx, target, facts);
     }
 
     /**
@@ -1323,115 +1456,145 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * client to inform, and reads current Git state when it is next loaded.
      */
     async applyGitSnapshot(
+        ctx: Context,
         target: { projectId: string; workspaceId?: string },
         git: GitChangeSnapshot,
     ): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         for (const session of this.#cachedSessions()) {
             const identity = session.projectIdentity();
             if (identity === undefined) continue;
             if (identity.projectId !== target.projectId) continue;
             if (identity.workspaceId !== target.workspaceId) continue;
-            await session.recordGitState(git);
+            await session.recordGitState(ctx, git);
         }
     }
 
-    async listFolders(): Promise<readonly Folder[]> {
-        return await this.#folders.listFolders();
+    async listFolders(ctx: Context): Promise<readonly Folder[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.listFolders(ctx);
     }
 
-    async folderCatalog() {
-        return await this.#folders.folderCatalog();
+    async folderCatalog(ctx: Context) {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.folderCatalog(ctx);
     }
 
-    async getFolder(folderId: string): Promise<Folder | undefined> {
-        return await this.#folders.getFolder(folderId);
+    async getFolder(ctx: Context, folderId: string): Promise<Folder | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.getFolder(ctx, folderId);
     }
 
-    async getFolderItem(itemId: string): Promise<FolderItem | undefined> {
-        return await this.#folders.getFolderItem(itemId);
+    async getFolderItem(ctx: Context, itemId: string): Promise<FolderItem | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.getFolderItem(ctx, itemId);
     }
 
     async createFolderItem(
+        ctx: Context,
         folderId: string,
         request: CreateFolderItemRequest,
     ): Promise<FolderItem> {
-        return await this.#folders.createFolderItem(folderId, request);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.createFolderItem(ctx, folderId, request);
     }
 
     async moveFolderItem(
+        ctx: Context,
         itemId: string,
         request: MoveFolderItemRequest,
         expectedVersion?: number,
     ): Promise<FolderItem | undefined> {
-        return await this.#folders.moveFolderItem(itemId, request, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.moveFolderItem(ctx, itemId, request, expectedVersion);
     }
 
     async archiveFolderItem(
+        ctx: Context,
         itemId: string,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<FolderItem | undefined> {
-        return await this.#folders.archiveFolderItem(itemId, expectedVersion, mutationId);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.archiveFolderItem(ctx, itemId, expectedVersion, mutationId);
     }
 
-    async createFolder(request: CreateFolderRequest): Promise<Folder> {
-        return await this.#folders.createFolder(request);
+    async createFolder(ctx: Context, request: CreateFolderRequest): Promise<Folder> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.createFolder(ctx, request);
     }
 
     async updateFolder(
+        ctx: Context,
         folderId: string,
         request: UpdateFolderRequest,
         expectedVersion?: number,
     ): Promise<Folder | undefined> {
-        return await this.#folders.updateFolder(folderId, request, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.updateFolder(ctx, folderId, request, expectedVersion);
     }
 
     async moveFolder(
+        ctx: Context,
         folderId: string,
         request: MoveFolderRequest,
         expectedVersion?: number,
     ): Promise<Folder | undefined> {
-        return await this.#folders.moveFolder(folderId, request, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.moveFolder(ctx, folderId, request, expectedVersion);
     }
 
     async archiveFolder(
+        ctx: Context,
         folderId: string,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<Folder | undefined> {
-        return await this.#folders.archiveFolder(folderId, expectedVersion, mutationId);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.archiveFolder(ctx, folderId, expectedVersion, mutationId);
     }
 
-    async sharedFolderState(rootFolderId: string): Promise<SharedFolderState> {
-        return await this.#folders.sharedFolderState(rootFolderId);
+    async sharedFolderState(ctx: Context, rootFolderId: string): Promise<SharedFolderState> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.sharedFolderState(ctx, rootFolderId);
     }
 
-    async sharedFolderGroup(folderId: string): Promise<string | undefined> {
-        return await this.#folders.sharedFolderGroup(folderId);
+    async sharedFolderGroup(ctx: Context, folderId: string): Promise<string | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.sharedFolderGroup(ctx, folderId);
     }
 
-    async sharedFolderRoot(groupId: string): Promise<string | undefined> {
-        return await this.#folders.sharedFolderRoot(groupId);
+    async sharedFolderRoot(ctx: Context, groupId: string): Promise<string | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.sharedFolderRoot(ctx, groupId);
     }
 
-    async assertFolderShareable(folderId: string): Promise<void> {
-        await this.#folders.assertFolderShareable(folderId);
+    async assertFolderShareable(ctx: Context, folderId: string): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await this.#folders.assertFolderShareable(ctx, folderId);
     }
 
-    async markFolderShared(folderId: string, groupId: string): Promise<Folder> {
-        return await this.#folders.markFolderShared(folderId, groupId);
+    async markFolderShared(ctx: Context, folderId: string, groupId: string): Promise<Folder> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.markFolderShared(ctx, folderId, groupId);
     }
 
-    async applySharedFolderState(groupId: string, state: SharedFolderState): Promise<Folder> {
-        return await this.#folders.applySharedFolderState(groupId, state);
+    async applySharedFolderState(
+        ctx: Context,
+        groupId: string,
+        state: SharedFolderState,
+    ): Promise<Folder> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.applySharedFolderState(ctx, groupId, state);
     }
 
-    async resetSharingState(): Promise<void> {
-        await this.#transaction(async (tx) => {
+    async resetSharingState(ctx: Context): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await this.#transaction(ctx, async (ctx) => {
             const now = this.#now();
-            const revision = await sharingStateReset(tx, now);
+            const revision = await sharingStateReset(ctx, now);
             if (revision === undefined) return;
-            await this.#publishGlobalEvent({
+            await this.#publishGlobalEvent(ctx, {
                 createdAt: now,
                 data: { revision },
                 id: this.#createSharingResetEventId(),
@@ -1440,62 +1603,80 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
-    async getDocument(documentId: string): Promise<Document | undefined> {
-        return await this.#documents.getDocument(documentId);
+    async getDocument(ctx: Context, documentId: string): Promise<Document | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#documents.getDocument(ctx, documentId);
     }
 
     async createDocument(
+        ctx: Context,
         request: CreateDocumentRequest,
         createdBy: DocumentCreatedBy,
     ): Promise<Document> {
-        return await this.#documents.createDocument(request, createdBy);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#documents.createDocument(ctx, request, createdBy);
     }
 
     async writeDocument(
+        ctx: Context,
         documentId: string,
         request: WriteDocumentRequest,
         expectedVersion: number,
     ): Promise<Document | undefined> {
-        return await this.#documents.writeDocument(documentId, request, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#documents.writeDocument(ctx, documentId, request, expectedVersion);
     }
 
     async documentUpdates(
+        ctx: Context,
         documentId: string,
         request: ListDocumentUpdatesRequest,
     ): Promise<DocumentUpdatePage | undefined> {
-        return await this.#documents.documentUpdates(documentId, request);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#documents.documentUpdates(ctx, documentId, request);
     }
 
     async setSessionFolder(
+        ctx: Context,
         sessionId: string,
         folderId: string | null,
         afterId?: string | null,
         mutationId?: string,
     ): Promise<InMemorySession | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertAcceptingMutations();
-        const session = await this.get(sessionId);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return undefined;
-        await session.fileIntoFolder(folderId, afterId, mutationId);
+        await session.fileIntoFolder(ctx, folderId, afterId, mutationId);
         return session;
     }
 
-    async sessionScopeMutationApplied(sessionId: string, mutationId: string): Promise<boolean> {
-        return await this.#folders.sessionScopeMutationApplied(sessionId, mutationId);
+    async sessionScopeMutationApplied(
+        ctx: Context,
+        sessionId: string,
+        mutationId: string,
+    ): Promise<boolean> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#folders.sessionScopeMutationApplied(ctx, sessionId, mutationId);
     }
 
-    async listProjects(): Promise<readonly Project[]> {
-        return await this.#projects.listProjects();
+    async listProjects(ctx: Context): Promise<readonly Project[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.listProjects(ctx);
     }
 
-    registerProject(request: RegisterProjectRequest): Promise<Project> {
-        return this.#projects.registerProject(request);
+    registerProject(ctx: Context, request: RegisterProjectRequest): Promise<Project> {
+        ctx = withDatabase(ctx, this.#database);
+        return this.#projects.registerProject(ctx, request);
     }
 
     createRemoteProject(
+        ctx: Context,
         request: CreateRemoteProjectRequest,
         options?: { createdBy?: ProjectCreator; githubToken?: string; mutationId?: string },
     ): Promise<Project> {
-        return this.#projects.createRemoteProject(request, {
+        ctx = withDatabase(ctx, this.#database);
+        return this.#projects.createRemoteProject(ctx, request, {
             ...options,
             createdBy: options?.createdBy ?? {
                 instanceId: this.localInstanceId,
@@ -1505,36 +1686,54 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async getWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined> {
-        return await this.#projects.getWorkspace(projectId, workspaceId);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.getWorkspace(ctx, projectId, workspaceId);
     }
 
-    async listWorkspaces(projectId?: string): Promise<readonly ProjectWorkspace[]> {
-        return await this.#projects.listWorkspaces(projectId);
+    async listWorkspaces(ctx: Context, projectId?: string): Promise<readonly ProjectWorkspace[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.listWorkspaces(ctx, projectId);
     }
 
     async renameProject(
+        ctx: Context,
         projectId: string,
         name: string,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<Project | undefined> {
-        return await this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.renameProject(
+            ctx,
+            projectId,
+            name,
+            expectedVersion,
+            mutationId,
+        );
     }
 
-    async queryProjectSettings(cwd: string): Promise<ProjectSessionSettings | undefined> {
-        return await this.#projects.queryProjectSettings(cwd);
+    async queryProjectSettings(
+        ctx: Context,
+        cwd: string,
+    ): Promise<ProjectSessionSettings | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.queryProjectSettings(ctx, cwd);
     }
 
     async setProjectSettings(
+        ctx: Context,
         projectId: string,
         settings: ProjectSettingsUpdate,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<Project | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         return await this.#projects.setProjectSettings(
+            ctx,
             projectId,
             settings,
             expectedVersion,
@@ -1542,33 +1741,39 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         );
     }
 
-    async refreshProject(projectId: string): Promise<Project | undefined> {
-        return await this.#projects.refreshProject(projectId);
+    async refreshProject(ctx: Context, projectId: string): Promise<Project | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.refreshProject(ctx, projectId);
     }
 
     async reorderProject(
+        ctx: Context,
         projectId: string,
         request: ReorderRequest,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        return await this.#projects.reorderProject(projectId, request, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.reorderProject(ctx, projectId, request, expectedVersion);
     }
 
     async reorderSession(
+        ctx: Context,
         sessionId: string,
         request: ReorderRequest,
     ): Promise<InMemorySession | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertAcceptingMutations();
-        const session = await this.get(sessionId);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return undefined;
         if (session.isSubagent()) {
             throw new Error("Subagent histories cannot be reordered.");
         }
         const snapshot = session.snapshot();
-        await this.#transaction(async () => {
+        await this.#transaction(ctx, async () => {
             await session.setOrderKey(
+                ctx,
                 orderKeyAfter(
-                    await this.#sessionOrderItems(snapshot.scope),
+                    await this.#sessionOrderItems(ctx, snapshot.scope),
                     sessionId,
                     request.afterId,
                 ),
@@ -1578,12 +1783,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async reorderWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         request: ReorderRequest,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         return await this.#projects.reorderWorkspace(
+            ctx,
             projectId,
             workspaceId,
             request,
@@ -1592,13 +1800,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async renameWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         name: string,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<ProjectWorkspace | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         return await this.#projects.renameWorkspace(
+            ctx,
             projectId,
             workspaceId,
             name,
@@ -1608,23 +1819,27 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     createWorkspace(
+        ctx: Context,
         projectId: string,
         request: CreateProjectWorkspaceRequest,
         options: { createdBy?: ProjectCreator; githubToken?: string } = {},
     ): Promise<ProjectWorkspace | undefined> {
-        return this.#projects.createWorkspace(projectId, request, undefined, options);
+        ctx = withDatabase(ctx, this.#database);
+        return this.#projects.createWorkspace(ctx, projectId, request, undefined, options);
     }
 
     async refreshSessionGitCredential(
+        ctx: Context,
         sessionId: string,
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<boolean> {
-        const session = await this.get(sessionId);
+        ctx = withDatabase(ctx, this.#database);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return false;
         const snapshot = session.snapshot();
         if (snapshot.projectId === undefined) return false;
-        const project = await this.#projects.getProject(snapshot.projectId);
+        const project = await this.#projects.getProject(ctx, snapshot.projectId);
         if (
             project?.remoteSource?.kind !== "github" ||
             snapshot.ownerInstanceId !== creator.instanceId ||
@@ -1636,21 +1851,37 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             project.createdBy?.instanceId === creator.instanceId &&
             project.createdBy.profileId === creator.profileId
         ) {
-            await this.#projects.refreshGitCredential(snapshot.projectId, creator, githubToken);
+            await this.#projects.refreshGitCredential(
+                ctx,
+                snapshot.projectId,
+                creator,
+                githubToken,
+            );
         } else {
-            await this.#projects.registerGitCredential(snapshot.projectId, creator, githubToken);
+            await this.#projects.registerGitCredential(
+                ctx,
+                snapshot.projectId,
+                creator,
+                githubToken,
+            );
         }
-        await session.refreshGitCommandSecret();
+        await session.refreshGitCommandSecret(ctx);
         return true;
     }
 
-    archiveProject(projectId: string, expectedVersion?: number): Promise<Project | undefined> {
-        const archive = () => this.#archiveProject(projectId, expectedVersion);
+    archiveProject(
+        ctx: Context,
+        projectId: string,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        const archive = () => this.#archiveProject(ctx, projectId, expectedVersion);
         return this.#taskDrain?.run(archive) ?? archive();
     }
 
-    async unarchiveProject(projectId: string): Promise<Project | undefined> {
-        return await this.#projects.unarchiveProject(projectId);
+    async unarchiveProject(ctx: Context, projectId: string): Promise<Project | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.unarchiveProject(ctx, projectId);
     }
 
     /*
@@ -1658,6 +1889,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * workspace is archived with the sessions and worktree directory it owns.
      */
     async #archiveProject(
+        ctx: Context,
         projectId: string,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
@@ -1665,18 +1897,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         let archiving: string[] = [];
         const postCommitFailures: unknown[] = [];
         try {
-            await this.#transaction(async () => {
-                project = await this.#projects.archiveProject(projectId, expectedVersion);
+            await this.#transaction(ctx, async () => {
+                project = await this.#projects.archiveProject(ctx, projectId, expectedVersion);
                 if (project === undefined) return;
-                const rootSessionIds = await queryRootSessionIdsForProject(this.#tx(), projectId);
+                const rootSessionIds = await queryRootSessionIdsForProject(ctx, projectId);
                 for (const sessionId of rootSessionIds) {
-                    await (await this.get(sessionId))?.setArchived(true);
+                    await (await this.get(ctx, sessionId))?.setArchived(ctx, true);
                 }
-                for (const workspace of await this.#projects.listWorkspaces(projectId)) {
+                for (const workspace of await this.#projects.listWorkspaces(ctx, projectId)) {
                     if (workspace.status === "archived" || workspace.status === "archiving") {
                         continue;
                     }
                     const begun = await this.#projects.beginWorkspaceArchive(
+                        ctx,
                         projectId,
                         workspace.id,
                     );
@@ -1699,7 +1932,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         for (const workspaceId of archiving) {
             try {
                 workspaces.push({
-                    cleanup: await this.#archiveWorkspaceSessions(workspaceId),
+                    cleanup: await this.#archiveWorkspaceSessions(ctx, workspaceId),
                     workspaceId,
                 });
             } catch (error) {
@@ -1710,9 +1943,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         // All logical state is committed before physical cleanup yields.
         const cleanup = await Promise.allSettled([
-            this.remoteTerminals.closeProject(projectId),
+            this.remoteTerminals.closeProject(ctx, projectId),
             ...workspaces.map((workspace) =>
-                this.#completeWorkspaceArchive(projectId, workspace.workspaceId, workspace.cleanup),
+                this.#completeWorkspaceArchive(
+                    ctx,
+                    projectId,
+                    workspace.workspaceId,
+                    workspace.cleanup,
+                ),
             ),
         ]);
         const failures = [
@@ -1726,18 +1964,21 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 "Project archival committed, but its post-commit cleanup failed.",
             );
         }
-        return await this.getProject(projectId);
+        return await this.getProject(ctx, projectId);
     }
 
     archiveWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        return this.#archiveWorkspace(projectId, workspaceId, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return this.#archiveWorkspace(ctx, projectId, workspaceId, expectedVersion);
     }
 
     async #archiveWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
@@ -1745,15 +1986,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         // The workspace becomes "archiving" in its own transaction, before any session is touched.
         // That decision is what makes the rest resumable: a daemon that dies partway through finds
         // the workspace still archiving on the next start and runs the remaining sessions.
-        const workspace = await this.#transaction(() =>
-            this.#projects.beginWorkspaceArchive(projectId, workspaceId, expectedVersion),
+        const workspace = await this.#transaction(ctx, () =>
+            this.#projects.beginWorkspaceArchive(ctx, projectId, workspaceId, expectedVersion),
         );
         if (workspace === undefined || workspace.status === "archived") {
             return Promise.resolve(workspace);
         }
-        const cleanup = await this.#archiveWorkspaceSessions(workspaceId);
-        cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
-        const finish = () => this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
+        const cleanup = await this.#archiveWorkspaceSessions(ctx, workspaceId);
+        cleanup.push(this.remoteTerminals.closeWorkspace(ctx, projectId, workspaceId));
+        const finish = () => this.#completeWorkspaceArchive(ctx, projectId, workspaceId, cleanup);
         const background = this.#taskDrain?.run(finish) ?? finish();
         void background.catch((error: unknown) => {
             // Residue left behind is worth a warning because a later attempt can still clear it.
@@ -1771,10 +2012,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * transaction commits. A failure in any queued-run/event write restores every session touched
      * by the transaction, so memory cannot get ahead of SQLite.
      */
-    async #archiveWorkspaceSessions(workspaceId: string): Promise<Promise<void>[]> {
+    async #archiveWorkspaceSessions(ctx: Context, workspaceId: string): Promise<Promise<void>[]> {
         // Sessions cannot join a workspace that is already archiving, so this list only shrinks.
-        const pending = await this.#transaction(() =>
-            queryUnarchivedSessionIdsForWorkspace(this.#tx(), workspaceId),
+        const pending = await this.#transaction(ctx, () =>
+            queryUnarchivedSessionIdsForWorkspace(ctx, workspaceId),
         );
         const touched: Array<{
             checkpoint: ReturnType<InMemorySession["captureMutationCheckpoint"]>;
@@ -1782,15 +2023,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }> = [];
         const teardowns: Array<() => Promise<void>> = [];
         try {
-            await this.#transaction(async () => {
+            await this.#transaction(ctx, async () => {
                 for (const sessionId of pending) {
-                    const session = await this.get(sessionId);
+                    const session = await this.get(ctx, sessionId);
                     if (session === undefined) continue;
                     touched.push({
                         checkpoint: session.captureMutationCheckpoint(),
                         session,
                     });
-                    const teardown = await session.archiveForWorkspace(workspaceId);
+                    const teardown = await session.archiveForWorkspace(ctx, workspaceId);
                     teardowns.push(teardown);
                 }
             });
@@ -1817,6 +2058,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async #completeWorkspaceArchive(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         cleanup: readonly Promise<void>[],
@@ -1828,35 +2070,44 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 this.#onWorkspaceCleanupError?.(result.reason, projectId, workspaceId);
             }
         }
-        return await this.#projects.removeArchivedWorkspace(projectId, workspaceId);
+        return await this.#projects.removeArchivedWorkspace(ctx, projectId, workspaceId);
     }
 
     setProjectAvatar(
+        ctx: Context,
         projectId: string,
         bytes: Buffer,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        return this.#projects.setAvatar(projectId, "user", bytes, expectedVersion);
+        ctx = withDatabase(ctx, this.#database);
+        return this.#projects.setAvatar(ctx, projectId, "user", bytes, expectedVersion);
     }
 
-    async clearProjectAvatar(projectId: string): Promise<Project | undefined> {
-        return await this.#projects.clearAvatar(projectId);
+    async clearProjectAvatar(ctx: Context, projectId: string): Promise<Project | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return await this.#projects.clearAvatar(ctx, projectId);
     }
 
-    getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined> {
-        return this.#projects.avatarAsset(hash);
+    getProjectAvatar(ctx: Context, hash: string): Promise<ProjectAvatarAsset | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return this.#projects.avatarAsset(ctx, hash);
     }
 
-    async registerSecret(request: RegisterSecretRequest): Promise<SecretSummary> {
+    async registerSecret(ctx: Context, request: RegisterSecretRequest): Promise<SecretSummary> {
+        ctx = withDatabase(ctx, this.#database);
         const candidate = new SecretRegistry([request]);
-        await secretRegister(this.#tx(), request);
+        await secretRegister(ctx, request);
         this.#secrets.register(request);
         return candidate.reference(request.id);
     }
 
-    async registerSpecialSecret(request: SpecialSecretRegistration): Promise<SecretSummary> {
+    async registerSpecialSecret(
+        ctx: Context,
+        request: SpecialSecretRegistration,
+    ): Promise<SecretSummary> {
+        ctx = withDatabase(ctx, this.#database);
         this.#secrets.register(request);
-        await this.#projects.retryRemoteProjects(request.kind);
+        await this.#projects.retryRemoteProjects(ctx, request.kind);
         return this.#secrets.reference(request.kind);
     }
 
@@ -1864,44 +2115,50 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#secrets.resolveSpecial(kind);
     }
 
-    async unregisterSecret(secretId: string): Promise<boolean> {
+    async unregisterSecret(ctx: Context, secretId: string): Promise<boolean> {
+        ctx = withDatabase(ctx, this.#database);
         const secret = this.#secrets.references().find((candidate) => candidate.id === secretId);
         if (secret === undefined || secret.kind !== undefined) return false;
-        await secretUnregister(this.#tx(), secretId);
+        await secretUnregister(ctx, secretId);
         this.#secrets.unregister(secretId);
         for (const session of this.#cachedSessions()) {
-            await session.detachSecret(secretId, { scope: "project" });
-            await session.detachSecret(secretId, { scope: "session" });
+            await session.detachSecret(ctx, secretId, { scope: "project" });
+            await session.detachSecret(ctx, secretId, { scope: "session" });
         }
         return true;
     }
 
-    async unregisterSpecialSecret(kind: SpecialSecretKind): Promise<boolean> {
+    async unregisterSpecialSecret(ctx: Context, kind: SpecialSecretKind): Promise<boolean> {
+        ctx = withDatabase(ctx, this.#database);
         return this.#secrets.unregisterSpecial(kind);
     }
 
     async updateSecret(
+        ctx: Context,
         secretId: string,
         request: UpdateSecretRequest,
     ): Promise<SecretSummary | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         const updated = this.#secrets.updatedRegistration(secretId, request);
         if (updated === undefined) return undefined;
-        await secretRegister(this.#tx(), updated);
+        await secretRegister(ctx, updated);
         this.#secrets.register(updated);
         return this.#secrets.reference(secretId);
     }
 
-    async repairInterruptedSessions(reason: SessionInterruption["reason"]): Promise<void> {
-        for (const { activeRunId, sessionId } of await queryInterruptedSessionCandidates(
-            this.#tx(),
-        )) {
+    async repairInterruptedSessions(
+        ctx: Context,
+        reason: SessionInterruption["reason"],
+    ): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        for (const { activeRunId, sessionId } of await queryInterruptedSessionCandidates(ctx)) {
             if (
                 activeRunId !== undefined &&
-                (await this.#reconcileTerminalRunState(sessionId, activeRunId))
+                (await this.#reconcileTerminalRunState(ctx, sessionId, activeRunId))
             ) {
                 continue;
             }
-            const session = await this.get(sessionId);
+            const session = await this.get(ctx, sessionId);
             if (session === undefined) {
                 continue;
             }
@@ -1918,25 +2175,27 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 continue;
             }
             if (session.hasDurableToolRun()) {
-                await session.resumeDurableToolRun();
+                await session.resumeDurableToolRun(ctx);
                 continue;
             }
             if (session.isSubagent() && state.status === "suspended") {
                 const message =
                     "The subagent stopped working because the local server restarted before its suspended run finished.";
-                await session.markSuspendedAfterRestart(message, runId);
+                await session.markSuspendedAfterRestart(ctx, message, runId);
                 const parentSessionId = session.agentMetadata().parentSessionId;
                 const parent =
-                    parentSessionId === undefined ? undefined : await this.get(parentSessionId);
+                    parentSessionId === undefined
+                        ? undefined
+                        : await this.get(ctx, parentSessionId);
                 this.#agentManager.recordChanged(session);
                 if (parent !== undefined) {
                     const subagent = session.subagentSummary();
                     const path = this.#agentManager.inspect(parent.id, subagent.agentId).path;
-                    await parent.recordSubagentStoppedAfterRestart(subagent, path);
+                    await parent.recordSubagentStoppedAfterRestart(ctx, subagent, path);
                 }
                 continue;
             }
-            await session.markInterrupted({
+            await session.markInterrupted(ctx, {
                 interruptedAt: this.#now(),
                 message:
                     reason === "crash"
@@ -1947,16 +2206,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             });
             const parentSessionId = session.agentMetadata().parentSessionId;
             if (parentSessionId !== undefined) {
-                await this.get(parentSessionId);
+                await this.get(ctx, parentSessionId);
                 this.#agentManager.recordChanged(session);
             }
         }
     }
 
-    async #reconcileTerminalRunState(sessionId: string, runId: string): Promise<boolean> {
-        const event = await queryTerminalRunEvent(this.#tx(), sessionId, runId);
+    async #reconcileTerminalRunState(
+        ctx: Context,
+        sessionId: string,
+        runId: string,
+    ): Promise<boolean> {
+        const event = await queryTerminalRunEvent(ctx, sessionId, runId);
         if (event === undefined) return false;
-        await sessionReconcileTerminalRun(this.#tx(), {
+        await sessionReconcileTerminalRun(ctx, {
             lastEventId: event.lastEventId,
             runId,
             sessionId,
@@ -1966,7 +2229,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return true;
     }
 
-    async prepareForShutdown(reason: SessionInterruption["reason"]): Promise<void> {
+    async prepareForShutdown(ctx: Context, reason: SessionInterruption["reason"]): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         this.#taskDrain?.beginClose();
         if (this.#scheduledMessageTimer !== undefined) {
             clearTimeout(this.#scheduledMessageTimer);
@@ -1980,28 +2244,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearImmediate(this.#unsortedSweepFollowup);
             this.#unsortedSweepFollowup = undefined;
         }
-        if (this.#toolResultSweepTimer !== undefined) {
-            clearInterval(this.#toolResultSweepTimer);
-            this.#toolResultSweepTimer = undefined;
-        }
-        if (this.#toolResultSweepFollowup !== undefined) {
-            clearImmediate(this.#toolResultSweepFollowup);
-            this.#toolResultSweepFollowup = undefined;
-        }
         const closingSessions = new Set(this.#cachedSessions());
         const cleanup: Promise<void>[] = [
-            ...[...closingSessions].map((session) => session.beginShutdown()),
-            this.remoteTerminals.close(),
+            ...[...closingSessions].map((session) => session.beginShutdown(ctx)),
+            this.remoteTerminals.close(ctx),
         ];
         let repairError: unknown;
         try {
-            await this.repairInterruptedSessions(reason);
+            await this.repairInterruptedSessions(ctx, reason);
         } catch (error) {
             repairError = error;
         }
         for (const session of this.#cachedSessions()) {
             if (closingSessions.has(session)) continue;
-            cleanup.push(session.beginShutdown());
+            cleanup.push(session.beginShutdown(ctx));
         }
         const cleanupResults = await Promise.allSettled(cleanup);
         await this.#taskDrain?.drain();
@@ -2016,7 +2272,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    async saveSession(state: PersistedSessionState): Promise<void> {
+    async saveSession(ctx: Context, state: PersistedSessionState): Promise<void> {
+        if (!isSessionDatabaseTransaction(getDatabaseScope(ctx))) {
+            ctx = withDatabase(ctx, this.#database);
+        }
         validOwnerInstanceId(state.ownerInstanceId);
         const contextMessages =
             state.contextMessages ??
@@ -2024,54 +2283,64 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .filter((message) => !message.isPartial)
                 .sort((left, right) => left.position - right.position)
                 .map((message) => message.message);
-        await sessionSave(this.#tx(), state, {
+        await sessionSave(ctx, state, {
             contextMessages,
             now: this.#now(),
         });
     }
 
     async setWorkspaceTransferState(
-        input: Parameters<NonNullable<InMemorySessionPersistence["setWorkspaceTransferState"]>>[0],
+        ctx: Context,
+        input: Parameters<NonNullable<InMemorySessionPersistence["setWorkspaceTransferState"]>>[1],
     ): Promise<void> {
-        await sessionSetWorkspaceTransferState(this.#tx(), { ...input, now: this.#now() });
+        ctx = withDatabase(ctx, this.#database);
+        await sessionSetWorkspaceTransferState(ctx, { ...input, now: this.#now() });
     }
 
-    async transferWorkspace(input: {
-        contextMessages: readonly Message[];
-        cwd: string;
-        sessionId: string;
-        state: Parameters<typeof sessionTransferWorkspace>[1]["state"];
-        projectId: string;
-        workspaceId: string;
-    }): Promise<string> {
+    async transferWorkspace(
+        ctx: Context,
+        input: {
+            contextMessages: readonly Message[];
+            cwd: string;
+            sessionId: string;
+            state: Parameters<typeof sessionTransferWorkspace>[1]["state"];
+            projectId: string;
+            workspaceId: string;
+        },
+    ): Promise<string> {
+        ctx = withDatabase(ctx, this.#database);
         const scope: SessionScope = {
             kind: "workspace",
             projectId: input.projectId,
             workspaceId: input.workspaceId,
         };
-        const orderKey = await this.#newLastSessionOrderKey(scope);
-        await sessionTransferWorkspace(this.#tx(), { ...input, now: this.#now(), orderKey });
+        const orderKey = await this.#newLastSessionOrderKey(ctx, scope);
+        await sessionTransferWorkspace(ctx, { ...input, now: this.#now(), orderKey });
         return orderKey;
     }
 
     async transferSession(
+        ctx: Context,
         sessionId: string,
         request: TransferSessionRequest,
     ): Promise<TransferSessionResponse | undefined> {
-        return this.#executeSessionTransfer(sessionId, request.targetWorkspaceId, false);
+        ctx = withDatabase(ctx, this.#database);
+        return this.#executeSessionTransfer(ctx, sessionId, request.targetWorkspaceId, false);
     }
 
     async #executeSessionTransfer(
+        ctx: Context,
         sessionId: string,
         targetWorkspaceId: string,
         scheduled: boolean,
     ): Promise<TransferSessionResponse | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertAcceptingMutations();
-        const session = await this.get(sessionId);
+        const session = await this.get(ctx, sessionId);
         if (session === undefined) return undefined;
-        return executeSessionWorkspaceTransfer({
-            hasAttachedSessions: async (workspaceId) =>
-                await queryWorkspaceHasAttachedSessions(this.#tx(), workspaceId),
+        return executeSessionWorkspaceTransfer(ctx, {
+            hasAttachedSessions: async (requestCtx, workspaceId) =>
+                await queryWorkspaceHasAttachedSessions(requestCtx, workspaceId),
             projects: this.#projects,
             releaseTarget: (workspaceId, ownerSessionId) =>
                 this.#releaseWorkspaceTransferTarget(workspaceId, ownerSessionId),
@@ -2083,13 +2352,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
-    async query<T>(operation: (tx: TX) => T | Promise<T>): Promise<T> {
+    async query<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T> {
+        ctx = withDatabase(ctx, this.#database);
         this.#assertOpen();
-        return await operation(this.#tx());
+        return await operation(ctx);
     }
 
-    transaction<T>(operation: (tx: TX) => T | Promise<T>): Promise<T> {
-        return this.#transaction(operation);
+    transaction<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T> {
+        ctx = withDatabase(ctx, this.#database);
+        return this.#transaction(ctx, operation);
     }
 
     #assertAcceptingMutations(): void {
@@ -2098,22 +2369,31 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    async upsertMessage(sessionId: string, message: PersistedSessionMessage): Promise<void> {
-        await sessionSaveMessage(this.#tx(), sessionId, message, this.#now());
+    async upsertMessage(
+        ctx: Context,
+        sessionId: string,
+        message: PersistedSessionMessage,
+    ): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await sessionSaveMessage(ctx, sessionId, message, this.#now());
     }
 
     async loadTranscriptPage(
+        ctx: Context,
         sessionId: string,
         turnLimit: number,
         before?: string,
     ): Promise<SessionTranscriptWindow | undefined> {
-        const page = await querySessionTranscriptPage(this.#tx(), sessionId, turnLimit, before);
+        ctx = withDatabase(ctx, this.#database);
+        const requestCtx = withDatabase(ctx, ctx.tx);
+        const page = await querySessionTranscriptPage(requestCtx, sessionId, turnLimit, before);
         if (page === undefined) return undefined;
         const firstPosition = page.messages[0]?.position;
         const hasEarlier =
             firstPosition !== undefined &&
-            (await querySessionHasEarlierTranscriptMessage(this.#tx(), sessionId, firstPosition));
+            (await querySessionHasEarlierTranscriptMessage(requestCtx, sessionId, firstPosition));
         return await this.#transcriptWindowForMessages(
+            requestCtx,
             sessionId,
             page.messages,
             turnLimit,
@@ -2123,17 +2403,21 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async loadTranscriptSince(
+        ctx: Context,
         sessionId: string,
         turnLimit: number,
         after: EventId,
     ): Promise<SessionTranscriptWindow | undefined> {
-        const range = await querySessionTranscriptSince(this.#tx(), sessionId, turnLimit, after);
+        ctx = withDatabase(ctx, this.#database);
+        const requestCtx = withDatabase(ctx, ctx.tx);
+        const range = await querySessionTranscriptSince(requestCtx, sessionId, turnLimit, after);
         if (range === undefined) return undefined;
         const lastPosition = range.messages.at(-1)?.position;
         const hasLater =
             lastPosition !== undefined &&
-            (await querySessionHasLaterTranscriptMessage(this.#tx(), sessionId, lastPosition));
+            (await querySessionHasLaterTranscriptMessage(requestCtx, sessionId, lastPosition));
         return await this.#transcriptWindowForMessages(
+            requestCtx,
             sessionId,
             range.messages,
             turnLimit,
@@ -2142,53 +2426,68 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         );
     }
 
-    async upsertExternalToolCall(call: ExternalToolCall): Promise<void> {
-        await externalToolCallSave(this.#tx(), call);
+    async upsertExternalToolCall(ctx: Context, call: ExternalToolCall): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await externalToolCallSave(ctx, call);
     }
 
     async handoffDurablePermissionToExternalTool(
+        ctx: Context,
         externalCall: ExternalToolCall,
         permissionCall: DurableUserInputCall,
     ): Promise<void> {
-        await durablePermissionHandoff(this.#tx(), externalCall, permissionCall);
+        ctx = withDatabase(ctx, this.#database);
+        await durablePermissionHandoff(ctx, externalCall, permissionCall);
     }
 
-    async upsertDurableUserInput(call: DurableUserInputCall): Promise<void> {
-        await durableUserInputSave(this.#tx(), call);
+    async upsertDurableUserInput(ctx: Context, call: DurableUserInputCall): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await durableUserInputSave(ctx, call);
     }
 
-    async upsertDurableWait(wait: DurableWait): Promise<void> {
-        await durableWaitSave(this.#tx(), wait);
+    async upsertDurableWait(ctx: Context, wait: DurableWait): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await durableWaitSave(ctx, wait);
     }
 
-    async upsertScheduledMessage(message: ScheduledMessage): Promise<void> {
-        await scheduledMessageSave(this.#tx(), message);
+    async upsertScheduledMessage(ctx: Context, message: ScheduledMessage): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await scheduledMessageSave(ctx, message);
     }
 
-    async scheduledMessageChanged(): Promise<void> {
-        await this.#afterTransactionCommit(() => this.#armScheduledMessageTimer());
+    async scheduledMessageChanged(ctx: Context): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await this.#afterTransactionCommit(ctx, (ctx) => this.#armScheduledMessageTimer(ctx));
     }
 
-    async pruneExternalToolCalls(sessionId: string, retain: number): Promise<void> {
-        await externalToolCallPrune(this.#tx(), sessionId, retain);
+    async pruneExternalToolCalls(ctx: Context, sessionId: string, retain: number): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await externalToolCallPrune(ctx, sessionId, retain);
     }
 
-    async pruneDurableUserInputs(sessionId: string, retain: number): Promise<void> {
-        await durableUserInputPrune(this.#tx(), sessionId, retain);
+    async pruneDurableUserInputs(ctx: Context, sessionId: string, retain: number): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await durableUserInputPrune(ctx, sessionId, retain);
     }
 
-    async pruneDurableWaits(sessionId: string, retain: number): Promise<void> {
-        await durableWaitPrune(this.#tx(), sessionId, retain);
+    async pruneDurableWaits(ctx: Context, sessionId: string, retain: number): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        await durableWaitPrune(ctx, sessionId, retain);
     }
 
-    async pruneScheduledMessages(sessionId: string, retain: number): Promise<readonly string[]> {
-        return await scheduledMessagePrune(this.#tx(), sessionId, retain);
+    async pruneScheduledMessages(
+        ctx: Context,
+        sessionId: string,
+        retain: number,
+    ): Promise<readonly string[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return await scheduledMessagePrune(ctx, sessionId, retain);
     }
 
-    async #armScheduledMessageTimer(): Promise<void> {
+    async #armScheduledMessageTimer(ctx: Context): Promise<void> {
         if (this.#database.closed) return;
         if (this.#scheduledMessageTimer !== undefined) clearTimeout(this.#scheduledMessageTimer);
-        const next = await queryNextPendingScheduledMessage(this.#tx());
+        const next = await queryNextPendingScheduledMessage(ctx);
         if (next === undefined) {
             this.#scheduledMessageTimer = undefined;
             return;
@@ -2196,7 +2495,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const delay = Math.min(MAX_SCHEDULE_TIMER_DELAY_MS, Math.max(0, next.dueAt - this.#now()));
         this.#scheduledMessageTimer = setTimeout(() => {
             this.#scheduledMessageTimer = undefined;
-            void this.#deliverDueScheduledMessages().catch(rethrowDatabaseFailure);
+            void withWorkerContext("scheduled-message-delivery", async (ctx) =>
+                this.#deliverDueScheduledMessages(withDatabase(ctx, this.#database)),
+            ).catch(rethrowDatabaseFailure);
         }, delay);
     }
 
@@ -2209,27 +2510,28 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * that never started out Unsorted, which is every chat a project or workspace holds, is not
      * swept at all.
      */
-    async archiveExpiredUnsortedSessions(): Promise<boolean> {
+    async archiveExpiredUnsortedSessions(ctx: Context): Promise<boolean> {
+        ctx = withDatabase(ctx, this.#database);
         if (this.#database.closed) return false;
         const unsortedBefore = this.#now() - UNSORTED_SESSION_ARCHIVE_AFTER_MS;
         const deadline = Date.now() + UNSORTED_SWEEP_MAX_MS;
         let archived = 0;
         while (archived < UNSORTED_SWEEP_MAX_SESSIONS && Date.now() <= deadline) {
             const expired = await queryExpiredUnsortedSessions(
-                this.#tx(),
+                ctx,
                 unsortedBefore,
                 Math.min(UNSORTED_SWEEP_LIMIT, UNSORTED_SWEEP_MAX_SESSIONS - archived),
             );
             if (expired.length === 0) return false;
             for (const sessionId of expired) {
                 if (this.#database.closed) return false;
-                const session = await this.get(sessionId);
+                const session = await this.get(ctx, sessionId);
                 if (session !== undefined) {
                     // An Unsorted root may be idle while one of its background agents is still
                     // running. Expiry is terminal for the whole retained tree, just like archiving
                     // the folder that owns one, so no hidden descendant keeps acting after the
                     // root disappears from Unsorted.
-                    await session.recordFolderArchived();
+                    await session.recordFolderArchived(ctx);
                 }
                 archived += 1;
             }
@@ -2242,16 +2544,17 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         // The first pass waits for the constructor to finish, the way other startup maintenance
         // does, so opening the store never blocks on working through a backlog of stale chats.
         this.#scheduleUnsortedSweep();
-        this.#unsortedSweepTimer = setInterval(
-            () => this.#sweepUnsortedSessions(),
-            UNSORTED_SWEEP_INTERVAL_MS,
-        );
+        this.#unsortedSweepTimer = setInterval(() => {
+            void withWorkerContext("unsorted-session-sweep", async (ctx) =>
+                this.#sweepUnsortedSessions(withDatabase(ctx, this.#database)),
+            ).catch(rethrowDatabaseFailure);
+        }, UNSORTED_SWEEP_INTERVAL_MS);
         this.#unsortedSweepTimer.unref();
     }
 
-    async #sweepUnsortedSessions(): Promise<void> {
+    async #sweepUnsortedSessions(ctx: Context): Promise<void> {
         try {
-            if (await this.archiveExpiredUnsortedSessions()) this.#scheduleUnsortedSweep();
+            if (await this.archiveExpiredUnsortedSessions(ctx)) this.#scheduleUnsortedSweep();
         } catch (error) {
             // Sweeping runs on its own, outside any request. A database that could not answer is
             // still fatal; one chat that refused to be put away must not take the daemon down.
@@ -2264,18 +2567,21 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#database.closed || this.#unsortedSweepFollowup !== undefined) return;
         this.#unsortedSweepFollowup = setImmediate(() => {
             this.#unsortedSweepFollowup = undefined;
-            void this.#sweepUnsortedSessions();
+            void withWorkerContext("unsorted-session-sweep-followup", async (ctx) =>
+                this.#sweepUnsortedSessions(withDatabase(ctx, this.#database)),
+            ).catch(rethrowDatabaseFailure);
         });
         this.#unsortedSweepFollowup.unref();
     }
 
-    async pruneStaleToolResults(): Promise<boolean> {
+    async pruneStaleToolResults(ctx: Context): Promise<boolean> {
+        ctx = withDatabase(ctx, this.#database);
         if (this.#database.closed || this.#toolResultRetentionMs === undefined) return false;
         const before = this.#now() - this.#toolResultRetentionMs;
         const deadline = Date.now() + TOOL_RESULT_SWEEP_MAX_MS;
         let scanned = 0;
         while (scanned < TOOL_RESULT_SWEEP_MAX_SCANNED_MESSAGES && Date.now() <= deadline) {
-            const page = await sessionPruneToolResults(this.#tx(), {
+            const page = await sessionPruneToolResults(ctx, {
                 ...(this.#toolResultSweepCursor === undefined
                     ? {}
                     : { after: this.#toolResultSweepCursor }),
@@ -2292,53 +2598,27 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return true;
     }
 
-    #armToolResultSweepTimer(): void {
-        this.#scheduleToolResultSweep();
-        this.#toolResultSweepTimer = setInterval(
-            () => this.#sweepToolResults(),
-            TOOL_RESULT_SWEEP_INTERVAL_MS,
-        );
-        this.#toolResultSweepTimer.unref();
-    }
-
-    async #sweepToolResults(): Promise<void> {
-        try {
-            if (await this.pruneStaleToolResults()) this.#scheduleToolResultSweep();
-        } catch (error) {
-            if (this.#database.closed) return;
-            if (isDatabaseFailure(error)) throw error;
-        }
-    }
-
-    #scheduleToolResultSweep(): void {
-        if (this.#database.closed || this.#toolResultSweepFollowup !== undefined) return;
-        this.#toolResultSweepFollowup = setImmediate(() => {
-            this.#toolResultSweepFollowup = undefined;
-            void this.#sweepToolResults();
-        });
-        this.#toolResultSweepFollowup.unref();
-    }
-
-    async #deliverDueScheduledMessages(): Promise<void> {
+    async #deliverDueScheduledMessages(ctx: Context): Promise<void> {
         for (;;) {
-            const next = await queryNextPendingScheduledMessage(this.#tx());
+            const next = await queryNextPendingScheduledMessage(ctx);
             if (next === undefined || next.dueAt > this.#now()) break;
-            const sender = await this.get(next.senderSessionId);
+            const sender = await this.get(ctx, next.senderSessionId);
             if (sender === undefined) {
                 throw new Error("The sender of a scheduled message no longer exists.");
             }
-            await sender.deliverScheduledMessage(next.id);
+            await sender.deliverScheduledMessage(ctx, next.id);
         }
-        await this.#armScheduledMessageTimer();
+        await this.#armScheduledMessageTimer(ctx);
     }
 
-    async #appendEvent(event: SessionEvent): Promise<void> {
+    async #appendEvent(ctx: Context, event: SessionEvent): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         if (isLiveOnlySessionEvent(event)) {
-            await sessionAdvanceEventCursor(this.#tx(), event.sessionId, event.id, this.#now());
-            await this.#afterTransactionCommit(async () => {
-                await this.#publishLiveStream(event);
-                await this.#publishGlobalEvent(event);
-                await this.#notifySessionEvent(event);
+            await sessionAdvanceEventCursor(ctx, event.sessionId, event.id, this.#now());
+            await this.#afterTransactionCommit(ctx, async (ctx) => {
+                await this.#publishLiveStream(ctx, event);
+                await this.#publishGlobalEvent(ctx, event);
+                await this.#notifySessionEvent(ctx, event);
             });
             return;
         }
@@ -2347,31 +2627,31 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         let globalEntry = this.#precommittedGlobalEvents.get(event.id) ?? undefined;
         this.#precommittedGlobalEvents.delete(event.id);
         let inserted = false;
-        await this.#transaction(async (tx) => {
+        await this.#transaction(ctx, async (ctx) => {
             inserted =
-                (await sessionAppendEvent(tx, event, eventFacts, this.#now())) === "inserted";
+                (await sessionAppendEvent(ctx, event, eventFacts, this.#now())) === "inserted";
             if (!precommitted && inserted && this.#globalEventQueue.durable) {
-                globalEntry = await this.#globalEventQueue.append(event, tx);
+                globalEntry = await this.#globalEventQueue.append(ctx, event);
             }
         });
         // The live stream carries this event whether or not the durable log
         // keeps it, but never before the row it describes is committed.
-        await this.#afterTransactionCommit(() => this.#publishLiveStream(event));
+        await this.#afterTransactionCommit(ctx, (ctx) => this.#publishLiveStream(ctx, event));
         if (this.#globalEventQueue.durable && globalEntry !== undefined) {
             const queue = this.#globalEventQueue;
-            await this.#afterTransactionCommit(() => queue.publish(globalEntry!));
+            await this.#afterTransactionCommit(ctx, () => queue.publish(globalEntry!));
         } else if (
             (inserted || precommitted) &&
             !this.#globalEventQueue.durable &&
             shouldPublishGlobalEvent(event)
         ) {
             const queue = this.#globalEventQueue;
-            await this.#afterTransactionCommit(async () => {
-                const entry = await queue.append(event);
+            await this.#afterTransactionCommit(ctx, async (ctx) => {
+                const entry = await queue.append(ctx, event);
                 if (entry !== undefined) queue.publish(entry);
             });
         }
-        await this.#afterTransactionCommit(() => this.#notifySessionEvent(event));
+        await this.#afterTransactionCommit(ctx, (ctx) => this.#notifySessionEvent(ctx, event));
     }
 
     /**
@@ -2380,34 +2660,34 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * Session events arrive here through `#appendEvent`, which has already done
      * this, so only the rest are forwarded from `#publishGlobalEvent`.
      */
-    async #publishLiveStream(event: GlobalEvent): Promise<void> {
+    async #publishLiveStream(ctx: Context, event: GlobalEvent): Promise<void> {
         const queue = this.liveEvents;
-        await this.#afterTransactionCommit(() => {
+        await this.#afterTransactionCommit(ctx, () => {
             queue.publish(event);
         });
     }
 
-    async #projectEvent(event: GlobalEvent): Promise<void> {
-        await this.#publishGlobalEvent(event);
+    async #projectEvent(ctx: Context, event: GlobalEvent): Promise<void> {
+        await this.#publishGlobalEvent(ctx, event);
         if (event.type !== "workspace_created" && event.type !== "workspace_updated") return;
         if (event.data.workspace.status === "initializing") return;
-        await this.#afterTransactionCommit(async () => {
+        await this.#afterTransactionCommit(ctx, async (ctx) => {
             await this.#workspaceReadyWaiters.changed(event.projectId, event.workspaceId);
-            await this.#workspaceReadinessChanged(event.workspaceId);
+            await this.#workspaceReadinessChanged(ctx, event.workspaceId);
         });
     }
 
-    async #workspaceReadinessChanged(workspaceId: string): Promise<void> {
-        for (const sessionId of await queryWorkspaceQueuedSessionIds(this.#tx(), workspaceId)) {
-            await (await this.get(sessionId))?.workspaceReadinessChanged();
+    async #workspaceReadinessChanged(ctx: Context, workspaceId: string): Promise<void> {
+        for (const sessionId of await queryWorkspaceQueuedSessionIds(ctx, workspaceId)) {
+            await (await this.get(ctx, sessionId))?.workspaceReadinessChanged();
         }
     }
 
-    async #publishGlobalEvent(event: GlobalEvent): Promise<void> {
-        if (!("sessionId" in event)) await this.#publishLiveStream(event);
+    async #publishGlobalEvent(ctx: Context, event: GlobalEvent): Promise<void> {
+        if (!("sessionId" in event)) await this.#publishLiveStream(ctx, event);
         if (isLiveGlobalEvent(event)) {
             const queue = this.#globalEventQueue;
-            await this.#afterTransactionCommit(() => {
+            await this.#afterTransactionCommit(ctx, () => {
                 queue.publishLive(event);
             });
             return;
@@ -2415,23 +2695,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (!shouldPublishGlobalEvent(event)) return;
         const queue = this.#globalEventQueue;
         if (!queue.durable) {
-            await this.#afterTransactionCommit(async () => {
-                const entry = await queue.append(event);
+            await this.#afterTransactionCommit(ctx, async (ctx) => {
+                const entry = await queue.append(ctx, event);
                 if (entry !== undefined) queue.publish(entry);
             });
             return;
         }
-        const entry = await queue.append(event, this.#tx());
+        const entry = await queue.append(ctx, event);
         if (entry !== undefined) {
-            await this.#afterTransactionCommit(() => queue.publish(entry));
+            await this.#afterTransactionCommit(ctx, () => queue.publish(entry));
         }
     }
 
-    async #notifySessionAccess(session: InMemorySession): Promise<void> {
+    async #notifySessionAccess(ctx: Context, session: InMemorySession): Promise<void> {
         // Observers own their own database connections. One that writes while this store still
         // holds the write lock would wait for a transaction that cannot commit until the observer
         // returns, so every notification waits for the commit.
-        await this.#afterTransactionCommit(() => {
+        await this.#afterTransactionCommit(ctx, () => {
             try {
                 this.#onSessionAccess?.(session);
             } catch (error) {
@@ -2441,7 +2721,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
-    async #notifySessionEvent(event: SessionEvent): Promise<void> {
+    async #notifySessionEvent(ctx: Context, event: SessionEvent): Promise<void> {
         try {
             await this.#onSessionEvent?.(event, this.#sessions.get(event.sessionId)?.deref());
         } catch (error) {
@@ -2450,8 +2730,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    async #loadSecretRegistrations(): Promise<void> {
-        const loaded = await querySecretRegistrations(this.#tx());
+    async #loadSecretRegistrations(ctx: Context): Promise<void> {
+        const loaded = await querySecretRegistrations(ctx);
         for (const registration of loaded.registrations) this.#secrets.register(registration);
         for (const variable of loaded.environmentVariables) {
             this.#secrets.rememberEnvironmentVariables(variable.secretId, [variable.name]);
@@ -2459,28 +2739,30 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async #inheritWorkspaceName(
+        ctx: Context,
         metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
     ): Promise<void> {
         const firstSessionId = await queryFirstRootSessionIdForWorkspace(
-            this.#tx(),
+            ctx,
             metadata.projectId,
             metadata.workspaceId,
         );
         if (firstSessionId !== metadata.sessionId) return;
         await this.#projects.inheritWorkspaceName(
+            ctx,
             metadata.projectId,
             metadata.workspaceId,
             metadata.title,
         );
     }
 
-    async #loadSession(sessionId: string): Promise<InMemorySession | undefined> {
-        const loaded = await querySessionRestore(this.#tx(), sessionId);
+    async #loadSession(ctx: Context, sessionId: string): Promise<InMemorySession | undefined> {
+        const loaded = await querySessionRestore(ctx, sessionId);
         if (loaded === undefined) return undefined;
         const ownerInstanceId = validOwnerInstanceId(loaded.restore.ownerInstanceId);
         const folderPath =
             loaded.restore.scope.kind === "folder"
-                ? await this.#folders.folderStoragePath(loaded.restore.scope.folderId)
+                ? await this.#folders.folderStoragePath(ctx, loaded.restore.scope.folderId)
                 : undefined;
         const request =
             folderPath === undefined
@@ -2496,32 +2778,39 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                       const { docker: _docker, ...restore } = loaded.restore;
                       return { ...restore, cwd: folderPath };
                   })();
-        return await InMemorySession.open({
+        const session = await InMemorySession.open(ctx, {
             presence: this.presence,
             agentManager: this.#agentManager,
             workspaceFeatures: this.#workspaceFeatures,
-            workspaceRunReadiness: (target) => workspaceRunReadiness(this.#projects, target),
+            workspaceRunReadiness: (target) =>
+                withWorkerContext("workspace-run-readiness", (workerCtx) =>
+                    workspaceRunReadiness(workerCtx, this.#projects, target),
+                ),
             createEventId: createEventIdFactory(
                 loaded.lastEventId === undefined ? {} : { after: loaded.lastEventId },
             ),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
-            deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
-            events: await querySessionEvents(this.#tx(), sessionId, RESTORED_SESSION_EVENT_LIMIT),
+            deferEventNotification: (eventCtx, notify) =>
+                this.#afterTransactionCommit(eventCtx, notify),
+            events: await querySessionEvents(ctx, sessionId, RESTORED_SESSION_EVENT_LIMIT),
             ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
             modelCatalog: this.#modelCatalogFor(ownerInstanceId),
             now: this.#now,
-            onInitialTitle: async (metadata) => await this.#inheritWorkspaceName(metadata),
+            onInitialTitle: async (metadata) =>
+                withWorkerContext("session-initial-title", (workerCtx) =>
+                    this.#inheritWorkspaceName(workerCtx, metadata),
+                ),
             ...(this.#mcpToolProvider === undefined
                 ? {}
                 : { mcpToolProvider: this.#mcpToolProvider }),
-            onAppendEvent: async (event) => await this.#appendEvent(event),
+            onAppendEvent: (eventCtx, event) => this.#appendEvent(eventCtx, event),
             persistence: this,
             folders: this.#folders,
             slotStores: { entries: this.slots, applets: this.applets },
             ...(loaded.restore.scope.kind === "project" || loaded.restore.scope.kind === "workspace"
                 ? {
                       projectSecretIds: await queryProjectSecretIds(
-                          this.#tx(),
+                          ctx,
                           loaded.restore.scope.projectId,
                       ),
                   }
@@ -2529,13 +2818,25 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ownerInstanceId,
             resolveGitAuthentication: async (projectId, creator) =>
                 await this.#projects.gitAuthentication(projectId, creator),
-            resolveProfile: async (profileId) => await queryRigProfile(this.#tx(), profileId),
+            resolveProfile: async (profileId) =>
+                withWorkerContext("session-profile-resolve", (workerCtx) =>
+                    queryRigProfile(withDatabase(workerCtx, this.#database), profileId),
+                ),
             request,
             secretRegistry: this.#secrets,
             restore,
             scope: loaded.restore.scope,
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });
+        const resolved = session.state();
+        if (
+            resolved.modelId !== restore.modelId ||
+            resolved.providerId !== restore.providerId ||
+            resolved.effort !== restore.effort
+        ) {
+            await this.saveSession(ctx, resolved);
+        }
+        return session;
     }
 
     #cacheSession(session: InMemorySession): void {
@@ -2573,18 +2874,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return session;
     }
 
-    async #loadAgentTree(session: InMemorySession): Promise<void> {
+    async #loadAgentTree(ctx: Context, session: InMemorySession): Promise<void> {
         if (session.isSubagent()) return;
-        for (const sessionId of await queryAgentTreeSessionIds(this.#tx(), session.id)) {
+        for (const sessionId of await queryAgentTreeSessionIds(ctx, session.id)) {
             if (sessionId === session.id) continue;
             if (this.#cachedSession(sessionId) !== undefined) continue;
-            const child = await this.#loadSession(sessionId);
+            const child = await this.#loadSession(ctx, sessionId);
             if (child !== undefined) this.#cacheSession(child);
         }
     }
 
-    async #newLastSessionOrderKey(scope: SessionScope): Promise<string> {
-        const items = await this.#sessionOrderItems(scope);
+    async #newLastSessionOrderKey(ctx: Context, scope: SessionScope): Promise<string> {
+        const items = await this.#sessionOrderItems(ctx, scope);
         return generateKeyBetween(items.at(-1)?.orderKey ?? null, null);
     }
 
@@ -2610,18 +2911,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    async #sessionOrderItems(scope: SessionScope): Promise<{ id: string; orderKey: string }[]> {
-        return await querySessionOrderItems(this.#tx(), scope);
+    async #sessionOrderItems(
+        ctx: Context,
+        scope: SessionScope,
+    ): Promise<{ id: string; orderKey: string }[]> {
+        return await querySessionOrderItems(ctx, scope);
     }
 
     async #transcriptWindowForMessages(
+        ctx: Context,
         sessionId: string,
         messages: readonly PersistedSessionMessage[],
         turnLimit: number,
         complete: boolean,
         noticesTruncated: boolean,
     ): Promise<SessionTranscriptWindow | undefined> {
-        const events = await querySessionTranscriptEvents(this.#tx(), sessionId, messages);
+        const events = await querySessionTranscriptEvents(ctx, sessionId, messages);
         const eventLog = new SessionEventLog({
             events,
             retentionLimit: Number.MAX_SAFE_INTEGER,
@@ -2675,19 +2980,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * closed either way.
      */
     async remoteTerminalDocker(
+        ctx: Context,
         scope: RemoteTerminalScope,
     ): Promise<DockerExecutionConfig | undefined> {
+        ctx = withDatabase(ctx, this.#database);
         try {
-            return (await this.#remoteTerminalContext(scope)).docker;
+            return (await this.#remoteTerminalContext(ctx, scope)).docker;
         } catch {
             return undefined;
         }
     }
 
     async #remoteTerminalContext(
+        ctx: Context,
         scope: RemoteTerminalScope,
     ): Promise<ProjectRemoteTerminalContext> {
-        const project = await this.#projects.getProject(scope.projectId);
+        const project = await this.#projects.getProject(ctx, scope.projectId);
         if (project === undefined) throw new Error("Project not found.");
         if (project.archivedAt !== undefined) {
             throw new Error("Archived projects cannot open terminals.");
@@ -2695,14 +3003,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const workspace =
             scope.workspaceId === undefined
                 ? undefined
-                : await this.#projects.getWorkspace(scope.projectId, scope.workspaceId);
+                : await this.#projects.getWorkspace(ctx, scope.projectId, scope.workspaceId);
         if (scope.workspaceId !== undefined && workspace === undefined) {
             throw new Error("Workspace not found.");
         }
         if (
             workspace !== undefined &&
             (
-                await workspaceRunReadiness(this.#projects, {
+                await workspaceRunReadiness(ctx, this.#projects, {
                     cwd: workspace.path,
                     projectId: workspace.projectId,
                     workspaceId: workspace.id,
@@ -2716,7 +3024,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             await configureSessionRequest(
                 { cwd },
                 this.#defaultDocker,
-                async () => await this.#projects.queryProjectSettings(cwd),
+                async () => await this.#projects.queryProjectSettings(ctx, cwd),
             )
         ).docker;
         return {
@@ -2725,34 +3033,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         };
     }
 
-    async #projectSecrets(projectId: string): Promise<readonly string[]> {
-        return await queryProjectSecretIds(this.#tx(), projectId);
+    async #projectSecrets(ctx: Context, projectId: string): Promise<readonly string[]> {
+        return await queryProjectSecretIds(ctx, projectId);
     }
 
-    async #recoverProjectWorkspaces(): Promise<void> {
+    async #recoverProjectWorkspaces(ctx: Context): Promise<void> {
         // Each step resumes after an await, by which point the store may have been closed. Asking a
         // connection that is already gone would fail for a reason that is not a database fault.
         if (this.#database.closed) return;
-        for (const workspace of await this.#projects.listWorkspaces()) {
+        for (const workspace of await this.#projects.listWorkspaces(ctx)) {
             if (workspace.status !== "archiving") continue;
             if (this.#database.closed) return;
-            await this.#archiveWorkspace(workspace.projectId, workspace.id);
+            await this.#archiveWorkspace(ctx, workspace.projectId, workspace.id);
         }
         if (this.#database.closed) return;
-        await this.#projects.reconcileInitializingWorkspaces();
+        await this.#projects.reconcileInitializingWorkspaces(ctx);
         if (this.#database.closed) return;
         // Presence and Git facts are enrichment, so they run only after archival recovery, which is
         // user-visible correctness.
-        await this.#projects.reconcileGitFacts();
+        await this.#projects.reconcileGitFacts(ctx);
     }
 
-    async #repairInterruptedTitleGenerations(): Promise<void> {
-        await sessionRepairInterruptedTitles(this.#tx(), this.#now());
-    }
-
-    #tx(): TX {
-        this.#assertOpen();
-        return sessionTransactionScope(this.#database);
+    async #repairInterruptedTitleGenerations(ctx: Context): Promise<void> {
+        await sessionRepairInterruptedTitles(ctx, this.#now());
     }
 
     /**
@@ -2766,17 +3069,27 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         throw new Error("The session database is closed.");
     }
 
-    async #transaction<T>(body: (tx: TX) => T | Promise<T>): Promise<T> {
+    async #transaction<T>(ctx: Context, body: (ctx: Context) => T | Promise<T>): Promise<T> {
         this.#assertOpen();
-        return await runSessionTransaction(this.#database, body);
+        if (isSessionDatabaseTransaction(getDatabaseScope(ctx))) return await body(ctx);
+        ctx = withDatabase(ctx, this.#database);
+        return await runSessionTransaction(ctx, body);
     }
 
-    #afterTransactionCommit(callback: () => void | Promise<void>): Promise<void> {
-        return deferSessionTransactionCommit(callback, this.#database);
+    #afterTransactionCommit(
+        ctx: Context,
+        callback: (ctx: Context) => void | Promise<void>,
+    ): Promise<void> {
+        const postCommitCtx = withDatabase(ctx, this.#database);
+        return deferSessionTransactionCommit(() => callback(postCommitCtx), this.#database);
     }
 
-    afterTransactionCommit(callback: () => void | Promise<void>): Promise<void> {
-        return this.#afterTransactionCommit(callback);
+    afterTransactionCommit(
+        ctx: Context,
+        callback: (ctx: Context) => void | Promise<void>,
+    ): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
+        return this.#afterTransactionCommit(ctx, callback);
     }
 }
 

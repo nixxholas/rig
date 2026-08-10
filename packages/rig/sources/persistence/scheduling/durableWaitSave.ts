@@ -1,12 +1,14 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { DurableWait } from "../../scheduling/index.js";
 import { durableWaits } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
-export async function durableWaitSave(tx: DatabaseScope, wait: DurableWait): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+export async function durableWaitSave(ctx: Context, wait: DurableWait): Promise<void> {
+    return await inDatabase(ctx, "rig.sql.scheduling.durableWaitSave", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(durableWaits)
             .values({

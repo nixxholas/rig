@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
 import { claudeTaskCreateTool } from "../../agent/tools/claude/TaskCreate.js";
 import { claudeTaskGetTool } from "../../agent/tools/claude/TaskGet.js";
@@ -9,17 +10,18 @@ import { claudeTaskUpdateTool } from "../../agent/tools/claude/TaskUpdate.js";
 
 describe("Claude task tools", () => {
     it("creates, links, updates, lists, and deletes persistent session tasks", async () => {
+        const ctx = createTestRootContext().named("task-tools-test");
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, {
             cwd: "/tmp/rig-task-tools",
         });
         const harness = createJustBashToolHarness();
         harness.context.tasks = {
-            create: (request) => session.createTask(request),
+            create: (request) => session.createTask(ctx, request),
             get: (taskId) => session.getTask(taskId),
             list: () => session.listTasks(),
-            update: (taskId, request) => session.updateTask(taskId, request),
+            update: (taskId, request) => session.updateTask(ctx, taskId, request),
         };
 
         await harness.runTool(claudeTaskCreateTool, {
@@ -73,29 +75,30 @@ describe("Claude task tools", () => {
             });
         });
 
-        await session.reset();
+        await session.reset(ctx);
 
         expect(session.listTasks()).toEqual([]);
-        expect(session.createTask({ subject: "Fresh task", description: "Start over." }).id).toBe(
-            "1",
-        );
+        expect(
+            session.createTask(ctx, { subject: "Fresh task", description: "Start over." }).id,
+        ).toBe("1");
     });
 
     it("rejects missing and self-referential dependencies without mutating tasks", async () => {
+        const ctx = createTestRootContext().named("task-tools-test");
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, {
             cwd: "/tmp/rig-task-tools",
         });
-        session.createTask({ subject: "One", description: "First task." });
+        session.createTask(ctx, { subject: "One", description: "First task." });
 
-        expect(session.updateTask("1", { addBlockedBy: ["1"] })).toEqual({
+        expect(session.updateTask(ctx, "1", { addBlockedBy: ["1"] })).toEqual({
             error: "A task cannot depend on itself.",
             success: false,
             taskId: "1",
             updatedFields: [],
         });
-        expect(session.updateTask("1", { addBlocks: ["99"] })).toEqual({
+        expect(session.updateTask(ctx, "1", { addBlocks: ["99"] })).toEqual({
             error: "Task 99 was not found.",
             success: false,
             taskId: "1",

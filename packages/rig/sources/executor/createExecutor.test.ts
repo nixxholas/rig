@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { describe, expect, it } from "vitest";
 import type { Executor } from "@slopus/rig-execution";
 
@@ -6,7 +7,7 @@ import { NativeProcessManager } from "../processes/index.js";
 import { createExecutor } from "./createExecutor.js";
 
 function testExecutor(permissionMode: PermissionMode): Executor {
-    const context = createNodeAgentContext({
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
         cwd: "/tmp/rig-executor-server-tools",
         permissionMode,
         processManager: new NativeProcessManager(),
@@ -30,7 +31,7 @@ function testExecutor(permissionMode: PermissionMode): Executor {
 describe("createExecutor", () => {
     it("creates one executor containing every enabled configured provider", () => {
         const result = createExecutor({
-            agentContext: createNodeAgentContext({
+            agentContext: createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: "/tmp/rig-executor-test",
                 processManager: new NativeProcessManager(),
             }),
@@ -73,7 +74,7 @@ describe("createExecutor", () => {
         "routes Bedrock search to the named GPT model in %s",
         (region) => {
             const result = createExecutor({
-                agentContext: createNodeAgentContext({
+                agentContext: createNodeAgentContext(createTestRootContext().named("agent"), {
                     cwd: "/tmp/rig-executor-bedrock-search",
                     processManager: new NativeProcessManager(),
                 }),
@@ -90,7 +91,7 @@ describe("createExecutor", () => {
 
     it("searches with the model named in the configuration file", () => {
         const result = createExecutor({
-            agentContext: createNodeAgentContext({
+            agentContext: createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: "/tmp/rig-executor-bedrock-search",
                 processManager: new NativeProcessManager(),
             }),
@@ -115,7 +116,7 @@ describe("createExecutor", () => {
     // for, which is worse than the tool simply not being offered.
     it("offers no search rather than a substitute when the configured model is unavailable", () => {
         const result = createExecutor({
-            agentContext: createNodeAgentContext({
+            agentContext: createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: "/tmp/rig-executor-bedrock-search",
                 processManager: new NativeProcessManager(),
             }),
@@ -136,7 +137,7 @@ describe("createExecutor", () => {
 
     it("authenticates Bedrock from the configuration file without any environment variable", () => {
         const result = createExecutor({
-            agentContext: createNodeAgentContext({
+            agentContext: createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: "/tmp/rig-executor-bedrock-token",
                 processManager: new NativeProcessManager(),
             }),

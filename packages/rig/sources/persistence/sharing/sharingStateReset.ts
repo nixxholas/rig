@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq, isNotNull, sql } from "drizzle-orm";
 
 import { advanceFolderCatalogRevision } from "../folder/advanceFolderCatalogRevision.js";
@@ -8,7 +10,6 @@ import {
     sharingProfileBinding,
 } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Removes every application record whose meaning depends on Murmur's cryptographic store.
@@ -16,11 +17,9 @@ import type { DatabaseScope } from "../Transaction.js";
  * The selected profile and enabled setting remain. Clearing the bound identity lets the freshly
  * opened Murmur client bind its new identity to that same profile.
  */
-export async function sharingStateReset(
-    tx: DatabaseScope,
-    now: number,
-): Promise<number | undefined> {
-    return await inTx(tx, async (tx) => {
+export async function sharingStateReset(ctx: Context, now: number): Promise<number | undefined> {
+    return await inTx(ctx, "rig.sql.sharing.sharingStateReset", async (ctx) => {
+        const tx = ctx.tx;
         const clearedRoots = (
             await tx
                 .update(folders)
@@ -39,6 +38,6 @@ export async function sharingStateReset(
             .set({ murmurIdentity: null })
             .where(eq(sharingProfileBinding.singletonId, 1))
             .run();
-        return clearedRoots === 0 ? undefined : await advanceFolderCatalogRevision(tx);
+        return clearedRoots === 0 ? undefined : await advanceFolderCatalogRevision(ctx);
     });
 }

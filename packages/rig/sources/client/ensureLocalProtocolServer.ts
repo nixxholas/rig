@@ -243,15 +243,20 @@ async function spawnLocalServer(paths: LocalServerPaths): Promise<void> {
     }
 }
 
-async function waitForReady(client: ProtocolHttpClient): Promise<ReadyHealthResponse> {
+export async function waitForReady(client: ProtocolHttpClient): Promise<ReadyHealthResponse> {
     let deadline = Date.now() + 5_000;
     let observedStarting = false;
+    let recoveredAfterStartingFailure = false;
     while (Date.now() < deadline) {
         let health: Awaited<ReturnType<ProtocolHttpClient["health"]>>;
         try {
             health = await client.health();
         } catch {
             // The socket may not be accepting connections yet.
+            if (observedStarting && !recoveredAfterStartingFailure) {
+                recoveredAfterStartingFailure = true;
+                deadline = Date.now() + 5_000;
+            }
             await delay(50);
             continue;
         }

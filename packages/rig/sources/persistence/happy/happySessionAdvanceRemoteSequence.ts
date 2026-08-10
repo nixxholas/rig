@@ -1,14 +1,16 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq, sql } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import { happySessions } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 
 export async function happySessionAdvanceRemoteSequence(
-    tx: DatabaseScope,
+    ctx: Context,
     input: { now: number; sequence: number; sessionId: string },
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.happy.advance_remote_sequence", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .update(happySessions)
             .set({

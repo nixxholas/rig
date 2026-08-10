@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
@@ -6,14 +8,14 @@ import {
     environmentSecretRegistrationSchema,
     type EnvironmentSecretRegistration,
 } from "../../secrets/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
-export async function querySecretRegistrations(tx: DatabaseScope): Promise<{
+export async function querySecretRegistrations(ctx: Context): Promise<{
     environmentVariables: readonly { name: string; secretId: string }[];
     registrations: readonly EnvironmentSecretRegistration[];
 }> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_secret_registrations", async (ctx) => {
+        const tx = ctx.tx;
         const registrations = (
             await tx.all<Record<string, unknown>>(
                 sql`SELECT id, description, environment_json FROM secret_registrations`,

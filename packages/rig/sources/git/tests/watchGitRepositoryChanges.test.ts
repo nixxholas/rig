@@ -76,6 +76,29 @@ describe("gitWatchTargets", () => {
 });
 
 describe("watchGitRepositoryChanges", { timeout: 30_000 }, () => {
+    it("reconciles once after arming to close the scan-to-watch race", async () => {
+        const repository = await createRepository();
+        await commit(repository, "a.txt", "one\n");
+        const gitDirectory = await git(repository, [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+        ]);
+        let dirty = 0;
+
+        const dispose = watchGitRepositoryChanges({
+            commonDirectory: gitDirectory,
+            gitDirectory,
+            onDirty: () => {
+                dirty += 1;
+            },
+            path: repository,
+        });
+        disposers.push(dispose);
+
+        expect(dirty).toBe(1);
+    });
+
     it("keeps noticing commits after the first one", async () => {
         const repository = await createRepository();
         await commit(repository, "a.txt", "one\n");

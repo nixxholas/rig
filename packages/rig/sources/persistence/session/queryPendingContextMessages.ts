@@ -1,16 +1,18 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { UserMessage } from "../../agent/types.js";
 import type { PersistedPendingContextMessage } from "../../session/InMemorySession.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 
 export async function queryPendingContextMessages(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
 ): Promise<readonly PersistedPendingContextMessage[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_pending_context_messages", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             SELECT pending.anchor_run_id, pending.created_at_ms, pending.position,

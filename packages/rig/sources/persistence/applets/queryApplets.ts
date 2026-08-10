@@ -1,6 +1,7 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     appletAllowedScopesSchema,
@@ -12,8 +13,9 @@ import { readNumber, readOptionalString, readString } from "../session/impl/sqli
 import { appletIconUrl } from "../../applets/readAppletIcon.js";
 
 /** Lists every applet with its complete version history, alphabetically by name. */
-export async function queryApplets(tx: DatabaseScope): Promise<readonly Applet[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryApplets(ctx: Context): Promise<readonly Applet[]> {
+    return await inDatabase(ctx, "rig.sql.applets.query_all", async (ctx) => {
+        const tx = ctx.tx;
         const appletRows = await tx.all<Record<string, unknown>>(
             sql`SELECT * FROM applets ORDER BY name ASC`,
         );

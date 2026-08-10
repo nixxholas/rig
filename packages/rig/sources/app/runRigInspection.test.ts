@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,7 +37,7 @@ describe("runRigInspection", () => {
         const databasePath = join(daemonDirectory, "sessions.sqlite");
         const output: string[] = [];
 
-        const inspection = await runRigInspection({
+        const inspection = await runRigInspection(createTestRootContext(), {
             databasePath,
             json: true,
             log: (line) => output.push(line),
@@ -57,12 +58,12 @@ describe("runRigInspection", () => {
     it("prints initialized data and its stable epoch in human-readable English", async () => {
         const root = testDirectory();
         const databasePath = join(root, "sessions.sqlite");
-        const database = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(database.database, { createDataEpoch: () => "epoch-one" });
-        await database.client.close();
+        const database = await openSessionDatabase(createTestRootContext(), databasePath);
+        await migrateSessionDatabase(database.ctx, { createDataEpoch: () => "epoch-one" });
+        await database.database.close(database.ctx);
         const output: string[] = [];
 
-        await runRigInspection({
+        await runRigInspection(createTestRootContext(), {
             databasePath,
             log: (line) => output.push(line),
             rigVersion: "1.2.3",
@@ -78,25 +79,28 @@ describe("runRigInspection", () => {
     });
 
     it("reports a populated released v16 database as a recognized epoch-less upgrade", async () => {
+        const ctx = createTestRootContext();
         const root = testDirectory();
         const databasePath = join(root, "sessions.sqlite");
-        const store = await PersistentSessionStore.open({ databasePath });
-        await store.create({ cwd: root });
-        await store.close();
-        const database = await openSessionDatabase(databasePath);
+        const store = await PersistentSessionStore.open(ctx, {
+            databasePath,
+        });
+        await store.create(ctx, { cwd: root });
+        await store.close(ctx);
+        const database = await openSessionDatabase(createTestRootContext(), databasePath);
         expect(
             await database.database.get<{ count: number }>(
                 sql.raw("SELECT COUNT(*) AS count FROM sessions"),
             ),
         ).toEqual({ count: 1 });
-        await database.database.run(sql.raw("DROP TABLE rig_data_identity"));
-        await database.database.run(
+        await database.ctx.tx.run(sql.raw("DROP TABLE rig_data_identity"));
+        await database.ctx.tx.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
         );
-        await database.client.close();
+        await database.database.close(database.ctx);
         const output: string[] = [];
 
-        const result = await runRigInspection({
+        const result = await runRigInspection(createTestRootContext(), {
             databasePath,
             log: (line) => output.push(line),
             rigVersion: "1.2.3",

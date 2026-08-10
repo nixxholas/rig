@@ -12,6 +12,7 @@ import type { LiveGlobalEventEntry } from "../../global-event/LiveGlobalEventQue
 import type { ComputePreparationEvent, PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { PluginManager } from "../PluginManager.js";
 import { PluginComputeRegistry } from "../PluginComputeRegistry.js";
 import type { GitHubFetch } from "../fetchBoundedGitHubResource.js";
@@ -31,6 +32,7 @@ const TEST_MODEL = defineModel({
     thinkingLevels: ["off"],
 });
 const cleanup: (() => Promise<void> | void)[] = [];
+const ctx = createTestRootContext().named("plugin-lifecycle-test");
 
 afterEach(async () => {
     for (const dispose of cleanup.splice(0).reverse()) await dispose();
@@ -56,12 +58,12 @@ describe("plugin registration", () => {
     it("starts a plugin as it is installed and stops it as it is uninstalled", async () => {
         const harness = await createHarness();
 
-        await harness.manager.start();
-        expect(await harness.manager.list()).toMatchObject({ failures: [], plugins: [] });
+        await harness.manager.start(ctx);
+        expect(await harness.manager.list(ctx)).toMatchObject({ failures: [], plugins: [] });
         expect(harness.events).toHaveLength(1);
 
         await createPluginSource(join(harness.workspace, "clock"));
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             fs: harness.fs,
             sourceDirectory: join(harness.workspace, "clock"),
         });
@@ -73,7 +75,7 @@ describe("plugin registration", () => {
         });
 
         // The plugin is registered and running by the time install resolves.
-        const afterInstall = await harness.manager.list();
+        const afterInstall = await harness.manager.list(ctx);
         expect(afterInstall.plugins).toEqual([
             {
                 apps: [],
@@ -97,7 +99,9 @@ describe("plugin registration", () => {
         ]);
         expect(lastPlugins(harness.events)).toEqual(afterInstall.plugins);
         const icon = afterInstall.plugins[0]!.icon;
-        await expect(harness.manager.readIcon("clock", icon.generation)).resolves.toMatchObject({
+        await expect(
+            harness.manager.readIcon(ctx, "clock", icon.generation),
+        ).resolves.toMatchObject({
             body: PNG_SIGNATURE,
             ...icon,
         });
@@ -114,21 +118,23 @@ describe("plugin registration", () => {
             .toBuffer();
         await writeFile(join(installed.directory, "icon.png"), replacementIcon);
         const publishedBeforeReplacement = harness.events.length;
-        await expect(harness.manager.readIcon("clock", icon.generation)).rejects.toMatchObject({
-            code: "stale_generation",
-        });
+        await expect(harness.manager.readIcon(ctx, "clock", icon.generation)).rejects.toMatchObject(
+            {
+                code: "stale_generation",
+            },
+        );
         expect(harness.events).toHaveLength(publishedBeforeReplacement + 1);
         const replacementSummary = harness.events.at(-1)!.data.plugins[0]!.icon;
         expect(replacementSummary.generation).not.toBe(icon.generation);
         await expect(
-            harness.manager.readIcon("clock", replacementSummary.generation),
+            harness.manager.readIcon(ctx, "clock", replacementSummary.generation),
         ).resolves.toMatchObject({
             body: replacementIcon,
             ...replacementSummary,
         });
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
-        await harness.store.slots.create({
+        await harness.store.slots.create(ctx, {
             author: { folder: "clock", name: "Clock", type: "plugin" },
             content: { markdown: "Tick", type: "text" },
             description: "Clock status",
@@ -136,7 +142,7 @@ describe("plugin registration", () => {
             scope: "everywhere",
             slot: "status-line",
         });
-        const retainedEntry = await harness.store.slots.create({
+        const retainedEntry = await harness.store.slots.create(ctx, {
             author: { folder: "calendar", name: "Calendar", type: "plugin" },
             content: { markdown: "Today", type: "text" },
             description: "Calendar status",
@@ -144,42 +150,42 @@ describe("plugin registration", () => {
             scope: "everywhere",
             slot: "status-line",
         });
-        expect(await harness.store.slots.list()).toHaveLength(2);
-        await expect(harness.manager.readLog("Clock")).resolves.toMatchObject({
+        expect(await harness.store.slots.list(ctx)).toHaveLength(2);
+        await expect(harness.manager.readLog(ctx, "Clock")).resolves.toMatchObject({
             source: "current_run",
             status: "running",
             text: "[stdout] ready\n",
         });
         harness.setStatus("Clock", "Waiting for the next tick.");
         await vi.waitFor(async () => {
-            await expect(harness.manager.list()).resolves.toMatchObject({
+            await expect(harness.manager.list(ctx)).resolves.toMatchObject({
                 plugins: [{ statusMessage: "Waiting for the next tick." }],
             });
         });
-        const uninstalled = await harness.manager.uninstall({ fs: harness.fs, name: "Clock" });
+        const uninstalled = await harness.manager.uninstall(ctx, { fs: harness.fs, name: "Clock" });
         expect(uninstalled).toEqual({
             dataDirectory: join(harness.dataRoot, "clock"),
             folder: "clock",
             name: "Clock",
         });
-        expect(await harness.manager.list()).toMatchObject({ plugins: [] });
+        expect(await harness.manager.list(ctx)).toMatchObject({ plugins: [] });
         expect(lastPlugins(harness.events)).toEqual([]);
         // The process stops before its code is removed, and is not started again.
         expect(harness.stopped).toEqual(["Clock"]);
         expect(harness.started).toEqual(["Clock"]);
-        expect(await harness.store.slots.list()).toEqual([retainedEntry]);
+        expect(await harness.store.slots.list(ctx)).toEqual([retainedEntry]);
     });
 
     it("announces every registration change on the live event stream", async () => {
         const harness = await createHarness();
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         await createPluginSource(join(harness.workspace, "clock"));
 
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             fs: harness.fs,
             sourceDirectory: join(harness.workspace, "clock"),
         });
-        await harness.manager.uninstall({ fs: harness.fs, name: "Clock" });
+        await harness.manager.uninstall(ctx, { fs: harness.fs, name: "Clock" });
 
         // Startup, install, and uninstall each announce the whole current set.
         expect(harness.events.map((event) => event.data.plugins.length)).toEqual([0, 1, 0]);
@@ -210,9 +216,9 @@ describe("plugin registration", () => {
                   }),
         );
         const harness = await createHarness({ githubFetch });
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
-        const beforeInstall = await harness.manager.discoverRepository({
+        const beforeInstall = await harness.manager.discoverRepository(ctx, {
             repository: "happy-dev/plugins",
         });
         expect(beforeInstall).toMatchObject({
@@ -222,12 +228,12 @@ describe("plugin registration", () => {
         expect(beforeInstall.plugins[0]).not.toHaveProperty("installed");
 
         await createPluginSource(join(harness.workspace, "clock"), "1.0.0");
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             fs: harness.fs,
             sourceDirectory: join(harness.workspace, "clock"),
         });
         await expect(
-            harness.manager.discoverRepository({ repository: "happy-dev/plugins" }),
+            harness.manager.discoverRepository(ctx, { repository: "happy-dev/plugins" }),
         ).resolves.toMatchObject({
             plugins: [
                 {
@@ -239,18 +245,18 @@ describe("plugin registration", () => {
 
         offeredVersion = "1.0.0";
         await expect(
-            harness.manager.discoverRepository({ repository: "happy-dev/plugins" }),
+            harness.manager.discoverRepository(ctx, { repository: "happy-dev/plugins" }),
         ).resolves.toMatchObject({ plugins: [{ availability: "reinstall-available" }] });
         offeredVersion = "0.9.0";
         await expect(
-            harness.manager.discoverRepository({ repository: "happy-dev/plugins" }),
+            harness.manager.discoverRepository(ctx, { repository: "happy-dev/plugins" }),
         ).resolves.toMatchObject({ plugins: [{ availability: "downgrade-available" }] });
     });
 
     it("announces compute provider health and disappearance through plugins_changed", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         await createPluginSource(
             join(harness.workspace, "cloud"),
             undefined,
@@ -258,7 +264,7 @@ describe("plugin registration", () => {
             undefined,
             "cloud",
         );
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             fs: harness.fs,
             sourceDirectory: join(harness.workspace, "cloud"),
         });
@@ -329,7 +335,7 @@ describe("plugin registration", () => {
             "failed",
         ]);
         expect(
-            (await harness.store.globalEventQueue.list())
+            (await harness.store.globalEventQueue.list(ctx))
                 ?.filter((entry) => entry.event.type === "compute_preparation")
                 .map((entry) => entry.event.id),
         ).toEqual(harness.computeEvents.map((event) => event.id));
@@ -352,21 +358,21 @@ describe("plugin registration", () => {
     it("appends ordered compute notices and retries only recipients whose partial delivery failed", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
-        const rejected = await harness.store.create({ cwd: harness.workspace });
+        await harness.manager.start(ctx);
+        const rejected = await harness.store.create(ctx, { cwd: harness.workspace });
         const recordRejectedNotice = rejected.recordSystemNotice.bind(rejected);
         let rejectedWaitingNotice = false;
         const rejectNotice = vi
             .spyOn(rejected, "recordSystemNotice")
-            .mockImplementation((payload, options) => {
+            .mockImplementation((requestCtx, payload, options) => {
                 if (payload.structured?.phase === "waiting_for_sandbox" && !rejectedWaitingNotice) {
                     rejectedWaitingNotice = true;
                     throw new Error("The session is shutting down.");
                 }
-                return recordRejectedNotice(payload, options);
+                return recordRejectedNotice(requestCtx, payload, options);
             });
-        const attributed = await harness.store.create({ cwd: harness.workspace });
-        const unrelated = await harness.store.create({ cwd: harness.dataRoot });
+        const attributed = await harness.store.create(ctx, { cwd: harness.workspace });
+        const unrelated = await harness.store.create(ctx, { cwd: harness.dataRoot });
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -490,7 +496,7 @@ describe("plugin registration", () => {
             ["ready", undefined],
         ]);
         expect(
-            (await harness.store.globalEventQueue.list())?.flatMap((entry) =>
+            (await harness.store.globalEventQueue.list(ctx))?.flatMap((entry) =>
                 entry.event.type === "compute_preparation" ? [entry.event.id] : [],
             ),
         ).toEqual(
@@ -588,8 +594,8 @@ describe("plugin registration", () => {
     it("does not publish or project compute progress that durable storage rejected", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
-        const session = await harness.store.create({ cwd: harness.workspace });
+        await harness.manager.start(ctx);
+        const session = await harness.store.create(ctx, { cwd: harness.workspace });
         let appendAttempts = 0;
         const append = vi.spyOn(harness.store.globalEventQueue, "append").mockImplementation(() => {
             appendAttempts += 1;
@@ -642,12 +648,14 @@ describe("plugin registration", () => {
     it("settles observed compute lifecycle for subagents and newly archived sessions", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
-        const subagent = await harness.store.create({ cwd: harness.workspace });
+        await harness.manager.start(ctx);
+        const subagent = await harness.store.create(ctx, { cwd: harness.workspace });
         vi.spyOn(subagent, "isSubagent").mockReturnValue(true);
-        const archivedDuringPreparation = await harness.store.create({ cwd: harness.workspace });
-        const alreadyArchived = await harness.store.create({ cwd: harness.workspace });
-        await alreadyArchived.setArchived(true);
+        const archivedDuringPreparation = await harness.store.create(ctx, {
+            cwd: harness.workspace,
+        });
+        const alreadyArchived = await harness.store.create(ctx, { cwd: harness.workspace });
+        await alreadyArchived.setArchived(ctx, true);
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -712,7 +720,7 @@ describe("plugin registration", () => {
         expect(noticePhases(archivedDuringPreparation)).toEqual(["preparing_compute"]);
         expect(noticePhases(alreadyArchived)).toEqual([]);
 
-        await archivedDuringPreparation.setArchived(true);
+        await archivedDuringPreparation.setArchived(ctx, true);
         provider.complete(registrationId, startCallId!, {
             error: {
                 code: "invalid_response",
@@ -730,7 +738,7 @@ describe("plugin registration", () => {
         expect(noticePhases(subagent)).toEqual(["preparing_compute", "failed"]);
         expect(noticePhases(alreadyArchived)).toEqual([]);
 
-        const archivedDuringSuccessfulPreparation = await harness.store.create({
+        const archivedDuringSuccessfulPreparation = await harness.store.create(ctx, {
             cwd: harness.workspace,
         });
         startCallId = undefined;
@@ -752,7 +760,7 @@ describe("plugin registration", () => {
         ).rejects.toMatchObject({ code: "preparing_compute" });
         await vi.waitFor(() => expect(startCallId).toBeDefined());
         expect(noticePhases(archivedDuringSuccessfulPreparation)).toEqual(["preparing_compute"]);
-        await archivedDuringSuccessfulPreparation.setArchived(true);
+        await archivedDuringSuccessfulPreparation.setArchived(ctx, true);
         provider.complete(registrationId, startCallId!, {
             operation: "start",
             result: { instanceId: "provider-instance-ready" },
@@ -777,9 +785,11 @@ describe("plugin registration", () => {
     it("does not resume an archived session when unavailable compute recovers", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
-        const active = await harness.store.create({ cwd: harness.workspace });
-        const archivedAfterUnavailable = await harness.store.create({ cwd: harness.workspace });
+        await harness.manager.start(ctx);
+        const active = await harness.store.create(ctx, { cwd: harness.workspace });
+        const archivedAfterUnavailable = await harness.store.create(ctx, {
+            cwd: harness.workspace,
+        });
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -872,7 +882,7 @@ describe("plugin registration", () => {
             });
         }
         await vi.waitFor(() => expect(states(active).at(-1)).toBe("unavailable"));
-        await archivedAfterUnavailable.setArchived(true);
+        await archivedAfterUnavailable.setArchived(ctx, true);
         providerRecovered = true;
 
         await expect(
@@ -892,9 +902,11 @@ describe("plugin registration", () => {
     it("settles an archived unavailable lifecycle when recovery fails terminally", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
-        const active = await harness.store.create({ cwd: harness.workspace });
-        const archivedAfterUnavailable = await harness.store.create({ cwd: harness.workspace });
+        await harness.manager.start(ctx);
+        const active = await harness.store.create(ctx, { cwd: harness.workspace });
+        const archivedAfterUnavailable = await harness.store.create(ctx, {
+            cwd: harness.workspace,
+        });
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -988,7 +1000,7 @@ describe("plugin registration", () => {
             });
         }
         await vi.waitFor(() => expect(states(archivedAfterUnavailable).at(-1)).toBe("unavailable"));
-        await archivedAfterUnavailable.setArchived(true);
+        await archivedAfterUnavailable.setArchived(ctx, true);
         failRecovery = true;
 
         await expect(
@@ -1008,7 +1020,7 @@ describe("plugin registration", () => {
     it("durably closes an in-flight preparation before daemon shutdown", async () => {
         const computeRegistry = new PluginComputeRegistry();
         const harness = await createHarness({ computeRegistry });
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         const provider = computeRegistry.createConnection({
             compute: { name: "cloud" },
             folder: "cloud",
@@ -1040,7 +1052,7 @@ describe("plugin registration", () => {
             ]),
         );
 
-        await harness.manager.close();
+        await harness.manager.close(ctx);
 
         expect(harness.computeEvents.map((event) => event.data.phase)).toEqual([
             "preparing_compute",
@@ -1050,7 +1062,7 @@ describe("plugin registration", () => {
             state: "stopped",
         });
         expect(
-            (await harness.store.globalEventQueue.list())
+            (await harness.store.globalEventQueue.list(ctx))
                 ?.filter((entry) => entry.event.type === "compute_preparation")
                 .map((entry) => entry.event.id),
         ).toEqual(harness.computeEvents.map((event) => event.id));
@@ -1063,24 +1075,24 @@ describe("plugin registration", () => {
             listImages: async () => Promise.reject(new Error("Docker stopped responding.")),
         } as unknown as Dockerode;
         const harness = await createHarness({ docker });
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         const source = join(harness.workspace, "docker-clock");
         await createPluginSource(source, undefined, "Docker Clock", {
             image: "example.invalid/docker-clock:1.0.0",
         });
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             fs: harness.fs,
             sourceDirectory: source,
         });
 
         expect(harness.events.at(-1)?.data.installation).toEqual(installed);
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [{ name: "Docker Clock", status: "running" }],
         });
 
         await expect(
-            harness.manager.uninstall({ fs: harness.fs, name: "Docker Clock" }),
+            harness.manager.uninstall(ctx, { fs: harness.fs, name: "Docker Clock" }),
         ).resolves.toMatchObject({ folder: "docker-clock", name: "Docker Clock" });
         await expect(access(installed.directory)).rejects.toMatchObject({ code: "ENOENT" });
         expect(lastPlugins(harness.events)).toEqual([]);
@@ -1088,57 +1100,57 @@ describe("plugin registration", () => {
 
     it("announces an upgrade classification with the new catalog version", async () => {
         const harness = await createHarness();
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         const source = join(harness.workspace, "clock");
         await createPluginSource(source, "1.0.0");
-        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        await harness.manager.install(ctx, { fs: harness.fs, sourceDirectory: source });
         await createPluginSource(source, "2.0.0");
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             fs: harness.fs,
             sourceDirectory: source,
         });
 
         expect(installed).toMatchObject({ classification: "upgrade", version: "2.0.0" });
         expect(harness.events.at(-1)?.data.installation).toEqual(installed);
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [{ version: "2.0.0" }],
         });
     });
 
     it("keeps a running plugin when a replacement has no main entry point", async () => {
         const harness = await createHarness();
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         const source = join(harness.workspace, "clock");
         await createPluginSource(source);
-        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        await harness.manager.install(ctx, { fs: harness.fs, sourceDirectory: source });
 
         await rm(join(source, "index.ts"));
         await expect(
-            harness.manager.install({ fs: harness.fs, sourceDirectory: source }),
+            harness.manager.install(ctx, { fs: harness.fs, sourceDirectory: source }),
         ).rejects.toThrow('The plugin main entry point "index.ts" does not exist.');
 
-        const listed = await harness.manager.list();
+        const listed = await harness.manager.list(ctx);
         expect(listed.plugins).toMatchObject([{ name: "Clock", status: "running" }]);
         expect(harness.stopped).toEqual([]);
     });
 
     it("refuses to uninstall a plugin that is not installed", async () => {
         const harness = await createHarness();
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
-        await expect(harness.manager.uninstall({ fs: harness.fs, name: "Clock" })).rejects.toThrow(
-            "No plugins are installed.",
-        );
+        await expect(
+            harness.manager.uninstall(ctx, { fs: harness.fs, name: "Clock" }),
+        ).rejects.toThrow("No plugins are installed.");
     });
 
     it("stops changing plugins once Rig is shutting down", async () => {
         const harness = await createHarness();
-        await harness.manager.start();
-        await harness.manager.close();
+        await harness.manager.start(ctx);
+        await harness.manager.close(ctx);
 
         await expect(
-            harness.manager.install({ fs: harness.fs, sourceDirectory: harness.workspace }),
+            harness.manager.install(ctx, { fs: harness.fs, sourceDirectory: harness.workspace }),
         ).rejects.toThrow("shutting down");
     });
 
@@ -1151,9 +1163,9 @@ describe("plugin registration", () => {
         });
         await createPluginSource(join(harness.manager.directory, "broken"));
 
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
-        expect(await harness.manager.list()).toMatchObject({
+        expect(await harness.manager.list(ctx)).toMatchObject({
             plugins: [
                 {
                     error: expect.stringContaining("The plugin runtime could not start."),
@@ -1162,7 +1174,7 @@ describe("plugin registration", () => {
                 },
             ],
         });
-        const log = await harness.manager.readLog("Broken");
+        const log = await harness.manager.readLog(ctx, "Broken");
         expect(log).toMatchObject({
             source: "error",
             status: "failed",
@@ -1178,12 +1190,12 @@ describe("plugin registration", () => {
         });
         await createPluginSource(join(harness.manager.directory, "broken"));
 
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
-        expect(await harness.manager.list()).toMatchObject({
+        expect(await harness.manager.list(ctx)).toMatchObject({
             plugins: [{ error: "The sandbox did not start.", status: "failed" }],
         });
-        await expect(harness.manager.readLog("Broken")).resolves.toMatchObject({
+        await expect(harness.manager.readLog(ctx, "Broken")).resolves.toMatchObject({
             error: "The sandbox did not start.",
             source: "error",
             status: "failed",
@@ -1202,14 +1214,14 @@ describe("plugin registration", () => {
             createPluginSource(join(harness.manager.directory, "slow"), undefined, "Slow"),
         ]);
 
-        const starting = harness.manager.start();
+        const starting = harness.manager.start(ctx);
         await vi.waitFor(() => {
             expect(harness.started).toHaveLength(2);
             expect(harness.started).toEqual(expect.arrayContaining(["Fast", "Slow"]));
         });
         await starting;
 
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [
                 { name: "Fast", status: "running" },
                 {
@@ -1230,9 +1242,9 @@ describe("plugin registration", () => {
         });
         await createPluginSource(join(harness.manager.directory, "slow"));
 
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [
                 {
                     error: "The plugin did not report ready within 25 milliseconds.",
@@ -1251,12 +1263,12 @@ describe("plugin registration", () => {
         });
         await createPluginSource(join(harness.manager.directory, "clock"));
 
-        const starting = harness.manager.start();
+        const starting = harness.manager.start(ctx);
         await vi.waitFor(() => expect(harness.started).toEqual(["Clock"]));
-        await harness.manager.close();
+        await harness.manager.close(ctx);
         await starting;
 
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [{ name: "Clock", status: "stopped" }],
         });
         expect(harness.stopped).toEqual(["Clock"]);
@@ -1265,7 +1277,7 @@ describe("plugin registration", () => {
     it("fails and republishes a running generation whose MCP registration retires", async () => {
         const harness = await createHarness();
         await createPluginSource(join(harness.manager.directory, "clock"));
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         expect(harness.events).toHaveLength(1);
 
         harness.retireRuntime("Clock", {
@@ -1274,7 +1286,7 @@ describe("plugin registration", () => {
         });
 
         await vi.waitFor(async () => {
-            await expect(harness.manager.list()).resolves.toMatchObject({
+            await expect(harness.manager.list(ctx)).resolves.toMatchObject({
                 plugins: [
                     {
                         error: "The plugin MCP connection closed.",
@@ -1294,7 +1306,7 @@ describe("plugin registration", () => {
     it("reports a clean process exit as stopped even when its MCP stream closes first", async () => {
         const harness = await createHarness();
         await createPluginSource(join(harness.manager.directory, "clock"));
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
         harness.retireRuntime("Clock", {
             reason: "The plugin MCP connection closed.",
@@ -1303,7 +1315,7 @@ describe("plugin registration", () => {
         harness.exitRuntime("Clock");
 
         await vi.waitFor(async () => {
-            await expect(harness.manager.list()).resolves.toMatchObject({
+            await expect(harness.manager.list(ctx)).resolves.toMatchObject({
                 plugins: [{ name: "Clock", status: "stopped" }],
             });
         });
@@ -1313,7 +1325,7 @@ describe("plugin registration", () => {
     it("stops a running plugin that intentionally unregisters its MCP server", async () => {
         const harness = await createHarness();
         await createPluginSource(join(harness.manager.directory, "clock"));
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
         harness.retireRuntime("Clock", {
             reason: "The plugin unregistered this MCP server.",
@@ -1321,7 +1333,7 @@ describe("plugin registration", () => {
         });
 
         await vi.waitFor(async () => {
-            await expect(harness.manager.list()).resolves.toMatchObject({
+            await expect(harness.manager.list(ctx)).resolves.toMatchObject({
                 plugins: [{ name: "Clock", status: "stopped" }],
             });
         });
@@ -1339,16 +1351,16 @@ describe("plugin registration", () => {
             },
         });
         await createPluginSource(join(harness.manager.directory, "clock"), "1.0.0");
-        const starting = harness.manager.start();
+        const starting = harness.manager.start(ctx);
         await firstStart.promise;
         const source = join(harness.workspace, "clock");
         await createPluginSource(source, "2.0.0");
 
-        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        await harness.manager.install(ctx, { fs: harness.fs, sourceDirectory: source });
         releaseFirstStart.resolve();
         await starting;
 
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [{ name: "Clock", status: "running", version: "2.0.0" }],
         });
         expect(harness.started).toEqual(["Clock", "Clock"]);
@@ -1368,16 +1380,16 @@ describe("plugin registration", () => {
                 attempt === 1 ? new Error("The stale generation failed.") : undefined,
         });
         await createPluginSource(join(harness.manager.directory, "clock"), "1.0.0");
-        const starting = harness.manager.start();
+        const starting = harness.manager.start(ctx);
         await firstStart.promise;
         const source = join(harness.workspace, "clock");
         await createPluginSource(source, "2.0.0");
 
-        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        await harness.manager.install(ctx, { fs: harness.fs, sourceDirectory: source });
         releaseFirstStart.resolve();
         await starting;
 
-        const listed = await harness.manager.list();
+        const listed = await harness.manager.list(ctx);
         expect(listed).toMatchObject({
             plugins: [{ status: "running", version: "2.0.0" }],
         });
@@ -1387,7 +1399,7 @@ describe("plugin registration", () => {
     it("coalesces rapid status updates into one bounded catalog publication", async () => {
         const harness = await createHarness();
         await createPluginSource(join(harness.manager.directory, "clock"));
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         const publishedBeforeStatus = harness.events.length;
 
         harness.setStatus("Clock", "First.");
@@ -1437,7 +1449,7 @@ async function createHarness(
     const dataRoot = join(root, "data");
     await mkdir(workspace, { recursive: true });
 
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(ctx, {
         modelCatalog: {
             defaultModelId: TEST_MODEL.id,
             defaultProviderId: "test",
@@ -1445,7 +1457,7 @@ async function createHarness(
             providers: [{ models: [TEST_MODEL], providerId: "test" }],
         },
     });
-    cleanup.push(() => store.close());
+    cleanup.push(() => store.close(ctx));
 
     const computeEvents: ComputePreparationEvent[] = [];
     const daemonLogs: string[] = [];
@@ -1536,7 +1548,7 @@ async function createHarness(
         },
         store,
     });
-    cleanup.push(() => manager.close());
+    cleanup.push(() => manager.close(ctx));
 
     return {
         computeEvents,

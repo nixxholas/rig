@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq, sql } from "drizzle-orm";
 
 import type {
@@ -8,13 +10,12 @@ import type {
 import { MAX_SHARED_FOLDER_NODES } from "../../protocol/index.js";
 import { folderShareNodes, folderShareOutbox, folderShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderShare } from "./queryFolderShares.js";
 
 const MAX_PENDING_FOLDER_SHARE_OPERATIONS = 10_000;
 
 export async function folderShareQueueState(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         groupId: string;
         force?: boolean;
@@ -24,8 +25,9 @@ export async function folderShareQueueState(
         state: SharedFolderState;
     },
 ): Promise<FolderSharePacket | undefined> {
-    return await inTx(tx, async (tx) => {
-        const share = await queryFolderShare(tx, input.groupId);
+    return await inTx(ctx, "rig.sql.folderShare.folderShareQueueState", async (ctx) => {
+        const tx = ctx.tx;
+        const share = await queryFolderShare(ctx, input.groupId);
         if (share === undefined) return undefined;
         const operations = diffState(share.state, input.state);
         if (operations.length === 0 && input.force === true) {

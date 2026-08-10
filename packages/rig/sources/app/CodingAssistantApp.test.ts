@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
@@ -60,6 +61,7 @@ describe("CodingAssistantApp", () => {
             timedOut: false,
         }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -113,6 +115,7 @@ describe("CodingAssistantApp", () => {
             throw new Error("The daemon connection closed.");
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -162,6 +165,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -266,6 +270,7 @@ describe("CodingAssistantApp", () => {
         }>();
         const send = vi.fn(() => run.promise);
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -290,6 +295,7 @@ describe("CodingAssistantApp", () => {
 
         await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
         expect(send).toHaveBeenCalledWith(
+            expect.anything(),
             "Keep the composer steady",
             expect.objectContaining({ clientSubmissionId: expect.any(String) }),
         );
@@ -343,6 +349,7 @@ describe("CodingAssistantApp", () => {
             tuiInspectorUrl: "ws://127.0.0.1:42001/tui",
         }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -401,6 +408,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -442,6 +450,7 @@ describe("CodingAssistantApp", () => {
         const onUserActivity = vi.fn();
         const onTerminalFocusChange = vi.fn();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onUserActivity,
@@ -528,6 +537,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -616,6 +626,7 @@ describe("CodingAssistantApp", () => {
             { abort },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             now: () => 100,
@@ -683,6 +694,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const abort = vi.fn(async () => ({ aborted: true }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -763,6 +775,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const abort = vi.fn(async () => ({ aborted: true }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -810,6 +823,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const abort = vi.fn(async () => ({ aborted: true }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -873,6 +887,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const abort = vi.fn(async () => ({ aborted: true }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -936,6 +951,7 @@ describe("CodingAssistantApp", () => {
             { abort },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             now: () => 100,
@@ -998,6 +1014,7 @@ describe("CodingAssistantApp", () => {
             { abort, send, steer },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -1039,6 +1056,7 @@ describe("CodingAssistantApp", () => {
 
         await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
         expect(send).toHaveBeenCalledWith(
+            expect.anything(),
             "Retain this immediate follow-up",
             expect.objectContaining({ displayText: "Retain this immediate follow-up" }),
         );
@@ -1087,6 +1105,7 @@ describe("CodingAssistantApp", () => {
             { abort, send, steer },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -1134,7 +1153,7 @@ describe("CodingAssistantApp", () => {
         });
 
         await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
-        expect(send.mock.calls[1]?.[0]).toBe("Retain this immediate follow-up");
+        expect(send.mock.calls[1]?.[1]).toBe("Retain this immediate follow-up");
         expect(steer).not.toHaveBeenCalled();
         expect(stripAnsi(app.render(100).join("\n")).split("Session interrupted").length - 1).toBe(
             1,
@@ -1158,6 +1177,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const abort = vi.fn(async () => ({ aborted: true }));
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -1238,6 +1258,7 @@ describe("CodingAssistantApp", () => {
                 { send },
             );
             const app = new CodingAssistantApp({
+                ctx: createTestRootContext().named("app"),
                 agent,
                 cwd: harness.context.fs.cwd,
                 processManager: new NativeProcessManager(),
@@ -1345,6 +1366,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1382,6 +1404,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1417,6 +1440,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1484,6 +1508,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1533,6 +1558,7 @@ describe("CodingAssistantApp", () => {
             { abort },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -1563,6 +1589,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const tui = fakeTui();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1610,6 +1637,7 @@ describe("CodingAssistantApp", () => {
         const oldPrimary = "\x1b[38;5;202m";
         const oldSecondary = "\x1b[38;5;203m";
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1679,6 +1707,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const tui = fakeTui({ rows: 12 });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1762,6 +1791,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -1829,6 +1859,7 @@ describe("CodingAssistantApp", () => {
             type: "message_submitted",
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             initialSessionEvents: [submitted(first, "event-1"), submitted(second, "event-2")],
@@ -1869,6 +1900,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const codexApp = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: codexAgent,
             cwd: codexHarness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -1901,6 +1933,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const claudeApp = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: claudeAgent,
             cwd: claudeHarness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -1928,6 +1961,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             activeAgentLabel: "Audit startup state [subagent]",
             agent: new Agent({
                 provider,
@@ -1945,6 +1979,7 @@ describe("CodingAssistantApp", () => {
         );
 
         const constrained = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             activeAgentLabel: `${"Very long delegated identity ".repeat(20)}\n\x1b[31munsafe`,
             agent: new Agent({
                 context: harness.context,
@@ -1989,6 +2024,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -2033,6 +2069,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onDefaultModelChange: (preference) => {
@@ -2102,6 +2139,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onDefaultModelChange: (preference) => {
@@ -2188,6 +2226,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: firstModel.id,
@@ -2289,6 +2328,7 @@ describe("CodingAssistantApp", () => {
             session,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -2391,6 +2431,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: "/workspace",
             onDefaultModelChange: (preference) => {
@@ -2504,6 +2545,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: "/workspace",
             onDefaultModelChange: (preference) => {
@@ -2571,6 +2613,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             modelLocked: true,
@@ -2625,6 +2668,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onDefaultModelChange: (preference) => {
@@ -2686,6 +2730,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onDefaultModelChange: (preference) => {
@@ -2764,6 +2809,7 @@ describe("CodingAssistantApp", () => {
             releaseFirstWrite = resolve;
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onDefaultModelChange: (preference) =>
@@ -2853,6 +2899,7 @@ describe("CodingAssistantApp", () => {
             serviceTier: "fast" | null;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: "/workspace",
             onDefaultModelChange: (preference) => {
@@ -2900,6 +2947,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -2937,6 +2985,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -2980,6 +3029,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -3029,6 +3079,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -3065,6 +3116,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -3125,6 +3177,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -3312,6 +3365,7 @@ describe("CodingAssistantApp", () => {
             },
         };
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -3343,8 +3397,8 @@ describe("CodingAssistantApp", () => {
         expect(completeEntry).toContain("COMPLETE_LOG_OUTPUT");
         expect(completeEntry).not.toContain("[Earlier plugin output omitted.]");
         expect(complete.match(/\[Earlier plugin output omitted\.\]/gu)).toHaveLength(1);
-        expect(readLog).toHaveBeenNthCalledWith(1, "Truncated plugin");
-        expect(readLog).toHaveBeenNthCalledWith(2, "Complete plugin");
+        expect(readLog).toHaveBeenNthCalledWith(1, expect.anything(), "Truncated plugin");
+        expect(readLog).toHaveBeenNthCalledWith(2, expect.anything(), "Complete plugin");
     });
 
     it("shows persisted task progress from the tasks command", () => {
@@ -3363,6 +3417,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -3415,6 +3470,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -3545,6 +3601,7 @@ describe("CodingAssistantApp", () => {
             type: "agent_message",
         };
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 context: harness.context,
                 modelId: model.id,
@@ -3634,6 +3691,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -3729,6 +3787,7 @@ describe("CodingAssistantApp", () => {
             setGoal: { value: setGoal },
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -3783,6 +3842,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -3853,6 +3913,7 @@ describe("CodingAssistantApp", () => {
             });
             const tui = fakeTui();
             const app = new CodingAssistantApp({
+                ctx: createTestRootContext().named("app"),
                 agent,
                 cwd: harness.context.fs.cwd,
                 processManager: new NativeProcessManager(),
@@ -3923,6 +3984,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -3982,6 +4044,7 @@ describe("CodingAssistantApp", () => {
             },
         ]);
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4054,6 +4117,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4109,6 +4173,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4123,7 +4188,7 @@ describe("CodingAssistantApp", () => {
         const rendered = stripAnsi(app.render(100).join("\n"));
         expect(rendered).toContain("/skill:release-check");
         expect(rendered).toContain("Check releases.");
-        expect(loadSkills).toHaveBeenCalledWith(harness.context.fs);
+        expect(loadSkills).toHaveBeenCalledWith(expect.anything(), harness.context.fs);
     });
 
     it("limits visible skill slash command autocomplete rows", async () => {
@@ -4162,6 +4227,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4227,6 +4293,7 @@ describe("CodingAssistantApp", () => {
         });
         const tui = fakeTui({ rows: 10, columns: 48 });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4293,6 +4360,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4356,6 +4424,7 @@ describe("CodingAssistantApp", () => {
         });
         const tui = fakeTui({ rows: 8 });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4416,6 +4485,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4499,6 +4569,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4580,6 +4651,7 @@ describe("CodingAssistantApp", () => {
             },
         ];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             initialSessionEvents,
@@ -4614,6 +4686,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4662,6 +4735,7 @@ describe("CodingAssistantApp", () => {
         });
         const tui = fakeTui();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4705,6 +4779,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4752,6 +4827,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -4806,6 +4882,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -4858,6 +4935,7 @@ describe("CodingAssistantApp", () => {
             });
             const tui = fakeTui();
             const app = new CodingAssistantApp({
+                ctx: createTestRootContext().named("app"),
                 agent,
                 cwd: harness.context.fs.cwd,
                 processManager: new NativeProcessManager(),
@@ -4901,6 +4979,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4937,6 +5016,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -4970,6 +5050,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5007,6 +5088,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5053,6 +5135,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -5134,6 +5217,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5180,6 +5264,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -5215,6 +5300,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -5256,6 +5342,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5291,6 +5378,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5333,6 +5421,7 @@ describe("CodingAssistantApp", () => {
         const tui = fakeTui();
         const processManager = new SlowKillProcessManager();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager,
@@ -5380,6 +5469,7 @@ describe("CodingAssistantApp", () => {
         });
         const tui = fakeTui();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5415,6 +5505,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5462,6 +5553,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5523,6 +5615,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5627,6 +5720,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5684,6 +5778,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -5710,6 +5805,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         let now = 1_000;
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -5787,6 +5883,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         let now = 1_000;
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -5868,6 +5965,7 @@ describe("CodingAssistantApp", () => {
             let now = 1_000;
             const tui = fakeTui();
             const app = new CodingAssistantApp({
+                ctx: createTestRootContext().named("app"),
                 agent: new Agent({
                     provider,
                     modelId: model.id,
@@ -5943,6 +6041,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         let now = 1_000;
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -6122,6 +6221,7 @@ describe("CodingAssistantApp", () => {
             },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             now: () => 1_000,
@@ -6176,6 +6276,7 @@ describe("CodingAssistantApp", () => {
             { getUsage: vi.fn(() => pendingUsage.promise) },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -6227,6 +6328,7 @@ describe("CodingAssistantApp", () => {
             });
             const tui = fakeTui();
             const app = new CodingAssistantApp({
+                ctx: createTestRootContext().named("app"),
                 agent,
                 cwd: harness.context.fs.cwd,
                 processManager: new NativeProcessManager(),
@@ -6278,6 +6380,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             idFactory: createDeterministicIds(),
@@ -6319,6 +6422,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -6452,6 +6556,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -6524,6 +6629,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -6600,6 +6706,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -6651,6 +6758,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -6734,6 +6842,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 context: harness.context,
                 modelId: model.id,
@@ -6817,6 +6926,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -7016,6 +7126,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 context: harness.context,
                 modelId: model.id,
@@ -7134,6 +7245,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -7360,6 +7472,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -7404,6 +7517,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -7710,6 +7824,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -7758,6 +7873,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -7822,6 +7938,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -7881,6 +7998,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -7949,6 +8067,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -8010,6 +8129,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -8094,6 +8214,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -8153,6 +8274,7 @@ describe("CodingAssistantApp", () => {
         });
         const harness = createJustBashToolHarness();
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -8221,6 +8343,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -8268,6 +8391,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             now: () => now,
@@ -8313,6 +8437,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         let now = 10_000;
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -8434,6 +8559,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         let now = 10_000;
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -8595,6 +8721,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -8640,6 +8767,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -8708,6 +8836,7 @@ describe("CodingAssistantApp", () => {
             showUsage: boolean;
         }> = [];
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             onSettingsChange: (settings) => {
@@ -8825,6 +8954,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -8873,6 +9003,7 @@ describe("CodingAssistantApp", () => {
         });
         const respondUserInput = vi.fn(async () => undefined);
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -8955,6 +9086,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const respondUserInput = vi.fn(async () => undefined);
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -9035,6 +9167,7 @@ describe("CodingAssistantApp", () => {
             ],
         };
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -9099,6 +9232,7 @@ describe("CodingAssistantApp", () => {
         const harness = createJustBashToolHarness();
         const respondUserInput = vi.fn(async () => undefined);
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -9162,6 +9296,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             processManager: new NativeProcessManager(),
@@ -9207,6 +9342,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent,
             cwd: harness.context.fs.cwd,
             idFactory: createDeterministicIds(),
@@ -9263,6 +9399,7 @@ describe("CodingAssistantApp", () => {
         const detachSecret = vi.fn(async () => {});
         const unregisterSecret = vi.fn(async () => true);
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -9370,6 +9507,7 @@ describe("CodingAssistantApp", () => {
             },
         );
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: new Agent({
                 provider,
                 modelId: model.id,
@@ -9505,6 +9643,7 @@ describe("CodingAssistantApp", () => {
             },
         });
         const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
             agent: Object.assign(
                 new Agent({
                     provider,
@@ -9569,6 +9708,7 @@ function createDraftApp(options: {
     });
     const harness = createJustBashToolHarness();
     return new CodingAssistantApp({
+        ctx: createTestRootContext().named("app"),
         agent: Object.assign(
             new Agent({
                 provider,

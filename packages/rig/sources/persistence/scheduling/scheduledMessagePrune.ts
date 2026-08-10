@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 
 import { scheduledMessages } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function scheduledMessagePrune(
-    tx: DatabaseScope,
+    ctx: Context,
     senderSessionId: string,
     retain: number,
 ): Promise<readonly string[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.scheduling.scheduledMessagePrune", async (ctx) => {
+        const tx = ctx.tx;
         const prunable = inArray(scheduledMessages.status, ["cancelled", "delivered"]);
         const removed = (
             await tx

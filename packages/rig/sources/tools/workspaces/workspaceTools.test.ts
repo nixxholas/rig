@@ -24,7 +24,7 @@ describe("workspace tools", () => {
             createWorkspaceTool.execute(
                 { base_ref: "main", name: "Investigate parser" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).resolves.toEqual(workspace());
         expect(create).toHaveBeenCalledWith({
@@ -38,7 +38,9 @@ describe("workspace tools", () => {
         const create = vi.fn(async () => workspace());
         harness.context.workspaces = workspaceContext({ create });
 
-        await createWorkspaceTool.execute({ name: "Investigate parser" }, harness.context, {});
+        await createWorkspaceTool.execute({ name: "Investigate parser" }, harness.context, {
+            ctx: harness.ctx,
+        });
 
         expect(create).toHaveBeenCalledWith({ name: "Investigate parser" });
     });
@@ -65,7 +67,7 @@ describe("workspace tools", () => {
                 workspace_id: "workspace-1",
             },
             harness.context,
-            { toolCallId: "tool-1" },
+            { ctx: harness.ctx, toolCallId: "tool-1" },
         );
 
         expect(result).toEqual({
@@ -115,6 +117,7 @@ describe("workspace tools", () => {
             },
             harness.context,
             {
+                ctx: harness.ctx,
                 messages: [
                     {
                         blocks: [{ type: "text", text: "Prior task" }],
@@ -156,7 +159,7 @@ describe("workspace tools", () => {
             archiveWorkspaceTool.execute(
                 { workspace_id: "someone-elses-workspace" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).toThrow("only available in a primary session");
     });
@@ -167,12 +170,16 @@ describe("workspace tools", () => {
         const listSessions = vi.fn(async () => [session()]);
         harness.context.workspaces = workspaceContext({ listSessions, listWorkspaces });
 
-        await expect(listWorkspacesTool.execute({}, harness.context, {})).resolves.toEqual({
+        await expect(
+            listWorkspacesTool.execute({}, harness.context, { ctx: harness.ctx }),
+        ).resolves.toEqual({
             workspaces: [workspace()],
         });
         expect(listWorkspaces).toHaveBeenCalledWith(undefined);
         await expect(
-            listWorkspaceSessionsTool.execute({ workspace_id: "workspace-1" }, harness.context, {}),
+            listWorkspaceSessionsTool.execute({ workspace_id: "workspace-1" }, harness.context, {
+                ctx: harness.ctx,
+            }),
         ).resolves.toEqual({ sessions: [session()] });
         expect(listSessions).toHaveBeenCalledWith({ workspaceId: "workspace-1" });
     });
@@ -181,9 +188,9 @@ describe("workspace tools", () => {
         const harness = createJustBashToolHarness();
         harness.context.workspaces = workspaceContext({});
 
-        await expect(listProjectsTool.execute({}, harness.context, {})).rejects.toThrow(
-            "features.cross_workspace",
-        );
+        await expect(
+            listProjectsTool.execute({}, harness.context, { ctx: harness.ctx }),
+        ).rejects.toThrow("features.cross_workspace");
     });
 
     it("adds projects through the reviewed cross-workspace action", async () => {
@@ -197,7 +204,9 @@ describe("workspace tools", () => {
         harness.context.workspaces = workspaceContext({ addProject, crossWorkspace: true });
 
         await expect(
-            addProjectTool.execute({ path: "/projects/another" }, harness.context, {}),
+            addProjectTool.execute({ path: "/projects/another" }, harness.context, {
+                ctx: harness.ctx,
+            }),
         ).resolves.toMatchObject({ id: "project-2", path: "/projects/another" });
         expect(addProject).toHaveBeenCalledWith("/projects/another");
         expect(addProjectTool.requiresAutoOrFullAccess).toBe(true);
@@ -233,7 +242,7 @@ describe("workspace tools", () => {
                     workspace_id: "workspace-2",
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).resolves.toMatchObject({ agentId: "agent-2", projectId: "project-1" });
         expect(delegate).toHaveBeenCalledWith({
@@ -269,7 +278,7 @@ describe("workspace tools", () => {
                     workspace_id: "workspace-2",
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).resolves.toMatchObject({ agentId: "agent-2", sessionId: "session-2" });
         expect(delegate).toHaveBeenCalledWith({
@@ -309,11 +318,9 @@ describe("workspace tools", () => {
         harness.context.workspaces = workspaceContext({ transfer });
 
         await expect(
-            transferSessionTool.execute(
-                { target_workspace_id: "workspace-2" },
-                harness.context,
-                {},
-            ),
+            transferSessionTool.execute({ target_workspace_id: "workspace-2" }, harness.context, {
+                ctx: harness.ctx,
+            }),
         ).resolves.toEqual(result);
         expect(transfer).toHaveBeenCalledWith("workspace-2");
         expect(transferSessionTool.description).toContain(".happyignore");

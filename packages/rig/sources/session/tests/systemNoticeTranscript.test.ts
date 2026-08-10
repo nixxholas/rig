@@ -1,5 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { Type } from "@sinclair/typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext, type AnyDefinedTool } from "../../agent/index.js";
 import { defineTool } from "../../agent/types.js";
@@ -20,10 +21,11 @@ import {
 import { InMemorySession } from "../InMemorySession.js";
 import { InMemorySessionStore } from "../InMemorySessionStore.js";
 
+const ctx = createTestRootContext();
 const stores: InMemorySessionStore[] = [];
 
 afterEach(async () => {
-    await Promise.all(stores.splice(0).map((store) => store.close()));
+    await Promise.all(stores.splice(0).map((store) => store.close(ctx)));
 });
 
 function computeNotice(phase: "preparing_compute" | "ready"): SystemNoticePayload {
@@ -43,15 +45,15 @@ function computeNotice(phase: "preparing_compute" | "ready"): SystemNoticePayloa
 
 describe("standalone system notice transcript rows", () => {
     it("keeps an idle notice before the first turn in the oldest in-memory window", async () => {
-        const store = await InMemorySessionStore.open();
+        const store = await InMemorySessionStore.open(ctx);
         stores.push(store);
-        const session = await store.create({ cwd: "/tmp/rig-system-notice-oldest" });
-        await session.recordSystemNotice(computeNotice("preparing_compute"));
+        const session = await store.create(ctx, { cwd: "/tmp/rig-system-notice-oldest" });
+        await session.recordSystemNotice(ctx, computeNotice("preparing_compute"));
 
-        await session.submit({ text: "Start the first real turn." });
+        await session.submit(ctx, { text: "Start the first real turn." });
 
         expect(
-            (await session.transcriptWindow()).notices?.map((entry) => entry.message.blocks[0]),
+            (await session.transcriptWindow(ctx)).notices?.map((entry) => entry.message.blocks[0]),
         ).toEqual([{ text: "Preparing compute.", type: "text" }]);
     });
 
@@ -59,7 +61,7 @@ describe("standalone system notice transcript rows", () => {
         const toolStarted = deferred<void>();
         const releaseTool = deferred<void>();
         const session = await createToolSession(toolStarted, releaseTool);
-        await session.submit({ text: "Run the tool." });
+        await session.submit(ctx, { text: "Run the tool." });
         await toolStarted.promise;
 
         const question = {
@@ -77,8 +79,14 @@ describe("standalone system notice transcript rows", () => {
                 },
             ],
         };
-        const pendingAnswer = session.requestUserInput(question);
-        await expect(session.markRead()).resolves.toBe(true);
+        const pendingAnswer = session.requestUserInput(ctx, question);
+        await vi.waitFor(() =>
+            expect(session.activity()).toMatchObject({
+                kind: "awaiting_input",
+                pendingInputRequestIds: [question.requestId],
+            }),
+        );
+        await expect(session.markRead(ctx)).resolves.toBe(true);
         const activityBefore = session.activity();
         expect(activityBefore).toMatchObject({
             kind: "awaiting_input",
@@ -91,7 +99,7 @@ describe("standalone system notice transcript rows", () => {
             .all()
             .filter((event) => event.type === "run_finished").length;
 
-        await session.recordSystemNotice(computeNotice("preparing_compute"));
+        await session.recordSystemNotice(ctx, computeNotice("preparing_compute"));
 
         expect(session.activity()).toEqual(activityBefore);
         expect(session.snapshot().pendingUserInputs).toEqual(pendingBefore);
@@ -110,7 +118,7 @@ describe("standalone system notice transcript rows", () => {
             );
         expect(session.events.all().indexOf(notice!)).toBeGreaterThan(toolStartIndex);
 
-        const transcript = await session.transcriptWindow(20);
+        const transcript = await session.transcriptWindow(ctx, 20);
         expect(transcript.notices).toEqual([
             {
                 createdAt: notice!.createdAt,
@@ -122,25 +130,25 @@ describe("standalone system notice transcript rows", () => {
             transcript.turns.some((turn) => turn.messageIds.includes(notice!.data.message.id)),
         ).toBe(false);
 
-        await session.answerUserInput(question.requestId, { answers: { choice: ["One"] } });
+        await session.answerUserInput(ctx, question.requestId, { answers: { choice: ["One"] } });
         await pendingAnswer;
         releaseTool.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("bounds notices separately without evicting real conversation turns", async () => {
-        const store = await InMemorySessionStore.open();
+        const store = await InMemorySessionStore.open(ctx);
         stores.push(store);
-        const session = await store.create({ cwd: "/tmp/rig-system-notice-budget" });
+        const session = await store.create(ctx, { cwd: "/tmp/rig-system-notice-budget" });
 
         for (let turn = 0; turn < 25; turn += 1) {
-            await session.submit({ text: `Real turn ${String(turn)}.` });
+            await session.submit(ctx, { text: `Real turn ${String(turn)}.` });
             for (let notice = 0; notice < 5; notice += 1) {
-                await session.recordSystemNotice(computeNotice("preparing_compute"));
+                await session.recordSystemNotice(ctx, computeNotice("preparing_compute"));
             }
         }
 
-        const bootstrap = await session.transcriptWindow(20);
+        const bootstrap = await session.transcriptWindow(ctx, 20);
         expect(bootstrap.turns).toHaveLength(20);
         expect(bootstrap.messages).toHaveLength(20);
         expect(bootstrap.notices).toHaveLength(50);
@@ -202,7 +210,7 @@ async function createToolSession(
         models: [model],
         providers: [{ models: [model], providerId: provider.id }],
     };
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         createRuntime: (options) => createRuntime(options, provider, [tool]),
         id: "system-notice-session",
@@ -228,7 +236,10 @@ function createRuntime(
     tools: readonly AnyDefinedTool[],
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

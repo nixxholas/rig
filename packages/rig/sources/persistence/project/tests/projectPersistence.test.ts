@@ -1,3 +1,8 @@
+import { withDatabase } from "../../database/databaseContext.js";
+
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
+
+import type { Span, Tracer } from "@opentelemetry/api";
 import { eq, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
@@ -13,19 +18,36 @@ import { workspaceReserve } from "../workspaceReserve.js";
 import { workspaceApplyProbe } from "../workspaceApplyProbe.js";
 
 describe("project persistence", () => {
+    it("uses a stable semantic SQL span name", async () => {
+        const opened = await databaseWithProject();
+        const spanNames: string[] = [];
+
+        await queryProject(
+            withDatabase(createTestRootContext(recordingTracer(spanNames)), opened.database),
+            "project-1",
+        );
+
+        expect(spanNames).toEqual(["rig.sql.project.queryProject"]);
+        opened.client.close();
+    });
+
     it("rolls back the avatar asset and project reference together", async () => {
         const opened = await databaseWithProject();
 
         await expect(
-            inTx(opened.database, async (tx) => {
-                await projectSetAvatar(tx, {
-                    asset: { byteLength: 3, hash: "a".repeat(64), height: 1, width: 1 },
-                    now: 2,
-                    projectId: "project-1",
-                    source: "user",
-                });
-                throw new Error("fail after avatar");
-            }),
+            inTx(
+                withDatabase(createTestRootContext(), opened.database),
+                "rig.sql.project.test.rollbackAvatar",
+                async (ctx) => {
+                    await projectSetAvatar(ctx, {
+                        asset: { byteLength: 3, hash: "a".repeat(64), height: 1, width: 1 },
+                        now: 2,
+                        projectId: "project-1",
+                        source: "user",
+                    });
+                    throw new Error("fail after avatar");
+                },
+            ),
         ).rejects.toThrow("fail after avatar");
 
         expect(await opened.database.select().from(projectAvatarAssets).all()).toEqual([]);
@@ -43,19 +65,23 @@ describe("project persistence", () => {
         const opened = await databaseWithProject();
 
         await expect(
-            inTx(opened.database, async (tx) => {
-                await workspaceReserve(tx, {
-                    baseCommit: "a".repeat(40),
-                    baseRef: "main",
-                    gitCommonDir: "/workspace/.git",
-                    id: "workspace-1",
-                    name: "Feature",
-                    now: 2,
-                    pathForStorageKey: (key) => `/state/workspaces/project/${key}`,
-                    projectId: "project-1",
-                });
-                throw new Error("fail after workspace");
-            }),
+            inTx(
+                withDatabase(createTestRootContext(), opened.database),
+                "rig.sql.project.test.rollbackWorkspace",
+                async (ctx) => {
+                    await workspaceReserve(ctx, {
+                        baseCommit: "a".repeat(40),
+                        baseRef: "main",
+                        gitCommonDir: "/workspace/.git",
+                        id: "workspace-1",
+                        name: "Feature",
+                        now: 2,
+                        pathForStorageKey: (key) => `/state/workspaces/project/${key}`,
+                        projectId: "project-1",
+                    });
+                    throw new Error("fail after workspace");
+                },
+            ),
         ).rejects.toThrow("fail after workspace");
 
         expect(await opened.database.select().from(projectWorkspaces).all()).toEqual([]);
@@ -64,7 +90,7 @@ describe("project persistence", () => {
 
     it("does not let an initialization-era probe overwrite workspace presence", async () => {
         const opened = await databaseWithProject();
-        await workspaceReserve(opened.database, {
+        await workspaceReserve(withDatabase(createTestRootContext(), opened.database), {
             id: "workspace-1",
             name: "Feature",
             now: 2,
@@ -74,7 +100,7 @@ describe("project persistence", () => {
 
         expect(
             await workspaceApplyProbe(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 "workspace-1",
                 {
@@ -107,14 +133,16 @@ describe("project persistence", () => {
 
         expect(
             await projectSetSettings(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
                 2,
                 1,
             ),
         ).toBe(1);
-        expect(await queryProject(opened.database, "project-1")).toMatchObject({
+        expect(
+            await queryProject(withDatabase(createTestRootContext(), opened.database), "project-1"),
+        ).toMatchObject({
             settings: {
                 defaultWorkspaceCompute: {
                     generation: 1,
@@ -127,14 +155,16 @@ describe("project persistence", () => {
 
         expect(
             await projectSetSettings(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
                 3,
                 2,
             ),
         ).toBe(1);
-        expect(await queryProject(opened.database, "project-1")).toMatchObject({
+        expect(
+            await queryProject(withDatabase(createTestRootContext(), opened.database), "project-1"),
+        ).toMatchObject({
             settings: {
                 defaultWorkspaceCompute: {
                     generation: 1,
@@ -146,14 +176,16 @@ describe("project persistence", () => {
         });
         expect(
             await projectSetSettings(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 { defaultWorkspaceCompute: { type: "local" } },
                 4,
                 3,
             ),
         ).toBe(1);
-        expect(await queryProject(opened.database, "project-1")).toMatchObject({
+        expect(
+            await queryProject(withDatabase(createTestRootContext(), opened.database), "project-1"),
+        ).toMatchObject({
             settings: {
                 defaultWorkspaceCompute: {
                     generation: 2,
@@ -164,7 +196,7 @@ describe("project persistence", () => {
         });
         await expect(
             projectSetSettings(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 { defaultWorkspaceCompute: { image: "invalid image", type: "docker" } },
                 5,
@@ -184,7 +216,7 @@ describe("project persistence", () => {
 
         expect(
             await projectSetSettings(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 { defaultWorkspaceCompute: { type: "local" } },
                 2,
@@ -193,7 +225,7 @@ describe("project persistence", () => {
         ).toBe(1);
         expect(
             await projectSetSettings(
-                opened.database,
+                withDatabase(createTestRootContext(), opened.database),
                 "project-1",
                 { defaultWorkspaceCompute: { type: "docker", image: "rig-dev:latest" } },
                 3,
@@ -206,7 +238,13 @@ describe("project persistence", () => {
     it("keeps refresh out of the user mutation watermark", async () => {
         const opened = await databaseWithProject();
 
-        expect(await projectRefresh(opened.database, "project-1", 2)).toBe(1);
+        expect(
+            await projectRefresh(
+                withDatabase(createTestRootContext(), opened.database),
+                "project-1",
+                2,
+            ),
+        ).toBe(1);
         expect(
             await opened.database
                 .select({
@@ -224,8 +262,8 @@ describe("project persistence", () => {
 async function databaseWithProject(): Promise<
     Awaited<Awaited<ReturnType<typeof openSessionDatabase>>>
 > {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+    const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+    await migrateSessionDatabase(withDatabase(createTestRootContext(), opened.database));
     await opened.database
         .insert(projects)
         .values({
@@ -250,4 +288,30 @@ async function databaseWithProject(): Promise<
         })
         .run();
     return opened;
+}
+
+function recordingTracer(spanNames: string[]): Tracer {
+    return {
+        startSpan(name: string) {
+            spanNames.push(name);
+            return testSpan();
+        },
+    } as unknown as Tracer;
+}
+
+function testSpan(): Span {
+    const span: Span = {
+        addEvent: () => span,
+        addLink: () => span,
+        addLinks: () => span,
+        end: () => undefined,
+        isRecording: () => true,
+        recordException: () => undefined,
+        setAttribute: () => span,
+        setAttributes: () => span,
+        setStatus: () => span,
+        spanContext: () => ({ spanId: "0000000000000000", traceFlags: 0, traceId: "0".repeat(32) }),
+        updateName: () => span,
+    };
+    return span;
 }

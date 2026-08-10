@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql } from "drizzle-orm";
 import type { Model, ServiceTier } from "@slopus/rig-execution";
 import { Value } from "@sinclair/typebox/value";
@@ -25,7 +27,7 @@ import {
     sessionWorkspaceTransferStateSchema,
     type SessionWorkspaceTransferState,
 } from "../../session/sessionWorkspaceTransferState.js";
-import type { DatabaseScope, TX } from "../Transaction.js";
+import type { TX } from "../Transaction.js";
 import { inTx } from "../inTx.js";
 import { parsePersistedUsage } from "./impl/persistedUsage.js";
 import {
@@ -51,10 +53,11 @@ export interface SessionRestore {
 }
 
 export async function querySessionRestore(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
 ): Promise<SessionRestore | undefined> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.session.query_session_restore", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx.get<Record<string, unknown>>(sql`
         SELECT * FROM sessions WHERE id = ${sessionId}
     `);
@@ -77,13 +80,13 @@ export async function querySessionRestore(
         const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
         const persistedUsage = parsePersistedUsage(readOptionalString(row, "usage_json"));
         const transcriptMessages =
-            (await querySessionTranscriptPage(tx, sessionId, 80))?.messages ?? [];
+            (await querySessionTranscriptPage(ctx, sessionId, 80))?.messages ?? [];
         const messages = [
             ...transcriptMessages,
-            ...(await querySessionPartialMessages(tx, sessionId)),
+            ...(await querySessionPartialMessages(ctx, sessionId)),
         ].sort((left, right) => left.position - right.position);
         const hasEarlierTranscript = await querySessionHasEarlierStoredMessage(
-            tx,
+            ctx,
             sessionId,
             transcriptMessages[0]?.position,
         );
@@ -156,9 +159,9 @@ export async function querySessionRestore(
                 : { interruption: JSON.parse(interruptionJson) as SessionInterruption }),
             ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
             messages,
-            durableUserInputs: [...(await queryDurableUserInputs(tx, sessionId))],
-            durableWaits: [...(await queryDurableWaits(tx, sessionId))],
-            externalToolCalls: [...(await queryExternalToolCallsForSession(tx, sessionId))],
+            durableUserInputs: [...(await queryDurableUserInputs(ctx, sessionId))],
+            durableWaits: [...(await queryDurableWaits(ctx, sessionId))],
+            externalToolCalls: [...(await queryExternalToolCallsForSession(ctx, sessionId))],
             externalTools: JSON.parse(
                 readString(row, "external_tools_json"),
             ) as ExternalToolDefinition[],
@@ -168,12 +171,12 @@ export async function querySessionRestore(
             orderKey: readString(row, "order_key"),
             providerId: readString(row, "provider_id"),
             permissionMode,
-            pendingContextMessages: await queryPendingContextMessages(tx, sessionId),
+            pendingContextMessages: await queryPendingContextMessages(ctx, sessionId),
             workspaceTransfer,
             workspaceQueueWaiting: readNumber(row, "workspace_queue_waiting") !== 0,
             secretIds: secretIdsJson === undefined ? [] : (JSON.parse(secretIdsJson) as string[]),
             queuedRuns: await queryQueuedRuns(tx, sessionId),
-            scheduledMessages: [...(await queryScheduledMessages(tx, sessionId))],
+            scheduledMessages: [...(await queryScheduledMessages(ctx, sessionId))],
             status: readString(row, "status") as PersistedSessionState["status"],
             tasks: JSON.parse(readString(row, "tasks_json")) as PersistedSessionState["tasks"],
             workflows: JSON.parse(readString(row, "workflows_json")) as PersistedWorkflowRun[],

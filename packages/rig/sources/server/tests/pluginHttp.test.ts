@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { defineModel } from "@slopus/rig-execution";
 
 import {
@@ -44,7 +46,10 @@ afterEach(async () => {
 describe("plugin HTTP protocol", () => {
     it("serves explicit plugin states and bounded current logs", async () => {
         const plugins = context();
-        const server = await createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            plugins,
+            token: "secret",
+        });
         servers.push(server);
         const port = await listen(server);
         await expect(requestJson(port, "/plugins")).resolves.toMatchObject({
@@ -78,7 +83,8 @@ describe("plugin HTTP protocol", () => {
                 "---\nname: clock\ndescription: Reads time\n---\n# Clock\n",
             ),
         ]);
-        const store = await InMemorySessionStore.open({
+        const ctx = createTestRootContext();
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: TEST_MODEL.id,
                 defaultProviderId: "test",
@@ -92,7 +98,10 @@ describe("plugin HTTP protocol", () => {
             mcpRegistry: new PluginMcpRegistry(),
             store,
         });
-        const server = await createProtocolHttpServer({ plugins: manager, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            plugins: manager,
+            token: "secret",
+        });
         servers.push(server);
         try {
             const port = await listen(server);
@@ -124,15 +133,18 @@ describe("plugin HTTP protocol", () => {
                 },
             });
         } finally {
-            await manager.close();
-            await store.close();
+            await manager.close(ctx);
+            await store.close(ctx);
             await rm(root, { force: true, recursive: true });
         }
     });
 
     it("authenticates and validates source-folder installation and uninstallation", async () => {
         const plugins = context();
-        const server = await createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            plugins,
+            token: "secret",
+        });
         servers.push(server);
         const port = await listen(server);
 
@@ -171,6 +183,7 @@ describe("plugin HTTP protocol", () => {
             },
         });
         expect(plugins.install).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({
                 requestId: "local-install-1",
                 signal: expect.any(AbortSignal),
@@ -231,6 +244,7 @@ describe("plugin HTTP protocol", () => {
             },
         });
         expect(plugins.uninstall).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({ name: "Clock", signal: expect.any(AbortSignal) }),
         );
     });
@@ -243,7 +257,10 @@ describe("plugin HTTP protocol", () => {
         vi.mocked(plugins.uninstall).mockRejectedValueOnce(
             new PluginNotFoundError("No plugin named Missing is installed."),
         );
-        const server = await createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            plugins,
+            token: "secret",
+        });
         servers.push(server);
         const port = await listen(server);
 
@@ -317,7 +334,10 @@ describe("plugin HTTP protocol", () => {
             name: "Clock",
             version: "1.2.0",
         });
-        const server = await createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            plugins,
+            token: "secret",
+        });
         servers.push(server);
         const port = await listen(server);
 
@@ -346,6 +366,7 @@ describe("plugin HTTP protocol", () => {
             plugin: { classification: "upgrade", version: "1.2.0" },
         });
         expect(plugins.installFromGitHub).toHaveBeenCalledWith(
+            expect.anything(),
             source,
             expect.objectContaining({
                 requestId: "install-clock-1",
@@ -356,7 +377,10 @@ describe("plugin HTTP protocol", () => {
 
     it("authenticates MCP App resources, tools, and namespaced storage and closes stale errors", async () => {
         const plugins = context();
-        const server = await createProtocolHttpServer({ plugins, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            plugins,
+            token: "secret",
+        });
         servers.push(server);
         const port = await listen(server);
         const base = "/plugin-apps/usage%3Aoverview/generations/current";
@@ -440,7 +464,7 @@ function context(): Pick<
     | "uninstall"
 > {
     return {
-        async callAppTool(_id, generation, _server, tool, input) {
+        async callAppTool(_ctx, _id, generation, _server, tool, input) {
             if (generation === "old")
                 throw new PluginAppError("stale_generation", "stale generation");
             return {
@@ -497,7 +521,7 @@ function context(): Pick<
                 throw new PluginAppError("stale_generation", "stale generation");
             return { mimeType: "text/html;profile=mcp-app", text: "<h1>Usage</h1>", uri };
         },
-        async readIcon(_pluginId, generation) {
+        async readIcon(_ctx, _pluginId, generation) {
             if (generation !== "a".repeat(64)) {
                 throw new PluginIconError("stale_generation", "stale generation");
             }
@@ -509,7 +533,7 @@ function context(): Pick<
                 size: body.byteLength,
             };
         },
-        async readLog(name) {
+        async readLog(_ctx, name) {
             return {
                 folder: "clock",
                 name,

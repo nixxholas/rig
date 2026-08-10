@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
+import { createTestRootContext } from "../../rig/sources/testing/createTestRootContext.js";
 import { connectRig, type RigConnection } from "@/connectRig.js";
 
 const started: { close: () => Promise<void> }[] = [];
+const ctx = createTestRootContext();
 
 afterEach(async () => {
     for (const cleanup of started.splice(0)) await cleanup.close();
@@ -17,14 +19,14 @@ afterEach(async () => {
 
 async function startDaemon(): Promise<{ endpoint: string; store: InMemorySessionStore }> {
     const home = await mkdtemp(join(tmpdir(), "rig-connect-folders-"));
-    const store = await InMemorySessionStore.open({ homeDirectory: home });
-    const server = await createProtocolHttpServer({ store, token: "secret" });
+    const store = await InMemorySessionStore.open(ctx, { homeDirectory: home });
+    const server = await createProtocolHttpServer(ctx, { store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const { port } = server.address() as AddressInfo;
     started.push({
         close: async () => {
             await new Promise<void>((resolve) => server.close(() => resolve()));
-            await store.close();
+            await store.close(ctx);
             await rm(home, { force: true, recursive: true });
         },
     });
@@ -73,13 +75,13 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
 
     it("never duplicates folder or Unsorted chats in project/workspace groups", async () => {
         const { endpoint, store } = await startDaemon();
-        const folder = await store.createFolder({ name: "Trips" });
-        const projectChat = await store.create({ cwd: "/tmp/rig-connect-folder-project" });
-        const folderChat = await store.create({
+        const folder = await store.createFolder(ctx, { name: "Trips" });
+        const projectChat = await store.create(ctx, { cwd: "/tmp/rig-connect-folder-project" });
+        const folderChat = await store.create(ctx, {
             cwd: folder.path,
             scope: { folderId: folder.id, kind: "folder" },
         });
-        const unsortedChat = await store.create({
+        const unsortedChat = await store.create(ctx, {
             cwd: "/tmp",
             scope: { kind: "unsorted" },
         });
@@ -119,8 +121,8 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
 
     it("moves a chat between Unsorted and a folder in one optimistic frame", async () => {
         const { endpoint, store } = await startDaemon();
-        const folder = await store.createFolder({ name: "Trips" });
-        const chat = await store.create({ cwd: "/tmp", scope: { kind: "unsorted" } });
+        const folder = await store.createFolder(ctx, { name: "Trips" });
+        const chat = await store.create(ctx, { cwd: "/tmp", scope: { kind: "unsorted" } });
 
         await withRig(endpoint, async (rig) => {
             const folders = rig.connectFolders({ onChange: () => undefined });
@@ -134,8 +136,8 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
             ]);
             await waitFor(
                 async () =>
-                    (await store.list()).find((session) => session.id === chat.id)?.scope.kind ===
-                    "folder",
+                    (await store.list(ctx)).find((session) => session.id === chat.id)?.scope
+                        .kind === "folder",
                 "the authoritative session scope",
             );
             folders.close();
@@ -144,8 +146,8 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
 
     it("publishes cross-tree moves only after both projections agree", async () => {
         const { endpoint, store } = await startDaemon();
-        const folder = await store.createFolder({ name: "Trips" });
-        const chat = await store.create({ cwd: "/tmp/rig-connect-folder-project" });
+        const folder = await store.createFolder(ctx, { name: "Trips" });
+        const chat = await store.create(ctx, { cwd: "/tmp/rig-connect-folder-project" });
 
         await withRig(endpoint, async (rig) => {
             let monitoring = false;
@@ -195,12 +197,12 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
 
     it("reorders chats only within their current folder", async () => {
         const { endpoint, store } = await startDaemon();
-        const folder = await store.createFolder({ name: "Trips" });
-        const first = await store.create({
+        const folder = await store.createFolder(ctx, { name: "Trips" });
+        const first = await store.create(ctx, {
             cwd: "/tmp/first",
             scope: { folderId: folder.id, kind: "folder" },
         });
-        const second = await store.create({
+        const second = await store.create(ctx, {
             cwd: "/tmp/second",
             scope: { folderId: folder.id, kind: "folder" },
         });
@@ -223,7 +225,7 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
                 first.id,
             ]);
             await waitFor(async () => {
-                const ordered = (await store.list())
+                const ordered = (await store.list(ctx))
                     .filter(
                         (session) =>
                             session.scope.kind === "folder" && session.scope.folderId === folder.id,
@@ -239,8 +241,8 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
 
     it("marks an open chat archived in the same optimistic folder-archive frame", async () => {
         const { endpoint, store } = await startDaemon();
-        const folder = await store.createFolder({ name: "Trips" });
-        const chat = await store.create({
+        const folder = await store.createFolder(ctx, { name: "Trips" });
+        const chat = await store.create(ctx, {
             cwd: folder.path,
             scope: { folderId: folder.id, kind: "folder" },
         });
@@ -266,8 +268,8 @@ describe("rig-connect folder and Unsorted projections against a live daemon", ()
 
     it("optimistically archives an open chat without a mounted folder view", async () => {
         const { endpoint, store } = await startDaemon();
-        const folder = await store.createFolder({ name: "Trips" });
-        const chat = await store.create({
+        const folder = await store.createFolder(ctx, { name: "Trips" });
+        const chat = await store.create(ctx, {
             cwd: folder.path,
             scope: { folderId: folder.id, kind: "folder" },
         });

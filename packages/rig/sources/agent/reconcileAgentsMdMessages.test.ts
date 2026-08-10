@@ -13,8 +13,10 @@ import { findLatestAgentsMdRecord } from "./findLatestAgentsMdRecord.js";
 import { isInternalMessage } from "./isInternalMessage.js";
 import { reconcileAgentsMdMessages } from "./reconcileAgentsMdMessages.js";
 import type { Message, UserMessage } from "./types.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 
 const temporaryDirectories: string[] = [];
+const ctx = createTestRootContext();
 
 afterEach(async () => {
     vi.restoreAllMocks();
@@ -79,7 +81,7 @@ describe("reconcileAgentsMdMessages", () => {
         await writeFile(join(workspace, "AGENTS.md"), "Always run the linter.\n");
         const fs = createFileSystem(workspace);
 
-        const prompt = await createSystemPrompt({
+        const prompt = await createSystemPrompt(ctx, {
             context: { fs } as never,
             instructions: "You are rig.",
             messages: [],
@@ -96,7 +98,7 @@ describe("reconcileAgentsMdMessages", () => {
         const fs = createFileSystem(workspace);
         const log = vi.spyOn(console, "error").mockImplementation(() => {});
 
-        const prompt = await createSystemPrompt({
+        const prompt = await createSystemPrompt(ctx, {
             context: {
                 fs,
                 plugins: {
@@ -121,7 +123,7 @@ describe("reconcileAgentsMdMessages", () => {
         const workspace = await createWorkspace();
         const fs = createFileSystem(workspace);
 
-        const prompt = await createSystemPrompt({
+        const prompt = await createSystemPrompt(ctx, {
             context: {
                 fs,
                 plugins: {
@@ -144,7 +146,7 @@ describe("reconcileAgentsMdMessages", () => {
         const fs = createFileSystem(workspace);
 
         for (const type of ["claude", "codex", "grok"] as const) {
-            const prompt = await createSystemPrompt({
+            const prompt = await createSystemPrompt(ctx, {
                 context: { fs } as never,
                 instructions: "You are rig.",
                 messages: [],

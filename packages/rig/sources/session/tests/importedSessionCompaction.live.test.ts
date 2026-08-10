@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { existsSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
@@ -14,10 +15,11 @@ const hasFixture =
     sessionId !== undefined &&
     existsSync(databasePath) &&
     hasBedrockCredential;
+const ctx = createTestRootContext();
 
 describe.skipIf(!LIVE || !hasFixture)("imported session compaction", () => {
     it("compacts the restored production session", async () => {
-        const store = await PersistentSessionStore.open({
+        const store = await PersistentSessionStore.open(ctx, {
             createRuntime: (options) =>
                 createCodingAssistantAgent({
                     ...options,
@@ -33,15 +35,15 @@ describe.skipIf(!LIVE || !hasFixture)("imported session compaction", () => {
         });
 
         try {
-            const session = await store.get(sessionId!);
+            const session = await store.get(ctx, sessionId!);
             expect(session).toBeDefined();
 
-            const result = await session!.compact();
+            const result = await session!.compact(ctx);
 
             expect(result.compacted).toBe(true);
             expect(result.estimatedTokensAfter).toBeLessThan(result.estimatedTokensBefore);
         } finally {
-            await store.close();
+            await store.close(ctx);
         }
     }, 300_000);
 });

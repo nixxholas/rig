@@ -5,13 +5,16 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("createProtocolHttpServer database failures", () => {
     it("escapes a route recovery catch as an unhandled rejection", async () => {
-        const store = await InMemorySessionStore.open();
+        const ctx = createTestRootContext();
+        const store = await InMemorySessionStore.open(ctx);
         const error = await captureDriverError();
         vi.spyOn(store, "registerSecret").mockImplementation(() => {
             throw error;
@@ -19,7 +22,10 @@ describe("createProtocolHttpServer database failures", () => {
 
         const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
-        const server = await createProtocolHttpServer({ store, token: "secret" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            store,
+            token: "secret",
+        });
         await new Promise<void>((resolve, reject) => {
             server.once("error", reject);
             server.listen(socketPath, () => {
@@ -58,7 +64,7 @@ describe("createProtocolHttpServer database failures", () => {
         } finally {
             request.destroy();
             await new Promise<void>((resolve) => server.close(() => resolve()));
-            await store.close();
+            await store.close(ctx);
             await rm(directory, { force: true, recursive: true });
         }
     });

@@ -1,11 +1,12 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { folderShareNodes, folderShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import type { SharedFolderState } from "../../protocol/FolderSharingProtocol.js";
 import { queryFolderShare } from "./queryFolderShares.js";
 
 export async function folderShareCreate(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         groupId: string;
         now: number;
@@ -16,8 +17,9 @@ export async function folderShareCreate(
         status: "synced" | "syncing";
     },
 ): Promise<"created" | "existing"> {
-    return await inTx(tx, async (tx) => {
-        const existing = await queryFolderShare(tx, input.groupId);
+    return await inTx(ctx, "rig.sql.folderShare.folderShareCreate", async (ctx) => {
+        const tx = ctx.tx;
+        const existing = await queryFolderShare(ctx, input.groupId);
         if (existing !== undefined) {
             if (existing.rootFolderId !== input.rootFolderId) {
                 throw new Error("A Murmur folder group cannot change its root.");

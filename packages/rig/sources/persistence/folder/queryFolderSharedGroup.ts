@@ -1,14 +1,16 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { folderItems, folders, sessions } from "../database/schema.js";
 import { inDatabase } from "../database/inDatabase.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryFolderSharedGroup(
-    tx: DatabaseScope,
+    ctx: Context,
     folderId: string,
 ): Promise<string | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolderSharedGroup", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.get<{ groupId: string }>(sql`
         WITH RECURSIVE ancestors(id, parent_id, shared_group_id) AS (
@@ -31,10 +33,11 @@ export async function queryFolderSharedGroup(
 }
 
 export async function querySharedFolderRoot(
-    tx: DatabaseScope,
+    ctx: Context,
     groupId: string,
 ): Promise<string | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.querySharedFolderRoot", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx
                 .select({ id: folders.id })
@@ -46,10 +49,11 @@ export async function querySharedFolderRoot(
 }
 
 export async function queryFolderShareRootProblem(
-    tx: DatabaseScope,
+    ctx: Context,
     folderId: string,
 ): Promise<"contents" | "missing" | "not_root" | "shared" | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolderShareRootProblem", async (ctx) => {
+        const tx = ctx.tx;
         const folder = await tx
             .select({
                 archivedAtMs: folders.archivedAtMs,
@@ -86,10 +90,11 @@ export async function queryFolderShareRootProblem(
 }
 
 export async function queryFolderSubtreeHasContents(
-    tx: DatabaseScope,
+    ctx: Context,
     folderId: string,
 ): Promise<boolean> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolderSubtreeHasContents", async (ctx) => {
+        const tx = ctx.tx;
         return (
             (await tx.get<{ found: number }>(sql`
             WITH RECURSIVE subtree(id) AS (

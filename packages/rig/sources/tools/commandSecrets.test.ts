@@ -4,20 +4,22 @@ import type { AgentContext, BashRunOptions, BashSessionSnapshot } from "../agent
 import { claudeBashTool } from "../agent/tools/claude/Bash.js";
 import { codexExecCommandTool } from "../agent/tools/codex/exec_command.js";
 import { grokRunTerminalCommandTool } from "./grok/run_terminal_command.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 
 describe("command secret selection", () => {
     it("forwards selected secret bundle IDs through every provider shell tool", async () => {
         const { calls, context } = recordingContext();
+        const ctx = createTestRootContext().named("command-secrets-test");
 
         await codexExecCommandTool.execute(
             { cmd: "codex-command", secrets: ["service"] },
             context,
-            {},
+            { ctx },
         );
         await claudeBashTool.execute(
             { command: "claude-command", secrets: ["service", "database"] },
             context,
-            {},
+            { ctx },
         );
         await grokRunTerminalCommandTool.execute(
             {
@@ -27,7 +29,7 @@ describe("command secret selection", () => {
                 secrets: [],
             },
             context,
-            {},
+            { ctx },
         );
 
         expect(calls).toHaveLength(3);

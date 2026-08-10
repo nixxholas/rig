@@ -2,13 +2,16 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import type { Context } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { NativeProcessManager } from "../NativeProcessManager.js";
 
 const tempDirs: string[] = [];
 
 describe("NativeProcessManager", () => {
+    const ctx = processContext();
     afterEach(async () => {
         await Promise.all(
             tempDirs.splice(0).map((path) =>
@@ -24,7 +27,7 @@ describe("NativeProcessManager", () => {
         const cwd = await makeTempDir();
         const manager = new NativeProcessManager();
 
-        const result = await manager.run({
+        const result = await manager.run(ctx, {
             command: "printf 'hello'; printf 'warn' >&2",
             cwd,
             timeoutMs: 2_000,
@@ -43,7 +46,7 @@ describe("NativeProcessManager", () => {
         const manager = new NativeProcessManager();
         const value = `quoted & piped | redirected > untouched`;
 
-        const result = await manager.run({
+        const result = await manager.run(ctx, {
             args: ["-e", "process.stdout.write(process.argv[1])", value],
             command: process.execPath,
             cwd,
@@ -60,16 +63,16 @@ describe("NativeProcessManager", () => {
         const script =
             "process.stdin.setEncoding('utf8'); process.stdin.on('data', data => { process.stdout.write(`seen:${data.trim()}`); process.exit(0); });";
 
-        const process = manager.start({
+        const process = await manager.start(ctx, {
             command: `${nodeBinary()} -e ${shellQuote(script)}`,
             cwd,
             maxOutputBytes: 4_096,
         });
 
         expect(manager.activeCount()).toBe(1);
-        expect(process.writeStdin("input\n")).toBe(true);
+        await expect(process.writeStdin(ctx, "input\n")).resolves.toBe(true);
 
-        const result = await process.wait();
+        const result = await process.wait(ctx);
         expect(result.stdout).toBe("seen:input");
         expect(result.exitCode).toBe(0);
         expect(manager.activeCount()).toBe(0);
@@ -79,7 +82,7 @@ describe("NativeProcessManager", () => {
         const cwd = await makeTempDir();
         const manager = new NativeProcessManager();
 
-        const result = await manager.run({
+        const result = await manager.run(ctx, {
             command: "printf 'oldest-newest'",
             cwd,
             maxOutputBytes: 6,
@@ -94,12 +97,12 @@ describe("NativeProcessManager", () => {
     it("honors direct read cursors without consuming their output", async () => {
         const cwd = await makeTempDir();
         const manager = new NativeProcessManager();
-        const process = manager.start({
+        const process = await manager.start(ctx, {
             command: "printf 'abcdef'",
             cwd,
             maxOutputBytes: 4_096,
         });
-        await process.wait();
+        await process.wait(ctx);
 
         expect(process.readOutput(2, 0)).toMatchObject({
             stdoutDelta: "cdef",
@@ -114,7 +117,7 @@ describe("NativeProcessManager", () => {
         const cwd = await makeTempDir();
         const manager = new NativeProcessManager();
 
-        const result = await manager.run({
+        const result = await manager.run(ctx, {
             command: `${nodeBinary()} -e ${shellQuote("setInterval(() => undefined, 1000);")}`,
             cwd,
             timeoutMs: 50,
@@ -131,7 +134,7 @@ describe("NativeProcessManager", () => {
         const cwd = await makeTempDir();
         const manager = new NativeProcessManager();
         const controller = new AbortController();
-        const resultPromise = manager.run({
+        const resultPromise = manager.run(ctx, {
             command: `${nodeBinary()} -e ${shellQuote("setInterval(() => undefined, 1000);")}`,
             cwd,
             timeoutMs: 2_000,
@@ -156,7 +159,7 @@ describe("NativeProcessManager", () => {
         const writer = `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "alive"), 500);`;
         const blocker = "setInterval(() => undefined, 1000);";
 
-        const result = await manager.run({
+        const result = await manager.run(ctx, {
             command: `${nodeBinary()} -e ${shellQuote(writer)} & ${nodeBinary()} -e ${shellQuote(blocker)}`,
             cwd,
             timeoutMs: 100,
@@ -183,4 +186,8 @@ function nodeBinary(): string {
 
 function shellQuote(value: string): string {
     return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function processContext(): Context {
+    return createTestRootContext().named("process-test");
 }

@@ -19,7 +19,7 @@ describe("get_command_or_subagent_output", () => {
         const result = await grokGetCommandOrSubagentOutputTool.execute(
             { task_ids: ["unguessable-agent-1"], timeout_ms: 500 },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
 
         expect(result.results).toEqual([
@@ -45,7 +45,7 @@ describe("get_command_or_subagent_output", () => {
         const reading = grokGetCommandOrSubagentOutputTool.execute(
             { task_ids: ["/root/test_subagent"], timeout_ms: 500 },
             harness.context,
-            { signal: controller.signal },
+            { ctx: harness.ctx, signal: controller.signal },
         );
 
         controller.abort();
@@ -60,7 +60,7 @@ describe("get_command_or_subagent_output", () => {
             grokGetCommandOrSubagentOutputTool.execute(
                 { task_ids: ["  "], timeout_ms: 0 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("at least one non-empty task ID");
     });

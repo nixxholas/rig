@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, desc, eq, notInArray, or, sql } from "drizzle-orm";
 
 import { durableUserInputs } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Mirrors `isOpenQuestion`: a question the user could still answer, including one that presence
@@ -16,11 +17,12 @@ const openQuestion = and(
 );
 
 export async function durableUserInputPrune(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     retain: number,
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.durable_user_input_prune", async (ctx) => {
+        const tx = ctx.tx;
         const prunable = or(
             eq(durableUserInputs.status, "cancelled"),
             and(eq(durableUserInputs.consumed, true), sql`NOT (${openQuestion})`),

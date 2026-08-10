@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createGeneratedMediaStore } from "../../generated-media/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { createPluginApiServer } from "../createPluginApiServer.js";
 import { MAX_INSTALLED_PLUGINS } from "../discoverPlugins.js";
 import { PluginHookRegistry } from "../PluginHookRegistry.js";
@@ -27,6 +28,7 @@ import { PluginStartupState } from "../PluginStartupState.js";
 
 const execFile = promisify(execFileCallback);
 const cleanup: (() => Promise<void> | void)[] = [];
+const ctx = createTestRootContext().named("plugin-api-server-test");
 
 afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((dispose) => dispose()));
@@ -37,7 +39,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -45,7 +47,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const server = createPluginApiServer({
             listPlugins: async () => [],
             pluginFolder: "test-plugin",
@@ -88,7 +90,7 @@ describe("plugin API server", () => {
         await execFile("git", ["-C", directory, "config", "user.name", "Rig Test"]);
         await execFile("git", ["-C", directory, "add", "README.md"]);
         await execFile("git", ["-C", directory, "commit", "-m", "Initial"]);
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -96,8 +98,8 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
-        const project = await store.registerProject({ path: directory });
+        cleanup.push(() => store.close(ctx));
+        const project = await store.registerProject(ctx, { path: directory });
         const server = createPluginApiServer({
             listPlugins: async () => [],
             pluginFolder: "test-plugin",
@@ -130,7 +132,7 @@ describe("plugin API server", () => {
         });
 
         expect(retry).toEqual(first);
-        await expect(store.listWorkspaces(project.id)).resolves.toEqual([
+        await expect(store.listWorkspaces(ctx, project.id)).resolves.toEqual([
             expect.objectContaining({ id }),
         ]);
         await expect(
@@ -149,7 +151,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -157,7 +159,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const hooks = new PluginHookRegistry().createConnection({
             folder: "test-plugin",
             name: "Test Plugin",
@@ -199,7 +201,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -207,7 +209,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const hooks = new PluginHookRegistry().createConnection({
             folder: "test-plugin",
             name: "Test Plugin",
@@ -245,7 +247,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -253,7 +255,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const hooks = new PluginHookRegistry().createConnection({
             folder: "test-plugin",
             name: "Test Plugin",
@@ -555,7 +557,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -563,7 +565,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const server = createPluginApiServer({
             listPlugins: async () => [
                 {
@@ -684,7 +686,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -692,7 +694,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const mcp = registry.createConnection({ folder: "projects", name: "Projects" });
@@ -753,11 +755,11 @@ describe("plugin API server", () => {
 
         const tools = (await registry.load("/workspace", "auto")).tools;
         const tool = tools.find((candidate) => candidate.name.endsWith("__list_projects"))!;
-        await expect(tool.execute({} as never, {} as never, {})).resolves.toEqual({
+        await expect(tool.execute({} as never, {} as never, { ctx })).resolves.toEqual({
             content: [{ text: "[]", type: "text" }],
         });
         const oversized = tools.find((candidate) => candidate.name.endsWith("__oversized_result"))!;
-        await expect(oversized.execute({} as never, {} as never, {})).resolves.toMatchObject({
+        await expect(oversized.execute({} as never, {} as never, { ctx })).resolves.toMatchObject({
             content: [{ text: expect.stringContaining("request is too large"), type: "text" }],
             isError: true,
         });
@@ -785,7 +787,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -793,7 +795,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const mcp = registry.createConnection({ folder: "slow", name: "Slow" });
@@ -839,7 +841,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -847,7 +849,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const registry = new PluginNetworkRegistry();
         cleanup.push(() => registry.close());
         const network = registry.createConnection({
@@ -884,7 +886,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -892,7 +894,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const startup = new PluginStartupState();
@@ -946,7 +948,7 @@ describe("plugin API server", () => {
         }).ready("Ready.");
         const retiredRegistrationId = contribution.registrationId;
         const tool = (await registry.load("/workspace", "auto")).tools[0]!;
-        const call = Promise.resolve(tool.execute({} as never, {} as never, {}));
+        const call = Promise.resolve(tool.execute({} as never, {} as never, { ctx }));
         const rejectedCall = expect(call).rejects.toThrow("connection closed");
         await callStarted.promise;
 
@@ -969,7 +971,7 @@ describe("plugin API server", () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -977,7 +979,7 @@ describe("plugin API server", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const startup = new PluginStartupState();
@@ -1055,7 +1057,7 @@ async function createWorkspaceApiFixture(
     const workspacePath = join(directory, "workspace");
     await mkdir(workspacePath);
     const socketPath = join(directory, "api.sock");
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(ctx, {
         modelCatalog: {
             defaultModelId: "",
             defaultProviderId: "",
@@ -1063,7 +1065,7 @@ async function createWorkspaceApiFixture(
             providers: [],
         },
     });
-    cleanup.push(() => store.close());
+    cleanup.push(() => store.close(ctx));
     const workspaceId = "workspace-1";
     vi.spyOn(store, "listWorkspaces").mockResolvedValue([
         {
@@ -1111,7 +1113,7 @@ async function createPluginApiFixture() {
     const generatedDirectory = join(directory, "generated");
     await mkdir(pluginDataDirectory);
     const socketPath = join(directory, "api.sock");
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(ctx, {
         modelCatalog: {
             defaultModelId: "",
             defaultProviderId: "",
@@ -1119,7 +1121,7 @@ async function createPluginApiFixture() {
             providers: [],
         },
     });
-    cleanup.push(() => store.close());
+    cleanup.push(() => store.close(ctx));
     const server = createPluginApiServer({
         generatedMedia: createGeneratedMediaStore({ hostDirectory: generatedDirectory }),
         listPlugins: async () => [],

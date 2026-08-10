@@ -14,6 +14,7 @@ import type {
     GitHubPluginSource,
 } from "../../plugins/githubPluginCatalog.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
+import type { Context } from "@steve.kite/stdlib";
 import type { Skill } from "../skills/Skill.js";
 import type { ManagedNetworkInterceptor } from "./ManagedNetworkPolicy.js";
 
@@ -26,29 +27,35 @@ import type { ManagedNetworkInterceptor } from "./ManagedNetworkPolicy.js";
 export interface PluginContext {
     /** Internal managed-proxy hook; absent in lightweight test/plugin-tool contexts. */
     network?: ManagedNetworkInterceptor;
-    applySystemPrompt?(input: HappySystemPromptHookInput): Promise<string>;
+    applySystemPrompt?(ctx: Context, input: HappySystemPromptHookInput): Promise<string>;
     discoverRepository(
+        ctx: Context,
         source: GitHubPluginSource,
         signal?: AbortSignal,
     ): Promise<GitHubPluginCatalog>;
-    install(options: {
-        fs: FileSystemContext;
-        requestId?: string;
-        signal?: AbortSignal;
-        sourceDirectory: string;
-    }): Promise<InstalledPluginSummary>;
+    install(
+        ctx: Context,
+        options: {
+            fs: FileSystemContext;
+            requestId?: string;
+            signal?: AbortSignal;
+            sourceDirectory: string;
+        },
+    ): Promise<InstalledPluginSummary>;
     installFromGitHub(
+        ctx: Context,
         source: GitHubPluginInstallationSource,
         options: { fs: FileSystemContext; requestId?: string; signal?: AbortSignal },
     ): Promise<InstalledPluginSummary>;
-    loadSkills(fs: FileSystemContext): Promise<readonly Skill[]>;
-    loadSystemPrompt?(): Promise<string | undefined>;
-    list(): Promise<{
+    loadSkills(ctx: Context, fs: FileSystemContext): Promise<readonly Skill[]>;
+    loadSystemPrompt?(ctx: Context): Promise<string | undefined>;
+    list(ctx: Context): Promise<{
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];
         version: EventId;
     }>;
     callAppTool(
+        ctx: Context,
         applicationId: string,
         generation: string,
         server: string,
@@ -62,28 +69,43 @@ export interface PluginContext {
         resourceUri: string,
     ): PluginAppResource;
     readIcon(
+        ctx: Context,
         pluginId: string,
         generation: string,
         signal?: AbortSignal,
     ): Promise<PluginIconResource>;
-    storageDelete(applicationId: string, generation: string, key: string): Promise<void>;
+    storageDelete(
+        ctx: Context,
+        applicationId: string,
+        generation: string,
+        key: string,
+    ): Promise<void>;
     storageGet(
+        ctx: Context,
         applicationId: string,
         generation: string,
         key: string,
     ): Promise<unknown | undefined>;
-    storageList(applicationId: string, generation: string): Promise<readonly string[]>;
+    storageList(
+        ctx: Context,
+        applicationId: string,
+        generation: string,
+    ): Promise<readonly string[]>;
     storageSet(
+        ctx: Context,
         applicationId: string,
         generation: string,
         key: string,
         value: unknown,
     ): Promise<void>;
     trace?(event: HappyTracingEvent): void;
-    readLog(name: string): Promise<PluginLogSnapshot>;
-    uninstall(options: {
-        fs: FileSystemContext;
-        name: string;
-        signal?: AbortSignal;
-    }): Promise<UninstalledPluginSummary>;
+    readLog(ctx: Context, name: string): Promise<PluginLogSnapshot>;
+    uninstall(
+        ctx: Context,
+        options: {
+            fs: FileSystemContext;
+            name: string;
+            signal?: AbortSignal;
+        },
+    ): Promise<UninstalledPluginSummary>;
 }

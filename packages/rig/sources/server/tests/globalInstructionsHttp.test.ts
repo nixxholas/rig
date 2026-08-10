@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { GLOBAL_AGENTS_MD_MAX_BYTES } from "../../config/globalAgentsMdMaxBytes.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -95,7 +97,7 @@ async function startServer(): Promise<{
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
     const instructionsPath = join(directory, "AGENTS.md");
-    const server = await createProtocolHttpServer({
+    const server = await createProtocolHttpServer(createTestRootContext(), {
         globalInstructionsPath: instructionsPath,
         token: "secret",
     });

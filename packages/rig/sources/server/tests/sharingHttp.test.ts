@@ -3,6 +3,8 @@ import { rm } from "node:fs/promises";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import type { SharingOutgoingContactRequest, SharingSnapshot } from "../../protocol/index.js";
 import type { SharingLifecycleServiceContract } from "../../sharing/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -55,7 +57,7 @@ describe("Sharing HTTP API", () => {
             snapshot: vi.fn(async () => snapshot),
         };
         const started = await startServer(
-            await createProtocolHttpServer({ sharing, token: "secret" }),
+            await createProtocolHttpServer(createTestRootContext(), { sharing, token: "secret" }),
         );
         close.push(started.close);
 
@@ -98,9 +100,11 @@ describe("Sharing HTTP API", () => {
             },
             status: 201,
         });
-        expect(sharing.createFolderShare).toHaveBeenCalledWith("afolder000000000000000001", [
-            REMOTE,
-        ]);
+        expect(sharing.createFolderShare).toHaveBeenCalledWith(
+            expect.anything(),
+            "afolder000000000000000001",
+            [REMOTE],
+        );
         expect(
             await send(
                 started.socketPath,
@@ -115,15 +119,15 @@ describe("Sharing HTTP API", () => {
         expect(
             await send(started.socketPath, "POST", "/sharing/contact-requests/request-1/accept"),
         ).toMatchObject({ status: 200 });
-        expect(sharing.acceptContact).toHaveBeenCalledWith("request-1");
+        expect(sharing.acceptContact).toHaveBeenCalledWith(expect.anything(), "request-1");
         expect(
             await send(started.socketPath, "DELETE", "/sharing/contact-requests/request-2"),
         ).toMatchObject({ status: 200 });
-        expect(sharing.rejectContact).toHaveBeenCalledWith("request-2");
+        expect(sharing.rejectContact).toHaveBeenCalledWith(expect.anything(), "request-2");
         expect(
             await send(started.socketPath, "DELETE", `/sharing/contacts/${REMOTE}`),
         ).toMatchObject({ status: 200 });
-        expect(sharing.removeContact).toHaveBeenCalledWith(REMOTE);
+        expect(sharing.removeContact).toHaveBeenCalledWith(expect.anything(), REMOTE);
         expect(await send(started.socketPath, "DELETE", "/sharing")).toEqual({
             body: snapshot,
             status: 200,
@@ -156,7 +160,7 @@ describe("Sharing HTTP API", () => {
             snapshot: vi.fn(async () => snapshot),
         };
         const started = await startServer(
-            await createProtocolHttpServer({ sharing, token: "secret" }),
+            await createProtocolHttpServer(createTestRootContext(), { sharing, token: "secret" }),
         );
         close.push(started.close);
 

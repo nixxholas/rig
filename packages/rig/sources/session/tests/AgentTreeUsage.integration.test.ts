@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,17 +27,18 @@ import {
 } from "../PersistentSessionStore.js";
 
 const execFile = promisify(execFileCallback);
+const ctx = createTestRootContext();
 
 describe("agent tree usage session wiring", () => {
     it("queries nested live subagents through InMemorySession and its manager", async () => {
         const fixture = inferenceFixture();
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             createRuntime: fixture.createRuntime,
             modelCatalog: fixture.catalog,
         });
         const sessions: InMemorySession[] = [];
         try {
-            const root = await store.create({
+            const root = await store.create(ctx, {
                 cwd: "/tmp/rig-agent-tree-in-memory",
                 modelId: fixture.model.id,
                 providerId: fixture.provider.id,
@@ -61,7 +63,7 @@ describe("agent tree usage session wiring", () => {
             const nestedSession = await requiredAgent(store, nested.agentId);
             sessions.push(nestedSession);
 
-            const usage = await getAgentTreeUsageTool.execute({}, rootContext, {});
+            const usage = await getAgentTreeUsageTool.execute({}, rootContext, { ctx });
             const rootAgentId = root.agentIdentity().agentId;
             expect(usage.totalTokens).toBe(22);
             expect(usage.sessions).toEqual([
@@ -91,8 +93,8 @@ describe("agent tree usage session wiring", () => {
                 }),
             ]);
         } finally {
-            await Promise.allSettled(sessions.map((session) => session.beginShutdown()));
-            await store.close();
+            await Promise.allSettled(sessions.map((session) => session.beginShutdown(ctx)));
+            await store.close(ctx);
         }
     });
 
@@ -119,29 +121,29 @@ describe("agent tree usage session wiring", () => {
         let store: PersistentSessionStore | undefined;
         const loadedSessions: InMemorySession[] = [];
         try {
-            store = await PersistentSessionStore.open(options);
-            const root = await store.create({
+            store = await PersistentSessionStore.open(ctx, options);
+            const root = await store.create(ctx, {
                 cwd: repository,
                 modelId: fixture.model.id,
                 providerId: fixture.provider.id,
             });
             loadedSessions.push(root);
             await waitFor(
-                () => store?.getProject(root.snapshot().projectId!),
+                () => store?.getProject(ctx, root.snapshot().projectId!),
                 (project) =>
                     project.initializationStatus === "ready" ||
                     project.initializationStatus === "failed",
             );
-            expect((await store.getProject(root.snapshot().projectId!))?.initializationStatus).toBe(
-                "ready",
-            );
+            expect(
+                (await store.getProject(ctx, root.snapshot().projectId!))?.initializationStatus,
+            ).toBe("ready");
 
             await submitAndWait(root, "First root turn.");
             expect(root.state()).toMatchObject({
                 lifetimeTotalTokens: 11,
                 usage: { totalTokens: 11 },
             });
-            await root.reset();
+            await root.reset(ctx);
             expect(root.state()).toMatchObject({
                 lifetimeTotalTokens: 11,
                 usage: { totalTokens: 0 },
@@ -167,10 +169,10 @@ describe("agent tree usage session wiring", () => {
                 name: "Visible review",
             });
             await waitFor(
-                () => store?.getWorkspace(workspace.projectId, workspace.id),
+                () => store?.getWorkspace(ctx, workspace.projectId, workspace.id),
                 (candidate) => candidate.status !== "initializing",
             );
-            expect((await store.getWorkspace(workspace.projectId, workspace.id))?.status).toBe(
+            expect((await store.getWorkspace(ctx, workspace.projectId, workspace.id))?.status).toBe(
                 "ready",
             );
             const delegated = await rootContext.workspaces!.delegate({
@@ -198,7 +200,7 @@ describe("agent tree usage session wiring", () => {
                 (totalTokens) => totalTokens === 33,
             );
 
-            const usage = await getAgentTreeUsageTool.execute({}, rootContext, {});
+            const usage = await getAgentTreeUsageTool.execute({}, rootContext, { ctx });
             const rootAgentId = root.agentIdentity().agentId;
             expect(usage.totalTokens).toBe(66);
             expect(usage.sessions.map((session) => session.agentId)).toEqual(
@@ -238,22 +240,24 @@ describe("agent tree usage session wiring", () => {
                 totalTokens: 11,
             });
 
-            await store.prepareForShutdown("shutdown");
-            await store.close();
+            await store.prepareForShutdown(ctx, "shutdown");
+            await store.close(ctx);
             store = undefined;
 
-            const restoredStore = await PersistentSessionStore.open(options);
+            const restoredStore = await PersistentSessionStore.open(ctx, options);
             store = restoredStore;
-            expect(await restoredStore.queryAgentTreeUsage(root.id)).toMatchObject({
+            expect(await restoredStore.queryAgentTreeUsage(ctx, root.id)).toMatchObject({
                 totalTokens: usage.totalTokens,
             });
             const restoredRoot = await requiredSession(restoredStore, root.id);
             loadedSessions.splice(0, loadedSessions.length, restoredRoot);
-            expect(await restoredStore.queryAgentTreeUsage(root.id)).toMatchObject({
+            expect(await restoredStore.queryAgentTreeUsage(ctx, root.id)).toMatchObject({
                 totalTokens: usage.totalTokens,
             });
             const restoredRootContext = await runtimeContext(restoredRoot);
-            const restoredUsage = await getAgentTreeUsageTool.execute({}, restoredRootContext, {});
+            const restoredUsage = await getAgentTreeUsageTool.execute({}, restoredRootContext, {
+                ctx,
+            });
             expect(restoredUsage.totalTokens).toBe(usage.totalTokens);
             expect(withoutStatuses(restoredUsage.sessions)).toEqual(
                 withoutStatuses(usage.sessions),
@@ -261,9 +265,9 @@ describe("agent tree usage session wiring", () => {
             expect(rowFor(restoredUsage.sessions, hidden.agentId).status).toBe("completed");
             expect(rowFor(restoredUsage.sessions, nested.agentId).status).toBe("completed");
         } finally {
-            await Promise.allSettled(loadedSessions.map((session) => session.beginShutdown()));
-            await store?.prepareForShutdown("shutdown");
-            await store?.close();
+            await Promise.allSettled(loadedSessions.map((session) => session.beginShutdown(ctx)));
+            await store?.prepareForShutdown(ctx, "shutdown");
+            await store?.close(ctx);
             await rm(directory, { force: true, recursive: true });
         }
     }, 30_000);
@@ -313,7 +317,7 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
         cwd: options.cwd,
         ...(options.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }),
         processManager,
@@ -361,8 +365,8 @@ function assistantMessage(model: string, text: string, totalTokens: number): Ass
 }
 
 async function submitAndWait(session: InMemorySession, text: string): Promise<void> {
-    const submitted = await session.submit({ text });
-    const completion = await session.waitForRun(submitted.runId);
+    const submitted = await session.submit(ctx, { text });
+    const completion = await session.waitForRun(ctx, submitted.runId);
     expect(completion.status).toBe("completed");
     await vi.waitFor(() => {
         expect(session.events.since(undefined)).toContainEqual(
@@ -384,7 +388,7 @@ async function waitForSettledSession(
         expect(session.events.since(undefined)).toContainEqual(
             expect.objectContaining({ type: "run_finished" }),
         );
-        const usage = await store.queryAgentTreeUsage(rootSessionId);
+        const usage = await store.queryAgentTreeUsage(ctx, rootSessionId);
         expect(
             usage?.sessions.find((candidate) => candidate.sessionId === session.id),
         ).toMatchObject({
@@ -397,14 +401,14 @@ async function waitForSettledSession(
 async function runtimeContext(
     session: InMemorySession,
 ): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
-    return await session.externalControlContext();
+    return await session.externalControlContext(ctx);
 }
 
 async function requiredSession(
     store: Pick<InMemorySessionStore, "get"> | Pick<PersistentSessionStore, "get">,
     sessionId: string,
 ): Promise<InMemorySession> {
-    const session = await store.get(sessionId);
+    const session = await store.get(ctx, sessionId);
     if (session === undefined) throw new Error(`Expected session '${sessionId}'.`);
     return session;
 }
@@ -415,7 +419,7 @@ async function requiredAgent(
         | Pick<PersistentSessionStore, "findByAgentId">,
     agentId: string,
 ): Promise<InMemorySession> {
-    const session = await store.findByAgentId(agentId);
+    const session = await store.findByAgentId(ctx, agentId);
     if (session === undefined) throw new Error(`Expected agent '${agentId}'.`);
     return session;
 }

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createEventIdFactory, type SessionEvent } from "../../protocol/index.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { SessionEventLog } from "../SessionEventLog.js";
+
+const ctx = createTestRootContext();
 
 const FIRST = "018bcfe5-6800-7001-8000-00000000aaaa";
 const OMITTED = "018bcfe5-6800-7002-8000-00000000aaaa";
@@ -14,7 +17,7 @@ describe("SessionEventLog", () => {
         const pending: (() => void | Promise<void>)[] = [];
         const observed: SessionEvent[] = [];
         const log = new SessionEventLog({
-            deferNotification: (notify) => {
+            deferNotification: (_ctx, notify) => {
                 pending.push(notify);
             },
         });
@@ -23,7 +26,7 @@ describe("SessionEventLog", () => {
         });
 
         const appended = event(FIRST);
-        await log.append(appended);
+        await log.append(ctx, appended);
 
         expect(observed).toEqual([]);
         expect(pending).toHaveLength(1);
@@ -45,7 +48,7 @@ describe("SessionEventLog", () => {
         let transactionCompleted = false;
         let notificationBeforeCommit = false;
         const log = new SessionEventLog({
-            deferNotification: (notify) => {
+            deferNotification: (_ctx, notify) => {
                 pending.push(notify);
             },
             onAppend: async () => {
@@ -59,7 +62,7 @@ describe("SessionEventLog", () => {
         });
 
         const transaction = (async () => {
-            await log.append(event(DURABLE));
+            await log.append(ctx, event(DURABLE));
             transactionCompleted = true;
             for (const notify of pending) await notify();
         })();
@@ -84,7 +87,7 @@ describe("SessionEventLog", () => {
         const pending: (() => void | Promise<void>)[] = [];
         const observed: SessionEvent[] = [];
         const log = new SessionEventLog({
-            deferNotification: (notify) => {
+            deferNotification: (_ctx, notify) => {
                 pending.push(notify);
             },
             onAppend: async () => {
@@ -95,7 +98,7 @@ describe("SessionEventLog", () => {
             observed.push(next);
         });
 
-        await expect(log.append(event(DURABLE))).rejects.toBe(failure);
+        await expect(log.append(ctx, event(DURABLE))).rejects.toBe(failure);
 
         expect(log.all()).toEqual([]);
         expect(log.lastEventId()).toBeUndefined();
@@ -118,7 +121,7 @@ describe("SessionEventLog", () => {
         const first = event(FIRST);
         const second = event(DURABLE);
         const log = new SessionEventLog({
-            onAppend: async (next) => {
+            onAppend: async (_ctx, next) => {
                 persisted.push(next.id);
                 if (next.id === first.id) {
                     markFirstStarted();
@@ -130,8 +133,8 @@ describe("SessionEventLog", () => {
             observed.push(next.id);
         });
 
-        const firstAppend = log.append(first);
-        const secondAppend = log.append(second);
+        const firstAppend = log.append(ctx, first);
+        const secondAppend = log.append(ctx, second);
         await firstStarted;
 
         expect(persisted).toEqual([first.id]);
@@ -149,7 +152,7 @@ describe("SessionEventLog", () => {
     it("offers reducers one allocation-free read-only view of a long log", async () => {
         const log = new SessionEventLog();
         const view = log.all();
-        await log.append(event("event-1"));
+        await log.append(ctx, event("event-1"));
 
         expect(log.all()).toBe(view);
         expect(view.map((entry) => entry.id)).toEqual(["event-1"]);
@@ -166,7 +169,7 @@ describe("SessionEventLog", () => {
         });
         const next = event(FIRST);
 
-        await expect(log.append(next)).resolves.toBe(next);
+        await expect(log.append(ctx, next)).resolves.toBe(next);
         expect(delivered).toEqual([next]);
         expect(log.since(undefined)).toEqual([next]);
     });
@@ -176,7 +179,7 @@ describe("SessionEventLog", () => {
             events: [event(FIRST)],
             lastEventId: OMITTED,
         });
-        await log.append(event(DURABLE));
+        await log.append(ctx, event(DURABLE));
 
         expect(log.since(OMITTED)?.map((entry) => entry.id)).toEqual([DURABLE]);
         expect(log.since(DURABLE)).toEqual([]);
@@ -199,7 +202,7 @@ describe("SessionEventLog", () => {
         const log = new SessionEventLog({ events: [event(FIRST)] });
         log.subscribe(listener);
 
-        await log.append(event(DURABLE));
+        await log.append(ctx, event(DURABLE));
 
         expect(log.lastEventId()).toBe(DURABLE);
         expect(listener).toHaveBeenCalledExactlyOnceWith(event(DURABLE));
@@ -209,8 +212,8 @@ describe("SessionEventLog", () => {
         const log = new SessionEventLog({ events: [event(FIRST)] });
         const reset = blockResetEvent(DURABLE);
 
-        await log.append(transientEvent(OMITTED, "tentative"));
-        await log.append(reset);
+        await log.append(ctx, transientEvent(OMITTED, "tentative"));
+        await log.append(ctx, reset);
 
         expect(log.since(OMITTED)).toEqual([reset]);
         expect(log.since(undefined)).toContainEqual(reset);
@@ -221,7 +224,7 @@ describe("SessionEventLog", () => {
         const appended = messageSubmittedEvent(DURABLE, "appended-message");
         const log = new SessionEventLog({ events: [restored] });
 
-        await log.append(appended);
+        await log.append(ctx, appended);
 
         expect(log.messageSubmission("restored-message")).toEqual(restored);
         expect(log.messageSubmission("appended-message")).toEqual(appended);
@@ -234,6 +237,7 @@ describe("SessionEventLog", () => {
         });
 
         await log.append(
+            ctx,
             steeringAppliedEvent(DURABLE, ["steer-one", "steer-two"], 1_700_000_020_000),
         );
 
@@ -246,8 +250,8 @@ describe("SessionEventLog", () => {
         const submission = messageSubmittedEvent(FIRST, "expired-message");
         const log = new SessionEventLog({ retentionLimit: 1 });
 
-        await log.append(submission);
-        await log.append(event(DURABLE));
+        await log.append(ctx, submission);
+        await log.append(ctx, event(DURABLE));
 
         expect(log.messageSubmission("expired-message")).toBeUndefined();
     });
@@ -256,7 +260,7 @@ describe("SessionEventLog", () => {
         const log = new SessionEventLog({
             events: [permissionReviewEvent(FIRST, "tool-old")],
         });
-        await log.append(permissionReviewEvent(DURABLE, "tool-new"));
+        await log.append(ctx, permissionReviewEvent(DURABLE, "tool-new"));
 
         expect(log.permissionReviews(new Set(["tool-old", "tool-new", "missing"]))).toEqual([
             expect.objectContaining({ toolCallId: "tool-old" }),
@@ -286,7 +290,7 @@ describe("SessionEventLog", () => {
             temporaryFullAccessStartedEvent(OMITTED, "tool-reviewed"),
         ];
         const incremental = new SessionEventLog({ retentionLimit: 1 });
-        for (const event of events) await incremental.append(event);
+        for (const event of events) await incremental.append(ctx, event);
         const reconstructed = new SessionEventLog({ events, retentionLimit: 1 });
 
         expect(reconstructed.permissionReviews(new Set(["tool-reviewed"]))).toEqual(
@@ -324,10 +328,10 @@ describe("SessionEventLog", () => {
         for (let index = 0; index < 10_000; index += 1) {
             const id = createId();
             transientIds.push(id);
-            await log.append(transientEvent(id, String(index)));
+            await log.append(ctx, transientEvent(id, String(index)));
         }
         const durable = event(createId());
-        await log.append(durable);
+        await log.append(ctx, durable);
 
         const retained = log.since(undefined) ?? [];
         expect(listener).toHaveBeenCalledTimes(10_001);

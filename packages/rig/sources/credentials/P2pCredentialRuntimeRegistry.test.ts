@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { ConfigProviders } from "../config/types.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import type { P2pCredentialStore } from "./P2pCredentialStore.js";
 import { P2pCredentialRuntimeRegistry } from "./P2pCredentialRuntimeRegistry.js";
 
@@ -32,7 +34,7 @@ describe("P2pCredentialRuntimeRegistry", () => {
             },
         };
         const store = {
-            listAll: () =>
+            listAll: (_ctx: Context) =>
                 new Map([
                     [
                         ownerInstanceId,
@@ -47,8 +49,9 @@ describe("P2pCredentialRuntimeRegistry", () => {
                     ],
                 ]),
         } as unknown as P2pCredentialStore;
-        const registry = await P2pCredentialRuntimeRegistry.open({
-            localCatalog: createModelCatalog({ providers: localProviders }),
+        const ctx = createTestRootContext().named("p2p-credential-runtime");
+        const registry = await P2pCredentialRuntimeRegistry.open(ctx, {
+            localCatalog: createModelCatalog(ctx, { providers: localProviders }),
             localInstanceId,
             localName: () => "Build Rig",
             localProviders,
@@ -99,10 +102,11 @@ describe("P2pCredentialRuntimeRegistry", () => {
             ],
         ]);
         const store = {
-            listAll: () => snapshots,
+            listAll: (_ctx: Context) => snapshots,
         } as unknown as P2pCredentialStore;
-        const registry = await P2pCredentialRuntimeRegistry.open({
-            localCatalog: createModelCatalog({
+        const ctx = createTestRootContext().named("p2p-credential-runtime");
+        const registry = await P2pCredentialRuntimeRegistry.open(ctx, {
+            localCatalog: createModelCatalog(ctx, {
                 providers: { localCodex: { apiKey: "local", enabled: true, type: "codex" } },
             }),
             localInstanceId,
@@ -138,7 +142,7 @@ describe("P2pCredentialRuntimeRegistry", () => {
         expect(readFileSync(authFile!, "utf8")).not.toContain("refresh");
 
         snapshots = new Map();
-        await registry.refresh();
+        await registry.refresh(ctx);
         expect(existsSync(authFile!)).toBe(false);
     });
 });

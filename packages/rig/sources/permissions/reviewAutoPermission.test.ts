@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PermissionReviewAgent, PermissionReviewRequest } from "./PermissionReviewAgent.js";
 import { reviewAutoPermission } from "./reviewAutoPermission.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 
 describe("reviewAutoPermission", () => {
     it("does not treat conversation text as an incomplete-evidence signal", async () => {
@@ -13,7 +16,7 @@ describe("reviewAutoPermission", () => {
         });
 
         await expect(
-            reviewAutoPermission({
+            reviewAutoPermission(ctx, {
                 action: 'running "pnpm test". Access: unrestricted filesystem and network access',
                 args: { sandbox_permissions: "require_escalated" },
                 messages: [
@@ -52,7 +55,7 @@ describe("reviewAutoPermission", () => {
         );
 
         await expect(
-            reviewAutoPermission({
+            reviewAutoPermission(ctx, {
                 action: 'running "pnpm test". Access: unrestricted filesystem and network access',
                 args: { sandbox_permissions: "require_escalated" },
                 messages: [],
@@ -82,7 +85,7 @@ describe("reviewAutoPermission", () => {
             );
 
             await expect(
-                reviewAutoPermission({
+                reviewAutoPermission(ctx, {
                     action: 'running "pnpm --filter happy-teams add jose". Access: unrestricted filesystem and network access',
                     args: { sandbox_permissions: "require_escalated" },
                     messages: [
@@ -120,7 +123,7 @@ describe("reviewAutoPermission", () => {
         const action =
             'writing "/workspace/.git/config". Access: protected Git control path inside the workspace';
 
-        await reviewAutoPermission({
+        await reviewAutoPermission(ctx, {
             action,
             args: { file_path: "/workspace/.git/config" },
             messages: [],
@@ -135,7 +138,7 @@ describe("reviewAutoPermission", () => {
         const reviewer: PermissionReviewAgent = {
             close: vi.fn(async () => {}),
             reset: vi.fn(async () => {}),
-            review: ({ signal }) =>
+            review: (_ctx, { signal }) =>
                 new Promise<never>((_resolve, reject) => {
                     signal?.addEventListener("abort", () => {
                         reject(new Error("The review deadline passed."));
@@ -144,7 +147,7 @@ describe("reviewAutoPermission", () => {
         };
 
         await expect(
-            reviewAutoPermission({
+            reviewAutoPermission(ctx, {
                 action: 'fetching "https://example.com"',
                 args: { url: "https://example.com" },
                 messages: [],
@@ -169,7 +172,7 @@ describe("reviewAutoPermission", () => {
         };
 
         await expect(
-            reviewAutoPermission({
+            reviewAutoPermission(ctx, {
                 action: 'fetching "https://example.com"',
                 args: { url: "https://example.com" },
                 messages: [],
@@ -193,7 +196,7 @@ describe("reviewAutoPermission", () => {
         };
         const controller = new AbortController();
 
-        const review = reviewAutoPermission({
+        const review = reviewAutoPermission(ctx, {
             action: 'fetching "https://example.com"',
             args: { url: "https://example.com" },
             messages: [],
@@ -218,7 +221,7 @@ function stubReviewer(
     userEvidenceOmitted = false,
 ) {
     const actions: string[] = [];
-    const review = vi.fn(async (request: PermissionReviewRequest) => {
+    const review = vi.fn(async (_ctx, request: PermissionReviewRequest) => {
         actions.push(request.action);
         return {
             text: JSON.stringify({

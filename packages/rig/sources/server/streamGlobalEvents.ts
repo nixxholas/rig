@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Context } from "@steve.kite/stdlib";
 
 import type {
     GlobalEventDelivery,
@@ -21,6 +22,7 @@ import { writeGlobalSseEvent } from "./writeGlobalSseEvent.js";
 export async function streamGlobalEvents(
     request: IncomingMessage,
     response: ServerResponse,
+    ctx: Context,
     queue: GlobalEventQueue,
     afterValue: string | null,
 ): Promise<void> {
@@ -107,7 +109,7 @@ export async function streamGlobalEvents(
     }, close);
 
     request.on("close", close);
-    let catchup = await queue.list({
+    let catchup = await queue.list(ctx, {
         ...(after === undefined ? {} : { after }),
         limit: CATCHUP_PAGE_LIMIT,
     });
@@ -149,7 +151,7 @@ export async function streamGlobalEvents(
         // preserving the ordered cursor walk across asynchronous database and SSE work.
         await new Promise<void>((resolve) => setImmediate(resolve));
         if (closed) return;
-        const next = await queue.list({ after: nextCursor, limit: CATCHUP_PAGE_LIMIT });
+        const next = await queue.list(ctx, { after: nextCursor, limit: CATCHUP_PAGE_LIMIT });
         if (next === undefined) {
             close();
             return;

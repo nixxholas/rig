@@ -24,6 +24,7 @@ describe("Claude AskUserQuestion tool", () => {
         ];
 
         const result = await claudeAskUserQuestionTool.execute({ questions }, harness.context, {
+            ctx: harness.ctx,
             toolBatchId: "batch-2",
             toolCallId: "call-2",
             toolCallIndex: 0,
@@ -77,7 +78,7 @@ describe("Claude AskUserQuestion tool", () => {
             claudeAskUserQuestionTool.execute(
                 { questions: [question, { ...question, header: "Fallback" }] },
                 harness.context,
-                { toolCallId: "call-3" },
+                { ctx: harness.ctx, toolCallId: "call-3" },
             ),
         ).rejects.toThrow("question text must be unique");
     });

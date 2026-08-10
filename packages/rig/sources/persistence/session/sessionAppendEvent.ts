@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
 import { sessionEvents, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export interface SessionEventIndexFacts {
     messageId?: string;
@@ -12,12 +13,13 @@ export interface SessionEventIndexFacts {
 }
 
 export async function sessionAppendEvent(
-    tx: DatabaseScope,
+    ctx: Context,
     event: SessionEvent,
     facts: SessionEventIndexFacts,
     updatedAt: number,
 ): Promise<"existing" | "inserted"> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.session.session_append_event", async (ctx) => {
+        const tx = ctx.tx;
         const inserted =
             (
                 await tx

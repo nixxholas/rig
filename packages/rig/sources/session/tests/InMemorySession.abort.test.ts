@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +27,7 @@ import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 describe("InMemorySession abort", () => {
     it("clears a restored durable-run identity when its workspace is archived", async () => {
-        const seed = new InMemorySession({
+        const seed = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: testCatalog(),
             request: {
@@ -34,7 +37,7 @@ describe("InMemorySession abort", () => {
             },
             scope: { kind: "workspace", projectId: "project-1", workspaceId: "workspace-1" },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: testCatalog(),
             request: {
@@ -51,7 +54,7 @@ describe("InMemorySession abort", () => {
         });
 
         await (
-            await session.archiveForWorkspace("workspace-1")
+            await session.archiveForWorkspace(ctx, "workspace-1")
         )();
 
         expect(session.state()).toMatchObject({
@@ -96,7 +99,7 @@ describe("InMemorySession abort", () => {
                 };
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -109,10 +112,10 @@ describe("InMemorySession abort", () => {
             scope: { kind: "workspace", projectId: "project-1", workspaceId: "workspace-1" },
         });
 
-        const submitted = session.submit({ text: "Keep running until archival." });
+        const submitted = session.submit(ctx, { text: "Keep running until archival." });
         await started.promise;
         await submitted;
-        const archive = await session.archiveForWorkspace("workspace-1");
+        const archive = await session.archiveForWorkspace(ctx, "workspace-1");
         release.resolve();
         await Promise.all([archive(), settled.promise]);
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -122,7 +125,7 @@ describe("InMemorySession abort", () => {
             status: "archived",
         });
         expect(session.state().activeRunId).toBeUndefined();
-        await expect(session.setArchived(false)).rejects.toThrow("cannot be restored");
+        await expect(session.setArchived(ctx, false)).rejects.toThrow("cannot be restored");
         expect(
             session.events
                 .since(undefined)
@@ -164,7 +167,7 @@ describe("InMemorySession abort", () => {
                 };
             },
         });
-        const session = await InMemorySession.open({
+        const session = await InMemorySession.open(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             emitCreatedEvent: false,
@@ -174,21 +177,21 @@ describe("InMemorySession abort", () => {
                 models: [model],
                 providers: [{ models: [model], providerId: provider.id }],
             },
-            onAppendEvent: (event) => {
+            onAppendEvent: (_ctx, event) => {
                 if (event.type === "session_archived") throw failure;
             },
             request: { cwd: "/tmp/rig-archive-persistence-rejection", modelId: model.id },
         });
 
-        const submitted = await session.submit({ text: "Keep this run alive." });
+        const submitted = await session.submit(ctx, { text: "Keep this run alive." });
         await started.promise;
 
-        await expect(session.setArchived(true)).rejects.toBe(failure);
+        await expect(session.setArchived(ctx, true)).rejects.toBe(failure);
 
         expect(runSignal?.aborted).toBe(false);
         expect(session.snapshot()).toMatchObject({ archived: false, status: "running" });
         release.resolve();
-        await session.waitForRun(submitted.runId);
+        await session.waitForRun(ctx, submitted.runId);
     });
 
     it("stops an active inference after project archival commits", async () => {
@@ -231,14 +234,14 @@ describe("InMemorySession abort", () => {
         });
         const session = createSession(provider, model, "/tmp/rig-project-archive-active-run");
 
-        await session.submit({ text: "Keep running until the project is archived." });
+        await session.submit(ctx, { text: "Keep running until the project is archived." });
         await started.promise;
-        await session.setArchived(true);
+        await session.setArchived(ctx, true);
         await stopped.promise;
 
         expect(runSignal?.aborted).toBe(true);
         expect(session.snapshot().archived).toBe(true);
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("kills a direct shell watcher before draining daemon shutdown tasks", async () => {
@@ -256,7 +259,7 @@ describe("InMemorySession abort", () => {
             },
         });
         const taskDrain = new TrackedTaskDrain();
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -273,9 +276,9 @@ describe("InMemorySession abort", () => {
             taskDrain,
         });
 
-        await session.runShellCommand({ command: "sleep 60", commandId: "shutdown-shell" });
+        await session.runShellCommand(ctx, { command: "sleep 60", commandId: "shutdown-shell" });
         taskDrain.beginClose();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
 
         await expect(taskDrain.drain()).resolves.toBeUndefined();
         expect(
@@ -288,7 +291,7 @@ describe("InMemorySession abort", () => {
     it("stops active descendants instead of suspending them", async () => {
         const pauseDescendants = vi.fn(async () => 1);
         const stopDescendants = vi.fn(async () => 1);
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             agentManager: {
                 communicationContext: vi.fn(),
                 pauseDescendants,
@@ -303,14 +306,14 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        await expect(session.abort()).resolves.toEqual({ aborted: true });
-        expect(stopDescendants).toHaveBeenCalledWith(session.id);
+        await expect(session.abort(ctx)).resolves.toEqual({ aborted: true });
+        expect(stopDescendants).toHaveBeenCalledWith(ctx, session.id);
         expect(pauseDescendants).not.toHaveBeenCalled();
     });
 
     it("stops active descendants even when the parent has no active run", async () => {
         const stopDescendants = vi.fn(async () => 2);
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             agentManager: {
                 communicationContext: vi.fn(),
                 stopDescendants,
@@ -324,8 +327,8 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        await expect(session.abort()).resolves.toEqual({ aborted: true });
-        expect(stopDescendants).toHaveBeenCalledWith(session.id);
+        await expect(session.abort(ctx)).resolves.toEqual({ aborted: true });
+        expect(stopDescendants).toHaveBeenCalledWith(ctx, session.id);
     });
 
     it("publishes interrupted tools and the stopped run before provider cleanup settles", async () => {
@@ -375,7 +378,7 @@ describe("InMemorySession abort", () => {
         );
         const descendantsStopped = deferred<number>();
         const stopDescendants = vi.fn(() => descendantsStopped.promise);
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             agentManager: {
                 communicationContext: vi.fn(),
                 stopDescendants,
@@ -390,11 +393,13 @@ describe("InMemorySession abort", () => {
             },
             request: { cwd: "/tmp/rig-immediate-abort", modelId: model.id },
         });
-        const submitted = await session.submit({ text: "Run both tools." });
+        const submitted = await session.submit(ctx, { text: "Run both tools." });
         await toolsStarted.promise;
 
-        const abort = session.abort();
-        await expect(settlesBeforeNextTurn(session.waitForRun(submitted.runId))).resolves.toEqual({
+        const abort = session.abort(ctx);
+        await expect(
+            settlesBeforeNextTurn(session.waitForRun(ctx, submitted.runId)),
+        ).resolves.toEqual({
             status: "aborted",
         });
 
@@ -440,7 +445,7 @@ describe("InMemorySession abort", () => {
                 providers: [{ providerId: provider.id, models: [model] }],
             };
             let processManager: NativeProcessManager | undefined;
-            const session = new InMemorySession({
+            const session = new InMemorySession(ctx, {
                 createEventId: createEventIdFactory(),
                 createRuntime(options) {
                     const runtime = createRuntime(options, provider);
@@ -451,13 +456,15 @@ describe("InMemorySession abort", () => {
                 request: { cwd, modelId: model.id, providerId: provider.id },
             });
 
-            const submitted = await session.submit({ text: "Finish before the delayed action." });
-            await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+            const submitted = await session.submit(ctx, {
+                text: "Finish before the delayed action.",
+            });
+            await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
                 status: "completed",
             });
             if (processManager === undefined) throw new Error("Runtime was not created.");
 
-            processManager.start({
+            await processManager.start(createTestRootContext().named("process"), {
                 command: `${shellQuote(process.execPath)} -e ${shellQuote(
                     `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "escaped"), 500);`,
                 )}`,
@@ -466,7 +473,7 @@ describe("InMemorySession abort", () => {
             });
             expect(processManager.activeCount()).toBe(1);
 
-            await expect(session.abort()).resolves.toEqual({
+            await expect(session.abort(ctx)).resolves.toEqual({
                 aborted: false,
                 stoppedProcesses: 1,
             });
@@ -504,7 +511,7 @@ describe("InMemorySession abort", () => {
             },
         });
         let runtime: CodingAssistantRuntime | undefined;
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime(options) {
                 runtime = createRuntime(options, provider);
@@ -523,29 +530,32 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        const submitted = await session.submit({ text: "Keep running until I abort." });
+        const submitted = await session.submit(ctx, { text: "Keep running until I abort." });
         await started.promise;
         if (runtime === undefined) throw new Error("Runtime was not created.");
-        const background = runtime.processManager.start({
-            command: "sleep 60",
-            cwd: tmpdir(),
-            maxOutputBytes: 4_096,
-        });
+        const background = await runtime.processManager.start(
+            createTestRootContext().named("process"),
+            {
+                command: "sleep 60",
+                cwd: tmpdir(),
+                maxOutputBytes: 4_096,
+            },
+        );
         background.detached = true;
         expect(runtime.processManager.activeCount()).toBe(1);
 
         try {
-            await expect(session.abort()).resolves.toMatchObject({
+            await expect(session.abort(ctx)).resolves.toMatchObject({
                 aborted: true,
                 stoppedProcesses: 1,
             });
             expect(runtime.processManager.activeCount()).toBe(0);
         } finally {
             release.resolve();
-            await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+            await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
                 status: "aborted",
             });
-            await session.beginShutdown();
+            await session.beginShutdown(ctx);
         }
     });
 
@@ -576,24 +586,24 @@ describe("InMemorySession abort", () => {
             models: [model],
             providers: [{ models: [model], providerId: provider.id }],
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: catalog,
             request: { cwd: "/tmp/rig-steering-continuation", modelId: model.id },
         });
 
-        const submitted = await session.submit({ text: "Start waiting." });
+        const submitted = await session.submit(ctx, { text: "Start waiting." });
         await started.promise;
-        await session.steer({
+        await session.steer(ctx, {
             clientSubmissionId: "client-pending-steering",
             text: "Apply this pending direction.",
         });
 
         await expect(
-            session.abort({ continuePendingSteering: true, stopDescendants: false }),
+            session.abort(ctx, { continuePendingSteering: true, stopDescendants: false }),
         ).resolves.toMatchObject({ aborted: true, continued: true });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
 
@@ -639,7 +649,7 @@ describe("InMemorySession abort", () => {
                 return abortableStream(options?.signal, started.resolve);
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => {
                 runtime = createRuntime(options, provider);
@@ -654,7 +664,7 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-internal-system-steering", modelId: model.id },
         });
 
-        const submitted = await session.submit({
+        const submitted = await session.submit(ctx, {
             text: "Keep working until the background task ends.",
         });
         await started.promise;
@@ -665,8 +675,8 @@ describe("InMemorySession abort", () => {
             role: "system",
         });
 
-        await expect(session.abort()).resolves.toMatchObject({ aborted: true });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        await expect(session.abort(ctx)).resolves.toMatchObject({ aborted: true });
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "aborted",
         });
 
@@ -713,9 +723,9 @@ describe("InMemorySession abort", () => {
             },
         });
         const session = createSession(provider, model, "/tmp/rig-applied-steering");
-        const submitted = await session.submit({ text: "Start the applied steering run." });
+        const submitted = await session.submit(ctx, { text: "Start the applied steering run." });
         await firstInferenceStarted.promise;
-        const accepted = await session.steer({
+        const accepted = await session.steer(ctx, {
             clientSubmissionId: "already-applied",
             expectedRunId: submitted.runId,
             text: "Use this exactly once.",
@@ -733,18 +743,18 @@ describe("InMemorySession abort", () => {
         ).toHaveLength(1);
 
         await expect(
-            session.abort({
+            session.abort(ctx, {
                 continuePendingSteering: true,
                 expectedRunId: submitted.runId,
                 stopDescendants: false,
                 steeringMessageIds: ["already-applied"],
             }),
         ).resolves.toMatchObject({ aborted: true, continued: true });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
         expect(
-            await session.steer({
+            await session.steer(ctx, {
                 clientSubmissionId: "already-applied",
                 expectedRunId: submitted.runId,
                 text: "Use this exactly once.",
@@ -804,22 +814,22 @@ describe("InMemorySession abort", () => {
             },
         });
         const session = createSession(provider, model, "/tmp/rig-mixed-steering");
-        const submitted = await session.submit({ text: "Start the mixed steering run." });
+        const submitted = await session.submit(ctx, { text: "Start the mixed steering run." });
         await firstInferenceStarted.promise;
-        await session.steer({ clientSubmissionId: "applied-first", text: "Applied first." });
+        await session.steer(ctx, { clientSubmissionId: "applied-first", text: "Applied first." });
         releaseFirstInference.resolve();
         await secondInferenceStarted.promise;
-        await session.steer({ clientSubmissionId: "pending-second", text: "Pending second." });
+        await session.steer(ctx, { clientSubmissionId: "pending-second", text: "Pending second." });
 
         await expect(
-            session.abort({
+            session.abort(ctx, {
                 continuePendingSteering: true,
                 expectedRunId: submitted.runId,
                 stopDescendants: false,
                 steeringMessageIds: ["applied-first", "pending-second"],
             }),
         ).resolves.toMatchObject({ aborted: true, continued: true });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
 
@@ -859,7 +869,7 @@ describe("InMemorySession abort", () => {
         });
         let session: InMemorySession;
         const stopDescendants = vi.fn(() => releaseDescendants.promise);
-        session = new InMemorySession({
+        session = new InMemorySession(ctx, {
             agentManager: {
                 communicationContext: vi.fn(),
                 stopDescendants,
@@ -875,21 +885,21 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-coalesced-steering", modelId: model.id },
         });
 
-        const submitted = await session.submit({ text: "Start waiting." });
+        const submitted = await session.submit(ctx, { text: "Start waiting." });
         await started.promise;
-        await session.steer({
+        await session.steer(ctx, {
             clientSubmissionId: "first-pending-direction",
             text: "First pending direction.",
         });
 
-        const firstAbort = session.abort({ continuePendingSteering: true });
-        const secondAbort = session.abort({ continuePendingSteering: true });
+        const firstAbort = session.abort(ctx, { continuePendingSteering: true });
+        const secondAbort = session.abort(ctx, { continuePendingSteering: true });
         expect(secondAbort).toBe(firstAbort);
         expect(stopDescendants).toHaveBeenCalledOnce();
         await expect(
-            session.abort({ continuePendingSteering: true, stopDescendants: false }),
+            session.abort(ctx, { continuePendingSteering: true, stopDescendants: false }),
         ).rejects.toThrow("An abort request with different options is already in progress.");
-        await session.steer({
+        await session.steer(ctx, {
             clientSubmissionId: "submitted-during-interrupt",
             text: "Submitted while interrupt settles.",
         });
@@ -899,7 +909,7 @@ describe("InMemorySession abort", () => {
             expect.objectContaining({ aborted: true, continued: true }),
             expect.objectContaining({ aborted: true, continued: true }),
         ]);
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
 
@@ -947,7 +957,7 @@ describe("InMemorySession abort", () => {
             },
         });
         const stopDescendants = vi.fn(() => releaseDescendants.promise);
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             agentManager: {
                 communicationContext: vi.fn(),
                 stopDescendants,
@@ -963,15 +973,15 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-hard-abort-override", modelId: model.id },
         });
 
-        const submitted = await session.submit({ text: "Start waiting." });
+        const submitted = await session.submit(ctx, { text: "Start waiting." });
         await started.promise;
-        await session.steer({ text: "Do not revive this run after a hard abort." });
+        await session.steer(ctx, { text: "Do not revive this run after a hard abort." });
 
-        const continuingAbort = session.abort({
+        const continuingAbort = session.abort(ctx, {
             continuePendingSteering: true,
             expectedRunId: submitted.runId,
         });
-        const hardAbort = session.abort({ expectedRunId: submitted.runId });
+        const hardAbort = session.abort(ctx, { expectedRunId: submitted.runId });
         releaseDescendants.resolve(1);
 
         await expect(Promise.all([continuingAbort, hardAbort])).resolves.toEqual([
@@ -980,7 +990,9 @@ describe("InMemorySession abort", () => {
         ]);
         expect(await continuingAbort).not.toHaveProperty("continued");
         expect(await hardAbort).not.toHaveProperty("continued");
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({ status: "aborted" });
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
+            status: "aborted",
+        });
 
         expect(contexts).toHaveLength(1);
         expect(
@@ -1009,7 +1021,7 @@ describe("InMemorySession abort", () => {
                     : abortableStream(options?.signal, replacementStarted.resolve);
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -1021,17 +1033,19 @@ describe("InMemorySession abort", () => {
             request: { cwd: "/tmp/rig-targeted-abort", modelId: model.id },
         });
 
-        const first = await session.submit({ text: "Finish first." });
-        await expect(session.waitForRun(first.runId)).resolves.toEqual({ status: "completed" });
-        const replacement = await session.submit({ text: "Keep replacement running." });
+        const first = await session.submit(ctx, { text: "Finish first." });
+        await expect(session.waitForRun(ctx, first.runId)).resolves.toEqual({
+            status: "completed",
+        });
+        const replacement = await session.submit(ctx, { text: "Keep replacement running." });
         await replacementStarted.promise;
 
-        const queued = await session.steer({
+        const queued = await session.steer(ctx, {
             expectedRunId: first.runId,
             text: "Run this after the replacement.",
         });
         expect(queued).toMatchObject({ delivery: "run" });
-        await expect(session.abort({ expectedRunId: first.runId })).resolves.toEqual({
+        await expect(session.abort(ctx, { expectedRunId: first.runId })).resolves.toEqual({
             aborted: false,
         });
         expect(session.summary()).toMatchObject({ status: "running" });
@@ -1055,7 +1069,7 @@ describe("InMemorySession abort", () => {
                 ),
         ).toMatchObject({ data: { delivery: "run" } });
         await expect(
-            session.abort({
+            session.abort(ctx, {
                 continuePendingSteering: true,
                 expectedRunId: replacement.runId,
                 steeringMessageIds: ["steering-from-the-finished-run"],
@@ -1063,7 +1077,9 @@ describe("InMemorySession abort", () => {
         ).resolves.toEqual({ aborted: false });
         expect(session.summary()).toMatchObject({ status: "running" });
 
-        await expect(session.abort({ expectedRunId: replacement.runId })).resolves.toMatchObject({
+        await expect(
+            session.abort(ctx, { expectedRunId: replacement.runId }),
+        ).resolves.toMatchObject({
             aborted: true,
         });
     });
@@ -1084,9 +1100,9 @@ describe("InMemorySession abort", () => {
             },
         });
         const session = createSession(provider, model, "/tmp/rig-notification-continuation");
-        const submitted = await session.submit({ text: "Keep running." });
+        const submitted = await session.submit(ctx, { text: "Keep running." });
         await started.promise;
-        const notification = await session.deliverNotification({
+        const notification = await session.deliverNotification(ctx, {
             text: "Background work completed.",
         });
         const notificationEvent = session.events
@@ -1099,7 +1115,7 @@ describe("InMemorySession abort", () => {
                 : "missing";
 
         await expect(
-            session.abort({
+            session.abort(ctx, {
                 continuePendingSteering: true,
                 expectedRunId: submitted.runId,
                 steeringMessageIds: [notificationMessageId],
@@ -1110,9 +1126,11 @@ describe("InMemorySession abort", () => {
             session.events.since(undefined)?.filter((event) => event.type === "abort_requested"),
         ).toHaveLength(0);
 
-        await expect(session.abort({ expectedRunId: submitted.runId })).resolves.toMatchObject({
-            aborted: true,
-        });
+        await expect(session.abort(ctx, { expectedRunId: submitted.runId })).resolves.toMatchObject(
+            {
+                aborted: true,
+            },
+        );
     });
 
     it("persists a standalone compaction as one durable transcript message", async () => {
@@ -1151,7 +1169,7 @@ describe("InMemorySession abort", () => {
                 return responseStream("Earlier answer");
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -1167,9 +1185,9 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        const submitted = await session.submit({ text: "Earlier request" });
-        await session.waitForRun(submitted.runId);
-        await session.compact();
+        const submitted = await session.submit(ctx, { text: "Earlier request" });
+        await session.waitForRun(ctx, submitted.runId);
+        await session.compact(ctx);
 
         const compactionMessages = session.events
             .since(undefined)
@@ -1212,7 +1230,9 @@ describe("InMemorySession abort", () => {
             type: "run_finished",
         });
         expect(
-            (await session.transcriptWindow()).turns.find((turn) => turn.runId === compactionRunId),
+            (await session.transcriptWindow(ctx)).turns.find(
+                (turn) => turn.runId === compactionRunId,
+            ),
         ).toMatchObject({
             kind: "compaction",
             outcome: "success",
@@ -1242,7 +1262,7 @@ describe("InMemorySession abort", () => {
                 return responseStream("Earlier answer");
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -1257,10 +1277,10 @@ describe("InMemorySession abort", () => {
                 providerId: provider.id,
             },
         });
-        const submitted = await session.submit({ text: "Earlier request" });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit(ctx, { text: "Earlier request" });
+        await session.waitForRun(ctx, submitted.runId);
 
-        await expect(session.compact()).rejects.toThrow(failure);
+        await expect(session.compact(ctx)).rejects.toThrow(failure);
 
         const compactionRun = session.events
             .since(undefined)
@@ -1311,7 +1331,7 @@ describe("InMemorySession abort", () => {
                 return responseStream("Earlier answer");
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -1327,16 +1347,16 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        const submitted = await session.submit({ text: "Earlier request" });
-        await session.waitForRun(submitted.runId);
-        const compacting = session.compact();
+        const submitted = await session.submit(ctx, { text: "Earlier request" });
+        await session.waitForRun(ctx, submitted.runId);
+        const compacting = session.compact(ctx);
         await compactStarted;
         expect(session.snapshot().activeTurn).toMatchObject({
             kind: "compaction",
             runId: expect.any(String),
         });
-        const shutdown = session.beginShutdown();
-        const interrupted = session.markInterrupted({
+        const shutdown = session.beginShutdown(ctx);
+        const interrupted = session.markInterrupted(ctx, {
             interruptedAt: 1,
             message: "The local daemon shut down during compaction.",
             reason: "shutdown",
@@ -1393,7 +1413,10 @@ function createRuntime(
     tools: readonly AnyDefinedTool[] = [],
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,
@@ -1423,7 +1446,7 @@ function createSession(
     model: ReturnType<typeof defineModel>,
     cwd: string,
 ): InMemorySession {
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         createRuntime: (options) => createRuntime(options, provider),
         modelCatalog: {

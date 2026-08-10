@@ -1,11 +1,12 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
-
 /** Advances and returns the revision committed with one logical folder-tree mutation. */
-export async function advanceFolderCatalogRevision(tx: DatabaseScope): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+export async function advanceFolderCatalogRevision(ctx: Context): Promise<number> {
+    return await inDatabase(ctx, "rig.sql.folder.advanceFolderCatalogRevision", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx.get<{ revision: number }>(
             sql.raw(`
         UPDATE folder_catalog

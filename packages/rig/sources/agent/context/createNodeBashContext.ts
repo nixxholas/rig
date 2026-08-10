@@ -1,10 +1,13 @@
 import { isAbsolute, resolve } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     resolveSystemShell,
     type ManagedProcess,
     type NativeProcessManager,
     type ProcessRunResult,
+    type ProcessRunOptions,
+    type ProcessStartOptions,
 } from "../../processes/index.js";
 import { assertPermissionRevision, type PermissionContext } from "../../permissions/index.js";
 import type { BashContext, BashSessionExit, BashSessionSnapshot } from "./BashContext.js";
@@ -40,6 +43,7 @@ import { redactGitAuthenticationText } from "../../git/GitCredentialBroker.js";
 import { assertCanUseCommandSecrets } from "./assertCanUseCommandSecrets.js";
 
 export interface CreateNodeBashContextOptions {
+    ctx: Context;
     cwd: string;
     environment?: NodeJS.ProcessEnv;
     loadManagedNetworkPolicy?: typeof loadProjectManagedNetworkPolicy;
@@ -121,7 +125,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 );
             }
             oldest.evicted = true;
-            void oldest.process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS });
+            void oldest.process.kill(options.ctx, "SIGTERM", {
+                forceAfterMs: BASH_SESSION_STOP_GRACE_MS,
+            });
         }
         pendingSessionStarts += 1;
         let released = false;
@@ -262,7 +268,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         async interruptSession(sessionId) {
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
-            return session.process.interrupt();
+            return session.process.interrupt(options.ctx);
         },
         async killAllSessions() {
             const active = [...sessions.values()].filter((session) => session.result === undefined);
@@ -271,7 +277,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             for (const session of active) session.exitObserved = true;
             await Promise.all(
                 active.map((session) =>
-                    session.process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS }),
+                    session.process.kill(options.ctx, "SIGTERM", {
+                        forceAfterMs: BASH_SESSION_STOP_GRACE_MS,
+                    }),
                 ),
             );
             return active.length;
@@ -283,7 +291,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             // call, so claim the outcome before the exit continuation can run
             // and announce it a second time.
             session.exitObserved = true;
-            await session.process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS });
+            await session.process.kill(options.ctx, "SIGTERM", {
+                forceAfterMs: BASH_SESSION_STOP_GRACE_MS,
+            });
             // The process is gone, but this session records the outcome from a
             // separate continuation. Wait for that before reporting status,
             // otherwise a just-killed command still reads as running.
@@ -344,7 +354,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 await managedNetwork?.close();
                 throw error;
             }
-            const processRunOptions: Parameters<NativeProcessManager["run"]>[0] = {
+            const processRunOptions: ProcessRunOptions = {
                 command: sandboxedCommand.command,
                 cwd,
                 env: managedNetwork?.withProxyEnvironment(commandEnvironment) ?? commandEnvironment,
@@ -389,7 +399,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             let cleanup: CommandCleanupResult = { protectedPathViolation: false };
             try {
                 assertPermissionRevision(options.permissions, permissionRevision);
-                result = await options.processManager.run(processRunOptions);
+                result = await options.processManager.run(options.ctx, processRunOptions);
             } finally {
                 activatedSecrets.release();
                 stopObservingNetworkDenials?.();
@@ -476,7 +486,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     await managedNetwork?.close();
                     throw error;
                 }
-                const processStartOptions: Parameters<NativeProcessManager["start"]>[0] = {
+                const processStartOptions: ProcessStartOptions = {
                     command: sandboxedCommand.command,
                     cwd,
                     env:
@@ -507,7 +517,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 let process: ManagedProcess;
                 try {
                     assertPermissionRevision(options.permissions, permissionRevision);
-                    process = options.processManager.start(processStartOptions);
+                    process = await options.processManager.start(options.ctx, processStartOptions);
                 } catch (error) {
                     activatedSecrets.release();
                     await cleanUpCommandResources(
@@ -517,7 +527,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     );
                     throw error;
                 }
-                const completion = process.wait();
+                const completion = process.wait(options.ctx);
                 const sessionId = nextSessionId;
                 nextSessionId += 1;
                 const session: NodeBashSession = {
@@ -539,7 +549,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
                     (request) => {
                         networkDenial ??= request;
-                        void process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS });
+                        void process.kill(options.ctx, "SIGTERM", {
+                            forceAfterMs: BASH_SESSION_STOP_GRACE_MS,
+                        });
                     },
                 );
                 sessions.set(sessionId, session);
@@ -612,7 +624,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             if (session?.usesSecrets === true) {
                 assertCanUseCommandSecrets(options.permissions.mode, ["selected"]);
             }
-            return session?.process.writeStdin(data) ?? false;
+            return session?.process.writeStdin(options.ctx, data) ?? false;
         },
     };
 }

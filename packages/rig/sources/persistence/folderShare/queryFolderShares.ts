@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { asc, eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -7,7 +9,6 @@ import {
 } from "../../protocol/FolderSharingProtocol.js";
 import { folderShareOutbox, folderShares } from "../database/schema.js";
 import { inDatabase } from "../database/inDatabase.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export interface FolderShareRecord {
     error?: string;
@@ -26,8 +27,9 @@ export interface FolderShareOutboxRecord {
     payloadJson: string;
 }
 
-export async function queryFolderShares(tx: DatabaseScope): Promise<readonly FolderShareRecord[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryFolderShares(ctx: Context): Promise<readonly FolderShareRecord[]> {
+    return await inDatabase(ctx, "rig.sql.folderShare.queryFolderShares", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx
             .select()
             .from(folderShares)
@@ -38,10 +40,11 @@ export async function queryFolderShares(tx: DatabaseScope): Promise<readonly Fol
 }
 
 export async function queryFolderShare(
-    tx: DatabaseScope,
+    ctx: Context,
     groupId: string,
 ): Promise<FolderShareRecord | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderShare.queryFolderShare", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select()
             .from(folderShares)
@@ -52,10 +55,11 @@ export async function queryFolderShare(
 }
 
 export async function queryFolderShareByShareId(
-    tx: DatabaseScope,
+    ctx: Context,
     shareId: string,
 ): Promise<FolderShareRecord | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderShare.queryFolderShareByShareId", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select()
             .from(folderShares)
@@ -66,12 +70,13 @@ export async function queryFolderShareByShareId(
 }
 
 export async function queryPendingFolderShareOutbox(
-    tx: DatabaseScope,
+    ctx: Context,
 ): Promise<readonly FolderShareOutboxRecord[]> {
     return await inDatabase(
-        tx,
-        async (tx) =>
-            await tx
+        ctx,
+        "rig.sql.folderShare.queryPendingFolderShareOutbox",
+        async (ctx) =>
+            await ctx.tx
                 .select({
                     groupId: folderShareOutbox.groupId,
                     operationId: folderShareOutbox.operationId,

@@ -2,6 +2,8 @@ import type { Server } from "node:http";
 import { rm } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import type { P2pPairingServiceContract } from "../../p2p/P2pPairingService.js";
 import type { P2pPairingState } from "../../protocol/index.js";
@@ -62,7 +64,10 @@ async function startServer(p2pPairing: P2pPairingServiceContract): Promise<{
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
-    const server = await createProtocolHttpServer({ p2pPairing, token: "test-token" });
+    const server = await createProtocolHttpServer(createTestRootContext(), {
+        p2pPairing,
+        token: "test-token",
+    });
     await listen(server, socketPath);
     return {
         close: async () => {

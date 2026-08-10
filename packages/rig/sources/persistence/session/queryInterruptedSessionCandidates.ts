@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { readOptionalString, readString } from "./impl/sqliteRow.js";
 
 export interface InterruptedSessionCandidate {
@@ -10,11 +11,15 @@ export interface InterruptedSessionCandidate {
 }
 
 export async function queryInterruptedSessionCandidates(
-    tx: DatabaseScope,
+    ctx: Context,
 ): Promise<readonly InterruptedSessionCandidate[]> {
-    return await inDatabase(tx, async (tx) => {
-        return (
-            await tx.all<Record<string, unknown>>(sql`
+    return await inDatabase(
+        ctx,
+        "rig.sql.session.query_interrupted_session_candidates",
+        async (ctx) => {
+            const tx = ctx.tx;
+            return (
+                await tx.all<Record<string, unknown>>(sql`
             SELECT DISTINCT sessions.id, sessions.active_run_id
             FROM sessions
             LEFT JOIN queued_runs ON queued_runs.session_id = sessions.id
@@ -22,12 +27,13 @@ export async function queryInterruptedSessionCandidates(
                 OR sessions.active_run_id IS NOT NULL
                 OR queued_runs.run_id IS NOT NULL
         `)
-        ).map((row) => {
-            const activeRunId = readOptionalString(row, "active_run_id");
-            return {
-                ...(activeRunId === undefined ? {} : { activeRunId }),
-                sessionId: readString(row, "id"),
-            };
-        });
-    });
+            ).map((row) => {
+                const activeRunId = readOptionalString(row, "active_run_id");
+                return {
+                    ...(activeRunId === undefined ? {} : { activeRunId }),
+                    sessionId: readString(row, "id"),
+                };
+            });
+        },
+    );
 }

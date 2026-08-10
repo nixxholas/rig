@@ -16,7 +16,10 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path
 import { StringDecoder } from "node:string_decoder";
 
 import { createId } from "@paralleldrive/cuid2";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/daemonContext.js";
 import sharp from "sharp";
+import { withDatabase } from "../persistence/database/databaseContext.js";
 
 import {
     createEventIdFactory,
@@ -84,7 +87,6 @@ import { projectSetDefaultBranch } from "../persistence/project/projectSetDefaul
 import { projectSetSettings } from "../persistence/project/projectSetSettings.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import type { TX } from "../persistence/Transaction.js";
 import { normalizeProjectCwd } from "../utils/normalizeProjectCwd.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { createGitWorktree } from "../git/createGitWorktree.js";
@@ -172,7 +174,7 @@ export class ProjectRegistrationError extends Error {
 }
 
 export interface ProjectRepositoryOptions {
-    afterTransactionCommit?: (callback: () => void | Promise<void>) => Promise<void>;
+    afterTransactionCommit?: (ctx: Context, callback: () => void | Promise<void>) => Promise<void>;
     cloneRemote?: typeof cloneRemoteRepository;
     database: SessionDatabase;
     /** Replaces both Git execution surfaces at once, so a test can drive lifecycle without Git. */
@@ -183,14 +185,14 @@ export interface ProjectRepositoryOptions {
     managedProjectsDirectory?: string;
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
-    onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void | Promise<void>;
+    onEvent?: (ctx: Context, event: ProjectEvent | ProjectWorkspaceEvent) => void | Promise<void>;
     /** Moving the branch is best-effort after the new name has already committed. */
     onWorkspaceBranchError?: (error: unknown, projectId: string, workspaceId: string) => void;
     /** Cleanup is best-effort after logical archival has already committed. */
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     stateDirectory?: string;
     taskDrain?: TaskDrain;
-    transaction?: <T>(body: (tx: TX) => T | Promise<T>) => Promise<T>;
+    transaction?: <T>(ctx: Context, body: (ctx: Context) => T | Promise<T>) => Promise<T>;
     workspacesDirectory?: string;
     resolveGitSecret?: (kind: "github") => string | undefined;
     resolveProfile?: (
@@ -199,9 +201,10 @@ export interface ProjectRepositoryOptions {
 }
 
 export class ProjectRepository {
+    readonly #backgroundAbort = new AbortController();
     readonly #assetRoot: string;
     readonly #afterTransactionCommit:
-        | ((callback: () => void | Promise<void>) => Promise<void>)
+        | ((ctx: Context, callback: () => void | Promise<void>) => Promise<void>)
         | undefined;
     readonly #avatarLifecycle = new Map<string, Promise<void>>();
     readonly #createEventId = createEventIdFactory();
@@ -223,7 +226,7 @@ export class ProjectRepository {
     readonly #cloneRemote: typeof cloneRemoteRepository;
     readonly #now: () => number;
     readonly #onEvent:
-        | ((event: ProjectEvent | ProjectWorkspaceEvent) => void | Promise<void>)
+        | ((ctx: Context, event: ProjectEvent | ProjectWorkspaceEvent) => void | Promise<void>)
         | undefined;
     readonly #onWorkspaceBranchError:
         | ((error: unknown, projectId: string, workspaceId: string) => void)
@@ -234,7 +237,9 @@ export class ProjectRepository {
     readonly #stateDirectory: string;
     readonly #ownedTaskDrain: TrackedTaskDrain | undefined;
     readonly #taskDrain: TaskDrain;
-    readonly #transactionRunner: (<T>(body: (tx: TX) => T | Promise<T>) => Promise<T>) | undefined;
+    readonly #transactionRunner:
+        | (<T>(ctx: Context, body: (ctx: Context) => T | Promise<T>) => Promise<T>)
+        | undefined;
     readonly #workspacesDirectory: string;
     readonly #resolveGitSecret: ((kind: "github") => string | undefined) | undefined;
     readonly #resolveProfile:
@@ -248,9 +253,9 @@ export class ProjectRepository {
     #activeInitializations = 0;
     #closed = false;
 
-    static async open(options: ProjectRepositoryOptions): Promise<ProjectRepository> {
+    static async open(ctx: Context, options: ProjectRepositoryOptions): Promise<ProjectRepository> {
         const repository = new ProjectRepository(options);
-        await repository.#initializeOnOpen();
+        await repository.#initializeOnOpen(ctx);
         return repository;
     }
 
@@ -261,7 +266,10 @@ export class ProjectRepository {
         this.#gitCredentialBroker = options.gitCredentialBroker ?? new GitCredentialBroker();
         this.#hasCustomGit = options.git !== undefined;
         this.#git = options.git ?? runGitCommand;
-        this.#probeGit = options.git ?? runSandboxedGitCommand;
+        this.#probeGit =
+            options.git ??
+            ((cwd, args) =>
+                runSandboxedGitCommand(cwd, args, { signal: this.#backgroundAbort.signal }));
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
         this.#localInstanceId = options.localInstanceId;
         this.#managedProjectsDirectory = normalizeFuturePath(
@@ -287,28 +295,32 @@ export class ProjectRepository {
         this.#assetRoot = join(this.#stateDirectory, "assets", "project-avatars");
     }
 
-    async #initializeOnOpen(): Promise<void> {
-        const workspaces = await this.listWorkspaces();
+    async #initializeOnOpen(ctx: Context): Promise<void> {
+        const workspaces = await this.listWorkspaces(ctx);
         for (const workspace of workspaces) {
             if (workspace.status === "ready") this.#scheduleWorkspaceSync(workspace.projectId);
         }
-        for (const project of await this.listProjects()) {
+        for (const project of await this.listProjects(ctx)) {
             if (project.kind === "regular" && project.initializationStatus === "initializing") {
-                await this.scheduleInitialization(project.id);
+                await this.scheduleInitialization(ctx, project.id);
             } else if (
                 project.kind === "regular" &&
                 project.initializationStatus === "failed" &&
                 project.initializationAttempt < 3 &&
                 existsSync(project.path)
             ) {
-                await this.#mutateAndPublishProject(project.id, (tx) =>
-                    projectRetryInitialization(tx, project.id, this.#now()),
+                await this.#mutateAndPublishProject(ctx, project.id, (transactionCtx) =>
+                    projectRetryInitialization(transactionCtx, project.id, this.#now()),
                 );
-                await this.scheduleInitialization(project.id);
+                await this.scheduleInitialization(ctx, project.id);
             }
         }
         setImmediate(() => {
-            this.#runBackgroundTask(() => this.#collectAvatarGarbage());
+            this.#runBackgroundTask(() =>
+                withWorkerContext("project-avatar-garbage", (workerCtx) =>
+                    this.#collectAvatarGarbage(workerCtx),
+                ),
+            );
         });
     }
 
@@ -321,12 +333,13 @@ export class ProjectRepository {
      * becomes a project now.
      */
     async resolve(
+        ctx: Context,
         cwd: string,
         assertedWorkspaceId?: string,
         requestedProjectId?: string,
     ): Promise<ResolvedProjectOwnership> {
         const path = normalizeProjectCwd(cwd);
-        return this.#resolvePath(path, assertedWorkspaceId, requestedProjectId);
+        return this.#resolvePath(ctx, path, assertedWorkspaceId, requestedProjectId);
     }
 
     /**
@@ -337,12 +350,16 @@ export class ProjectRepository {
      * every operation that needs that path immediately continues through the ready-only resolver.
      */
     async resolveSessionOwnership(
+        ctx: Context,
         cwd: string,
         workspaceId: string,
         assertedProjectId?: string,
     ): Promise<ResolvedProjectOwnership> {
         const path = normalizeProjectCwd(cwd);
-        const workspace = await queryWorkspaceById(this.#database.database, workspaceId);
+        const workspace = await queryWorkspaceById(
+            withDatabase(ctx, this.#database.database),
+            workspaceId,
+        );
         if (workspace === undefined || workspace.path !== path) {
             throw new Error("The workspace ID does not match the session directory.");
         }
@@ -364,14 +381,14 @@ export class ProjectRepository {
                 `The managed workspace '${workspace.name}' is unavailable.`,
             );
         }
-        const project = await this.getProject(workspace.projectId);
+        const project = await this.getProject(ctx, workspace.projectId);
         if (project === undefined) {
             throw new ProjectRegistrationError(
                 "managed_workspace_unavailable",
                 "The managed workspace's project was not found.",
             );
         }
-        return { project: (await this.unarchiveProject(project.id)) ?? project, workspace };
+        return { project: (await this.unarchiveProject(ctx, project.id)) ?? project, workspace };
     }
 
     /**
@@ -381,7 +398,7 @@ export class ProjectRepository {
      * canonical root of one working tree. A linked worktree is its own valid top-level folder; a
      * managed workspace Rig already knows still resolves to its owning project.
      */
-    async registerProject(request: RegisterProjectRequest): Promise<Project> {
+    async registerProject(ctx: Context, request: RegisterProjectRequest): Promise<Project> {
         if (!isAbsolute(request.path)) {
             throw new ProjectRegistrationError(
                 "invalid_request",
@@ -398,11 +415,12 @@ export class ProjectRepository {
                 );
             }
         }
-        const path = await this.#validateRegistrationPath(request.path);
-        return (await this.#resolvePath(path, undefined, request.projectId)).project;
+        const path = await this.#validateRegistrationPath(ctx, request.path);
+        return (await this.#resolvePath(ctx, path, undefined, request.projectId)).project;
     }
 
     async createRemoteProject(
+        ctx: Context,
         request: CreateRemoteProjectRequest,
         options: {
             createdBy?: ProjectCreator;
@@ -448,7 +466,7 @@ export class ProjectRepository {
                 token: githubToken,
             });
         };
-        const retried = await this.#retriedRemoteProject(id, path, request, creator);
+        const retried = await this.#retriedRemoteProject(ctx, id, path, request, creator);
         if (retried !== undefined) {
             await registerCredential();
             const canRetry =
@@ -457,17 +475,21 @@ export class ProjectRepository {
             if (retried.initializationStatus === "failed" && !canRetry) return retried;
             if (retried.initializationStatus === "failed") {
                 await this.#mutateAndPublishProject(
+                    ctx,
                     id,
-                    (tx) => projectRetryInitialization(tx, id, this.#now()),
+                    (transactionCtx) => projectRetryInitialization(transactionCtx, id, this.#now()),
                     options.mutationId,
                 );
             }
             if (retried.initializationStatus !== "ready" && canRetry) {
-                await this.scheduleInitialization(id);
+                await this.scheduleInitialization(ctx, id);
             }
-            return (await this.getProject(id)) ?? retried;
+            return (await this.getProject(ctx, id)) ?? retried;
         }
-        const projectAtPath = await queryProjectByPath(this.#database.database, path);
+        const projectAtPath = await queryProjectByPath(
+            withDatabase(ctx, this.#database.database),
+            path,
+        );
         if (projectAtPath !== undefined) {
             throw new ProjectRegistrationError(
                 "project_path_conflict",
@@ -483,8 +505,8 @@ export class ProjectRepository {
         await mkdir(this.#managedProjectsDirectory, { recursive: true });
         await registerCredential();
         try {
-            const project = await this.#mutate(async (tx) => {
-                await projectCreate(tx, {
+            const project = await this.#mutate(ctx, async (transactionCtx) => {
+                await projectCreate(transactionCtx, {
                     createdBy: creator,
                     baseName: name,
                     id,
@@ -496,25 +518,33 @@ export class ProjectRepository {
                         ? {}
                         : { requiredSecretKind: request.secret.kind }),
                 });
-                const created = await queryProject(tx, id);
+                const created = await queryProject(transactionCtx, id);
                 if (created === undefined) {
                     throw new Error("The remote project could not be created.");
                 }
-                await this.#publishProject("project_created", created, options.mutationId);
+                await this.#publishProject(
+                    transactionCtx,
+                    "project_created",
+                    created,
+                    options.mutationId,
+                );
                 return created;
             });
-            await this.scheduleInitialization(id);
+            await this.scheduleInitialization(ctx, id);
             return project;
         } catch (error) {
-            const racedRetry = await this.#retriedRemoteProject(id, path, request, creator);
+            const racedRetry = await this.#retriedRemoteProject(ctx, id, path, request, creator);
             if (racedRetry !== undefined) {
                 if (racedRetry.initializationStatus !== "ready") {
-                    await this.scheduleInitialization(id);
+                    await this.scheduleInitialization(ctx, id);
                 }
                 return racedRetry;
             }
             this.#gitCredentialBroker.revoke(id);
-            if ((await queryProjectByPath(this.#database.database, path)) !== undefined) {
+            if (
+                (await queryProjectByPath(withDatabase(ctx, this.#database.database), path)) !==
+                undefined
+            ) {
                 throw new ProjectRegistrationError(
                     "project_path_conflict",
                     "That managed project folder already belongs to another project.",
@@ -525,11 +555,15 @@ export class ProjectRepository {
     }
 
     async #resolvePath(
+        ctx: Context,
         path: string,
         assertedWorkspaceId?: string,
         requestedProjectId?: string,
     ): Promise<ResolvedProjectOwnership> {
-        const workspace = await queryWorkspaceByPath(this.#database.database, path);
+        const workspace = await queryWorkspaceByPath(
+            withDatabase(ctx, this.#database.database),
+            path,
+        );
         if (workspace !== undefined) {
             if (workspace.status !== "ready") {
                 throw new ProjectRegistrationError(
@@ -540,14 +574,17 @@ export class ProjectRepository {
             if (assertedWorkspaceId !== undefined && assertedWorkspaceId !== workspace.id) {
                 throw new Error("The workspace ID does not match the session directory.");
             }
-            const project = await this.getProject(workspace.projectId);
+            const project = await this.getProject(ctx, workspace.projectId);
             if (project === undefined) {
                 throw new ProjectRegistrationError(
                     "managed_workspace_unavailable",
                     "The managed workspace's project was not found.",
                 );
             }
-            return { project: (await this.unarchiveProject(project.id)) ?? project, workspace };
+            return {
+                project: (await this.unarchiveProject(ctx, project.id)) ?? project,
+                workspace,
+            };
         }
         if (assertedWorkspaceId !== undefined) {
             throw new Error("The workspace ID does not match the session directory.");
@@ -557,35 +594,35 @@ export class ProjectRepository {
             requestedProjectId === undefined
                 ? undefined
                 : clientChosenId(requestedProjectId, "project");
-        const existing = await queryProjectByPath(this.#database.database, path);
+        const existing = await queryProjectByPath(withDatabase(ctx, this.#database.database), path);
         if (existing !== undefined) {
             /*
              * A project is only a folder, so working in it again is what brings it back: starting a
              * session restores an archived project instead of asking the user to unarchive it.
              */
             if (importedId !== undefined && importedId !== existing.id) {
-                await this.#assertUnusedProjectId(importedId, path);
+                await this.#assertUnusedProjectId(ctx, importedId, path);
             }
-            return { project: (await this.unarchiveProject(existing.id)) ?? existing };
+            return { project: (await this.unarchiveProject(ctx, existing.id)) ?? existing };
         }
-        if (importedId !== undefined) await this.#assertUnusedProjectId(importedId, path);
+        if (importedId !== undefined) await this.#assertUnusedProjectId(ctx, importedId, path);
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
         const baseName = kind === "home" ? "Home" : folderProjectName(path);
         const now = this.#now();
         const id = importedId ?? createId();
-        const project = await this.#mutate(async (tx) => {
-            await projectCreate(tx, { baseName, id, kind, now, path });
-            const created = await queryProject(tx, id);
+        const project = await this.#mutate(ctx, async (transactionCtx) => {
+            await projectCreate(transactionCtx, { baseName, id, kind, now, path });
+            const created = await queryProject(transactionCtx, id);
             if (created === undefined) throw new Error("The project could not be created.");
-            await this.#publishProject("project_created", created);
+            await this.#publishProject(transactionCtx, "project_created", created);
             return created;
         });
-        if (kind === "regular") await this.scheduleInitialization(id);
+        if (kind === "regular") await this.scheduleInitialization(ctx, id);
         return { project };
     }
 
-    async #validateRegistrationPath(requestedPath: string): Promise<string> {
+    async #validateRegistrationPath(ctx: Context, requestedPath: string): Promise<string> {
         let details;
         try {
             details = await stat(requestedPath);
@@ -655,8 +692,9 @@ export class ProjectRepository {
         return path;
     }
 
-    async close(): Promise<void> {
+    async close(ctx: Context): Promise<void> {
         this.#closed = true;
+        this.#backgroundAbort.abort();
         this.#ownedTaskDrain?.beginClose();
         this.#gitCredentialBroker.close();
         this.#pendingInitializations.length = 0;
@@ -672,32 +710,35 @@ export class ProjectRepository {
         await this.#ownedTaskDrain?.drain();
     }
 
-    async getProject(projectId: string): Promise<Project | undefined> {
-        return queryProject(this.#database.database, projectId);
+    async getProject(ctx: Context, projectId: string): Promise<Project | undefined> {
+        return queryProject(withDatabase(ctx, this.#database.database), projectId);
     }
 
-    async listProjects(): Promise<readonly Project[]> {
-        return queryProjects(this.#database.database);
+    async listProjects(ctx: Context): Promise<readonly Project[]> {
+        return queryProjects(withDatabase(ctx, this.#database.database));
     }
 
-    async listWorkspaces(projectId?: string): Promise<readonly ProjectWorkspace[]> {
-        return queryWorkspaces(this.#database.database, projectId);
+    async listWorkspaces(ctx: Context, projectId?: string): Promise<readonly ProjectWorkspace[]> {
+        return queryWorkspaces(withDatabase(ctx, this.#database.database), projectId);
     }
 
     async getWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined> {
-        return queryWorkspace(this.#database.database, projectId, workspaceId);
+        return queryWorkspace(withDatabase(ctx, this.#database.database), projectId, workspaceId);
     }
 
     async prepareSessionTransfer(
+        ctx: Context,
         projectId: string,
         sourceWorkspaceId: string,
         targetWorkspaceId: string,
         beforeApply?: () => void | Promise<void>,
     ): Promise<{ prepared: PreparedWorkspaceTransfer; target: ProjectWorkspace }> {
         const { source, target } = await this.validateSessionTransfer(
+            ctx,
             projectId,
             sourceWorkspaceId,
             targetWorkspaceId,
@@ -714,25 +755,31 @@ export class ProjectRepository {
             };
         } catch (error) {
             if (!(error instanceof WorkspaceTransferTargetRestoreError)) throw error;
-            throw await this.markSessionTransferTargetFailed(projectId, targetWorkspaceId, error);
+            throw await this.markSessionTransferTargetFailed(
+                ctx,
+                projectId,
+                targetWorkspaceId,
+                error,
+            );
         }
     }
 
     async markSessionTransferTargetFailed(
+        ctx: Context,
         projectId: string,
         targetWorkspaceId: string,
         error: WorkspaceTransferTargetRestoreError,
     ): Promise<WorkspaceTransferTargetRestoreError> {
-        const target = await this.getWorkspace(projectId, targetWorkspaceId);
+        const target = await this.getWorkspace(ctx, projectId, targetWorkspaceId);
         if (target === undefined) return error;
         const failure = new WorkspaceTransferTargetRestoreError(
             error.originalError,
             error.restoreError,
             target.name,
         );
-        await this.#mutateAndPublishWorkspace(projectId, targetWorkspaceId, (tx) =>
+        await this.#mutateAndPublishWorkspace(ctx, projectId, targetWorkspaceId, (transactionCtx) =>
             workspaceMarkFailed(
-                tx,
+                transactionCtx,
                 projectId,
                 targetWorkspaceId,
                 failure.message.slice(0, PROJECT_ERROR_MAX_LENGTH),
@@ -743,6 +790,7 @@ export class ProjectRepository {
     }
 
     async validateSessionTransfer(
+        ctx: Context,
         projectId: string,
         sourceWorkspaceId: string,
         targetWorkspaceId: string,
@@ -750,7 +798,7 @@ export class ProjectRepository {
         if (sourceWorkspaceId === targetWorkspaceId) {
             throw new Error("Choose a different workspace for the session transfer.");
         }
-        const source = await this.getWorkspace(projectId, sourceWorkspaceId);
+        const source = await this.getWorkspace(ctx, projectId, sourceWorkspaceId);
         if (source === undefined) {
             throw new Error("The session's current workspace was not found.");
         }
@@ -761,7 +809,7 @@ export class ProjectRepository {
         ) {
             throw new Error("The session's current workspace is not ready and available.");
         }
-        const target = await this.getWorkspace(projectId, targetWorkspaceId);
+        const target = await this.getWorkspace(ctx, projectId, targetWorkspaceId);
         if (target === undefined) {
             throw new Error("The target workspace was not found in this project.");
         }
@@ -771,8 +819,8 @@ export class ProjectRepository {
         return { source, target };
     }
 
-    async reconcileInitializingWorkspaces(): Promise<void> {
-        const workspaces = (await this.listWorkspaces()).filter(
+    async reconcileInitializingWorkspaces(ctx: Context): Promise<void> {
+        const workspaces = (await this.listWorkspaces(ctx)).filter(
             (workspace) => workspace.status === "initializing",
         );
         let next = 0;
@@ -781,7 +829,7 @@ export class ProjectRepository {
                 if (this.#closed || this.#taskDrain.closing) return;
                 const workspace = workspaces[next++];
                 if (workspace === undefined) return;
-                await this.#initializeWorkspace(workspace);
+                await this.#initializeWorkspace(ctx, workspace);
             }
         };
         await Promise.all(
@@ -797,16 +845,16 @@ export class ProjectRepository {
      * workspace. Enrichment only: it publishes when something actually changed, never blocks
      * startup, and stops as soon as the repository closes.
      */
-    async reconcileGitFacts(): Promise<void> {
+    async reconcileGitFacts(ctx: Context): Promise<void> {
         const targets: (
             | { kind: "project"; value: Project }
             | { kind: "workspace"; value: ProjectWorkspace }
         )[] = [
-            ...(await this.listProjects())
+            ...(await this.listProjects(ctx))
                 // An archived project is hidden, so re-deriving its Git facts is wasted work.
                 .filter((project) => project.archivedAt === undefined)
                 .map((value) => ({ kind: "project" as const, value })),
-            ...(await this.listWorkspaces())
+            ...(await this.listWorkspaces(ctx))
                 .filter((workspace) => workspace.status === "ready")
                 .map((value) => ({ kind: "workspace" as const, value })),
         ];
@@ -820,9 +868,9 @@ export class ProjectRepository {
                 const target = targets[next++];
                 if (target === undefined) return;
                 if (target.kind === "project") {
-                    await this.#reconcileProjectGitFacts(target.value);
+                    await this.#reconcileProjectGitFacts(ctx, target.value);
                 } else {
-                    await this.#reconcileWorkspaceGitFacts(target.value);
+                    await this.#reconcileWorkspaceGitFacts(ctx, target.value);
                 }
             }
         };
@@ -839,61 +887,77 @@ export class ProjectRepository {
      * few slow-moving fields are written, and only when one actually differs.
      */
     async applyGitFacts(
+        ctx: Context,
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
     ): Promise<void> {
         if (target.workspaceId === undefined) {
-            await this.#mutateAndPublishProject(target.projectId, (tx) =>
-                projectApplyGitFacts(tx, target.projectId, facts, this.#now()),
+            await this.#mutateAndPublishProject(ctx, target.projectId, (transactionCtx) =>
+                projectApplyGitFacts(transactionCtx, target.projectId, facts, this.#now()),
             );
         } else {
             const workspaceId = target.workspaceId;
-            await this.#mutateAndPublishWorkspace(target.projectId, workspaceId, (tx) =>
-                workspaceApplyGitFacts(tx, target.projectId, workspaceId, facts, this.#now()),
+            await this.#mutateAndPublishWorkspace(
+                ctx,
+                target.projectId,
+                workspaceId,
+                (transactionCtx) =>
+                    workspaceApplyGitFacts(
+                        transactionCtx,
+                        target.projectId,
+                        workspaceId,
+                        facts,
+                        this.#now(),
+                    ),
             );
         }
     }
 
-    async #reconcileProjectGitFacts(project: Project): Promise<void> {
+    async #reconcileProjectGitFacts(ctx: Context, project: Project): Promise<void> {
         const probe = await probeGitRepository({
             git: this.#probeGit,
             isHome: project.kind === "home",
             path: project.path,
         });
         if (this.#closed) return;
-        await this.#mutateAndPublishProject(project.id, (tx) =>
-            projectApplyProbe(tx, project.id, projectGitFactValues(probe), this.#now()),
+        await this.#mutateAndPublishProject(ctx, project.id, (transactionCtx) =>
+            projectApplyProbe(transactionCtx, project.id, projectGitFactValues(probe), this.#now()),
         );
     }
 
-    async #reconcileWorkspaceGitFacts(workspace: ProjectWorkspace): Promise<void> {
+    async #reconcileWorkspaceGitFacts(ctx: Context, workspace: ProjectWorkspace): Promise<void> {
         const probe = await probeGitRepository({
             git: this.#probeGit,
             path: workspace.path,
         });
         if (this.#closed) return;
-        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
-            workspaceApplyProbe(
-                tx,
-                workspace.projectId,
-                workspace.id,
-                workspaceGitFactValues(probe),
-                this.#now(),
-            ),
+        await this.#mutateAndPublishWorkspace(
+            ctx,
+            workspace.projectId,
+            workspace.id,
+            (transactionCtx) =>
+                workspaceApplyProbe(
+                    transactionCtx,
+                    workspace.projectId,
+                    workspace.id,
+                    workspaceGitFactValues(probe),
+                    this.#now(),
+                ),
         );
     }
 
     async renameProject(
+        ctx: Context,
         projectId: string,
         requestedName: string,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<Project | undefined> {
-        const current = await this.getProject(projectId);
+        const current = await this.getProject(ctx, projectId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined) {
             const userMutationVersion = await queryProjectUserMutationVersion(
-                this.#database.database,
+                withDatabase(ctx, this.#database.database),
                 projectId,
             );
             if (userMutationVersion === undefined) return undefined;
@@ -902,32 +966,39 @@ export class ProjectRepository {
             }
         }
         const name = validateProjectName(requestedName);
-        return await this.#mutate(async (tx) => {
-            const changed = await projectRename(tx, projectId, name, this.#now(), expectedVersion);
+        return await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await projectRename(
+                transactionCtx,
+                projectId,
+                name,
+                this.#now(),
+                expectedVersion,
+            );
             if (changed === 0) {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before it could be renamed.");
                 }
-                return queryProject(tx, projectId);
+                return queryProject(transactionCtx, projectId);
             }
-            return this.#publishedProject(projectId, mutationId);
+            return this.#publishedProject(ctx, projectId, mutationId);
         });
     }
 
     async setProjectSettings(
+        ctx: Context,
         projectId: string,
         settings: ProjectSettingsUpdate,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<Project | undefined> {
-        const current = await this.getProject(projectId);
+        const current = await this.getProject(ctx, projectId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion > current.version) {
             throw new Error("The project changed before its settings could be saved.");
         }
-        return await this.#mutate(async (tx) => {
+        return await this.#mutate(ctx, async (transactionCtx) => {
             const changed = await projectSetSettings(
-                tx,
+                transactionCtx,
                 projectId,
                 settings,
                 this.#now(),
@@ -937,17 +1008,26 @@ export class ProjectRepository {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before its settings could be saved.");
                 }
-                return queryProject(tx, projectId);
+                return queryProject(transactionCtx, projectId);
             }
-            return this.#publishedProject(projectId, mutationId);
+            return this.#publishedProject(ctx, projectId, mutationId);
         });
     }
 
-    async queryProjectSettings(cwd: string): Promise<ProjectSessionSettings | undefined> {
+    async queryProjectSettings(
+        ctx: Context,
+        cwd: string,
+    ): Promise<ProjectSessionSettings | undefined> {
         const path = normalizeProjectCwd(cwd);
-        const workspace = await queryWorkspaceByPath(this.#database.database, path);
+        const workspace = await queryWorkspaceByPath(
+            withDatabase(ctx, this.#database.database),
+            path,
+        );
         if (workspace !== undefined) {
-            const project = await queryProject(this.#database.database, workspace.projectId);
+            const project = await queryProject(
+                withDatabase(ctx, this.#database.database),
+                workspace.projectId,
+            );
             return project === undefined
                 ? undefined
                 : {
@@ -956,22 +1036,23 @@ export class ProjectRepository {
                       workspaceId: workspace.id,
                   };
         }
-        const project = await queryProjectByPath(this.#database.database, path);
+        const project = await queryProjectByPath(withDatabase(ctx, this.#database.database), path);
         return project === undefined
             ? undefined
             : { projectId: project.id, settings: project.settings };
     }
 
     async reorderProject(
+        ctx: Context,
         projectId: string,
         request: ReorderRequest,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        const current = await this.getProject(projectId);
+        const current = await this.getProject(ctx, projectId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined) {
             const userMutationVersion = await queryProjectUserMutationVersion(
-                this.#database.database,
+                withDatabase(ctx, this.#database.database),
                 projectId,
             );
             if (userMutationVersion === undefined) return undefined;
@@ -979,11 +1060,11 @@ export class ProjectRepository {
                 throw new Error("The project changed before it could be reordered.");
             }
         }
-        const orderKey = orderKeyAfter(await this.listProjects(), projectId, request.afterId);
+        const orderKey = orderKeyAfter(await this.listProjects(ctx), projectId, request.afterId);
         if (orderKey === current.orderKey) return current;
-        return await this.#mutate(async (tx) => {
+        return await this.#mutate(ctx, async (transactionCtx) => {
             const changed = await projectReorder(
-                tx,
+                transactionCtx,
                 projectId,
                 orderKey,
                 this.#now(),
@@ -993,34 +1074,36 @@ export class ProjectRepository {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before it could be reordered.");
                 }
-                return queryProject(tx, projectId);
+                return queryProject(transactionCtx, projectId);
             }
-            return this.#publishedProject(projectId);
+            return this.#publishedProject(ctx, projectId);
         });
     }
 
-    async refreshProject(projectId: string): Promise<Project | undefined> {
-        const project = await this.getProject(projectId);
+    async refreshProject(ctx: Context, projectId: string): Promise<Project | undefined> {
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return undefined;
         if (project.kind === "home") {
             throw new Error("The Home project does not need initialization.");
         }
-        const updated = await this.#mutate(async (tx) => {
-            const changed = await projectRefresh(tx, projectId, this.#now());
-            return changed === 0 ? queryProject(tx, projectId) : this.#publishedProject(projectId);
+        const updated = await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await projectRefresh(transactionCtx, projectId, this.#now());
+            return changed === 0
+                ? queryProject(transactionCtx, projectId)
+                : this.#publishedProject(ctx, projectId);
         });
-        await this.scheduleInitialization(projectId);
+        await this.scheduleInitialization(ctx, projectId);
         return updated;
     }
 
-    async scheduleInitialization(projectId: string): Promise<void> {
+    async scheduleInitialization(ctx: Context, projectId: string): Promise<void> {
         if (this.#closed || this.#initializing.has(projectId)) return;
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return;
         if (!existsSync(project.path) && project.remoteSource === undefined) {
-            await this.#mutateAndPublishProject(projectId, (tx) =>
+            await this.#mutateAndPublishProject(ctx, projectId, (transactionCtx) =>
                 projectMarkInitializationFailed(
-                    tx,
+                    transactionCtx,
                     projectId,
                     "Project directory is unavailable.",
                     this.#now(),
@@ -1036,12 +1119,12 @@ export class ProjectRepository {
         if (this.#afterTransactionCommit === undefined) {
             schedule();
         } else {
-            await this.#afterTransactionCommit(schedule);
+            await this.#afterTransactionCommit(ctx, schedule);
         }
     }
 
-    async retryRemoteProjects(kind: "github"): Promise<void> {
-        for (const project of await this.listProjects()) {
+    async retryRemoteProjects(ctx: Context, kind: "github"): Promise<void> {
+        for (const project of await this.listProjects(ctx)) {
             if (project.requiredSecretKind !== kind) continue;
             if (
                 project.createdBy !== undefined &&
@@ -1066,29 +1149,30 @@ export class ProjectRepository {
                 })
                 .then(async () => {
                     if (this.#closed) return;
-                    const current = await this.getProject(project.id);
+                    const current = await this.getProject(ctx, project.id);
                     if (current?.initializationStatus === "failed") {
-                        await this.#mutateAndPublishProject(project.id, (tx) =>
-                            projectRetryInitialization(tx, project.id, this.#now()),
+                        await this.#mutateAndPublishProject(ctx, project.id, (transactionCtx) =>
+                            projectRetryInitialization(transactionCtx, project.id, this.#now()),
                         );
                     }
-                    await this.scheduleInitialization(project.id);
+                    await this.scheduleInitialization(ctx, project.id);
                 })
                 .catch(() => undefined);
         }
     }
 
     async setAvatar(
+        ctx: Context,
         projectId: string,
         source: ProjectAvatarSource,
         bytes: Buffer,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return undefined;
         if (expectedVersion !== undefined) {
             const userMutationVersion = await queryProjectUserMutationVersion(
-                this.#database.database,
+                withDatabase(ctx, this.#database.database),
                 projectId,
             );
             if (userMutationVersion === undefined) return undefined;
@@ -1100,13 +1184,13 @@ export class ProjectRepository {
             throw new Error("The project avatar is larger than the allowed limit.");
         }
         const normalized = await normalizeAvatar(bytes);
-        return this.#withAvatarLifecycleLock(normalized.hash, async () => {
-            await this.#storeAvatarBytes(normalized.hash, normalized.bytes);
+        return this.#withAvatarLifecycleLock(ctx, normalized.hash, async () => {
+            await this.#storeAvatarBytes(ctx, normalized.hash, normalized.bytes);
             if (this.#closed) return project;
             const now = this.#now();
             try {
-                return await this.#mutate(async (tx) => {
-                    const result = await projectSetAvatar(tx, {
+                return await this.#mutate(ctx, async (transactionCtx) => {
+                    const result = await projectSetAvatar(transactionCtx, {
                         asset: {
                             byteLength: normalized.bytes.byteLength,
                             hash: normalized.hash,
@@ -1119,13 +1203,13 @@ export class ProjectRepository {
                         source,
                     });
                     if (result === "missing" || result === "preserved") {
-                        return queryProject(tx, projectId);
+                        return queryProject(transactionCtx, projectId);
                     }
-                    return this.#publishedProject(projectId);
+                    return this.#publishedProject(ctx, projectId);
                 });
             } catch (error) {
                 const asset = await queryProjectAvatarAsset(
-                    this.#database.database,
+                    withDatabase(ctx, this.#database.database),
                     normalized.hash,
                 );
                 if (asset === undefined) {
@@ -1136,21 +1220,26 @@ export class ProjectRepository {
         });
     }
 
-    async clearAvatar(projectId: string): Promise<Project | undefined> {
-        const project = await this.getProject(projectId);
+    async clearAvatar(ctx: Context, projectId: string): Promise<Project | undefined> {
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return undefined;
         const now = this.#now();
-        const updated = await this.#mutate(async (tx) => {
-            const changed = await projectClearAvatar(tx, projectId, now);
-            return changed === 0 ? queryProject(tx, projectId) : this.#publishedProject(projectId);
+        const updated = await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await projectClearAvatar(transactionCtx, projectId, now);
+            return changed === 0
+                ? queryProject(transactionCtx, projectId)
+                : this.#publishedProject(ctx, projectId);
         });
-        if (updated?.kind === "regular") await this.scheduleInitialization(projectId);
+        if (updated?.kind === "regular") await this.scheduleInitialization(ctx, projectId);
         return updated;
     }
 
-    async avatarAsset(hash: string): Promise<ProjectAvatarAsset | undefined> {
+    async avatarAsset(ctx: Context, hash: string): Promise<ProjectAvatarAsset | undefined> {
         if (!/^[a-f0-9]{64}$/u.test(hash)) return undefined;
-        const asset = await queryProjectAvatarAsset(this.#database.database, hash);
+        const asset = await queryProjectAvatarAsset(
+            withDatabase(ctx, this.#database.database),
+            hash,
+        );
         if (asset === undefined) return undefined;
         try {
             return {
@@ -1164,12 +1253,13 @@ export class ProjectRepository {
     }
 
     async createWorkspace(
+        ctx: Context,
         projectId: string,
         request: CreateProjectWorkspaceRequest,
         creatorSessionId?: string,
         options: { createdBy?: ProjectCreator; githubToken?: string } = {},
     ): Promise<ProjectWorkspace | undefined> {
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return undefined;
         if (
             request.identity === undefined
@@ -1187,13 +1277,19 @@ export class ProjectRepository {
             request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
         const requestedRef = requestedBaseRef(request.baseRef);
         const retry = await this.#retriedWorkspace(
+            ctx,
             projectId,
             requestedId,
             requestedRef,
             options.createdBy,
         );
         if (options.githubToken !== undefined && options.createdBy !== undefined) {
-            await this.registerGitCredential(projectId, options.createdBy, options.githubToken);
+            await this.registerGitCredential(
+                ctx,
+                projectId,
+                options.createdBy,
+                options.githubToken,
+            );
         }
         if (
             project.requiredSecretKind === "github" &&
@@ -1208,8 +1304,8 @@ export class ProjectRepository {
         const gitRefs = workspaceGitRefSnapshot(project.path);
         const fallbackStorageKey = `${projectStorageKey(name).slice(0, 20)}-${workspaceId}`;
 
-        const reserved = await this.#mutate(async (tx) => {
-            const result = await workspaceReserve(tx, {
+        const reserved = await this.#mutate(ctx, async (transactionCtx) => {
+            const result = await workspaceReserve(transactionCtx, {
                 ...(requestedRef === undefined ? {} : { baseRef: requestedRef }),
                 ...(options.createdBy === undefined ? {} : { createdBy: options.createdBy }),
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
@@ -1226,28 +1322,38 @@ export class ProjectRepository {
                 projectId,
                 ...(gitRefs.complete ? {} : { storageKeySeed: fallbackStorageKey }),
             });
-            const workspace = await queryWorkspace(tx, projectId, result.workspaceId);
+            const workspace = await queryWorkspace(transactionCtx, projectId, result.workspaceId);
             if (workspace === undefined) throw new Error("The workspace could not be reserved.");
             if (result.created) {
-                await this.#publishWorkspace("workspace_created", workspace, requestedId);
+                await this.#publishWorkspace(
+                    transactionCtx,
+                    "workspace_created",
+                    workspace,
+                    requestedId,
+                );
             }
             return { created: result.created, workspace };
         });
         const { created, workspace } = reserved;
         if (created) {
             setImmediate(() => {
-                this.#runBackgroundTask(() => this.#initializeWorkspace(workspace));
+                this.#runBackgroundTask(() =>
+                    withWorkerContext("project-workspace-initialization", (workerCtx) =>
+                        this.#initializeWorkspace(workerCtx, workspace),
+                    ),
+                );
             });
         }
         return workspace;
     }
 
     async refreshGitCredential(
+        ctx: Context,
         projectId: string,
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<GitAuthentication> {
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (
             project?.remoteSource?.kind !== "github" ||
             project.createdBy?.instanceId !== creator.instanceId ||
@@ -1255,22 +1361,28 @@ export class ProjectRepository {
         ) {
             throw new Error("That human profile does not own a managed GitHub project.");
         }
-        const authentication = await this.registerGitCredential(projectId, creator, githubToken);
+        const authentication = await this.registerGitCredential(
+            ctx,
+            projectId,
+            creator,
+            githubToken,
+        );
         if (project.initializationStatus === "failed") {
-            await this.#mutateAndPublishProject(project.id, (tx) =>
-                projectRetryInitialization(tx, project.id, this.#now()),
+            await this.#mutateAndPublishProject(ctx, project.id, (transactionCtx) =>
+                projectRetryInitialization(transactionCtx, project.id, this.#now()),
             );
-            await this.scheduleInitialization(project.id);
+            await this.scheduleInitialization(ctx, project.id);
         }
         return authentication;
     }
 
     async registerGitCredential(
+        ctx: Context,
         projectId: string,
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<GitAuthentication> {
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (project?.remoteSource?.kind !== "github") {
             throw new Error("GitHub credentials can only be used with a GitHub project.");
         }
@@ -1290,12 +1402,13 @@ export class ProjectRepository {
     }
 
     getOwnedWorkspace(
+        ctx: Context,
         creatorSessionId: string,
         projectId: string,
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined> {
         return queryOwnedWorkspace(
-            this.#database.database,
+            withDatabase(ctx, this.#database.database),
             creatorSessionId,
             projectId,
             workspaceId,
@@ -1303,8 +1416,8 @@ export class ProjectRepository {
     }
 
     /** Refuses a client-chosen project identity that already names another folder. */
-    async #assertUnusedProjectId(id: string, path: string): Promise<void> {
-        const known = await queryProject(this.#database.database, id);
+    async #assertUnusedProjectId(ctx: Context, id: string, path: string): Promise<void> {
+        const known = await queryProject(withDatabase(ctx, this.#database.database), id);
         if (known !== undefined && known.path !== path) {
             throw new ProjectRegistrationError(
                 "project_id_conflict",
@@ -1323,13 +1436,17 @@ export class ProjectRepository {
      * than something to reconcile.
      */
     async #retriedWorkspace(
+        ctx: Context,
         projectId: string,
         requestedId: string | undefined,
         baseRef: string | undefined,
         creator: ProjectCreator | undefined,
     ): Promise<ProjectWorkspace | undefined> {
         if (requestedId === undefined) return undefined;
-        const workspace = await queryWorkspaceById(this.#database.database, requestedId);
+        const workspace = await queryWorkspaceById(
+            withDatabase(ctx, this.#database.database),
+            requestedId,
+        );
         if (workspace === undefined) return undefined;
         if (workspace.projectId !== projectId) {
             throw new Error("That workspace ID already names a workspace in another project.");
@@ -1379,21 +1496,22 @@ export class ProjectRepository {
     }
 
     async renameWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         requestedName: string,
         expectedVersion?: number,
         mutationId?: string,
     ): Promise<ProjectWorkspace | undefined> {
-        const current = await this.getWorkspace(projectId, workspaceId);
+        const current = await this.getWorkspace(ctx, projectId, workspaceId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new Error("The workspace changed before it could be renamed.");
         }
         const name = validateProjectName(requestedName);
-        const branchTaken = await this.#workspaceBranchProbe(projectId);
-        const updated = await this.#mutate(async (tx) => {
-            const result = await workspaceRename(tx, {
+        const branchTaken = await this.#workspaceBranchProbe(ctx, projectId);
+        const updated = await this.#mutate(ctx, async (transactionCtx) => {
+            const result = await workspaceRename(transactionCtx, {
                 id: workspaceId,
                 isBranchUnavailable: branchTaken,
                 name,
@@ -1404,9 +1522,9 @@ export class ProjectRepository {
             if (result.changed === 0 && expectedVersion !== undefined) {
                 throw new Error("The workspace changed before it could be renamed.");
             }
-            const workspace = await queryWorkspace(tx, projectId, workspaceId);
+            const workspace = await queryWorkspace(transactionCtx, projectId, workspaceId);
             if (result.changed > 0) {
-                await this.#publishedWorkspace(projectId, workspaceId, mutationId);
+                await this.#publishedWorkspace(ctx, projectId, workspaceId, mutationId);
             }
             return { branch: result.branch, workspace };
         });
@@ -1421,25 +1539,26 @@ export class ProjectRepository {
      * instead of sitting beside it. A workspace someone has already named keeps that name.
      */
     async inheritWorkspaceName(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         requestedName: string,
     ): Promise<ProjectWorkspace | undefined> {
-        const current = await this.getWorkspace(projectId, workspaceId);
+        const current = await this.getWorkspace(ctx, projectId, workspaceId);
         if (current === undefined) return undefined;
         const name = validateProjectName(requestedName);
-        const branchTaken = await this.#workspaceBranchProbe(projectId);
-        const updated = await this.#mutate(async (tx) => {
-            const result = await workspaceInheritName(tx, {
+        const branchTaken = await this.#workspaceBranchProbe(ctx, projectId);
+        const updated = await this.#mutate(ctx, async (transactionCtx) => {
+            const result = await workspaceInheritName(transactionCtx, {
                 id: workspaceId,
                 isBranchUnavailable: branchTaken,
                 name,
                 now: this.#now(),
                 projectId,
             });
-            const workspace = await queryWorkspace(tx, projectId, workspaceId);
+            const workspace = await queryWorkspace(transactionCtx, projectId, workspaceId);
             if (result.changed > 0) {
-                await this.#publishedWorkspace(projectId, workspaceId);
+                await this.#publishedWorkspace(ctx, projectId, workspaceId);
             }
             return { branch: result.branch, workspace };
         });
@@ -1448,8 +1567,11 @@ export class ProjectRepository {
     }
 
     /** Reads the project's branches once so every candidate check is only set membership. */
-    async #workspaceBranchProbe(projectId: string): Promise<(branch: string) => boolean> {
-        const project = await this.getProject(projectId);
+    async #workspaceBranchProbe(
+        ctx: Context,
+        projectId: string,
+    ): Promise<(branch: string) => boolean> {
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return () => false;
         const gitRefs = workspaceGitRefSnapshot(project.path);
         return (branch) => this.#gitBranchExists(gitRefs, branch);
@@ -1466,73 +1588,84 @@ export class ProjectRepository {
     #moveWorkspaceBranch(previous: ProjectWorkspace, branch: string | undefined): void {
         if (branch === undefined || branch === previous.branch) return;
         if (previous.status !== "ready") return;
-        this.#runBackgroundTask(async () => {
-            await this.#withWorkspaceLifecycleLock(previous.id, async () => {
-                if (this.#closed) return;
-                const workspace = await this.getWorkspace(previous.projectId, previous.id);
-                // A later rename may already have moved the recorded branch past this one, and
-                // this hop still runs: that rename starts from this branch, so skipping it would
-                // leave Git a step behind with nothing able to catch it up again.
-                if (workspace === undefined || workspace.status !== "ready") return;
-                try {
-                    // Every worktree of a project shares one set of refs and reflogs, so branch
-                    // work takes the project's Git lock the way worktree creation does.
-                    await this.#projectInitializationLock(previous.projectId).runInLock(
-                        async () =>
-                            await renameGitBranch({
-                                expectedCommonDir: workspace.gitCommonDir,
-                                from: previous.branch,
-                                git: this.#git,
-                                to: branch,
-                                workspacePath: workspace.path,
-                            }),
-                    );
-                } catch (error) {
-                    if (isDatabaseFailure(error)) throw error;
+        this.#runBackgroundTask(() =>
+            withWorkerContext("project-workspace-branch-rename", async (workerCtx) => {
+                await this.#withWorkspaceLifecycleLock(workerCtx, previous.id, async () => {
                     if (this.#closed) return;
-                    // A later rename may already have replaced this one, and it owns the recorded
-                    // branch from then on. Reverting it here would strand that rename instead.
-                    if (
-                        (await this.getWorkspace(previous.projectId, previous.id))?.branch !==
-                        branch
-                    ) {
-                        return;
-                    }
-                    this.#onWorkspaceBranchError?.(error, previous.projectId, previous.id);
-                    await this.#mutateAndPublishWorkspace(previous.projectId, previous.id, (tx) =>
-                        workspaceSetBranch(
-                            tx,
+                    const workspace = await this.getWorkspace(
+                        workerCtx,
+                        previous.projectId,
+                        previous.id,
+                    );
+                    // A later rename may already have moved the recorded branch past this one, and
+                    // this hop still runs: that rename starts from this branch, so skipping it would
+                    // leave Git a step behind with nothing able to catch it up again.
+                    if (workspace === undefined || workspace.status !== "ready") return;
+                    try {
+                        // Every worktree of a project shares one set of refs and reflogs, so branch
+                        // work takes the project's Git lock the way worktree creation does.
+                        await this.#projectInitializationLock(previous.projectId).runInLock(
+                            async () =>
+                                await renameGitBranch({
+                                    expectedCommonDir: workspace.gitCommonDir,
+                                    from: previous.branch,
+                                    git: this.#git,
+                                    to: branch,
+                                    workspacePath: workspace.path,
+                                }),
+                        );
+                    } catch (error) {
+                        if (isDatabaseFailure(error)) throw error;
+                        if (this.#closed) return;
+                        // A later rename may already have replaced this one, and it owns the recorded
+                        // branch from then on. Reverting it here would strand that rename instead.
+                        if (
+                            (await this.getWorkspace(workerCtx, previous.projectId, previous.id))
+                                ?.branch !== branch
+                        ) {
+                            return;
+                        }
+                        this.#onWorkspaceBranchError?.(error, previous.projectId, previous.id);
+                        await this.#mutateAndPublishWorkspace(
+                            workerCtx,
                             previous.projectId,
                             previous.id,
-                            previous.branch,
-                            this.#now(),
-                        ),
-                    );
-                }
-            });
-        });
+                            (transactionCtx) =>
+                                workspaceSetBranch(
+                                    transactionCtx,
+                                    previous.projectId,
+                                    previous.id,
+                                    previous.branch,
+                                    this.#now(),
+                                ),
+                        );
+                    }
+                });
+            }),
+        );
     }
 
     async reorderWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         request: ReorderRequest,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        const current = await this.getWorkspace(projectId, workspaceId);
+        const current = await this.getWorkspace(ctx, projectId, workspaceId);
         if (current === undefined) return undefined;
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new Error("The workspace changed before it could be reordered.");
         }
         const orderKey = orderKeyAfter(
-            await this.listWorkspaces(projectId),
+            await this.listWorkspaces(ctx, projectId),
             workspaceId,
             request.afterId,
         );
         if (orderKey === current.orderKey) return current;
-        return await this.#mutate(async (tx) => {
+        return await this.#mutate(ctx, async (transactionCtx) => {
             const changed = await workspaceReorder(
-                tx,
+                transactionCtx,
                 projectId,
                 workspaceId,
                 orderKey,
@@ -1543,22 +1676,23 @@ export class ProjectRepository {
                 if (expectedVersion !== undefined) {
                     throw new Error("The workspace changed before it could be reordered.");
                 }
-                return queryWorkspace(tx, projectId, workspaceId);
+                return queryWorkspace(transactionCtx, projectId, workspaceId);
             }
-            return this.#publishedWorkspace(projectId, workspaceId);
+            return this.#publishedWorkspace(ctx, projectId, workspaceId);
         });
     }
 
     async archiveProject(
+        ctx: Context,
         projectId: string,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined) return undefined;
         if (project.archivedAt !== undefined) return project;
         if (expectedVersion !== undefined) {
             const userMutationVersion = await queryProjectUserMutationVersion(
-                this.#database.database,
+                withDatabase(ctx, this.#database.database),
                 projectId,
             );
             if (userMutationVersion === undefined) return undefined;
@@ -1567,35 +1701,38 @@ export class ProjectRepository {
             }
         }
         const now = this.#now();
-        const archived = await this.#mutate(async (tx) => {
-            const changed = await projectArchive(tx, projectId, now, expectedVersion);
+        const archived = await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await projectArchive(transactionCtx, projectId, now, expectedVersion);
             if (changed === 0) {
                 if (expectedVersion !== undefined) {
                     throw new Error("The project changed before it could be archived.");
                 }
-                return queryProject(tx, projectId);
+                return queryProject(transactionCtx, projectId);
             }
-            return this.#publishedProject(projectId);
+            return this.#publishedProject(ctx, projectId);
         });
         if (archived?.archivedAt !== undefined) this.#gitCredentialBroker.revoke(projectId);
         return archived;
     }
 
-    async unarchiveProject(projectId: string): Promise<Project | undefined> {
-        const project = await this.getProject(projectId);
+    async unarchiveProject(ctx: Context, projectId: string): Promise<Project | undefined> {
+        const project = await this.getProject(ctx, projectId);
         if (project === undefined || project.archivedAt === undefined) return project;
-        return await this.#mutate(async (tx) => {
-            const changed = await projectRestore(tx, projectId, this.#now());
-            return changed === 0 ? queryProject(tx, projectId) : this.#publishedProject(projectId);
+        return await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await projectRestore(transactionCtx, projectId, this.#now());
+            return changed === 0
+                ? queryProject(transactionCtx, projectId)
+                : this.#publishedProject(ctx, projectId);
         });
     }
 
     async beginWorkspaceArchive(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        const workspace = await this.getWorkspace(projectId, workspaceId);
+        const workspace = await this.getWorkspace(ctx, projectId, workspaceId);
         if (workspace === undefined) return undefined;
         if (workspace.status === "archived" || workspace.status === "archiving") {
             this.#stopWorkspaceSetup(workspaceId);
@@ -1604,68 +1741,69 @@ export class ProjectRepository {
         if (expectedVersion !== undefined && expectedVersion !== workspace.version) {
             throw new Error("The workspace changed before it could be archived.");
         }
-        const archived = await this.#mutate(async (tx) => {
+        const archived = await this.#mutate(ctx, async (transactionCtx) => {
             const changed = await workspaceBeginArchive(
-                tx,
+                transactionCtx,
                 projectId,
                 workspaceId,
                 this.#now(),
                 expectedVersion,
             );
             return changed === 0
-                ? queryWorkspace(tx, projectId, workspaceId)
-                : this.#publishedWorkspace(projectId, workspaceId);
+                ? queryWorkspace(transactionCtx, projectId, workspaceId)
+                : this.#publishedWorkspace(ctx, projectId, workspaceId);
         });
         if (archived?.status === "archiving") this.#stopWorkspaceSetup(workspaceId);
         return archived;
     }
 
     async removeArchivedWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
     ): Promise<ProjectWorkspace | undefined> {
-        await this.#withWorkspaceLifecycleLock(workspaceId, async () => {
-            const workspace = await this.getWorkspace(projectId, workspaceId);
+        await this.#withWorkspaceLifecycleLock(ctx, workspaceId, async () => {
+            const workspace = await this.getWorkspace(ctx, projectId, workspaceId);
             if (workspace === undefined || workspace.status === "archived") return;
             if (workspace.status !== "archiving") {
                 throw new Error("The workspace is not being archived.");
             }
-            const project = await this.getProject(projectId);
+            const project = await this.getProject(ctx, projectId);
             if (project === undefined) throw new Error("The workspace project was not found.");
             try {
-                await this.#removeWorkspaceDirectory(project, workspace);
+                await this.#removeWorkspaceDirectory(ctx, project, workspace);
                 if (this.#closed) return;
-                await this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
+                await this.#finishWorkspaceArchive(ctx, projectId, workspaceId, "archived");
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
                 if (!this.#closed) {
                     this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
-                    await this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
+                    await this.#finishWorkspaceArchive(ctx, projectId, workspaceId, "archived");
                 }
             }
         });
-        return this.getWorkspace(projectId, workspaceId);
+        return this.getWorkspace(ctx, projectId, workspaceId);
     }
 
     /**
      * Reads the branch a project's workspaces are cut from, detecting and recording it on first
      * use so an older project or a failed detection still forks from the trunk.
      */
-    async #projectDefaultBranch(project: Project): Promise<string | undefined> {
+    async #projectDefaultBranch(ctx: Context, project: Project): Promise<string | undefined> {
         if (project.defaultBranch !== undefined) return project.defaultBranch;
         const detected = await detectGitDefaultBranch(this.#git, project.path);
         if (detected === undefined || this.#closed) return detected;
-        const updated = await this.#mutateAndPublishProject(project.id, (tx) =>
-            projectSetDefaultBranch(tx, project.id, detected, this.#now()),
+        const updated = await this.#mutateAndPublishProject(ctx, project.id, (transactionCtx) =>
+            projectSetDefaultBranch(transactionCtx, project.id, detected, this.#now()),
         );
         // Another path may have recorded a different branch first. The stored decision is the one
         // the project publishes, so it is also the one the workspace has to be cut from.
         return updated?.defaultBranch ?? detected;
     }
 
-    async #initialize(projectId: string): Promise<void> {
+    async #initialize(ctx: Context, projectId: string): Promise<void> {
         if (this.#closed) return;
-        const project = await this.getProject(projectId);
+        const project = await this.getProject(ctx, projectId);
         if (
             project === undefined ||
             project.kind === "home" ||
@@ -1675,12 +1813,12 @@ export class ProjectRepository {
         }
         try {
             if (project.remoteSource !== undefined) {
-                await this.#cloneRemoteProject(project);
+                await this.#cloneRemoteProject(ctx, project);
                 if (this.#closed) return;
             }
             // A new project learns its presence and worktree capability here rather than waiting
             // for the next daemon start, because the desktop offers "Create worktree" immediately.
-            await this.#reconcileProjectGitFacts(project);
+            await this.#reconcileProjectGitFacts(ctx, project);
             if (this.#closed) return;
 
             let remote: string | undefined;
@@ -1698,34 +1836,35 @@ export class ProjectRepository {
             // branch to fork without re-deciding it under a user's request. Git resolves upward
             // from a folder, so this waits until the folder is known to be a repository root and a
             // plain directory inside somebody else's repository cannot inherit their branch.
-            if (repositoryTopLevel) await this.#projectDefaultBranch(project);
+            if (repositoryTopLevel) await this.#projectDefaultBranch(ctx, project);
             if (this.#closed) return;
 
             const detectedName = remote === undefined ? undefined : remoteProjectName(remote);
-            const current = await this.getProject(projectId);
+            const current = await this.getProject(ctx, projectId);
             if (current === undefined) return;
             if (detectedName !== undefined && current.nameSource === "folder") {
-                await this.#mutateAndPublishProject(projectId, (tx) =>
-                    projectAdoptRemoteName(tx, projectId, detectedName, this.#now()),
+                await this.#mutateAndPublishProject(ctx, projectId, (transactionCtx) =>
+                    projectAdoptRemoteName(transactionCtx, projectId, detectedName, this.#now()),
                 );
             }
 
-            const beforeAvatar = await this.getProject(projectId);
+            const beforeAvatar = await this.getProject(ctx, projectId);
             if (beforeAvatar?.avatar === undefined) {
                 const repositoryAvatar = repositoryTopLevel
-                    ? await this.#findRepositoryAvatar(project.path)
+                    ? await this.#findRepositoryAvatar(ctx, project.path)
                     : undefined;
                 const hostingAvatar =
                     repositoryAvatar === undefined && remote !== undefined
-                        ? await this.#findHostingAvatar(remote)
+                        ? await this.#findHostingAvatar(ctx, remote)
                         : undefined;
                 const candidate = repositoryAvatar ?? hostingAvatar;
                 if (this.#closed) return;
                 if (
                     candidate !== undefined &&
-                    (await this.getProject(projectId))?.avatar === undefined
+                    (await this.getProject(ctx, projectId))?.avatar === undefined
                 ) {
                     await this.setAvatar(
+                        ctx,
                         projectId,
                         repositoryAvatar === undefined ? "hosting" : "repository",
                         candidate,
@@ -1734,15 +1873,15 @@ export class ProjectRepository {
             }
             if (this.#closed) return;
 
-            await this.#mutateAndPublishProject(projectId, (tx) =>
-                projectMarkInitializationReady(tx, projectId, this.#now()),
+            await this.#mutateAndPublishProject(ctx, projectId, (transactionCtx) =>
+                projectMarkInitializationReady(transactionCtx, projectId, this.#now()),
             );
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (this.#closed) return;
-            await this.#mutateAndPublishProject(projectId, (tx) =>
+            await this.#mutateAndPublishProject(ctx, projectId, (transactionCtx) =>
                 projectMarkInitializationFailed(
-                    tx,
+                    transactionCtx,
                     projectId,
                     errorToMessage(error).slice(0, PROJECT_ERROR_MAX_LENGTH),
                     this.#now(),
@@ -1751,7 +1890,7 @@ export class ProjectRepository {
         }
     }
 
-    async #cloneRemoteProject(project: Project): Promise<void> {
+    async #cloneRemoteProject(ctx: Context, project: Project): Promise<void> {
         if (project.remoteSource === undefined) return;
         const stagingRoot = join(this.#managedProjectsDirectory, ".rig", "clones");
         const stagingPath = join(stagingRoot, project.id);
@@ -1764,7 +1903,7 @@ export class ProjectRepository {
             if (!remoteSourceUrlMatches(origin, project.remoteSource)) {
                 throw new Error("The managed project folder has a different origin repository.");
             }
-            await this.#markCloneReady(project.id);
+            await this.#markCloneReady(ctx, project.id);
             return;
         }
         if (project.createdBy === undefined) {
@@ -1796,7 +1935,7 @@ export class ProjectRepository {
                 throw new Error("The managed project folder appeared while cloning.");
             }
             await rename(stagingPath, project.path);
-            await this.#markCloneReady(project.id);
+            await this.#markCloneReady(ctx, project.id);
         } finally {
             await rm(stagingPath, { force: true, recursive: true });
         }
@@ -1810,19 +1949,20 @@ export class ProjectRepository {
         }
     }
 
-    async #markCloneReady(projectId: string): Promise<void> {
-        await this.#mutateAndPublishProject(projectId, (tx) =>
-            projectMarkCloneReady(tx, projectId, this.#now()),
+    async #markCloneReady(ctx: Context, projectId: string): Promise<void> {
+        await this.#mutateAndPublishProject(ctx, projectId, (transactionCtx) =>
+            projectMarkCloneReady(transactionCtx, projectId, this.#now()),
         );
     }
 
     async #retriedRemoteProject(
+        ctx: Context,
         id: string,
         path: string,
         request: CreateRemoteProjectRequest,
         creator: ProjectCreator,
     ): Promise<Project | undefined> {
-        const project = await queryProject(this.#database.database, id);
+        const project = await queryProject(withDatabase(ctx, this.#database.database), id);
         if (project === undefined) return undefined;
         if (
             project.path !== path ||
@@ -1845,7 +1985,10 @@ export class ProjectRepository {
             const projectId = this.#pendingInitializations.shift();
             if (projectId === undefined) return;
             this.#activeInitializations += 1;
-            const initialize = () => this.#initialize(projectId);
+            const initialize = () =>
+                withWorkerContext("project-initialization", (workerCtx) =>
+                    this.#initialize(workerCtx, projectId),
+                );
             const task = this.#taskDrain.run(initialize);
             let initializationRejected = false;
             void task
@@ -1863,14 +2006,21 @@ export class ProjectRepository {
                     if (this.#closed) return;
                     if (
                         !initializationRejected &&
-                        (await this.getProject(projectId))?.initializationStatus === "initializing"
+                        (
+                            await withWorkerContext(
+                                "project-initialization.finalize",
+                                (workerCtx) => this.getProject(workerCtx, projectId),
+                            )
+                        )?.initializationStatus === "initializing"
                     ) {
-                        await this.#mutateAndPublishProject(projectId, (tx) =>
-                            projectMarkInitializationFailed(
-                                tx,
-                                projectId,
-                                "Project initialization did not complete.",
-                                this.#now(),
+                        await withWorkerContext("project-initialization.fail", (workerCtx) =>
+                            this.#mutateAndPublishProject(workerCtx, projectId, (transactionCtx) =>
+                                projectMarkInitializationFailed(
+                                    transactionCtx,
+                                    projectId,
+                                    "Project initialization did not complete.",
+                                    this.#now(),
+                                ),
                             ),
                         );
                     }
@@ -1879,7 +2029,7 @@ export class ProjectRepository {
         }
     }
 
-    async #findRepositoryAvatar(root: string): Promise<Buffer | undefined> {
+    async #findRepositoryAvatar(ctx: Context, root: string): Promise<Buffer | undefined> {
         const deadline = Date.now() + 2_000;
         const candidates: { path: string; score: number }[] = [];
         const directories = [
@@ -1959,7 +2109,7 @@ export class ProjectRepository {
         return undefined;
     }
 
-    async #findHostingAvatar(remote: string): Promise<Buffer | undefined> {
+    async #findHostingAvatar(ctx: Context, remote: string): Promise<Buffer | undefined> {
         const repository = parseHostingRepository(remote);
         if (repository === undefined) return undefined;
         const controller = new AbortController();
@@ -2023,20 +2173,20 @@ export class ProjectRepository {
         }
     }
 
-    async #collectAvatarGarbage(): Promise<void> {
+    async #collectAvatarGarbage(ctx: Context): Promise<void> {
         if (this.#closed) return;
         const cutoff = this.#now() - AVATAR_GARBAGE_DELAY_MS;
         const hashes = await queryProjectAvatarGarbageCandidates(
-            this.#database.database,
+            withDatabase(ctx, this.#database.database),
             cutoff,
             100,
         );
         for (const hash of hashes) {
             if (this.#closed) return;
-            await this.#withAvatarLifecycleLock(hash, async () => {
+            await this.#withAvatarLifecycleLock(ctx, hash, async () => {
                 if (this.#closed) return;
-                const removed = await this.#mutate((tx) =>
-                    projectAvatarCollectGarbage(tx, hash, cutoff),
+                const removed = await this.#mutate(ctx, (transactionCtx) =>
+                    projectAvatarCollectGarbage(transactionCtx, hash, cutoff),
                 );
                 if (removed) {
                     await rm(this.#avatarPath(hash), { force: true });
@@ -2045,10 +2195,14 @@ export class ProjectRepository {
         }
     }
 
-    async #reconcileInitializingWorkspace(workspace: ProjectWorkspace): Promise<void> {
-        const project = await this.getProject(workspace.projectId);
+    async #reconcileInitializingWorkspace(
+        ctx: Context,
+        workspace: ProjectWorkspace,
+    ): Promise<void> {
+        const project = await this.getProject(ctx, workspace.projectId);
         if (project === undefined) {
             await this.#markWorkspaceInitializationFailed(
+                ctx,
                 workspace,
                 "The workspace project was not found.",
             );
@@ -2057,9 +2211,9 @@ export class ProjectRepository {
         try {
             const current = await this.#projectInitializationLock(workspace.projectId).runInLock(
                 async () => {
-                    let locked = await this.getWorkspace(workspace.projectId, workspace.id);
+                    let locked = await this.getWorkspace(ctx, workspace.projectId, workspace.id);
                     if (locked?.status !== "initializing") return undefined;
-                    locked = await this.#prepareWorkspaceInitialization(locked, project);
+                    locked = await this.#prepareWorkspaceInitialization(ctx, locked, project);
                     if (locked?.status !== "initializing") return undefined;
                     if (existsSync(locked.path)) {
                         const adoptable = await isGitWorktreeAt({
@@ -2069,7 +2223,7 @@ export class ProjectRepository {
                         });
                         if (adoptable) return locked;
                         // A partial managed worktree is cleaned up before retrying creation.
-                        await this.#removeWorkspaceDirectory(project, locked);
+                        await this.#removeWorkspaceDirectory(ctx, project, locked);
                     }
                     if (this.#closed) return undefined;
                     // The workspace is anchored to the commit it was reserved on, so an
@@ -2078,6 +2232,7 @@ export class ProjectRepository {
                         throw new Error("The workspace base commit is unavailable.");
                     }
                     await this.#createWorkspaceCheckoutLocked(
+                        ctx,
                         locked,
                         project.path,
                         locked.baseCommit,
@@ -2086,18 +2241,23 @@ export class ProjectRepository {
                 },
             );
             if (current === undefined || this.#closed) return;
-            await this.#setupWorkspace(current);
+            await this.#setupWorkspace(ctx, current);
             if (this.#closed) return;
-            await this.#markWorkspaceReady(current);
+            await this.#markWorkspaceReady(ctx, current);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (!this.#closed) {
-                await this.#markWorkspaceInitializationFailed(workspace, errorToMessage(error));
+                await this.#markWorkspaceInitializationFailed(
+                    ctx,
+                    workspace,
+                    errorToMessage(error),
+                );
             }
         }
     }
 
     async #prepareWorkspaceInitialization(
+        ctx: Context,
         workspace: ProjectWorkspace,
         project: Project,
     ): Promise<ProjectWorkspace | undefined> {
@@ -2119,7 +2279,9 @@ export class ProjectRepository {
             throw new Error("Managed workspaces require a Git repository project.");
         }
         const defaultBranch =
-            workspace.baseRef === undefined ? await this.#projectDefaultBranch(project) : undefined;
+            workspace.baseRef === undefined
+                ? await this.#projectDefaultBranch(ctx, project)
+                : undefined;
         const gitCommonDir = await readGitCommonDir(git, project.path);
         const base = await resolveWorkspaceBase({
             ...(defaultBranch === undefined ? {} : { defaultBranch }),
@@ -2129,11 +2291,12 @@ export class ProjectRepository {
         });
         if (this.#closed) return undefined;
         const initialized = await this.#mutateAndPublishWorkspace(
+            ctx,
             workspace.projectId,
             workspace.id,
-            (tx) =>
+            (transactionCtx) =>
                 workspaceRecordInitialization(
-                    tx,
+                    transactionCtx,
                     workspace.projectId,
                     workspace.id,
                     {
@@ -2166,7 +2329,11 @@ export class ProjectRepository {
         return this.#gitCredentialBroker.daemonAuthentication(projectId, creator);
     }
 
-    async #removeWorkspaceDirectory(project: Project, workspace: ProjectWorkspace): Promise<void> {
+    async #removeWorkspaceDirectory(
+        ctx: Context,
+        project: Project,
+        workspace: ProjectWorkspace,
+    ): Promise<void> {
         const validStorageKey = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
         if (
             !validStorageKey.test(project.storageKey) ||
@@ -2220,6 +2387,7 @@ export class ProjectRepository {
     }
 
     async #createWorkspaceCheckoutLocked(
+        ctx: Context,
         workspace: ProjectWorkspace,
         projectPath: string,
         commit: string,
@@ -2227,7 +2395,7 @@ export class ProjectRepository {
         if (this.#closed) return;
         // The branch may already have followed a rename made while the checkout was reserved.
         const branch =
-            (await this.getWorkspace(workspace.projectId, workspace.id))?.branch ??
+            (await this.getWorkspace(ctx, workspace.projectId, workspace.id))?.branch ??
             workspace.branch;
         await createGitWorktree({
             branch,
@@ -2240,10 +2408,20 @@ export class ProjectRepository {
         // A rename landing during the checkout is not moved by the branch mover, which leaves
         // workspaces that are not ready alone. The branch Git just created is the real one.
         if (this.#closed) return;
-        const stored = await this.getWorkspace(workspace.projectId, workspace.id);
+        const stored = await this.getWorkspace(ctx, workspace.projectId, workspace.id);
         if (stored === undefined || stored.branch === branch) return;
-        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
-            workspaceSetBranch(tx, workspace.projectId, workspace.id, branch, this.#now()),
+        await this.#mutateAndPublishWorkspace(
+            ctx,
+            workspace.projectId,
+            workspace.id,
+            (transactionCtx) =>
+                workspaceSetBranch(
+                    transactionCtx,
+                    workspace.projectId,
+                    workspace.id,
+                    branch,
+                    this.#now(),
+                ),
         );
         this.#onWorkspaceBranchError?.(
             new Error(
@@ -2254,12 +2432,12 @@ export class ProjectRepository {
         );
     }
 
-    async #setupWorkspace(workspace: ProjectWorkspace): Promise<void> {
+    async #setupWorkspace(ctx: Context, workspace: ProjectWorkspace): Promise<void> {
         const controller = new AbortController();
         this.#workspaceSetupControllers.set(workspace.id, controller);
         try {
             if (
-                (await this.getWorkspace(workspace.projectId, workspace.id))?.status !==
+                (await this.getWorkspace(ctx, workspace.projectId, workspace.id))?.status !==
                 "initializing"
             ) {
                 return;
@@ -2268,7 +2446,7 @@ export class ProjectRepository {
                 cwd: workspace.path,
                 homeDirectory: this.#homeDirectory,
             });
-            const project = await this.getProject(workspace.projectId);
+            const project = await this.getProject(ctx, workspace.projectId);
             // The first replication runs before setup commands so they can rely on the shared
             // files being present. The sync list is read from the project root — the same source
             // every later sync pass uses — so an uncommitted root configuration change applies.
@@ -2286,9 +2464,14 @@ export class ProjectRepository {
                     workspacePath: workspace.path,
                 });
             }
-            await runWorkspaceSetupCommands(workspace.path, loaded.config.workspace.setupCommands, {
-                signal: controller.signal,
-            });
+            await runWorkspaceSetupCommands(
+                ctx,
+                workspace.path,
+                loaded.config.workspace.setupCommands,
+                {
+                    signal: controller.signal,
+                },
+            );
         } finally {
             if (this.#workspaceSetupControllers.get(workspace.id) === controller) {
                 this.#workspaceSetupControllers.delete(workspace.id);
@@ -2302,9 +2485,13 @@ export class ProjectRepository {
             ?.abort(new Error("Workspace setup stopped because the workspace was archived."));
     }
 
-    async #markWorkspaceReady(workspace: ProjectWorkspace): Promise<void> {
-        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
-            workspaceMarkReady(tx, workspace.projectId, workspace.id, this.#now()),
+    async #markWorkspaceReady(ctx: Context, workspace: ProjectWorkspace): Promise<void> {
+        await this.#mutateAndPublishWorkspace(
+            ctx,
+            workspace.projectId,
+            workspace.id,
+            (transactionCtx) =>
+                workspaceMarkReady(transactionCtx, workspace.projectId, workspace.id, this.#now()),
         );
         this.#scheduleWorkspaceSync(workspace.projectId);
     }
@@ -2317,7 +2504,11 @@ export class ProjectRepository {
         clearTimeout(this.#workspaceSyncTimers.get(projectId));
         const timer = setTimeout(() => {
             this.#workspaceSyncTimers.delete(projectId);
-            this.#runBackgroundTask(() => this.#queueWorkspaceSyncPass(projectId));
+            this.#runBackgroundTask(() =>
+                withWorkerContext("project-workspace-sync", (workerCtx) =>
+                    this.#queueWorkspaceSyncPass(workerCtx, projectId),
+                ),
+            );
         }, WORKSPACE_SYNC_DEBOUNCE_MS);
         timer.unref?.();
         this.#workspaceSyncTimers.set(projectId, timer);
@@ -2328,11 +2519,11 @@ export class ProjectRepository {
      * watch. Debouncing keeps the queue depth at one: events during a running pass collapse into
      * a single timer, which queues a single following pass.
      */
-    async #queueWorkspaceSyncPass(projectId: string): Promise<void> {
+    async #queueWorkspaceSyncPass(ctx: Context, projectId: string): Promise<void> {
         const previous = this.#workspaceSyncChain.get(projectId) ?? Promise.resolve();
         const queued = previous
             .catch(() => undefined)
-            .then(() => this.#runWorkspaceSyncPass(projectId));
+            .then(() => this.#runWorkspaceSyncPass(ctx, projectId));
         this.#workspaceSyncChain.set(projectId, queued);
         try {
             await queued;
@@ -2349,12 +2540,12 @@ export class ProjectRepository {
      * receive a copy never fails the others or the project, and a project left without ready
      * workspaces simply stops being watched.
      */
-    async #runWorkspaceSyncPass(projectId: string): Promise<void> {
+    async #runWorkspaceSyncPass(ctx: Context, projectId: string): Promise<void> {
         this.#workspaceSyncStops.get(projectId)?.();
         this.#workspaceSyncStops.delete(projectId);
         if (this.#closed) return;
-        const project = await this.getProject(projectId);
-        const workspaces = (await this.listWorkspaces(projectId)).filter(
+        const project = await this.getProject(ctx, projectId);
+        const workspaces = (await this.listWorkspaces(ctx, projectId)).filter(
             (workspace) => workspace.status === "ready",
         );
         if (project === undefined || workspaces.length === 0) return;
@@ -2389,7 +2580,8 @@ export class ProjectRepository {
             if (this.#closed) return;
             // Re-read right before copying: a workspace archived while this pass was running
             // must not have its folder written to, much less recreated.
-            if ((await this.getWorkspace(projectId, workspace.id))?.status !== "ready") continue;
+            if ((await this.getWorkspace(ctx, projectId, workspace.id))?.status !== "ready")
+                continue;
             try {
                 await syncWorkspaceFiles({
                     paths: syncPaths,
@@ -2403,64 +2595,76 @@ export class ProjectRepository {
     }
 
     async #markWorkspaceInitializationFailed(
+        ctx: Context,
         workspace: ProjectWorkspace,
         error: string,
     ): Promise<void> {
-        await this.#mutateAndPublishWorkspace(workspace.projectId, workspace.id, (tx) =>
-            workspaceMarkInitializationFailed(
-                tx,
-                workspace.projectId,
-                workspace.id,
-                error.slice(0, PROJECT_ERROR_MAX_LENGTH),
-                this.#now(),
-            ),
+        await this.#mutateAndPublishWorkspace(
+            ctx,
+            workspace.projectId,
+            workspace.id,
+            (transactionCtx) =>
+                workspaceMarkInitializationFailed(
+                    transactionCtx,
+                    workspace.projectId,
+                    workspace.id,
+                    error.slice(0, PROJECT_ERROR_MAX_LENGTH),
+                    this.#now(),
+                ),
         );
     }
 
     async #finishWorkspaceArchive(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         _status: "archived",
     ): Promise<void> {
         const now = this.#now();
-        await this.#mutateAndPublishWorkspace(projectId, workspaceId, (tx) =>
-            workspaceCompleteArchive(tx, projectId, workspaceId, now),
+        await this.#mutateAndPublishWorkspace(ctx, projectId, workspaceId, (transactionCtx) =>
+            workspaceCompleteArchive(transactionCtx, projectId, workspaceId, now),
         );
         // The next pass stops the watch when this was the project's last ready workspace.
         this.#scheduleWorkspaceSync(projectId);
     }
 
-    async #mutate<T>(body: (tx: TX) => T | Promise<T>): Promise<T> {
+    async #mutate<T>(ctx: Context, body: (ctx: Context) => T | Promise<T>): Promise<T> {
         if (this.#transactionRunner !== undefined) {
-            return this.#transactionRunner(body);
+            return this.#transactionRunner(ctx, body);
         }
-        return inTx(this.#database, body);
+        return inTx(
+            withDatabase(ctx, this.#database),
+            "rig.sql.project.repositoryTransaction",
+            body,
+        );
     }
 
     async #mutateAndPublishProject(
+        ctx: Context,
         projectId: string,
-        body: (tx: TX) => number | Promise<number>,
+        body: (ctx: Context) => number | Promise<number>,
         mutationId?: string,
     ): Promise<Project | undefined> {
-        return await this.#mutate(async (tx) => {
-            const changed = await body(tx);
+        return await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await body(transactionCtx);
             return changed === 0
-                ? queryProject(tx, projectId)
-                : this.#publishedProject(projectId, mutationId);
+                ? queryProject(transactionCtx, projectId)
+                : this.#publishedProject(transactionCtx, projectId, mutationId);
         });
     }
 
     async #mutateAndPublishWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
-        body: (tx: TX) => number | Promise<number>,
+        body: (ctx: Context) => number | Promise<number>,
         mutationId?: string,
     ): Promise<ProjectWorkspace | undefined> {
-        return await this.#mutate(async (tx) => {
-            const changed = await body(tx);
+        return await this.#mutate(ctx, async (transactionCtx) => {
+            const changed = await body(transactionCtx);
             return changed === 0
-                ? queryWorkspace(tx, projectId, workspaceId)
-                : this.#publishedWorkspace(projectId, workspaceId, mutationId);
+                ? queryWorkspace(transactionCtx, projectId, workspaceId)
+                : this.#publishedWorkspace(transactionCtx, projectId, workspaceId, mutationId);
         });
     }
 
@@ -2475,7 +2679,11 @@ export class ProjectRepository {
         });
     }
 
-    async #withAvatarLifecycleLock<T>(hash: string, task: () => Promise<T>): Promise<T> {
+    async #withAvatarLifecycleLock<T>(
+        ctx: Context,
+        hash: string,
+        task: () => Promise<T>,
+    ): Promise<T> {
         const previous = this.#avatarLifecycle.get(hash) ?? Promise.resolve();
         let release!: () => void;
         const barrier = new Promise<void>((resolveBarrier) => {
@@ -2494,7 +2702,11 @@ export class ProjectRepository {
         }
     }
 
-    async #withWorkspaceLifecycleLock<T>(workspaceId: string, task: () => Promise<T>): Promise<T> {
+    async #withWorkspaceLifecycleLock<T>(
+        ctx: Context,
+        workspaceId: string,
+        task: () => Promise<T>,
+    ): Promise<T> {
         const previous = this.#workspaceLifecycle.get(workspaceId) ?? Promise.resolve();
         let release!: () => void;
         const barrier = new Promise<void>((resolveBarrier) => {
@@ -2513,9 +2725,9 @@ export class ProjectRepository {
         }
     }
 
-    async #initializeWorkspace(workspace: ProjectWorkspace): Promise<void> {
-        await this.#withWorkspaceLifecycleLock(workspace.id, () =>
-            this.#reconcileInitializingWorkspace(workspace),
+    async #initializeWorkspace(ctx: Context, workspace: ProjectWorkspace): Promise<void> {
+        await this.#withWorkspaceLifecycleLock(ctx, workspace.id, () =>
+            this.#reconcileInitializingWorkspace(ctx, workspace),
         );
     }
 
@@ -2530,27 +2742,33 @@ export class ProjectRepository {
         return lock;
     }
 
-    async #publishedProject(projectId: string, mutationId?: string): Promise<Project | undefined> {
-        const project = await this.getProject(projectId);
+    async #publishedProject(
+        ctx: Context,
+        projectId: string,
+        mutationId?: string,
+    ): Promise<Project | undefined> {
+        const project = await this.getProject(ctx, projectId);
         if (project !== undefined) {
-            await this.#publishProject("project_updated", project, mutationId);
+            await this.#publishProject(ctx, "project_updated", project, mutationId);
         }
         return project;
     }
 
     async #publishedWorkspace(
+        ctx: Context,
         projectId: string,
         workspaceId: string,
         mutationId?: string,
     ): Promise<ProjectWorkspace | undefined> {
-        const workspace = await this.getWorkspace(projectId, workspaceId);
+        const workspace = await this.getWorkspace(ctx, projectId, workspaceId);
         if (workspace !== undefined) {
-            await this.#publishWorkspace("workspace_updated", workspace, mutationId);
+            await this.#publishWorkspace(ctx, "workspace_updated", workspace, mutationId);
         }
         return workspace;
     }
 
     async #publishProject(
+        ctx: Context,
         type: ProjectEvent["type"],
         project: Project,
         mutationId?: string,
@@ -2562,10 +2780,11 @@ export class ProjectRepository {
             projectId: project.id,
             type,
         } as ProjectEvent;
-        await this.#onEvent?.(event);
+        await this.#onEvent?.(ctx, event);
     }
 
     async #publishWorkspace(
+        ctx: Context,
         type: ProjectWorkspaceEvent["type"],
         workspace: ProjectWorkspace,
         mutationId?: string,
@@ -2578,10 +2797,10 @@ export class ProjectRepository {
             type,
             workspaceId: workspace.id,
         } as ProjectWorkspaceEvent;
-        await this.#onEvent?.(event);
+        await this.#onEvent?.(ctx, event);
     }
 
-    async #storeAvatarBytes(hash: string, bytes: Buffer): Promise<void> {
+    async #storeAvatarBytes(ctx: Context, hash: string, bytes: Buffer): Promise<void> {
         const path = this.#avatarPath(hash);
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
         const temporary = `${path}.${createId()}.tmp`;

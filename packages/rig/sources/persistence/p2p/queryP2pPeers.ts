@@ -1,13 +1,15 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { asc } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
 import { p2pTrustedPeerSchema, type P2pTrustedPeer } from "../../p2p/P2pPeer.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { p2pPeers } from "../database/schema.js";
 
-export async function queryP2pPeers(tx: DatabaseScope): Promise<readonly P2pTrustedPeer[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryP2pPeers(ctx: Context): Promise<readonly P2pTrustedPeer[]> {
+    return await inDatabase(ctx, "rig.sql.p2p.queryP2pPeers", async (ctx) => {
+        const tx = ctx.tx;
         return (await tx.select().from(p2pPeers).orderBy(asc(p2pPeers.instanceId)).all()).map(
             (row) => {
                 const bindings: unknown = JSON.parse(row.bindingsJson);

@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,8 @@ import { NativeProcessManager } from "../../../processes/index.js";
 import { createJustBashToolHarness } from "../../../tools/testing/createJustBashToolHarness.js";
 import { codexExecCommandTool } from "../../tools/codex/exec_command.js";
 import { codexWriteStdinTool } from "../../tools/codex/write_stdin.js";
+
+const ctx = createTestRootContext();
 
 describe("codex write_stdin tool", () => {
     it("polls a command that outlives the initial exec yield", async () => {
@@ -40,7 +43,10 @@ describe("codex write_stdin tool", () => {
         const cwd = await mkdtemp(join(tmpdir(), "rig-unified-exec-test-"));
         const processManager = new NativeProcessManager();
         try {
-            const context = createNodeAgentContext({ cwd, processManager });
+            const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+                cwd,
+                processManager,
+            });
             context.permissions?.setMode("full_access");
             const script = [
                 'process.stdin.setEncoding("utf8")',
@@ -52,18 +58,20 @@ describe("codex write_stdin tool", () => {
                     yield_time_ms: 1,
                 },
                 context,
-                {},
+                { ctx },
             );
             expect(started.session_id).toBe(1);
 
             const completed = await codexWriteStdinTool.execute(
                 { chars: "hello\n", session_id: 1, yield_time_ms: 2_000 },
                 context,
-                {},
+                { ctx },
             );
             expect(completed).toMatchObject({ exit_code: 0, output: "received:hello" });
         } finally {
-            await processManager.killAll({ forceAfterMs: 100 });
+            await processManager.killAll(createTestRootContext().named("process-cleanup"), {
+                forceAfterMs: 100,
+            });
             await rm(cwd, { force: true, recursive: true });
         }
     });

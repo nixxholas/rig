@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     contactSessionDescriptor,
     type CreateMurmurSessionOptions,
@@ -22,17 +23,20 @@ const SELF = new Uint8Array(32).fill(1);
 const REMOTE = new Uint8Array(32).fill(2);
 const SESSION = new Uint8Array(32).fill(3);
 const INVITATION = new Uint8Array(32).fill(4);
+const ctx = createTestRootContext().named("sharing-service-test");
 
 describe("SharingService", () => {
     it("binds the Murmur identity to the same local Rig profile and manages contacts", async () => {
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const events: string[] = [];
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = await profiles.create({
+        const profile = await profiles.create(ctx, {
             email: "steve@example.test",
             name: "Steve",
             photo: {
@@ -71,30 +75,34 @@ describe("SharingService", () => {
             database,
             now: () => 1_000,
             profiles,
-            publish: (event) => events.push(event.type),
+            publish: (_ctx, event) => events.push(event.type),
         });
-        sharing.start();
+        sharing.start(ctx);
         try {
-            await expect(sharing.createInvitation()).rejects.toThrow("Choose a local Rig profile");
-            await sharing.bindProfile(profile.id);
-            expect((await sharing.snapshot()).profileId).toBe(profile.id);
-            const otherProfile = await profiles.create({
+            await expect(sharing.createInvitation(ctx)).rejects.toThrow(
+                "Choose a local Rig profile",
+            );
+            await sharing.bindProfile(ctx, profile.id);
+            expect((await sharing.snapshot(ctx)).profileId).toBe(profile.id);
+            const otherProfile = await profiles.create(ctx, {
                 email: "other@example.test",
                 name: "Other",
             });
-            await expect(sharing.bindProfile(otherProfile.id)).rejects.toThrow("already bound");
+            await expect(sharing.bindProfile(ctx, otherProfile.id)).rejects.toThrow(
+                "already bound",
+            );
 
-            await expect(sharing.createInvitation()).resolves.toEqual({
+            await expect(sharing.createInvitation(ctx)).resolves.toEqual({
                 expiresAt: 301_000,
                 invitation: Buffer.from(INVITATION).toString("base64url"),
             });
-            expect((await sharing.snapshot()).incomingRequests[0]).toMatchObject({
+            expect((await sharing.snapshot(ctx)).incomingRequests[0]).toMatchObject({
                 id: "request-1",
                 profile: remoteProfile,
             });
 
-            await sharing.acceptContact("request-1");
-            expect((await sharing.snapshot()).contacts).toEqual([
+            await sharing.acceptContact(ctx, "request-1");
+            expect((await sharing.snapshot(ctx)).contacts).toEqual([
                 {
                     identity: Buffer.from(REMOTE).toString("base64url"),
                     profile: remoteProfile,
@@ -102,10 +110,11 @@ describe("SharingService", () => {
                 },
             ]);
 
-            await sharing.removeContact(Buffer.from(REMOTE).toString("base64url"));
-            expect((await sharing.snapshot()).contacts).toEqual([]);
+            await sharing.removeContact(ctx, Buffer.from(REMOTE).toString("base64url"));
+            expect((await sharing.snapshot(ctx)).contacts).toEqual([]);
 
             const outgoing = await sharing.requestContact(
+                ctx,
                 Buffer.from(INVITATION).toString("base64url"),
             );
             expect(client.localProfiles.at(-1)).toMatchObject({
@@ -117,30 +126,32 @@ describe("SharingService", () => {
                     ?.profile?.photo,
             ).toBeUndefined();
             expect(outgoing.identity).toBe(Buffer.from(REMOTE).toString("base64url"));
-            expect((await sharing.snapshot()).outgoingRequests).toContainEqual(outgoing);
+            expect((await sharing.snapshot(ctx)).outgoingRequests).toContainEqual(outgoing);
             expect(events).toContain("sharing_changed");
         } finally {
-            await sharing.close();
-            await database.close();
+            await sharing.close(ctx);
+            await database.close(ctx);
         }
     });
 
     it("refuses to attach a persisted profile binding to a different Murmur identity", async () => {
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const sharing = new SharingService({
             client: new FakeMurmurClient(),
             database,
             profiles,
             publish: () => undefined,
         });
-        await sharing.bindProfile(profile.id);
-        await sharing.close();
+        await sharing.bindProfile(ctx, profile.id);
+        await sharing.close(ctx);
         const remoteSharing = new SharingService({
             client: new FakeMurmurClient({ identity: REMOTE }),
             database,
@@ -148,12 +159,12 @@ describe("SharingService", () => {
             publish: () => undefined,
         });
         try {
-            await expect(remoteSharing.bindProfile(profile.id)).rejects.toThrow(
+            await expect(remoteSharing.bindProfile(ctx, profile.id)).rejects.toThrow(
                 "stored Murmur identity does not match",
             );
         } finally {
-            await remoteSharing.close();
-            await database.close();
+            await remoteSharing.close(ctx);
+            await database.close(ctx);
         }
     });
 
@@ -162,7 +173,9 @@ describe("SharingService", () => {
         const contactsGate = new Promise<void>((resolve) => {
             releaseContacts = resolve;
         });
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
@@ -175,24 +188,26 @@ describe("SharingService", () => {
             profiles,
             publish: () => undefined,
         });
-        const snapshot = sharing.snapshot();
-        const closing = sharing.close();
+        const snapshot = sharing.snapshot(ctx);
+        const closing = sharing.close(ctx);
         expect(client.closed).toBe(false);
         releaseContacts?.();
         await snapshot;
         await closing;
         expect(client.closed).toBe(true);
-        await database.close();
+        await database.close(ctx);
     });
 
     it("aborts an active Murmur invitation upload while closing", async () => {
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const client = new FakeMurmurClient({ invitationWaitsForAbort: true });
         const sharing = new SharingService({
             client,
@@ -200,24 +215,26 @@ describe("SharingService", () => {
             profiles,
             publish: () => undefined,
         });
-        await sharing.bindProfile(profile.id);
-        const invitation = sharing.createInvitation();
+        await sharing.bindProfile(ctx, profile.id);
+        const invitation = sharing.createInvitation(ctx);
         const aborted = expect(invitation).rejects.toThrow("invitation aborted");
         await vi.waitFor(() => expect(client.invitationSignal).toBeDefined());
-        await sharing.close();
+        await sharing.close(ctx);
         await aborted;
         expect(client.invitationSignal?.aborted).toBe(true);
-        await database.close();
+        await database.close(ctx);
     });
 
     it("does not accept a contact request whose Murmur profile is not a Rig profile", async () => {
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
             publish: () => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
         const client = new FakeMurmurClient({
             incoming: [
                 {
@@ -234,21 +251,23 @@ describe("SharingService", () => {
             profiles,
             publish: () => undefined,
         });
-        await sharing.bindProfile(profile.id);
+        await sharing.bindProfile(ctx, profile.id);
         try {
-            expect((await sharing.snapshot()).incomingRequests[0]?.profile).toBeNull();
-            await expect(sharing.acceptContact("invalid")).rejects.toThrow(
+            expect((await sharing.snapshot(ctx)).incomingRequests[0]?.profile).toBeNull();
+            await expect(sharing.acceptContact(ctx, "invalid")).rejects.toThrow(
                 "does not contain a valid Rig profile",
             );
         } finally {
-            await sharing.close();
-            await database.close();
+            await sharing.close(ctx);
+            await database.close(ctx);
         }
     });
 
     it("restarts Murmur synchronization after an unexpected failure", async () => {
         vi.useFakeTimers();
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
@@ -266,23 +285,25 @@ describe("SharingService", () => {
             publish: () => undefined,
         });
         try {
-            sharing.start();
+            sharing.start(ctx);
             await vi.waitFor(() => expect(client.syncCalls).toBe(1));
-            expect((await sharing.snapshot()).connection).toBe("disconnected");
+            expect((await sharing.snapshot(ctx)).connection).toBe("disconnected");
             expect(errors).toHaveLength(1);
 
             await vi.advanceTimersByTimeAsync(1_000);
             await vi.waitFor(() => expect(client.syncCalls).toBe(2));
-            expect((await sharing.snapshot()).connection).toBe("connected");
+            expect((await sharing.snapshot(ctx)).connection).toBe("connected");
         } finally {
-            await sharing.close();
-            await database.close();
+            await sharing.close(ctx);
+            await database.close(ctx);
             vi.useRealTimers();
         }
     });
 
     it("drains queued folder work before closing Murmur", async () => {
-        const database = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: "alocalinstance00000000001",
@@ -312,7 +333,7 @@ describe("SharingService", () => {
             publish: () => undefined,
         });
         try {
-            const closing = sharing.close();
+            const closing = sharing.close(ctx);
             await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
             expect(client.closed).toBe(false);
 
@@ -320,8 +341,8 @@ describe("SharingService", () => {
             await closing;
             expect(client.closed).toBe(true);
         } finally {
-            await sharing.close();
-            await database.close();
+            await sharing.close(ctx);
+            await database.close(ctx);
         }
     });
 });

@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { SessionEvent } from "../../protocol/index.js";
 import { TIMELINE_EVENT_TYPES } from "../../timeline/index.js";
@@ -12,10 +13,11 @@ import { readString } from "../session/impl/sqliteRow.js";
  * deserialized so a chart never materializes the history it does not draw.
  */
 export async function queryTimelineEvents(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionIds: readonly string[],
 ): Promise<readonly SessionEvent[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.timeline.query_events", async (ctx) => {
+        const tx = ctx.tx;
         if (sessionIds.length === 0) return [];
         const ids = sql.join(
             sessionIds.map((id) => sql`${id}`),

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { WorkletContext } from "../../agent/context/WorkletContext.js";
 import type { Worklet } from "../../protocol/WorkletProtocol.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import {
     workletInstallTool,
     workletListTool,
@@ -73,6 +74,7 @@ describe("worklet tools", () => {
     it("refuses a source folder outside the workspace before reaching the worklet", async () => {
         const install = vi.fn();
         const context = createContext({ install });
+        const ctx = createTestRootContext().named("worklet-tools-test");
 
         await expect(
             workletInstallTool.execute(
@@ -82,7 +84,7 @@ describe("worklet tools", () => {
                     permissions: SEALED,
                 },
                 context,
-                {},
+                { ctx },
             ),
         ).rejects.toThrow("inside the active workspace");
         expect(install).not.toHaveBeenCalled();
@@ -103,15 +105,17 @@ describe("worklet tools", () => {
             uninstall,
             update,
         });
+        const ctx = createTestRootContext().named("worklet-tools-test");
         const request = {
             iconPath: "/workspace/icon.png",
             path: "/workspace/watch",
             permissions: SEALED,
         };
 
-        await expect(workletInstallTool.execute(request, context, {})).resolves.toBe(worklet);
+        await expect(workletInstallTool.execute(request, context, { ctx })).resolves.toBe(worklet);
         // The session bakes in authorship and the folder names itself, so neither is passed along.
         expect(install).toHaveBeenCalledWith(
+            ctx,
             { iconPath: request.iconPath, path: request.path },
             context.fs,
             SEALED,
@@ -126,10 +130,11 @@ describe("worklet tools", () => {
                     permissions: SEALED,
                 },
                 context,
-                {},
+                { ctx },
             ),
         ).resolves.toMatchObject({ currentVersion: 2 });
         expect(update).toHaveBeenCalledWith(
+            ctx,
             "github-watch",
             { changeDescription: "More repositories", path: "/workspace/watch" },
             context.fs,
@@ -139,27 +144,28 @@ describe("worklet tools", () => {
         await workletRevertTool.execute(
             { name: "github-watch", permissions: SEALED, version: 1 },
             context,
-            {},
+            { ctx },
         );
-        expect(revert).toHaveBeenCalledWith("github-watch", { version: 1 }, SEALED);
+        expect(revert).toHaveBeenCalledWith(ctx, "github-watch", { version: 1 }, SEALED);
 
         await expect(
-            workletUninstallTool.execute({ name: "github-watch" }, context, {}),
+            workletUninstallTool.execute({ name: "github-watch" }, context, { ctx }),
         ).resolves.toEqual({ name: "github-watch" });
-        expect(uninstall).toHaveBeenCalledWith("github-watch");
+        expect(uninstall).toHaveBeenCalledWith(ctx, "github-watch");
 
-        await expect(workletListTool.execute({}, context, {})).resolves.toEqual({
+        await expect(workletListTool.execute({}, context, { ctx })).resolves.toEqual({
             worklets: [worklet],
         });
         await expect(
-            workletLogsTool.execute({ name: "github-watch" }, context, {}),
+            workletLogsTool.execute({ name: "github-watch" }, context, { ctx }),
         ).resolves.toEqual({ log: "watching", truncated: false });
     });
 
     it("says plainly when a session has no worklets", async () => {
         const context = { fs: { cwd: "/workspace" } } as AgentContext;
+        const ctx = createTestRootContext().named("worklet-tools-test");
 
-        await expect(workletListTool.execute({}, context, {})).rejects.toThrow(
+        await expect(workletListTool.execute({}, context, { ctx })).rejects.toThrow(
             "Worklets are unavailable in this session.",
         );
     });

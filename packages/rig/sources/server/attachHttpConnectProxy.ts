@@ -8,6 +8,7 @@ import { proxyHttpRequest } from "./proxyHttpRequest.js";
 import { resolveHttpProxyProjectScope } from "./resolveHttpProxyProjectScope.js";
 import type { ProjectScope } from "../protocol/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
+import { withWorkerContext } from "../observability/index.js";
 
 export function attachHttpConnectProxy(server: Server, token: string, store: SessionStore): void {
     const tunnels = new Set<Duplex>();
@@ -26,15 +27,16 @@ export function attachHttpConnectProxy(server: Server, token: string, store: Ses
         return closeServer(callback);
     }) as Server["close"];
     server.on("connect", (request, client, head) => {
-        void handleHttpConnect(request, client, head, proxyServer, store, token, tunnels).catch(
-            () => {
-                client.destroy();
-            },
-        );
+        void withWorkerContext("http-connect-setup", (ctx) =>
+            handleHttpConnect(ctx, request, client, head, proxyServer, store, token, tunnels),
+        ).catch(() => {
+            client.destroy();
+        });
     });
 }
 
 async function handleHttpConnect(
+    ctx: import("@steve.kite/stdlib").Context,
     request: IncomingMessage,
     client: Duplex,
     head: Buffer,
@@ -57,7 +59,7 @@ async function handleHttpConnect(
         return;
     }
 
-    const resolution = await resolveHttpProxyProjectScope(scope, store);
+    const resolution = await resolveHttpProxyProjectScope(ctx, scope, store);
     if (!resolution.allowed) {
         endWithStatus(client, resolution);
         return;

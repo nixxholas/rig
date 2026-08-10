@@ -1,16 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
-
-import type { DatabaseScope } from "../Transaction.js";
 
 export type SessionMutationReceiptResult = "applied" | "conflict" | "missing";
 
 /** Checks one durable mutation identity without depending on the bounded session event cache. */
 export async function querySessionMutationReceipt(
-    tx: DatabaseScope,
+    ctx: Context,
     input: { action: string; mutationId: string; sessionId: string },
 ): Promise<SessionMutationReceiptResult> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_mutation_receipt", async (ctx) => {
+        const tx = ctx.tx;
         const receipt = await tx.get<{ action: string; session_id: string }>(sql`
         SELECT action, session_id
         FROM session_mutations

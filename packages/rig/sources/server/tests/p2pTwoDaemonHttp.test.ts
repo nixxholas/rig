@@ -5,6 +5,8 @@ import { rm } from "node:fs/promises";
 import { Endpoint, RelayMode, SecretKey } from "@number0/iroh/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { IrohNetwork, P2pNetwork } from "../../p2p/index.js";
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { createP2pInstanceIdentity } from "../../p2p/P2pIdentity.js";
@@ -87,7 +89,7 @@ describe("P2P HTTP between two real daemon servers", () => {
         ]);
         const firstId = firstEndpoint.id().toString();
         const secondId = secondEndpoint.id().toString();
-        const firstNetwork = await P2pNetwork.create({
+        const firstNetwork = await P2pNetwork.create(createTestRootContext(), {
             config: {
                 direct: {},
                 enableDirect: false,
@@ -115,7 +117,7 @@ describe("P2P HTTP between two real daemon servers", () => {
             peerTrustStore,
         });
         cleanups.push(() => firstNetwork.close());
-        const secondNetwork = await P2pNetwork.create({
+        const secondNetwork = await P2pNetwork.create(createTestRootContext(), {
             config: {
                 direct: {},
                 enableDirect: false,
@@ -231,7 +233,10 @@ describe("P2P HTTP between two real daemon servers", () => {
             `/p2p/peers/${firstIdentity.instanceId}/api/health`,
             "second-token",
         );
-        expect(refusal.status).toBe(502);
+        expect(refusal.status).toBe(403);
+        expect(JSON.parse(refusal.body)).toEqual({
+            error: "P2P API sharing is disabled for that peer connection.",
+        });
     });
 });
 
@@ -254,7 +259,7 @@ async function startDaemon(
     const store =
         options === undefined
             ? undefined
-            : await PersistentSessionStore.open({
+            : await PersistentSessionStore.open(createTestRootContext(), {
                   databasePath: ":memory:",
                   homeDirectory: directory,
                   localInstanceId: options.localInstanceId,
@@ -268,11 +273,16 @@ async function startDaemon(
                   localInstanceId: options!.localInstanceId,
                   publish: () => undefined,
               });
-    await profiles?.replicate(options!.remoteProfile, options!.allowedProvisionPeerId);
+    await profiles?.replicate(
+        createTestRootContext(),
+        options!.remoteProfile,
+        options!.allowedProvisionPeerId,
+    );
     const remoteProject =
         store === undefined
             ? undefined
             : await store.createRemoteProject(
+                  createTestRootContext(),
                   {
                       identity: options!.remoteProfile.id,
                       name: "Peer managed project",
@@ -287,7 +297,7 @@ async function startDaemon(
                       githubToken: "test-github-token",
                   },
               );
-    const server = await createProtocolHttpServer({
+    const server = await createProtocolHttpServer(createTestRootContext(), {
         ...(options === undefined
             ? {}
             : {
@@ -315,7 +325,7 @@ async function startDaemon(
         await new Promise<void>((resolve, reject) => {
             server.close((error) => (error === undefined ? resolve() : reject(error)));
         });
-        await store?.close();
+        await store?.close(createTestRootContext());
         await rm(directory, { force: true, recursive: true });
     };
     cleanups.push(close);

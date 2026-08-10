@@ -1,4 +1,5 @@
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { P2pNetwork } from "../p2p/index.js";
 import {
@@ -13,25 +14,28 @@ import { sameRigProfile } from "./sameRigProfile.js";
 const PROFILE_RESPONSE_MAXIMUM_BYTES = 256 * 1024;
 const MAXIMUM_CONCURRENT_PROFILE_RETRIES = 3;
 
-export async function replicateProfileForP2pRequest(options: {
-    body: Uint8Array;
-    network: P2pNetwork;
-    onSynchronized?: (peerId: string, profileId: string, version: number) => void;
-    path: string;
-    peerId: string;
-    profiles: RigProfileStore;
-    signal: AbortSignal;
-}): Promise<void> {
+export async function replicateProfileForP2pRequest(
+    ctx: Context,
+    options: {
+        body: Uint8Array;
+        network: P2pNetwork;
+        onSynchronized?: (peerId: string, profileId: string, version: number) => void;
+        path: string;
+        peerId: string;
+        profiles: RigProfileStore;
+        signal: AbortSignal;
+    },
+): Promise<void> {
     const profileId = messageProfileId(options.path, options.body);
     if (profileId === undefined) return;
-    const profile = await options.profiles.get(profileId);
-    if (profile === undefined || !(await options.profiles.isLocal(profileId))) {
+    const profile = await options.profiles.get(ctx, profileId);
+    if (profile === undefined || !(await options.profiles.isLocal(ctx, profileId))) {
         throw new P2pProfileReplicationError(403, "That human profile is not owned by this Rig.");
     }
     let candidate = profile;
     for (let attempt = 0; attempt < MAXIMUM_CONCURRENT_PROFILE_RETRIES; attempt += 1) {
         try {
-            await replicateProfileToP2pPeer({
+            await replicateProfileToP2pPeer(ctx, {
                 network: options.network,
                 peerId: options.peerId,
                 profile: candidate,
@@ -41,10 +45,10 @@ export async function replicateProfileForP2pRequest(options: {
             return;
         } catch (error) {
             if (!(error instanceof NewerP2pProfileError)) throw error;
-            const latest = await options.profiles.get(profileId);
+            const latest = await options.profiles.get(ctx, profileId);
             if (
                 latest === undefined ||
-                !(await options.profiles.isLocal(profileId)) ||
+                !(await options.profiles.isLocal(ctx, profileId)) ||
                 latest.version < error.profile.version
             ) {
                 throw new P2pProfileReplicationError(
@@ -65,15 +69,19 @@ export async function replicateProfileForP2pRequest(options: {
     );
 }
 
-export async function replicateProfileToP2pPeer(options: {
-    createIfMissing?: boolean;
-    network: P2pNetwork;
-    peerId: string;
-    profile: RigProfile;
-    signal: AbortSignal;
-}): Promise<"missing" | "synchronized"> {
+export async function replicateProfileToP2pPeer(
+    ctx: Context,
+    options: {
+        createIfMissing?: boolean;
+        network: P2pNetwork;
+        peerId: string;
+        profile: RigProfile;
+        signal: AbortSignal;
+    },
+): Promise<"missing" | "synchronized"> {
     const path = `/profiles/${encodeURIComponent(options.profile.id)}`;
     const current = await options.network.fetch(
+        ctx,
         options.peerId,
         {
             body: new Uint8Array(),
@@ -117,6 +125,7 @@ export async function replicateProfileToP2pPeer(options: {
 
     const encoded = Buffer.from(JSON.stringify({ profile: options.profile }), "utf8");
     const replicated = await options.network.fetch(
+        ctx,
         options.peerId,
         {
             body: encoded,

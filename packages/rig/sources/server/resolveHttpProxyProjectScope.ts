@@ -6,10 +6,11 @@ export type HttpProxyProjectScopeResolution =
     | { allowed: false; message: string; statusCode: number; statusText: string };
 
 export async function resolveHttpProxyProjectScope(
+    ctx: Context,
     scope: ProjectScope,
     store: SessionStore,
 ): Promise<HttpProxyProjectScopeResolution> {
-    if ((await store.getProject(scope.projectId)) === undefined) {
+    if ((await store.getProject(ctx, scope.projectId)) === undefined) {
         return {
             allowed: false,
             message: "The requested Rig project was not found.",
@@ -19,7 +20,7 @@ export async function resolveHttpProxyProjectScope(
     }
     if (
         scope.workspaceId !== undefined &&
-        (await store.getWorkspace(scope.projectId, scope.workspaceId)) === undefined
+        (await store.getWorkspace(ctx, scope.projectId, scope.workspaceId)) === undefined
     ) {
         return {
             allowed: false,
@@ -30,3 +31,4 @@ export async function resolveHttpProxyProjectScope(
     }
     return { allowed: true };
 }
+import type { Context } from "@steve.kite/stdlib";

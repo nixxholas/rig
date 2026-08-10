@@ -1,15 +1,14 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { ScheduledMessage } from "../../scheduling/index.js";
 import { scheduledMessages } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
-export async function scheduledMessageSave(
-    tx: DatabaseScope,
-    message: ScheduledMessage,
-): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+export async function scheduledMessageSave(ctx: Context, message: ScheduledMessage): Promise<void> {
+    return await inDatabase(ctx, "rig.sql.scheduling.scheduledMessageSave", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(scheduledMessages)
             .values({

@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -27,7 +30,7 @@ describe("InMemorySession queued configuration", () => {
                 throw new Error("This test only creates runtimes.");
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => {
                 const runtime = createRuntime(options, provider);
@@ -39,7 +42,7 @@ describe("InMemorySession queued configuration", () => {
                 models: [capableModel],
                 providers: [{ models: [capableModel], providerId: "test" }],
             },
-            onAppendEvent(event) {
+            onAppendEvent(_ctx, event) {
                 events.push(event);
             },
             request: { cwd: "/tmp/rig-inference-scope-refresh" },
@@ -48,7 +51,7 @@ describe("InMemorySession queued configuration", () => {
         const firstContext = await runtimeContext(session);
         const close = vi.spyOn(runtimes[0]!.agent, "close");
 
-        await session.refreshInferenceScope({
+        await session.refreshInferenceScope(ctx, {
             defaultModelId: capableModel.id,
             defaultProviderId: "test",
             models: [capableModel, catalog.models[1]!],
@@ -79,7 +82,7 @@ describe("InMemorySession queued configuration", () => {
                 }),
             ),
         );
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("aborts active inference before retiring a rotated credential runtime", async () => {
@@ -90,12 +93,12 @@ describe("InMemorySession queued configuration", () => {
                 runtimes.push(runtime);
             },
         });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
         const close = vi.spyOn(runtimes[0]!.agent, "close");
         expect(session.snapshot().status).toBe("running");
 
-        session.refreshInferenceScope(structuredClone(catalog));
+        session.refreshInferenceScope(ctx, structuredClone(catalog));
 
         expect(close).not.toHaveBeenCalled();
 
@@ -111,13 +114,13 @@ describe("InMemorySession queued configuration", () => {
         expect(runtimes).toHaveLength(1);
         expect(session.snapshot().status).toBe("aborted");
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("falls back durably when a credential refresh removes the selected provider", async () => {
         const { capableModel, limitedModel } = testModels();
         const events: unknown[] = [];
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: {
                 defaultModelId: capableModel.id,
@@ -128,7 +131,7 @@ describe("InMemorySession queued configuration", () => {
                     { models: [limitedModel], providerId: "removed" },
                 ],
             },
-            onAppendEvent(event) {
+            onAppendEvent(_ctx, event) {
                 events.push(event);
             },
             request: {
@@ -138,7 +141,7 @@ describe("InMemorySession queued configuration", () => {
             },
         });
 
-        await session.refreshInferenceScope({
+        await session.refreshInferenceScope(ctx, {
             defaultModelId: capableModel.id,
             defaultProviderId: "capable",
             models: [capableModel],
@@ -161,7 +164,7 @@ describe("InMemorySession queued configuration", () => {
                 }),
             ),
         );
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("keeps the persisted credential binding when an owner ID collides with an extra", async () => {
@@ -182,7 +185,7 @@ describe("InMemorySession queued configuration", () => {
             sourceProviderId,
             visibility: "shared" as const,
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: {
                 defaultModelId: capableModel.id,
@@ -237,12 +240,12 @@ describe("InMemorySession queued configuration", () => {
             ],
         };
         const savedBeforeCollision = session.state();
-        session.refreshInferenceScope(collidingCatalog);
+        session.refreshInferenceScope(ctx, collidingCatalog);
 
         expect(session.snapshot().providerId).toBe(`${extraProviderId}-2`);
         expect(session.state().credentialBindingId).toBe(`${extraOwnerInstanceId}:codex`);
 
-        const restored = new InMemorySession({
+        const restored = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: collidingCatalog,
             request: { cwd: "/tmp/rig-inference-binding-collision" },
@@ -265,14 +268,14 @@ describe("InMemorySession queued configuration", () => {
             },
             processManager,
         });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
-        await session.changePermissionMode({ permissionMode: "read_only" });
+        await session.changePermissionMode(ctx, { permissionMode: "read_only" });
 
         expect(modeWhenKilled).toBe("read_only");
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("starts descendant permission reduction before root process shutdown settles", async () => {
@@ -292,17 +295,17 @@ describe("InMemorySession queued configuration", () => {
             } as unknown as AgentSessionManager,
             processManager,
         });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
-        const changing = session.changePermissionMode({ permissionMode: "read_only" });
+        const changing = session.changePermissionMode(ctx, { permissionMode: "read_only" });
         await killStarted.promise;
 
-        expect(changeSubagentPermissionModes).toHaveBeenCalledWith(session.id, "read_only");
+        expect(changeSubagentPermissionModes).toHaveBeenCalledWith(ctx, session.id, "read_only");
         releaseKill.resolve();
         await changing;
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("does not promote independently restricted descendants when the root mode increases", async () => {
@@ -314,12 +317,12 @@ describe("InMemorySession queued configuration", () => {
             } as unknown as AgentSessionManager,
         });
 
-        await session.changePermissionMode({ permissionMode: "read_only" });
-        await session.changePermissionMode({ permissionMode: "auto" });
+        await session.changePermissionMode(ctx, { permissionMode: "read_only" });
+        await session.changePermissionMode(ctx, { permissionMode: "auto" });
 
         expect(changeSubagentPermissionModes).toHaveBeenCalledOnce();
-        expect(changeSubagentPermissionModes).toHaveBeenCalledWith(session.id, "read_only");
-        await session.beginShutdown();
+        expect(changeSubagentPermissionModes).toHaveBeenCalledWith(ctx, session.id, "read_only");
+        await session.beginShutdown(ctx);
     });
 
     it("waits for local shutdown when descendant permission propagation fails", async () => {
@@ -340,10 +343,10 @@ describe("InMemorySession queued configuration", () => {
             } as unknown as AgentSessionManager,
             processManager,
         });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
-        const changing = session.changePermissionMode({ permissionMode: "read_only" });
+        const changing = session.changePermissionMode(ctx, { permissionMode: "read_only" });
         let settled = false;
         void changing.then(
             () => {
@@ -360,7 +363,7 @@ describe("InMemorySession queued configuration", () => {
         releaseKill.resolve();
         await expect(changing).rejects.toThrow("descendant propagation failed");
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("keeps a reduced permission mode durable when process shutdown fails", async () => {
@@ -370,12 +373,12 @@ describe("InMemorySession queued configuration", () => {
             new Error("could not stop process"),
         );
         const { session, started, release } = runningSession({ processManager });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
-        await expect(session.changePermissionMode({ permissionMode: "read_only" })).rejects.toThrow(
-            "could not stop process",
-        );
+        await expect(
+            session.changePermissionMode(ctx, { permissionMode: "read_only" }),
+        ).rejects.toThrow("could not stop process");
 
         expect(session.snapshot().permissionMode).toBe("read_only");
         expect(session.events.since(undefined)).toContainEqual(
@@ -385,7 +388,7 @@ describe("InMemorySession queued configuration", () => {
             }),
         );
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("stops running processes before a fallible MCP projection after permission reduction", async () => {
@@ -395,7 +398,7 @@ describe("InMemorySession queued configuration", () => {
         let reductionDurable = false;
         let rejectMcpProjection = true;
         const { session, started, release } = runningSession({
-            onAppendEvent(event) {
+            onAppendEvent(_ctx, event) {
                 if (
                     event.type === "permission_mode_changed" &&
                     event.data.permissionMode === "read_only"
@@ -412,17 +415,17 @@ describe("InMemorySession queued configuration", () => {
             },
             processManager,
         });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
-        await expect(session.changePermissionMode({ permissionMode: "read_only" })).rejects.toThrow(
-            "could not persist MCP projection",
-        );
+        await expect(
+            session.changePermissionMode(ctx, { permissionMode: "read_only" }),
+        ).rejects.toThrow("could not persist MCP projection");
 
         expect(killAll).toHaveBeenCalledOnce();
         expect(session.snapshot().permissionMode).toBe("read_only");
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("fails closed when a permission reduction cannot be made durable", async () => {
@@ -431,7 +434,7 @@ describe("InMemorySession queued configuration", () => {
         const killAll = vi.spyOn(processManager, "killAll").mockResolvedValue();
         vi.spyOn(processManager, "activeCount").mockReturnValue(1);
         const { session, started, release } = runningSession({
-            onAppendEvent(event) {
+            onAppendEvent(_ctx, event) {
                 if (event.type === "permission_mode_changed") {
                     throw new Error("could not persist permission mode");
                 }
@@ -441,10 +444,10 @@ describe("InMemorySession queued configuration", () => {
             },
             processManager,
         });
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
-        const changing = session.changePermissionMode({ permissionMode: "read_only" });
+        const changing = session.changePermissionMode(ctx, { permissionMode: "read_only" });
         release.resolve();
         await expect(changing).rejects.toThrow("could not persist permission mode");
 
@@ -457,27 +460,27 @@ describe("InMemorySession queued configuration", () => {
     it("validates reasoning against a model an earlier queued message has not applied yet", async () => {
         const { session, started, release } = runningSession();
 
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
         // This one cannot start yet, so its model is still only a pending intent.
-        await session.submit({ modelId: "test/limited", text: "Switch models." });
+        await session.submit(ctx, { modelId: "test/limited", text: "Switch models." });
         expect(session.state().queuedRuns).toHaveLength(1);
 
         // "high" suits the model selected right now, so validating against that model instead of
         // the one already queued would wrongly accept this.
-        await expect(session.submit({ effort: "high", text: "Think hard." })).rejects.toThrow(
+        await expect(session.submit(ctx, { effort: "high", text: "Think hard." })).rejects.toThrow(
             "Model 'test/limited' does not support 'high' reasoning.",
         );
 
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("refuses to change the configuration by steering a running response", async () => {
         const { session, started, release } = runningSession();
 
-        await session.submit({ text: "Start a long run." });
+        await session.submit(ctx, { text: "Start a long run." });
         await started.promise;
 
         // Steering reaches the model mid-run, which is exactly where a configuration change must
@@ -489,13 +492,13 @@ describe("InMemorySession queued configuration", () => {
             // Even a value the session already holds, so the rule cannot depend on current state.
             { modelId: "test/capable" },
         ]) {
-            await expect(session.steer({ ...change, text: "Change it." })).rejects.toThrow(
+            await expect(session.steer(ctx, { ...change, text: "Change it." })).rejects.toThrow(
                 "can only be changed by submitting a message",
             );
         }
 
         release.resolve();
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("does not resend a message that a cross-provider switch already excluded from history", async () => {
@@ -511,7 +514,7 @@ describe("InMemorySession queued configuration", () => {
             name: "Claude model",
             thinkingLevels: ["off"],
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: {
                 defaultModelId: codexModel.id,
@@ -525,7 +528,7 @@ describe("InMemorySession queued configuration", () => {
             request: { cwd: "/tmp/rig-queued-configuration", modelId: codexModel.id },
         });
 
-        await session.submit({
+        await session.submit(ctx, {
             modelId: claudeModel.id,
             providerId: "claude",
             text: "Only message.",
@@ -601,7 +604,7 @@ describe("InMemorySession queued configuration", () => {
             },
         };
         const canonicalContext = [opaqueCheckpoint];
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog,
             request: {
@@ -707,7 +710,7 @@ function testModels() {
 function runningSession(
     options: {
         agentManager?: AgentSessionManager;
-        onAppendEvent?: ConstructorParameters<typeof InMemorySession>[0]["onAppendEvent"];
+        onAppendEvent?: ConstructorParameters<typeof InMemorySession>[1]["onAppendEvent"];
         onRuntime?: (runtime: CodingAssistantRuntime) => void;
         processManager?: NativeProcessManager;
     } = {},
@@ -731,7 +734,7 @@ function runningSession(
             };
         },
     });
-    const session = new InMemorySession({
+    const session = new InMemorySession(ctx, {
         ...(options.agentManager === undefined ? {} : { agentManager: options.agentManager }),
         createEventId: createEventIdFactory(),
         createRuntime: (runtimeOptions) => {
@@ -751,7 +754,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
     processManager = new NativeProcessManager(),
 ): CodingAssistantRuntime {
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,
@@ -778,5 +784,5 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
 async function runtimeContext(
     session: InMemorySession,
 ): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
-    return await session.externalControlContext();
+    return await session.externalControlContext(ctx);
 }

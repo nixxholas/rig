@@ -46,7 +46,7 @@ describe("attach tool", () => {
             query: { range: "24h", team: "platform" },
             applet: "usage-dashboard",
         };
-        const result = await tool.execute(args, harness.context, {});
+        const result = await tool.execute(args, harness.context, { ctx: harness.ctx });
 
         expect(result).toEqual({
             attachment: {
@@ -79,7 +79,7 @@ describe("attach tool", () => {
             createAttachTool().execute(
                 { operation: "add", applet: "missing-dashboard" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow('No applet named "missing-dashboard" exists.');
     });
@@ -94,7 +94,7 @@ describe("attach tool", () => {
             createAttachTool().execute(
                 { operation: "add", path: "/private/secret.txt" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("must be inside the active workspace or Rig-generated media directory");
     });
@@ -122,7 +122,7 @@ describe("attach tool", () => {
             createAttachTool().execute(
                 { operation: "add", path: "/generated/result.txt" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).resolves.toMatchObject({
             attachment: {
@@ -158,7 +158,7 @@ describe("attach tool", () => {
         const result = await createAttachTool().execute(
             { operation: "add", path: "/workspace/result.txt" },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
 
         expect(result).toMatchObject({
@@ -215,7 +215,9 @@ describe("attach tool", () => {
                 source: source.source,
                 width: 1280,
             }),
-        }).execute({ operation: "add", path: "/workspace/result.mp4" }, harness.context, {});
+        }).execute({ operation: "add", path: "/workspace/result.mp4" }, harness.context, {
+            ctx: harness.ctx,
+        });
 
         expect(result).toMatchObject({
             attachment: {

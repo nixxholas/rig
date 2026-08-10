@@ -4,11 +4,13 @@ import { createPermissionContext } from "../permissions/index.js";
 import { defineModel } from "@slopus/rig-execution";
 import type { ModelCatalog, ProtocolSession, SessionEvent } from "../protocol/index.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import type { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { RemoteAgent } from "./RemoteAgent.js";
 import { RemoteAgentRunError } from "./RemoteAgentRunError.js";
 
 describe("RemoteAgent", () => {
+    const ctx = createTestRootContext();
     it("keeps its local context synchronized with permission responses and events", async () => {
         const model = defineModel({
             id: "openai/test",
@@ -283,7 +285,7 @@ describe("RemoteAgent", () => {
             session,
         });
 
-        await agent.send("Expanded reviewer instructions", { displayText: "/review" });
+        await agent.send(ctx, "Expanded reviewer instructions", { displayText: "/review" });
 
         expect(submitMessage).toHaveBeenCalledWith(session.id, {
             content: [{ type: "text", text: "Expanded reviewer instructions" }],
@@ -316,7 +318,7 @@ describe("RemoteAgent", () => {
         controller.abort();
 
         await expect(
-            agent.send("Stop this submitted run.", { signal: controller.signal }),
+            agent.send(ctx, "Stop this submitted run.", { signal: controller.signal }),
         ).resolves.toMatchObject({ runId: "run-1", stopReason: "aborted" });
         expect(abort).toHaveBeenCalledOnce();
         expect(abort).toHaveBeenCalledWith(session.id, { expectedRunId: "run-1" });
@@ -352,7 +354,9 @@ describe("RemoteAgent", () => {
             session,
         });
 
-        const failure = await agent.send("Trigger the failure.").catch((error: unknown) => error);
+        const failure = await agent
+            .send(ctx, "Trigger the failure.")
+            .catch((error: unknown) => error);
 
         expect(failure).toBeInstanceOf(RemoteAgentRunError);
         expect(failure).toMatchObject({

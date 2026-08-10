@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -8,12 +10,11 @@ import {
     type P2pTransportBinding,
 } from "../../p2p/P2pPeer.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { p2pPeers } from "../database/schema.js";
 import { queryP2pPeers } from "./queryP2pPeers.js";
 
 export async function p2pPeerVerifyOrPin(
-    tx: DatabaseScope,
+    ctx: Context,
     identity: P2pPeerIdentity,
     binding: P2pTransportBinding | undefined,
     connections: P2pPeerConnections | undefined,
@@ -27,8 +28,9 @@ export async function p2pPeerVerifyOrPin(
     if (name !== undefined && !Value.Check(p2pPeerNameSchema, name)) {
         throw new Error("The peer presented an invalid P2P name.");
     }
-    await inTx(tx, async (transaction) => {
-        const peers = await queryP2pPeers(transaction);
+    await inTx(ctx, "rig.sql.p2p.p2pPeerVerifyOrPin", async (ctx) => {
+        const tx = ctx.tx;
+        const peers = await queryP2pPeers(ctx);
         const byInstance = peers.find((peer) => peer.instanceId === identity.instanceId);
         if (byInstance !== undefined && byInstance.publicKey !== identity.publicKey) {
             throw new Error("The peer's stable P2P identity key does not match its pin.");
@@ -53,7 +55,7 @@ export async function p2pPeerVerifyOrPin(
             if (name === undefined) {
                 throw new Error("A new trusted P2P peer must have a display name.");
             }
-            await transaction
+            await tx
                 .insert(p2pPeers)
                 .values({
                     bindingsJson: JSON.stringify(binding === undefined ? [] : [binding]),
@@ -85,7 +87,7 @@ export async function p2pPeerVerifyOrPin(
         ) {
             return;
         }
-        await transaction
+        await tx
             .update(p2pPeers)
             .set({
                 bindingsJson: JSON.stringify(bindings),

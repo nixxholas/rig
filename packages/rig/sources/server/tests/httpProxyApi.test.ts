@@ -6,6 +6,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
@@ -165,7 +167,7 @@ async function startRigProxy(): Promise<{
     const directory = await createTestSocketDirectory();
     directories.push(directory);
     const socketPath = join(directory, "server.sock");
-    const server = await createProtocolHttpServer({ token: "secret" });
+    const server = await createProtocolHttpServer(createTestRootContext(), { token: "secret" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, resolve);

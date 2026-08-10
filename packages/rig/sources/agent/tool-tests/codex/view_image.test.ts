@@ -2,9 +2,12 @@ import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 
 import { createJustBashToolHarness } from "../../../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { validJpeg32Base64, validPng32Base64 } from "../../../tools/testing/validImageFixtures.js";
 import { IMAGE_PROCESSING_ERROR_PLACEHOLDER } from "../../../tools/utils/index.js";
 import { codexViewImageTool } from "../../tools/codex/view_image.js";
+
+const ctx = createTestRootContext();
 
 const validImageCases = [
     {
@@ -193,7 +196,7 @@ describe("codex view_image tool", () => {
         const result = await codexViewImageTool.execute(
             { path: "/workspace/too-large.png" },
             context,
-            {},
+            { ctx },
         );
 
         expect(result.image_url).toBe(IMAGE_PROCESSING_ERROR_PLACEHOLDER);

@@ -1,17 +1,19 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql, type SQL } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readSessionEventRow } from "./impl/sessionEventRow.js";
 
 export async function querySessionTranscriptEvents(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     messages: readonly PersistedSessionMessage[],
 ): Promise<SessionEvent[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_transcript_events", async (ctx) => {
+        const tx = ctx.tx;
         const runIds = [...new Set(messages.flatMap((entry) => entry.runId ?? []))];
         const messageIds = messages.map((entry) => entry.message.id);
         const toolCallIds = messages.flatMap((entry) =>

@@ -7,6 +7,7 @@ import {
 } from "../agent/prompt/permissionReviewInstructions.js";
 import type { AnyDefinedTool, Message } from "../agent/types.js";
 import type { Model, Provider } from "@slopus/rig-execution";
+import type { Context } from "@steve.kite/stdlib";
 import { createAutoPermissionTranscript } from "./createAutoPermissionTranscript.js";
 import type {
     PermissionReviewAgent,
@@ -88,7 +89,10 @@ export function createPermissionReviewSideAgent(options: {
     };
     return {
         reset: () => serialize(discardUnfinishedReview),
-        review: (request: PermissionReviewRequest): Promise<PermissionReviewResponse> =>
+        review: (
+            ctx: Context,
+            request: PermissionReviewRequest,
+        ): Promise<PermissionReviewResponse> =>
             serialize(async () => {
                 const securityPolicy = await options.readSecurityPolicy?.();
                 agent.setSystemPrompt(createPermissionReviewInstructions(securityPolicy));
@@ -117,6 +121,7 @@ export function createPermissionReviewSideAgent(options: {
                 let result;
                 try {
                     result = await agent.send(
+                        ctx,
                         prompt,
                         request.signal === undefined ? {} : { signal: request.signal },
                     );

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/index.js";
 
 import type { P2pNetwork } from "../p2p/index.js";
 import {
@@ -19,12 +21,14 @@ const MAXIMUM_VERSION_RECONCILIATIONS = 3;
 const LEASE_RENEWAL_INTERVAL_MS = 4 * 60 * 1_000;
 
 export interface P2pCredentialReplicatorOptions {
-    listPeers: () =>
+    listPeers: (
+        ctx: Context,
+    ) =>
         | readonly { instanceId: string; publicKey: string }[]
         | Promise<readonly { instanceId: string; publicKey: string }[]>;
     network: P2pNetwork;
-    onError?: (peerId: string, error: unknown) => void;
-    snapshot: () => P2pCredentialSnapshot | Promise<P2pCredentialSnapshot>;
+    onError?: (ctx: Context, peerId: string, error: unknown) => void;
+    snapshot: (ctx: Context) => P2pCredentialSnapshot | Promise<P2pCredentialSnapshot>;
     store: P2pCredentialStore;
 }
 
@@ -43,13 +47,13 @@ export class P2pCredentialReplicator {
         this.#scheduleLeaseRenewal();
     }
 
-    ensure(peerId: string, signal?: AbortSignal): Promise<void> {
+    ensure(ctx: Context, peerId: string, signal?: AbortSignal): Promise<void> {
         if (this.#abort.signal.aborted) {
             return Promise.reject(new Error("Credential synchronization is closed."));
         }
         const current = this.#inFlight.get(peerId);
         if (current !== undefined) return current;
-        const run = this.#synchronize(peerId, signal).finally(() => {
+        const run = this.#synchronize(ctx, peerId, signal).finally(() => {
             if (this.#inFlight.get(peerId) === run) this.#inFlight.delete(peerId);
         });
         this.#inFlight.set(peerId, run);
@@ -57,24 +61,25 @@ export class P2pCredentialReplicator {
     }
 
     /** Reports an optional credential preflight failure without failing the proxied request. */
-    async ensureForRequest(peerId: string, signal?: AbortSignal): Promise<void> {
+    async ensureForRequest(ctx: Context, peerId: string, signal?: AbortSignal): Promise<void> {
         try {
-            await this.ensure(peerId, signal);
+            await this.ensure(ctx, peerId, signal);
         } catch (error) {
-            this.#report(peerId, error);
+            this.#report(ctx, peerId, error);
         }
     }
 
-    peerChanged(peerId: string): void {
+    peerChanged(ctx: Context, peerId: string): void {
         this.#synchronizedDigests.delete(peerId);
-        void this.ensureForRequest(peerId);
+        void this.ensureForRequest(ctx, peerId);
     }
 
-    async syncAll(): Promise<void> {
-        for (const peer of await this.#options.listPeers()) this.peerChanged(peer.instanceId);
+    async syncAll(ctx: Context): Promise<void> {
+        for (const peer of await this.#options.listPeers(ctx))
+            this.peerChanged(ctx, peer.instanceId);
     }
 
-    async close(): Promise<void> {
+    async close(_ctx: Context): Promise<void> {
         if (this.#abort.signal.aborted) return;
         this.#abort.abort();
         if (this.#renewalTimer !== undefined) clearTimeout(this.#renewalTimer);
@@ -93,7 +98,9 @@ export class P2pCredentialReplicator {
         }
         this.#renewalTimer = setTimeout(() => {
             this.#renewalTimer = undefined;
-            const run = this.#renewLeases();
+            const run = withWorkerContext("p2p-credential-renewal", (ctx) =>
+                this.#renewLeases(ctx),
+            );
             this.#renewalRun = run;
             const finish = (): void => {
                 if (this.#renewalRun === run) this.#renewalRun = undefined;
@@ -104,32 +111,32 @@ export class P2pCredentialReplicator {
         this.#renewalTimer.unref?.();
     }
 
-    async #renewLeases(): Promise<void> {
+    async #renewLeases(ctx: Context): Promise<void> {
         try {
             await Promise.all(
-                (await this.#options.listPeers()).map((peer) =>
-                    this.ensureForRequest(peer.instanceId),
+                (await this.#options.listPeers(ctx)).map((peer) =>
+                    this.ensureForRequest(ctx, peer.instanceId),
                 ),
             );
         } catch (error) {
-            this.#report("local", error);
+            this.#report(ctx, "local", error);
         }
     }
 
-    #report(peerId: string, error: unknown): void {
+    #report(ctx: Context, peerId: string, error: unknown): void {
         try {
-            this.#options.onError?.(peerId, error);
+            this.#options.onError?.(ctx, peerId, error);
         } catch {
             // Optional replication and diagnostics cannot interrupt proxying or renewal.
         }
     }
 
-    async #synchronize(peerId: string, signal?: AbortSignal): Promise<void> {
-        const peer = (await this.#options.listPeers()).find(
+    async #synchronize(ctx: Context, peerId: string, signal?: AbortSignal): Promise<void> {
+        const peer = (await this.#options.listPeers(ctx)).find(
             (candidate) => candidate.instanceId === peerId,
         );
         if (peer === undefined) throw new Error("That Rig is not a trusted P2P peer.");
-        let snapshot = await this.#snapshot();
+        let snapshot = await this.#snapshot(ctx);
         const timeout = new AbortController();
         const timeoutTimer = setTimeout(
             () =>
@@ -154,6 +161,7 @@ export class P2pCredentialReplicator {
                 if (this.#synchronizedDigests.get(peerId) === digest) return;
                 const envelope = this.#options.store.encryptForPeer(snapshot, peer.publicKey);
                 const { response } = await this.#options.network.fetch(
+                    ctx,
                     peerId,
                     {
                         body: Buffer.from(JSON.stringify(envelope), "utf8"),
@@ -182,6 +190,7 @@ export class P2pCredentialReplicator {
                     reconciliation < MAXIMUM_VERSION_RECONCILIATIONS
                 ) {
                     snapshot = await this.#options.store.fastForwardOwnSnapshot(
+                        ctx,
                         snapshot,
                         body.version,
                     );
@@ -197,9 +206,9 @@ export class P2pCredentialReplicator {
         }
     }
 
-    #snapshot(): Promise<P2pCredentialSnapshot> {
+    #snapshot(ctx: Context): Promise<P2pCredentialSnapshot> {
         if (this.#snapshotInFlight !== undefined) return this.#snapshotInFlight;
-        const pending = Promise.resolve(this.#options.snapshot()).finally(() => {
+        const pending = Promise.resolve(this.#options.snapshot(ctx)).finally(() => {
             if (this.#snapshotInFlight === pending) this.#snapshotInFlight = undefined;
         });
         this.#snapshotInFlight = pending;
@@ -207,13 +216,17 @@ export class P2pCredentialReplicator {
     }
 }
 
-export async function replicateCredentialSnapshotToP2pPeer(options: {
-    envelope: P2pEncryptedCredentialSnapshot;
-    network: P2pNetwork;
-    peerId: string;
-    signal: AbortSignal;
-}): Promise<void> {
+export async function replicateCredentialSnapshotToP2pPeer(
+    ctx: Context,
+    options: {
+        envelope: P2pEncryptedCredentialSnapshot;
+        network: P2pNetwork;
+        peerId: string;
+        signal: AbortSignal;
+    },
+): Promise<void> {
     const { response } = await options.network.fetch(
+        ctx,
         options.peerId,
         {
             body: Buffer.from(JSON.stringify(options.envelope), "utf8"),

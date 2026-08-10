@@ -3,6 +3,8 @@ import { rm } from "node:fs/promises";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { P2pCredentialVersionConflictError } from "../../credentials/P2pCredentialStore.js";
 import { createModelCatalog } from "../../model-catalog/createModelCatalog.js";
 import { RigProfileStore } from "../../profiles/index.js";
@@ -24,12 +26,13 @@ describe("P2P inference credentials", () => {
     });
 
     it("accepts an encrypted snapshot only from its authenticated owner and binds sessions to it", async () => {
+        const ctx = createTestRootContext();
         const homeDirectory = await createTestSocketDirectory();
         close.push(() => rm(homeDirectory, { force: true, recursive: true }));
-        const modelCatalog = createModelCatalog({
+        const modelCatalog = createModelCatalog(createTestRootContext().named("model-catalog"), {
             providers: { codex: { apiKey: "local", enabled: true, type: "codex" } },
         });
-        const store = await PersistentSessionStore.open({
+        const store = await PersistentSessionStore.open(ctx, {
             databasePath: ":memory:",
             homeDirectory,
             localInstanceId: LOCAL_ID,
@@ -42,6 +45,7 @@ describe("P2P inference credentials", () => {
             publish: () => undefined,
         });
         await profiles.replicate(
+            ctx,
             {
                 createdAt: 1,
                 email: "steve@example.test",
@@ -62,7 +66,7 @@ describe("P2P inference credentials", () => {
             })),
         };
         const started = await startServer(
-            await createProtocolHttpServer({
+            await createProtocolHttpServer(createTestRootContext(), {
                 canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
                 canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID || peerId === OTHER_ID,
                 modelCatalog,
@@ -75,7 +79,7 @@ describe("P2P inference credentials", () => {
         );
         close.push(async () => {
             await started.close();
-            await store.close();
+            await store.close(ctx);
         });
         const envelope: P2pEncryptedCredentialSnapshot = {
             algorithm: "nacl_box",
@@ -101,7 +105,7 @@ describe("P2P inference credentials", () => {
                 OWNER_ID,
             ),
         ).toEqual({ body: { changed: true, version: 1 }, status: 200 });
-        expect(replace).toHaveBeenCalledWith(OWNER_ID, envelope);
+        expect(replace).toHaveBeenCalledWith(expect.anything(), OWNER_ID, envelope);
         replace.mockImplementationOnce(() => {
             throw new P2pCredentialVersionConflictError(
                 "The credential snapshot is older than saved state.",
@@ -163,12 +167,13 @@ describe("P2P inference credentials", () => {
     });
 
     it("shares broadcasts and timelines while keeping raw daemon event administration private", async () => {
+        const ctx = createTestRootContext();
         const homeDirectory = await createTestSocketDirectory();
         close.push(() => rm(homeDirectory, { force: true, recursive: true }));
-        const modelCatalog = createModelCatalog({
+        const modelCatalog = createModelCatalog(createTestRootContext().named("model-catalog"), {
             providers: { codex: { apiKey: "local", enabled: true, type: "codex" } },
         });
-        const store = await PersistentSessionStore.open({
+        const store = await PersistentSessionStore.open(ctx, {
             databasePath: ":memory:",
             homeDirectory,
             localInstanceId: LOCAL_ID,
@@ -181,6 +186,7 @@ describe("P2P inference credentials", () => {
             publish: () => undefined,
         });
         await profiles.replicate(
+            ctx,
             {
                 createdAt: 1,
                 email: "steve@example.test",
@@ -194,6 +200,7 @@ describe("P2P inference credentials", () => {
         );
         const otherProfileId = "aotherprofile0000000000001";
         await profiles.replicate(
+            ctx,
             {
                 createdAt: 1,
                 email: "other@example.test",
@@ -206,17 +213,19 @@ describe("P2P inference credentials", () => {
             OTHER_ID,
         );
         const otherSession = await store.create(
+            ctx,
             { cwd: "/tmp/p2p-other-session" },
             { ownerInstanceId: OTHER_ID, profileId: otherProfileId },
         );
         const ownerSession = await store.create(
+            ctx,
             { cwd: "/tmp/p2p-owner-session" },
             { ownerInstanceId: OWNER_ID, profileId: OWNER_PROFILE_ID },
         );
         const ownerSubmit = vi.spyOn(ownerSession, "submit");
         const otherSubmit = vi.spyOn(otherSession, "submit");
         const started = await startServer(
-            await createProtocolHttpServer({
+            await createProtocolHttpServer(createTestRootContext(), {
                 canP2pPeerProvision: (peerId) => peerId === OWNER_ID,
                 canP2pPeerUseRemoteWork: (peerId) => peerId === OWNER_ID,
                 modelCatalog,
@@ -227,7 +236,7 @@ describe("P2P inference credentials", () => {
         );
         close.push(async () => {
             await started.close();
-            await store.close();
+            await store.close(ctx);
         });
 
         expect(

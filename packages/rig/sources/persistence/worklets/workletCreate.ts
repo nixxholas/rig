@@ -1,7 +1,7 @@
 import type { WorkletPermissions } from "../../protocol/WorkletProtocol.js";
 import { worklets, workletVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface WorkletCreateRecord {
     authorSessionId: string;
@@ -15,8 +15,9 @@ export interface WorkletCreateRecord {
 }
 
 /** Writes the worklet identity together with its first version so neither exists alone. */
-export async function workletCreate(tx: DatabaseScope, record: WorkletCreateRecord): Promise<void> {
-    await inTx(tx, async (transaction) => {
+export async function workletCreate(ctx: Context, record: WorkletCreateRecord): Promise<void> {
+    await inTx(ctx, "rig.sql.worklets.create", async (ctx) => {
+        const transaction = ctx.tx;
         await transaction
             .insert(worklets)
             .values({

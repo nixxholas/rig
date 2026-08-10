@@ -4,6 +4,7 @@ import { Agent } from "./Agent.js";
 import { AGENTS_MD_REMOVAL_NOTICE, AGENTS_MD_REPLACEMENT_NOTICE } from "./agentsMdNotices.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
 import { isInternalMessage } from "./isInternalMessage.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     defineModel,
     defineProvider,
@@ -12,6 +13,8 @@ import {
     type InferenceStream,
     type Usage,
 } from "@slopus/rig-execution";
+
+const ctx = createTestRootContext();
 
 const model = defineModel({
     id: "openai/gpt-test",
@@ -113,7 +116,7 @@ describe("global instructions in the conversation", () => {
         const { provider, contexts } = createRecordingProvider();
         const { agent } = await createWorkspace(provider, { global: "Answer in English.\n" });
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
 
         const leading = textOfFirstUserContent(contexts[0]!);
         expect(leading).toContain("# Global AGENTS.md instructions");
@@ -128,7 +131,7 @@ describe("global instructions in the conversation", () => {
             project: "Always run the linter.\n",
         });
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
 
         const leading = textOfFirstUserContent(contexts[0]!);
         expect(leading.indexOf("Answer in English.")).toBeLessThan(
@@ -141,8 +144,8 @@ describe("global instructions in the conversation", () => {
         const { provider, contexts } = createRecordingProvider();
         const { agent } = await createWorkspace(provider, { global: "Answer in English.\n" });
 
-        await agent.send("Fix the bug.");
-        await agent.send("Keep going.");
+        await agent.send(ctx, "Fix the bug.");
+        await agent.send(ctx, "Keep going.");
 
         expect(textOfFirstUserContent(contexts[1]!)).toBe(textOfFirstUserContent(contexts[0]!));
     });
@@ -153,9 +156,9 @@ describe("global instructions in the conversation", () => {
             global: "Answer in English.\n",
         });
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
         setGlobalInstructions("Answer in French.\n");
-        await agent.send("Keep going.");
+        await agent.send(ctx, "Keep going.");
 
         expect(textOfRecord(agent, 0)).toContain("Answer in English.");
         expect(textOfRecord(agent, 1)).toContain(AGENTS_MD_REPLACEMENT_NOTICE);
@@ -168,9 +171,9 @@ describe("global instructions in the conversation", () => {
             global: "Answer in English.\n",
         });
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
         setGlobalInstructions(undefined);
-        await agent.send("Keep going.");
+        await agent.send(ctx, "Keep going.");
 
         expect(textOfRecord(agent, 1)).toContain(AGENTS_MD_REMOVAL_NOTICE);
     });
@@ -179,7 +182,7 @@ describe("global instructions in the conversation", () => {
         const { provider, contexts } = createRecordingProvider();
         const { agent } = await createWorkspace(provider);
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
 
         expect(contexts[0]!.messages).toHaveLength(1);
         expect(agent.snapshot().contextMessages).toBeUndefined();

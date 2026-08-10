@@ -10,6 +10,7 @@ import { openSessionDatabase } from "../../persistence/database/openSessionDatab
 import { AppletInvalidError } from "../AppletInvalidError.js";
 import { AppletStore } from "../AppletStore.js";
 import { isDatabaseFailure } from "../../persistence/isDatabaseFailure.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 
@@ -26,7 +27,7 @@ describe("AppletStore", () => {
         await writeFile(join(source, "icon.png"), icon);
 
         const store = await createStore(root);
-        const created = await store.applets.create({
+        const created = await store.applets.create(store.ctx, {
             authorSessionId: "agent-1",
             description: "A dashboard",
             iconPath: join(source, "icon.png"),
@@ -45,7 +46,7 @@ describe("AppletStore", () => {
         await expect(readFile(join(root, "dashboard", "v1", "index.html"), "utf8")).resolves.toBe(
             "<h1>one</h1>",
         );
-        await expect(store.applets.readIcon("dashboard", "png")).resolves.toMatchObject({
+        await expect(store.applets.readIcon(store.ctx, "dashboard", "png")).resolves.toMatchObject({
             contentType: "image/png",
             data: icon,
             type: "file",
@@ -61,7 +62,7 @@ describe("AppletStore", () => {
 
         const first = await createStore(data, databasePath);
         await expect(
-            first.applets.create({
+            first.applets.create(first.ctx, {
                 allowedScopes: ["session", "workspace"],
                 authorSessionId: "agent-1",
                 description: "A dashboard",
@@ -71,13 +72,13 @@ describe("AppletStore", () => {
                 purpose: "Track work",
             }),
         ).resolves.toMatchObject({ allowedScopes: ["session", "workspace"] });
-        await first.applets.update("dashboard", {
+        await first.applets.update(first.ctx, "dashboard", {
             allowedScopes: ["project"],
             changeDescription: "Project-only lifetime",
             path: source,
         });
         const restored = await createStore(data, databasePath);
-        expect(await restored.applets.get("dashboard")).toMatchObject({
+        expect(await restored.applets.get(restored.ctx, "dashboard")).toMatchObject({
             allowedScopes: ["project"],
             currentVersion: 2,
         });
@@ -93,7 +94,7 @@ describe("AppletStore", () => {
 
         const store = await createStore(root);
         await expect(
-            store.applets.create({
+            store.applets.create(store.ctx, {
                 authorSessionId: "agent-1",
                 description: "A dashboard",
                 iconPath: join(source, "icon.png"),
@@ -102,7 +103,7 @@ describe("AppletStore", () => {
                 purpose: "Track work",
             }),
         ).rejects.toBeInstanceOf(AppletInvalidError);
-        expect(await store.applets.get("dashboard")).toBeUndefined();
+        expect(await store.applets.get(store.ctx, "dashboard")).toBeUndefined();
     });
 
     it("rejects a symbolic link used as the required icon", async () => {
@@ -117,7 +118,7 @@ describe("AppletStore", () => {
 
         const store = await createStore(root);
         await expect(
-            store.applets.create({
+            store.applets.create(store.ctx, {
                 authorSessionId: "agent-1",
                 description: "A dashboard",
                 iconPath: iconLink,
@@ -126,7 +127,7 @@ describe("AppletStore", () => {
                 purpose: "Track work",
             }),
         ).rejects.toBeInstanceOf(AppletInvalidError);
-        expect(await store.applets.get("dashboard")).toBeUndefined();
+        expect(await store.applets.get(store.ctx, "dashboard")).toBeUndefined();
     });
 
     it("reclaims a stranded pre-icon data directory without deleting it", async () => {
@@ -140,7 +141,7 @@ describe("AppletStore", () => {
 
         const store = await createStore(root);
         await expect(
-            store.applets.create({
+            store.applets.create(store.ctx, {
                 authorSessionId: "agent-1",
                 description: "A dashboard",
                 iconPath: join(source, "icon.png"),
@@ -176,8 +177,8 @@ describe("AppletStore", () => {
         };
 
         const results = await Promise.allSettled([
-            store.applets.create(request),
-            store.applets.create(request),
+            store.applets.create(store.ctx, request),
+            store.applets.create(store.ctx, request),
         ]);
 
         expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -206,7 +207,7 @@ describe("AppletStore", () => {
         `);
 
         const failure = await store.applets
-            .create({
+            .create(store.ctx, {
                 authorSessionId: "agent-1",
                 description: "A dashboard",
                 iconPath: join(source, "icon.png"),
@@ -230,21 +231,23 @@ async function createStore(
     root: string,
     databasePath = ":memory:",
 ): Promise<{
+    ctx: Awaited<ReturnType<typeof openSessionDatabase>>["ctx"];
     database: Awaited<ReturnType<typeof openSessionDatabase>>["database"];
     client: Awaited<ReturnType<typeof openSessionDatabase>>["client"];
     applets: AppletStore;
 }> {
-    const opened = await openSessionDatabase(databasePath);
-    await migrateSessionDatabase(opened.database);
+    const rootCtx = createTestRootContext();
+    const opened = await openSessionDatabase(rootCtx, databasePath);
+    await migrateSessionDatabase(opened.ctx);
     const store = new AppletStore({
+        database: opened.database,
         environment: { HAPPY_APPLETS_DIRECTORY: root },
         publish: () => {},
-        tx: () => opened.database,
     });
     cleanups.push(() => {
-        return opened.client.close();
+        return opened.database.close(opened.ctx);
     });
-    return { client: opened.client, database: opened.database, applets: store };
+    return { ctx: rootCtx, client: opened.client, database: opened.database, applets: store };
 }
 
 async function iconPng(): Promise<Buffer> {

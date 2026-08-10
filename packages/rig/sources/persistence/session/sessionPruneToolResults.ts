@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql, type SQL } from "drizzle-orm";
 
 import {
@@ -7,7 +9,6 @@ import {
     TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE,
 } from "../../agent/boundToolResultPresentation.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 
 export interface SessionToolResultPruneCursor {
@@ -28,10 +29,11 @@ export type SessionToolResultPrunePage =
  * not make an old chat look active.
  */
 export async function sessionPruneToolResults(
-    tx: DatabaseScope,
+    ctx: Context,
     input: { after?: SessionToolResultPruneCursor; before: number; limit: number },
 ): Promise<SessionToolResultPrunePage> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.session.session_prune_tool_results", async (ctx) => {
+        const tx = ctx.tx;
         const after: SQL =
             input.after === undefined
                 ? sql`1`
@@ -39,23 +41,6 @@ export async function sessionPruneToolResults(
                     (session_id, position)
                         > (${input.after.sessionId}, ${input.after.position})
                 `;
-        const rows = await tx.all<Record<string, unknown>>(sql`
-            SELECT session_id, position
-            FROM session_messages
-            WHERE ${after}
-            ORDER BY session_id ASC, position ASC
-            LIMIT ${input.limit}
-        `);
-        if (rows.length === 0) return { complete: true, pruned: 0 };
-        const last = rows.at(-1)!;
-        const cursor = {
-            position: readNumber(last, "position"),
-            sessionId: readString(last, "session_id"),
-        };
-
-        const keys = rows.map(
-            (row) => sql`(${readString(row, "session_id")}, ${readNumber(row, "position")})`,
-        );
         const stale = sql`
             EXISTS (
                 SELECT 1
@@ -80,6 +65,30 @@ export async function sessionPruneToolResults(
             AND length(json_extract(block.value, '$.presentation.output'))
                 > ${TOOL_RESULT_PRESENTATION_MAXIMUM_OUTPUT_CHARACTERS}
         `;
+        const rows = await tx.all<Record<string, unknown>>(sql`
+            SELECT message.session_id, message.position
+            FROM session_messages AS message
+            WHERE ${after}
+                AND message.role = 'agent'
+                AND EXISTS (
+                    SELECT 1
+                    FROM json_each(message.message_json, '$.blocks') AS block
+                    WHERE (${stale} AND ${hasRetainedOutput})
+                        OR ${hasOversizedPresentation}
+                )
+            ORDER BY message.session_id ASC, message.position ASC
+            LIMIT ${input.limit}
+        `);
+        if (rows.length === 0) return { complete: true, pruned: 0 };
+        const last = rows.at(-1)!;
+        const cursor = {
+            position: readNumber(last, "position"),
+            sessionId: readString(last, "session_id"),
+        };
+
+        const keys = rows.map(
+            (row) => sql`(${readString(row, "session_id")}, ${readNumber(row, "position")})`,
+        );
         const changed = (
             await tx.run(sql`
             UPDATE session_messages AS message

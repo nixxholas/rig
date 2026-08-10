@@ -82,7 +82,7 @@ describe("applet tools", () => {
                     purpose: "Must not leak",
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("must be inside the active workspace or Rig-generated media directory");
     });

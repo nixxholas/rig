@@ -25,6 +25,7 @@ describe("createImageGenerationTool", () => {
         const harness = createJustBashToolHarness();
 
         const result = await tool.execute({ prompt: "A lighthouse in a storm" }, harness.context, {
+            ctx: harness.ctx,
             provider: { id: "current" } as never,
             toolCallId: "call-1",
         });
@@ -56,8 +57,14 @@ describe("createImageGenerationTool", () => {
         );
         const harness = createJustBashToolHarness();
 
-        await tool.execute({ prompt: "First" }, harness.context, { toolCallId: "first" });
-        await tool.execute({ prompt: "Second" }, harness.context, { toolCallId: "second" });
+        await tool.execute({ prompt: "First" }, harness.context, {
+            ctx: harness.ctx,
+            toolCallId: "first",
+        });
+        await tool.execute({ prompt: "Second" }, harness.context, {
+            ctx: harness.ctx,
+            toolCallId: "second",
+        });
 
         expect(calls).toEqual(["one", "two"]);
     });
@@ -80,6 +87,7 @@ describe("createImageGenerationTool", () => {
 
         await expect(
             tool.execute({ prompt: "A lighthouse in a storm" }, harness.context, {
+                ctx: harness.ctx,
                 toolCallId: "call-1",
             }),
         ).rejects.toThrow(/has not been read yet/);
@@ -99,12 +107,12 @@ describe("createImageGenerationTool", () => {
             imageGenerationSurface,
         );
 
+        const harness = createJustBashToolHarness();
         await expect(
-            tool.execute(
-                { prompt: "A lighthouse in a storm" },
-                createJustBashToolHarness().context,
-                { toolCallId: "call-1" },
-            ),
+            tool.execute({ prompt: "A lighthouse in a storm" }, harness.context, {
+                ctx: harness.ctx,
+                toolCallId: "call-1",
+            }),
         ).rejects.toThrow("connection reset");
 
         expect(second).not.toHaveBeenCalled();
@@ -138,7 +146,7 @@ describe("createImageGenerationTool", () => {
                     referenced_image_paths: ["one.png", "two.png"],
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("32 MiB aggregate");
         expect(generate).not.toHaveBeenCalled();
@@ -163,7 +171,7 @@ describe("createImageGenerationTool", () => {
                 referenced_image_paths: ["reference.png"],
             },
             harness.context,
-            { toolCallId: "bounded-read" },
+            { ctx: harness.ctx, toolCallId: "bounded-read" },
         );
 
         expect(readFileBuffer).toHaveBeenCalledWith("/workspace/reference.png", {
@@ -219,7 +227,7 @@ describe("createImageGenerationTool", () => {
         };
         expect(Value.Check(tool.arguments, nulled)).toBe(true);
 
-        await tool.execute(nulled, harness.context, { toolCallId: "nulled" });
+        await tool.execute(nulled, harness.context, { ctx: harness.ctx, toolCallId: "nulled" });
 
         expect(generate).toHaveBeenCalledOnce();
         expect(generate.mock.calls[0]?.[0]).not.toHaveProperty("images");
@@ -249,8 +257,10 @@ describe("createImageGenerationTool", () => {
             imageGenerationSurface,
         );
 
+        const harness = createJustBashToolHarness();
         await expect(
-            tool.execute({ prompt: "A lighthouse" }, createJustBashToolHarness().context, {
+            tool.execute({ prompt: "A lighthouse" }, harness.context, {
+                ctx: harness.ctx,
                 toolCallId: "call-bad",
             }),
         ).rejects.toThrow(message);

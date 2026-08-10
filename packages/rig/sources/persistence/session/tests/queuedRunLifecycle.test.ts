@@ -16,21 +16,23 @@ import {
 } from "../sessionAcceptQueuedRun.js";
 import { sessionFailQueuedRun } from "../sessionFailQueuedRun.js";
 import { sessionStartQueuedRun } from "../sessionStartQueuedRun.js";
+import { inTx } from "../../inTx.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 
 describe("queued run lifecycle persistence", () => {
     it("accepts the queue row, visible message, event, and session status atomically", async () => {
         const opened = await createDatabase();
         const accepted = fixture();
 
-        await sessionAcceptQueuedRun(opened.database, accepted);
+        await sessionAcceptQueuedRun(opened.ctx, accepted);
 
-        expect(await counts(opened.database)).toEqual({ events: 1, messages: 1, queued: 1 });
-        expect(await sessionState(opened.database)).toMatchObject({
+        expect(await counts(opened.ctx)).toEqual({ events: 1, messages: 1, queued: 1 });
+        expect(await sessionState(opened.ctx)).toMatchObject({
             activeRunId: null,
             status: "queued",
             workspaceQueueWaiting: 1,
         });
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("rolls every accepted-submission row back with its surrounding action", async () => {
@@ -38,26 +40,26 @@ describe("queued run lifecycle persistence", () => {
         const accepted = fixture();
 
         await expect(
-            opened.database.transaction(async (tx) => {
-                await sessionAcceptQueuedRun(tx, accepted);
+            inTx(opened.ctx, "rig.sql.test.queued_run.accept_rollback", async (ctx) => {
+                await sessionAcceptQueuedRun(ctx, accepted);
                 throw new Error("submission response could not commit");
             }),
         ).rejects.toThrow("submission response could not commit");
 
-        expect(await counts(opened.database)).toEqual({ events: 0, messages: 0, queued: 0 });
-        expect(await sessionState(opened.database)).toMatchObject({
+        expect(await counts(opened.ctx)).toEqual({ events: 0, messages: 0, queued: 0 });
+        expect(await sessionState(opened.ctx)).toMatchObject({
             activeRunId: null,
             status: "idle",
             workspaceQueueWaiting: 0,
         });
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("moves an accepted run into the active slot without a durable gap", async () => {
         const opened = await createDatabase();
         const accepted = fixture();
-        await sessionAcceptQueuedRun(opened.database, accepted);
-        await opened.database.update(sessions).set({ workspaceQueueWaiting: true }).run();
+        await sessionAcceptQueuedRun(opened.ctx, accepted);
+        await opened.ctx.tx.update(sessions).set({ workspaceQueueWaiting: true }).run();
         const started = {
             activeSince: 3,
             event: {
@@ -72,25 +74,25 @@ describe("queued run lifecycle persistence", () => {
             sessionId: accepted.sessionId,
         };
 
-        await sessionStartQueuedRun(opened.database, started);
+        await sessionStartQueuedRun(opened.ctx, started);
 
-        expect(await counts(opened.database)).toEqual({ events: 2, messages: 1, queued: 0 });
-        expect(await sessionState(opened.database)).toMatchObject({
+        expect(await counts(opened.ctx)).toEqual({ events: 2, messages: 1, queued: 0 });
+        expect(await sessionState(opened.ctx)).toMatchObject({
             activeRunId: accepted.run.runId,
             status: "running",
             workspaceQueueWaiting: 0,
         });
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("keeps the queued run when starting or failing cannot commit", async () => {
         const opened = await createDatabase();
         const accepted = fixture();
-        await sessionAcceptQueuedRun(opened.database, accepted);
+        await sessionAcceptQueuedRun(opened.ctx, accepted);
 
         await expect(
-            opened.database.transaction(async (tx) => {
-                await sessionStartQueuedRun(tx, {
+            inTx(opened.ctx, "rig.sql.test.queued_run.start_rollback", async (ctx) => {
+                await sessionStartQueuedRun(ctx, {
                     activeSince: 3,
                     event: {
                         createdAt: 3,
@@ -106,11 +108,11 @@ describe("queued run lifecycle persistence", () => {
                 throw new Error("runtime handoff could not commit");
             }),
         ).rejects.toThrow("runtime handoff could not commit");
-        expect(await counts(opened.database)).toEqual({ events: 1, messages: 1, queued: 1 });
+        expect(await counts(opened.ctx)).toEqual({ events: 1, messages: 1, queued: 1 });
 
         await expect(
-            opened.database.transaction(async (tx) => {
-                await sessionFailQueuedRun(tx, {
+            inTx(opened.ctx, "rig.sql.test.queued_run.fail_rollback", async (ctx) => {
+                await sessionFailQueuedRun(ctx, {
                     event: {
                         createdAt: 4,
                         data: {
@@ -129,21 +131,21 @@ describe("queued run lifecycle persistence", () => {
                 throw new Error("failure event could not commit");
             }),
         ).rejects.toThrow("failure event could not commit");
-        expect(await counts(opened.database)).toEqual({ events: 1, messages: 1, queued: 1 });
-        expect(await sessionState(opened.database)).toMatchObject({
+        expect(await counts(opened.ctx)).toEqual({ events: 1, messages: 1, queued: 1 });
+        expect(await sessionState(opened.ctx)).toMatchObject({
             activeRunId: null,
             status: "queued",
         });
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("clears the durable workspace wait when a queued run fails", async () => {
         const opened = await createDatabase();
         const accepted = fixture();
-        await sessionAcceptQueuedRun(opened.database, accepted);
-        await opened.database.update(sessions).set({ workspaceQueueWaiting: true }).run();
+        await sessionAcceptQueuedRun(opened.ctx, accepted);
+        await opened.ctx.tx.update(sessions).set({ workspaceQueueWaiting: true }).run();
 
-        await sessionFailQueuedRun(opened.database, {
+        await sessionFailQueuedRun(opened.ctx, {
             event: {
                 createdAt: 5,
                 data: {
@@ -160,12 +162,12 @@ describe("queued run lifecycle persistence", () => {
             sessionId: accepted.sessionId,
         });
 
-        expect(await sessionState(opened.database)).toMatchObject({
+        expect(await sessionState(opened.ctx)).toMatchObject({
             activeRunId: null,
             status: "error",
             workspaceQueueWaiting: 0,
         });
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("restores structured debug request content from the durable user message", async () => {
@@ -187,11 +189,9 @@ describe("queued run lifecycle persistence", () => {
         };
         accepted.message.message = accepted.run.userMessage;
         accepted.event.data.message = accepted.run.userMessage;
-        await sessionAcceptQueuedRun(opened.database, accepted);
+        await sessionAcceptQueuedRun(opened.ctx, accepted);
 
-        expect(
-            (await querySessionRestore(opened.database, accepted.sessionId))?.restore,
-        ).toMatchObject({
+        expect((await querySessionRestore(opened.ctx, accepted.sessionId))?.restore).toMatchObject({
             queuedRuns: [
                 {
                     debug: true,
@@ -200,7 +200,7 @@ describe("queued run lifecycle persistence", () => {
             ],
             workspaceQueueWaiting: true,
         });
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 });
 
@@ -246,8 +246,8 @@ function fixture(): SessionAcceptQueuedRunInput {
     };
 }
 
-async function counts(database: Awaited<ReturnType<typeof createDatabase>>["database"]) {
-    return await database.get<{ events: number; messages: number; queued: number }>(sql`
+async function counts(ctx: Awaited<ReturnType<typeof createDatabase>>["ctx"]) {
+    return await ctx.tx.get<{ events: number; messages: number; queued: number }>(sql`
         SELECT
             (SELECT COUNT(*) FROM session_events) AS events,
             (SELECT COUNT(*) FROM session_messages) AS messages,
@@ -255,8 +255,8 @@ async function counts(database: Awaited<ReturnType<typeof createDatabase>>["data
     `);
 }
 
-async function sessionState(database: Awaited<ReturnType<typeof createDatabase>>["database"]) {
-    return await database.get<{
+async function sessionState(ctx: Awaited<ReturnType<typeof createDatabase>>["ctx"]) {
+    return await ctx.tx.get<{
         activeRunId: string | null;
         status: string;
         workspaceQueueWaiting: number;
@@ -269,9 +269,9 @@ async function sessionState(database: Awaited<ReturnType<typeof createDatabase>>
 }
 
 async function createDatabase() {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
-    await opened.database
+    const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+    await migrateSessionDatabase(opened.ctx);
+    await opened.ctx.tx
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -294,7 +294,7 @@ async function createDatabase() {
             worktreeSupport: "unknown",
         })
         .run();
-    await opened.database
+    await opened.ctx.tx
         .insert(sessions)
         .values({
             agentId: "agent-1",
@@ -329,7 +329,7 @@ async function createDatabase() {
             workflowsJson: "[]",
         })
         .run();
-    await opened.database
+    await opened.ctx.tx
         .insert(sessionCredentialBindings)
         .values({
             bindingId: "alocalinstance00000000001:codex",

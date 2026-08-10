@@ -12,6 +12,7 @@ import {
     nobleSecretBoxSeal,
 } from "../../crypto/nobleNaCl.js";
 import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import type { AbortRunOptions } from "../../protocol/index.js";
 import type { InMemorySession } from "../../session/InMemorySession.js";
 import { decryptHappyPayload, encryptHappyPayload } from "../happyEncryption.js";
@@ -20,6 +21,7 @@ import { HappySyncRepository } from "../HappySyncRepository.js";
 import type { HappyConnectionConfiguration, HappyRemoteMessage } from "../types.js";
 
 const directories: string[] = [];
+const ctx = createTestRootContext().named("happy-session-client-test");
 
 afterEach(async () => {
     vi.restoreAllMocks();
@@ -33,7 +35,7 @@ describe("HappySessionClient", () => {
         const { databasePath, repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -96,7 +98,7 @@ describe("HappySessionClient", () => {
             session,
             socketFactory: () => socket,
         });
-        await client.enqueue([
+        await client.enqueue(ctx, [
             {
                 content: {
                     ev: { t: "text", text: "Hello" },
@@ -109,7 +111,7 @@ describe("HappySessionClient", () => {
                 role: "session",
             },
         ]);
-        client.start();
+        client.start(ctx);
 
         await waitFor(() => submitted.length === 1 && outbound.length === 1);
 
@@ -123,13 +125,13 @@ describe("HappySessionClient", () => {
                 text: "Continue from my phone.",
             },
         ]);
-        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(1);
+        expect((await repository.getSession(ctx, "session-1"))?.lastRemoteSeq).toBe(1);
         expect(socket.emitted.find(([event]) => event === "session-alive")?.[1]).toMatchObject({
             activity: { kind: "idle", label: "Idle" },
             thinking: false,
         });
-        await client.close();
-        await repository.close();
+        await client.close(ctx);
+        await repository.close(ctx);
         expect(databasePath).toBeTruthy();
     });
 
@@ -137,7 +139,7 @@ describe("HappySessionClient", () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -252,7 +254,7 @@ describe("HappySessionClient", () => {
             session: harness.session,
             socketFactory: () => socket,
         });
-        client.start();
+        client.start(ctx);
         await waitFor(() => socket.emitted.some(([event]) => event === "session-alive"));
 
         harness.snapshot.title = "Updated from Rig";
@@ -278,7 +280,7 @@ describe("HappySessionClient", () => {
                 taskId: "task-1",
             },
         ];
-        client.kick();
+        client.kick(ctx);
 
         await waitFor(() => socket.emitted.some(([event]) => event === "update-metadata"));
         const update = socket.emitted.find(([event]) => event === "update-metadata")?.[1] as any;
@@ -301,15 +303,15 @@ describe("HappySessionClient", () => {
             summary: { text: "Updated from Rig" },
         });
 
-        await client.close();
-        await repository.close();
+        await client.close(ctx);
+        await repository.close(ctx);
     });
 
     it("applies provider-qualified model and reasoning, decrypts attachments, and handles abort RPC", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -387,16 +389,16 @@ describe("HappySessionClient", () => {
             session: harness.session,
             socketFactory: () => socket,
         });
-        client.start();
+        client.start(ctx);
 
         await waitFor(() =>
             request.mock.calls.some(([input]) =>
                 String(input).endsWith("/attachments/request-download"),
             ),
         );
-        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(0);
+        expect((await repository.getSession(ctx, "session-1"))?.lastRemoteSeq).toBe(0);
         allowText = true;
-        client.kick();
+        client.kick(ctx);
         await waitFor(() => submitted.length === 1);
         expect(harness.changedModels).toEqual([
             { effort: "low", modelId: "gpt-test", providerId: "codex" },
@@ -411,7 +413,7 @@ describe("HappySessionClient", () => {
                 ],
             }),
         ]);
-        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(2);
+        expect((await repository.getSession(ctx, "session-1"))?.lastRemoteSeq).toBe(2);
 
         harness.snapshot.status = "running";
         harness.snapshot.activeTurn = { runId: "run-1", startedAt: 1 };
@@ -473,8 +475,8 @@ describe("HappySessionClient", () => {
         ).toEqual({ success: true });
         expect(harness.snapshot.archived).toBe(true);
 
-        await client.close();
-        await repository.close();
+        await client.close(ctx);
+        await repository.close(ctx);
     });
 
     it("publishes a pending question to Happy and applies the answer that comes back", async () => {
@@ -483,7 +485,7 @@ describe("HappySessionClient", () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -513,7 +515,7 @@ describe("HappySessionClient", () => {
             session: harness.session,
             socketFactory: () => socket,
         });
-        client.start();
+        client.start(ctx);
         await waitFor(() => socket.emitted.some(([event]) => event === "session-alive"));
 
         // Nothing is asked yet, so Happy should not have been told about any
@@ -537,7 +539,7 @@ describe("HappySessionClient", () => {
                 requestId: "call-1",
             },
         ];
-        client.kick();
+        client.kick(ctx);
         await waitFor(() => socket.emitted.some(([event]) => event === "update-state"));
 
         const published = socket.emitted.find(([event]) => event === "update-state")?.[1] as any;
@@ -563,7 +565,7 @@ describe("HappySessionClient", () => {
 
         now = 2_000;
         const aliveCount = socket.emitted.filter(([event]) => event === "session-alive").length;
-        client.kick();
+        client.kick(ctx);
         await waitFor(
             () => socket.emitted.filter(([event]) => event === "session-alive").length > aliveCount,
         );
@@ -619,7 +621,7 @@ describe("HappySessionClient", () => {
                 requestId: "call-2",
             },
         ];
-        client.kick();
+        client.kick(ctx);
         await waitFor(
             () => socket.emitted.filter(([event]) => event === "update-state").length === 3,
         );
@@ -654,15 +656,15 @@ describe("HappySessionClient", () => {
             },
         });
 
-        await client.close();
-        await repository.close();
+        await client.close(ctx);
+        await repository.close(ctx);
     });
 
     it("clears stale agent state when reconnecting an existing Happy session", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -698,7 +700,7 @@ describe("HappySessionClient", () => {
             session: fakeSession([]).session,
             socketFactory: () => socket,
         });
-        client.start();
+        client.start(ctx);
 
         await waitFor(() => socket.emitted.some(([event]) => event === "update-state"));
         expect(socket.emitted.find(([event]) => event === "update-state")?.[1]).toMatchObject({
@@ -707,15 +709,15 @@ describe("HappySessionClient", () => {
             sid: "remote-1",
         });
 
-        await client.close();
-        await repository.close();
+        await client.close(ctx);
+        await repository.close(ctx);
     });
 
     it("retries a versioned metadata update after a concurrent Happy update", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
         const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account",
             encryptionKey: sessionKey,
             encryptionVariant: "dataKey",
@@ -754,7 +756,7 @@ describe("HappySessionClient", () => {
             session: fakeSession([]).session,
             socketFactory: () => socket,
         });
-        client.start();
+        client.start(ctx);
 
         await waitFor(
             () => socket.emitted.filter(([event]) => event === "update-metadata").length === 2,
@@ -773,8 +775,8 @@ describe("HappySessionClient", () => {
             session: { status: "idle" },
         });
 
-        await client.close();
-        await repository.close();
+        await client.close(ctx);
+        await repository.close(ctx);
     });
 });
 
@@ -872,7 +874,7 @@ function fakeSession(submitted: unknown[]): {
         changedPermissionModes,
         session: {
             activity: () => structuredClone(activity),
-            abort: async (options?: AbortRunOptions) => {
+            abort: async (_ctx: typeof ctx, options?: AbortRunOptions) => {
                 abortCalls += 1;
                 abortRequests.push(options);
                 snapshot.pendingUserInputs = [];
@@ -884,13 +886,19 @@ function fakeSession(submitted: unknown[]): {
             changeEffort: ({ effort }: { effort: string }) => {
                 snapshot.effort = effort;
             },
-            changeModel: (request: { effort?: string; modelId: string; providerId?: string }) => {
+            changeModel: (
+                _ctx: typeof ctx,
+                request: { effort?: string; modelId: string; providerId?: string },
+            ) => {
                 changedModels.push(request);
                 snapshot.modelId = request.modelId;
                 snapshot.providerId = request.providerId ?? snapshot.providerId;
                 snapshot.effort = request.effort ?? snapshot.effort;
             },
-            changePermissionMode: async ({ permissionMode }: { permissionMode: string }) => {
+            changePermissionMode: async (
+                _ctx: typeof ctx,
+                { permissionMode }: { permissionMode: string },
+            ) => {
                 changedPermissionModes.push(permissionMode);
                 snapshot.permissionMode = permissionMode;
             },
@@ -905,7 +913,7 @@ function fakeSession(submitted: unknown[]): {
                         type: "message_submitted",
                     })),
             },
-            answerUserInput: (requestId: string, response: unknown) => {
+            answerUserInput: (_ctx: typeof ctx, requestId: string, response: unknown) => {
                 const pending = snapshot.pendingUserInputs.find(
                     (candidate: { requestId: string }) => candidate.requestId === requestId,
                 );
@@ -927,13 +935,14 @@ function fakeSession(submitted: unknown[]): {
                 );
                 return snapshot;
             },
+            clientSnapshot: () => snapshot,
             id: "session-1",
-            setArchived: (archived: boolean) => {
+            setArchived: (_ctx: typeof ctx, archived: boolean) => {
                 snapshot.archived = archived;
                 return snapshot;
             },
             snapshot: () => snapshot,
-            submit: (request: { clientSubmissionId: string }) => {
+            submit: (_ctx: typeof ctx, request: { clientSubmissionId: string }) => {
                 submitted.push(request);
                 submittedIds.add(request.clientSubmissionId);
             },
@@ -1010,7 +1019,10 @@ async function createRepository() {
     directories.push(directory);
     const databasePath = join(directory, "sessions.sqlite");
     await createSessionDatabaseFixture(databasePath);
-    return { databasePath, repository: await HappySyncRepository.open(databasePath) };
+    return {
+        databasePath,
+        repository: await HappySyncRepository.open(createTestRootContext(), databasePath),
+    };
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

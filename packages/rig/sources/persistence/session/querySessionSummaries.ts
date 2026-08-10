@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
@@ -11,7 +13,6 @@ import type {
 import { parsePermissionMode } from "../../permissions/index.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import { summarizeDockerExecution } from "../../execution/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import {
     readNumber,
     readOptionalNumber,
@@ -21,11 +22,12 @@ import {
 import { sessionScopeFromRow } from "./impl/sessionScope.js";
 
 export async function querySessionSummaries(
-    tx: DatabaseScope,
+    ctx: Context,
     activeOnly: boolean,
     options: { limit?: number },
 ): Promise<readonly SessionSummary[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_summaries", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx.all<Record<string, unknown>>(sql`
         SELECT listed_sessions.*
         FROM (

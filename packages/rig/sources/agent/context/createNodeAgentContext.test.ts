@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { NativeProcessManager } from "../../processes/index.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { createNodeAgentContext } from "./createNodeAgentContext.js";
 import { SecretRegistry, SessionSecretContext } from "../../secrets/index.js";
 
@@ -14,6 +15,7 @@ const tempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
 
 describe("createNodeAgentContext", () => {
+    const ctx = createTestRootContext().named("node-agent-context-test");
     afterEach(async () => {
         await Promise.all(
             tempDirs.splice(0).map((path) =>
@@ -28,7 +30,7 @@ describe("createNodeAgentContext", () => {
     it("runs bash through the explicit process manager", async () => {
         const cwd = await makeTempDir();
         const processManager = new NativeProcessManager();
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager,
         });
@@ -46,7 +48,7 @@ describe("createNodeAgentContext", () => {
 
     it("injects the session Git identity into shell subprocesses", async () => {
         const cwd = await makeTempDir();
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             environment: {
                 ...process.env,
@@ -96,7 +98,7 @@ describe("createNodeAgentContext", () => {
         if (address === null || typeof address === "string") {
             throw new Error("Missing credential broker test port.");
         }
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager: new NativeProcessManager(),
         });
@@ -143,7 +145,7 @@ describe("createNodeAgentContext", () => {
             id: "project-git",
             trustedLoopbackPorts: [41_000],
         });
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             permissionMode: "full_access",
             processManager: new NativeProcessManager(),
@@ -163,7 +165,7 @@ describe("createNodeAgentContext", () => {
 
     it("rejects attacker-selected shells outside Full access", async () => {
         const cwd = await makeTempDir();
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager: new NativeProcessManager(),
         });
@@ -191,7 +193,7 @@ describe("createNodeAgentContext", () => {
         process.env.SHELL_SAFE_TEST_VALUE = "ordinary-value";
 
         try {
-            const context = createNodeAgentContext({
+            const context = createNodeAgentContext(ctx, {
                 cwd,
                 permissionMode: "full_access",
                 processManager: new NativeProcessManager(),
@@ -235,7 +237,7 @@ describe("createNodeAgentContext", () => {
             },
         ]);
         const secrets = new SessionSecretContext(registry, ["service"], ["database"]);
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             permissionMode: "full_access",
             processManager: new NativeProcessManager(),
@@ -283,7 +285,7 @@ describe("createNodeAgentContext", () => {
                 id: "service",
             },
         ]);
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             permissionMode: "auto",
             processManager: new NativeProcessManager(),
@@ -313,7 +315,7 @@ describe("createNodeAgentContext", () => {
     it("keeps yielded shell sessions alive for polling and stdin", async () => {
         const cwd = await makeTempDir();
         const processManager = new NativeProcessManager();
-        const context = createNodeAgentContext({ cwd, processManager });
+        const context = createNodeAgentContext(ctx, { cwd, processManager });
         const script = [
             'process.stdin.setEncoding("utf8")',
             'process.stdin.once("data", data => { process.stdout.write("received:" + data.trim()); process.exit(0) })',
@@ -345,7 +347,7 @@ describe("createNodeAgentContext", () => {
 
     it("reports only background session lifecycle changes", async () => {
         const cwd = await makeTempDir();
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager: new NativeProcessManager(),
         });
@@ -364,7 +366,7 @@ describe("createNodeAgentContext", () => {
     it("leaves a background shell session running when a read gives up waiting", async () => {
         const cwd = await makeTempDir();
         const processManager = new NativeProcessManager();
-        const context = createNodeAgentContext({ cwd, processManager });
+        const context = createNodeAgentContext(ctx, { cwd, processManager });
         const sessionId = await context.bash.startSession({
             command: `${JSON.stringify(process.execPath)} -e 'setInterval(() => undefined, 1000)'`,
         });
@@ -391,7 +393,7 @@ describe("createNodeAgentContext", () => {
         await writeFile(outside, "original");
         await symlink(outside, join(cwd, "outside-link"));
         await symlink(join(root, "missing-outside.txt"), join(cwd, "broken-outside-link"));
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager: new NativeProcessManager(),
         });
@@ -424,7 +426,7 @@ describe("createNodeAgentContext", () => {
         const cwd = join(root, "workspace");
         const outside = join(root, "outside.txt");
         await mkdir(cwd);
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             permissionMode: "auto",
             processManager: new NativeProcessManager(),
@@ -453,7 +455,7 @@ describe("createNodeAgentContext", () => {
         const root = await makeWorkspaceRoot();
         const cwd = join(root, "workspace");
         await mkdir(cwd);
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager: new NativeProcessManager(),
         });
@@ -495,7 +497,7 @@ describe("createNodeAgentContext", () => {
             await writeFile(globalIgnore, "ignored-by-global-config.txt\n");
             await writeFile(globalConfig, `[core]\n\texcludesfile = ${globalIgnore}\n`);
             await writeFile(join(cwd, "ignored-by-global-config.txt"), "ignored\n");
-            const context = createNodeAgentContext({
+            const context = createNodeAgentContext(ctx, {
                 cwd,
                 permissionMode: "workspace_write",
                 processManager: new NativeProcessManager(),
@@ -531,7 +533,7 @@ describe("createNodeAgentContext", () => {
             process.env.RIG_SERVER_TOKEN_PATH = tokenPath;
 
             try {
-                const context = createNodeAgentContext({
+                const context = createNodeAgentContext(ctx, {
                     cwd,
                     permissionMode: "workspace_write",
                     processManager: new NativeProcessManager(),
@@ -558,7 +560,7 @@ describe("createNodeAgentContext", () => {
             await mkdir(metadata);
             await writeFile(join(metadata, "config"), "protected\n");
             await symlink(metadata, join(cwd, ".git"));
-            const context = createNodeAgentContext({
+            const context = createNodeAgentContext(ctx, {
                 cwd,
                 permissionMode: "workspace_write",
                 processManager: new NativeProcessManager(),
@@ -577,7 +579,7 @@ describe("createNodeAgentContext", () => {
 
     it("blocks shell network access unless Full access is selected", async () => {
         const cwd = await makeTempDir();
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd,
             processManager: new NativeProcessManager(),
         });

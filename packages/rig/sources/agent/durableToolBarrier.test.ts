@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { runAgentLoop } from "./loop.js";
 import { defineTool } from "./types.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     defineModel,
     defineProvider,
@@ -11,6 +12,8 @@ import {
     type ProviderAssistantMessageEvent,
     type InferenceStream,
 } from "@slopus/rig-execution";
+
+const ctx = createTestRootContext();
 
 describe("durable tool execution barriers", () => {
     it("finishes immediate calls before publishing durable calls from the same batch", async () => {
@@ -80,7 +83,7 @@ describe("durable tool execution barriers", () => {
         });
         const harness = createJustBashToolHarness();
 
-        const result = await runAgentLoop({
+        const result = await runAgentLoop(ctx, {
             context: harness.context,
             messages: [{ blocks: [{ text: "Run both", type: "text" }], id: "user", role: "user" }],
             modelId: model.id,

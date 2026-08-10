@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Client } from "@libsql/client";
+import { trace, type Context as OtelContext, type Span, type Tracer } from "@opentelemetry/api";
 
 import type {
     ComputePreparationEvent,
@@ -15,6 +16,7 @@ import { openSessionDatabase } from "../../persistence/database/openSessionDatab
 import { InMemoryGlobalEventQueue } from "../InMemoryGlobalEventQueue.js";
 import { PersistentGlobalEventQueue } from "../PersistentGlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "../shouldPublishGlobalEvent.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
 const clients: Client[] = [];
 
@@ -24,20 +26,27 @@ afterEach(async () => {
 
 describe("live global events", () => {
     for (const [name, create] of [
-        ["in-memory", () => new InMemoryGlobalEventQueue()],
+        [
+            "in-memory",
+            () => ({ ctx: createTestRootContext(), queue: new InMemoryGlobalEventQueue() }),
+        ],
         [
             "durable",
             async () => {
-                const opened = await openSessionDatabase(":memory:");
+                const rootCtx = createTestRootContext();
+                const opened = await openSessionDatabase(rootCtx, ":memory:");
                 clients.push(opened.client);
-                await migrateSessionDatabase(opened.database);
-                return PersistentGlobalEventQueue.open(opened.database);
+                await migrateSessionDatabase(opened.ctx);
+                return {
+                    ctx: opened.ctx,
+                    queue: await PersistentGlobalEventQueue.open(rootCtx, opened.database),
+                };
             },
         ],
     ] as const) {
         describe(name, () => {
             it("delivers a live event without storing it or advancing the cursor", async () => {
-                const queue = await create();
+                const { ctx, queue } = await create();
                 const delivered: GlobalEventDelivery[] = [];
                 queue.subscribe((delivery) => delivered.push(delivery));
                 const before = queue.cursor();
@@ -49,12 +58,12 @@ describe("live global events", () => {
                 expect(queue.cursor()).toBe(before);
                 // A replay from the beginning must not contain it, or a reconnecting client would
                 // receive a snapshot that no longer reflects the repository.
-                expect(await queue.list()).toEqual([]);
+                expect(await queue.list(ctx)).toEqual([]);
             });
 
             it("keeps stored events replayable alongside live ones", async () => {
-                const queue = await create();
-                const entry = await queue.append({
+                const { ctx, queue } = await create();
+                const entry = await queue.append(ctx, {
                     createdAt: 1,
                     data: { project: { id: "p1" } as never },
                     id: "e1" as never,
@@ -63,19 +72,19 @@ describe("live global events", () => {
                 });
                 queue.publishLive(liveEvent());
 
-                expect((await queue.list())?.map((stored) => stored.cursor)).toEqual([
+                expect((await queue.list(ctx))?.map((stored) => stored.cursor)).toEqual([
                     entry?.cursor,
                 ]);
             });
 
             it("keeps delivering stored events after one subscriber throws", async () => {
-                const queue = await create();
+                const { ctx, queue } = await create();
                 const delivered: GlobalEventDelivery[] = [];
                 queue.subscribe(() => {
                     throw new Error("subscriber failed");
                 });
                 queue.subscribe((delivery) => delivered.push(delivery));
-                const entry = await queue.append({
+                const entry = await queue.append(ctx, {
                     createdAt: 1,
                     data: { project: { id: "p1" } as never },
                     id: "e1" as never,
@@ -107,10 +116,11 @@ describe("live global events", () => {
     });
 
     it("rolls a durable append back with its caller transaction", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const rootCtx = createTestRootContext();
+        const opened = await openSessionDatabase(rootCtx, ":memory:");
         clients.push(opened.client);
-        await migrateSessionDatabase(opened.database);
-        const queue = await PersistentGlobalEventQueue.open(opened.database);
+        await migrateSessionDatabase(opened.ctx);
+        const queue = await PersistentGlobalEventQueue.open(rootCtx, opened.database);
         const before = queue.cursor();
         const event = {
             createdAt: 1,
@@ -121,22 +131,37 @@ describe("live global events", () => {
         };
 
         await expect(
-            inTx(opened.database, async (tx) => {
-                expect((await queue.append(event, tx))?.event).toBe(event);
-                expect(await queue.list()).toHaveLength(1);
+            inTx(opened.ctx, "rig.sql.global_event.test_rollback", async (ctx) => {
+                expect((await queue.append(ctx, event))?.event).toBe(event);
                 throw new Error("roll back caller");
             }),
         ).rejects.toThrow("roll back caller");
 
         expect(queue.cursor()).toBe(before);
-        expect(await queue.list()).toEqual([]);
+        expect(await queue.list(opened.ctx)).toEqual([]);
+    });
+
+    it("keeps the caller trace as the parent of durable SQL", async () => {
+        const traced = recordingContext();
+        const opened = await openSessionDatabase(traced.ctx, ":memory:");
+        clients.push(opened.client);
+        await migrateSessionDatabase(opened.ctx);
+        const queue = await PersistentGlobalEventQueue.open(traced.ctx, opened.database);
+        traced.calls.length = 0;
+
+        await traced.ctx.span("test.global_events.caller", (ctx) => queue.list(ctx));
+
+        const caller = traced.calls.find((call) => call.name === "test.global_events.caller");
+        const query = traced.calls.find((call) => call.name === "rig.sql.global_events.query");
+        expect(query?.parentSpanId).toBe(caller?.spanId);
     });
 
     it("retains compute preparation events in the durable stream", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const rootCtx = createTestRootContext();
+        const opened = await openSessionDatabase(rootCtx, ":memory:");
         clients.push(opened.client);
-        await migrateSessionDatabase(opened.database);
-        const queue = await PersistentGlobalEventQueue.open(opened.database);
+        await migrateSessionDatabase(opened.ctx);
+        const queue = await PersistentGlobalEventQueue.open(rootCtx, opened.database);
         const event: ComputePreparationEvent = {
             computeInstanceId: "compute-1",
             createdAt: 1,
@@ -150,11 +175,13 @@ describe("live global events", () => {
             type: "compute_preparation",
         };
 
-        const appended = await queue.append(event);
+        const appended = await queue.append(opened.ctx, event);
 
         expect(appended?.event).toBe(event);
         expect(
-            await PersistentGlobalEventQueue.open(opened.database).then((next) => next.list()),
+            await PersistentGlobalEventQueue.open(rootCtx, opened.database).then((next) =>
+                next.list(rootCtx),
+            ),
         ).toEqual([
             expect.objectContaining({
                 event,
@@ -163,10 +190,11 @@ describe("live global events", () => {
     });
 
     it("stores folder and document events under their own aggregates", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const rootCtx = createTestRootContext();
+        const opened = await openSessionDatabase(rootCtx, ":memory:");
         clients.push(opened.client);
-        await migrateSessionDatabase(opened.database);
-        const queue = await PersistentGlobalEventQueue.open(opened.database);
+        await migrateSessionDatabase(opened.ctx);
+        const queue = await PersistentGlobalEventQueue.open(rootCtx, opened.database);
         const documentEvent: DocumentEvent = {
             createdAt: 1,
             data: { documentId: "document-1", version: 2 },
@@ -180,8 +208,8 @@ describe("live global events", () => {
             type: "folders_changed",
         };
 
-        await queue.append(documentEvent);
-        await queue.append(folderEvent);
+        await queue.append(opened.ctx, documentEvent);
+        await queue.append(opened.ctx, folderEvent);
 
         expect(
             (
@@ -225,4 +253,31 @@ function snapshot(): GitChangeSnapshot {
         scannedAt: 1,
         version: 1,
     };
+}
+
+function recordingContext(): {
+    calls: Array<{ name: string; parentSpanId?: string; spanId: string }>;
+    ctx: ReturnType<typeof createTestRootContext>;
+} {
+    const calls: Array<{ name: string; parentSpanId?: string; spanId: string }> = [];
+    let nextSpanId = 0;
+    const tracer = {
+        startSpan: (name: string, _options: unknown, parent: OtelContext) => {
+            nextSpanId += 1;
+            const spanId = nextSpanId.toString(16).padStart(16, "0");
+            const parentSpanId = trace.getSpan(parent)?.spanContext().spanId;
+            calls.push({ name, ...(parentSpanId === undefined ? {} : { parentSpanId }), spanId });
+            return {
+                end: () => undefined,
+                recordException: () => undefined,
+                setStatus: () => undefined,
+                spanContext: () => ({
+                    spanId,
+                    traceFlags: 1,
+                    traceId: "1".repeat(32),
+                }),
+            } as unknown as Span;
+        },
+    } as unknown as Tracer;
+    return { calls, ctx: createTestRootContext(tracer) };
 }

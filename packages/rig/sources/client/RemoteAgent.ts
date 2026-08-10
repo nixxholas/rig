@@ -7,6 +7,7 @@ import type {
     ContentBlock,
     UserMessage,
 } from "../agent/index.js";
+import type { Context } from "@steve.kite/stdlib";
 import type {
     CodingAssistantAgentBackend,
     CodingAssistantModelChoice,
@@ -263,6 +264,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     async compact(
+        _ctx: Context,
         _signal?: AbortSignal,
         _onEvent?: AgentRunOptions["onEvent"],
     ): Promise<AgentCompactionResult> {
@@ -293,6 +295,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     async send(
+        _ctx: Context,
         content: string | readonly ContentBlock[],
         options: AgentRunOptions = {},
     ): Promise<AgentRunResult> {

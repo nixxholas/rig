@@ -7,6 +7,7 @@ import { reportCliFailure } from "../../rig/sources/reportCliFailure.js";
 
 // Development runs must fail the same way the published CLI does, not with a raw Node stack.
 installCliFailureReporting();
+process.env.RIG_RUNTIME_MODE = "local-development";
 
 // pnpm runs package scripts from the package directory; start the session in
 // the directory the developer actually invoked `pnpm dev` from.

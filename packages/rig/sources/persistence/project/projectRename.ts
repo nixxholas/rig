@@ -1,18 +1,20 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, ne, sql } from "drizzle-orm";
 import { projects } from "../database/schema.js";
 import { projectNameKey } from "../../project/projectIdentity.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export async function projectRename(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     name: string,
     now: number,
     version?: number,
 ): Promise<number> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.project.projectRename", async (ctx) => {
+        const tx = ctx.tx;
         const reservedName = await reserveUnique(
             name,
             async (candidate) =>

@@ -22,6 +22,9 @@ import {
 } from "@slopus/rig-execution";
 import type { DebugLog } from "../debug/index.js";
 import { createPermissionContext } from "../permissions/index.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 
 describe("Agent", () => {
     it("preserves a custom tool namespace and converts its input before execution", async () => {
@@ -104,7 +107,7 @@ describe("Agent", () => {
             },
         });
 
-        await agent.send("Apply it.");
+        await agent.send(ctx, "Apply it.");
 
         expect(execute).toHaveBeenCalledWith(
             { patch: "raw patch" },
@@ -208,7 +211,7 @@ describe("Agent", () => {
             }),
         } as unknown as DebugLog;
 
-        const result = await agent.send("Run the side effect.", { debug });
+        const result = await agent.send(ctx, "Run the side effect.", { debug });
 
         expect(result.stopReason).toBe("stop");
         expect(execute).toHaveBeenCalledOnce();
@@ -292,7 +295,7 @@ describe("Agent", () => {
             },
         });
 
-        await expect(agent.send("Run the side effect.")).rejects.toBe(databaseError);
+        await expect(agent.send(ctx, "Run the side effect.")).rejects.toBe(databaseError);
 
         expect(execute).toHaveBeenCalledOnce();
         expect(requestCount).toBe(1);
@@ -330,7 +333,7 @@ describe("Agent", () => {
             },
         });
 
-        await expect(agent.send("Answer once.")).rejects.toBe(databaseError);
+        await expect(agent.send(ctx, "Answer once.")).rejects.toBe(databaseError);
         expect(traces.map((event) => event.type)).toEqual([
             "turn_started",
             "inference_request_started",
@@ -398,7 +401,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        await expect(agent.send("Persist state.")).rejects.toBe(databaseError);
+        await expect(agent.send(ctx, "Persist state.")).rejects.toBe(databaseError);
 
         expect(requestCount).toBe(1);
     });
@@ -436,7 +439,7 @@ describe("Agent", () => {
             },
         });
 
-        await expect(agent.compact()).rejects.toBe(databaseError);
+        await expect(agent.compact(ctx)).rejects.toBe(databaseError);
 
         expect(consoleError).not.toHaveBeenCalled();
     });
@@ -520,7 +523,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        await agent.send([
+        await agent.send(ctx, [
             {
                 type: "image",
                 data: image.toString("base64"),
@@ -575,10 +578,10 @@ describe("Agent", () => {
         });
 
         agent.enqueueUserMessage("First run.");
-        await agent.run();
+        await agent.run(ctx);
         agent.setAppendSystemPrompt("Updated API instructions.");
         agent.enqueueUserMessage("Second run.");
-        await agent.run();
+        await agent.run(ctx);
 
         expect(contexts[0]?.systemPrompt).toBe(
             `Base instructions.\n\n${AGENTS_MD_SPEC}\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.\n\nInitial API instructions.`,
@@ -605,7 +608,7 @@ describe("Agent", () => {
             },
         });
         const harness = createJustBashToolHarness();
-        const applySystemPrompt = vi.fn(async ({ systemPrompt, userPrompt }) => {
+        const applySystemPrompt = vi.fn(async (_ctx, { systemPrompt, userPrompt }) => {
             return `${systemPrompt}\n\nPlugin saw: ${userPrompt}`;
         });
         const traces: { type: string }[] = [];
@@ -623,9 +626,9 @@ describe("Agent", () => {
             traceSessionId: "session-1",
         });
 
-        await agent.send("Replace this turn.");
+        await agent.send(ctx, "Replace this turn.");
 
-        expect(applySystemPrompt).toHaveBeenCalledWith({
+        expect(applySystemPrompt).toHaveBeenCalledWith(ctx, {
             systemPrompt: expect.stringContaining("Base instructions."),
             userPrompt: "Replace this turn.",
         });
@@ -700,7 +703,7 @@ describe("Agent", () => {
             directory: "/tmp/rig-agent-debug",
             record: async () => undefined,
         } as unknown as DebugLog;
-        const result = await agent.run({ debug });
+        const result = await agent.run(ctx, { debug });
 
         expect(result.runId).toBe("id-6");
         expect(result.debugDirectory).toBe("/tmp/rig-agent-debug");
@@ -886,9 +889,9 @@ describe("Agent", () => {
         });
 
         agent.setModel(secondModel.id, undefined);
-        await agent.send("Use fast inference.");
+        await agent.send(ctx, "Use fast inference.");
         currentTime = new Date(2024, 1, 3, 12).getTime();
-        await agent.send("Keep using fast inference.");
+        await agent.send(ctx, "Keep using fast inference.");
 
         expect(agent.snapshot().serviceTier).toBe("fast");
         expect(streamOptions).toMatchObject([
@@ -954,7 +957,7 @@ describe("Agent", () => {
             },
         });
 
-        await agent.send("Continue from there.");
+        await agent.send(ctx, "Continue from there.");
 
         expect(contexts).toHaveLength(1);
         expect(contexts[0]?.messages).toMatchObject([
@@ -1038,7 +1041,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        await expect(agent.send("Continue.")).rejects.toThrow("native compaction failed");
+        await expect(agent.send(ctx, "Continue.")).rejects.toThrow("native compaction failed");
         expect(compactions).toBe(1);
         expect(inferences).toBe(0);
     });
@@ -1136,7 +1139,7 @@ describe("Agent", () => {
                 printToConsole: false,
             });
 
-            const result = await agent.send("Continue with the tool.");
+            const result = await agent.send(ctx, "Continue with the tool.");
 
             expect(result.stopReason).toBe("stop");
             expect(contexts).toHaveLength(2);
@@ -1224,7 +1227,7 @@ describe("Agent", () => {
             },
         });
 
-        const result = await agent.send("Continue after compacting.");
+        const result = await agent.send(ctx, "Continue after compacting.");
 
         expect(result.stopReason).toBe("stop");
         expect(contexts).toHaveLength(2);
@@ -1300,7 +1303,7 @@ describe("Agent", () => {
         });
 
         agent.enqueueUserMessage("Continue without manual intervention.");
-        const result = await agent.run();
+        const result = await agent.run(ctx);
 
         expect(result.stopReason).toBe("error");
         expect(requestCount).toBe(1);
@@ -1395,7 +1398,7 @@ describe("Agent", () => {
             },
         });
 
-        const result = await agent.send("Answer once.");
+        const result = await agent.send(ctx, "Answer once.");
 
         expect(result.stopReason).toBe("error");
         expect(requestCount).toBe(1);
@@ -1449,11 +1452,11 @@ describe("Agent", () => {
                 if (event.type.startsWith("context_compact")) compactionEvents.push(event);
             },
         });
-        await agent.send("Do the work.");
+        await agent.send(ctx, "Do the work.");
         compactionEvents.length = 0;
         const visibleMessages = agent.snapshot().messages;
 
-        const result = await agent.compact();
+        const result = await agent.compact(ctx);
 
         expect(result).toMatchObject({
             compacted: true,
@@ -1549,10 +1552,10 @@ describe("Agent", () => {
             context: harness.context,
             printToConsole: false,
         });
-        await agent.send("Initial turn.");
-        await agent.compact();
+        await agent.send(ctx, "Initial turn.");
+        await agent.compact(ctx);
 
-        await agent.send("Fresh turn.");
+        await agent.send(ctx, "Fresh turn.");
 
         expect(normalContexts).toHaveLength(2);
         expect(JSON.stringify(normalContexts.at(-1))).not.toContain("stale compaction steering");
@@ -1598,10 +1601,10 @@ describe("Agent", () => {
                 if (event.type.startsWith("context_compact")) compactionEvents.push(event);
             },
         });
-        await agent.send("Do the work.");
+        await agent.send(ctx, "Do the work.");
         compactionEvents.length = 0;
 
-        await expect(agent.compact()).rejects.toThrow("summary failed");
+        await expect(agent.compact(ctx)).rejects.toThrow("summary failed");
 
         expect(compactionEvents.map((event) => event.type)).toEqual([
             "context_compaction_started",
@@ -1649,7 +1652,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        await agent.send("hello");
+        await agent.send(ctx, "hello");
         agent.enqueueUserMessage("queued");
         expect(agent.snapshot().messages.length).toBeGreaterThan(0);
         expect(agent.snapshot().queue.length).toBe(1);
@@ -1683,7 +1686,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        await agent.send("hello");
+        await agent.send(ctx, "hello");
         await agent.reset();
 
         expect(resetProvider).toHaveBeenCalledOnce();
@@ -1803,7 +1806,7 @@ describe("Agent", () => {
             },
         });
 
-        const result = await agent.send("Inspect the image.");
+        const result = await agent.send(ctx, "Inspect the image.");
 
         expect(result.stopReason).toBe("stop");
         expect(contexts).toHaveLength(3);
@@ -1937,7 +1940,7 @@ describe("Agent", () => {
             },
         });
 
-        const abortedRun = agent.send("start tool", { signal: controller.signal });
+        const abortedRun = agent.send(ctx, "start tool", { signal: controller.signal });
         await started.promise;
         await agent.steer("pending tool direction");
         controller.abort();
@@ -1962,7 +1965,7 @@ describe("Agent", () => {
         });
         expect(completedDisplays).toEqual(["Interrupted by user."]);
 
-        await agent.send("next message");
+        await agent.send(ctx, "next message");
 
         expect(contexts[1]?.messages).toMatchObject([
             { role: "user" },
@@ -2052,7 +2055,7 @@ describe("Agent", () => {
         });
 
         await expect(
-            agent.send("Stop before the tool.", { signal: controller.signal }),
+            agent.send(ctx, "Stop before the tool.", { signal: controller.signal }),
         ).resolves.toMatchObject({ stopReason: "aborted" });
         expect(execute).not.toHaveBeenCalled();
         expect(
@@ -2124,7 +2127,7 @@ describe("Agent", () => {
             },
         });
 
-        const result = await agent.send("run the tool", { signal: controller.signal });
+        const result = await agent.send(ctx, "run the tool", { signal: controller.signal });
 
         expect(result.stopReason).toBe("aborted");
         expect(result.messages.at(-1)).toMatchObject({
@@ -2216,7 +2219,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        const run = agent.send("Start the steerable wait.");
+        const run = agent.send(ctx, "Start the steerable wait.");
         await started.promise;
         await agent.steer("Change direction now.");
         try {
@@ -2304,7 +2307,7 @@ describe("Agent", () => {
             },
         });
 
-        await agent.send("run the failing tool");
+        await agent.send(ctx, "run the failing tool");
 
         expect(toolResults).toEqual([
             expect.objectContaining({
@@ -2385,7 +2388,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        const firstRun = agent.send("initial", { signal: controller.signal });
+        const firstRun = agent.send(ctx, "initial", { signal: controller.signal });
         await started.promise;
         await agent.steer("pending direction");
         controller.abort();
@@ -2401,7 +2404,7 @@ describe("Agent", () => {
             ),
         ).toHaveLength(1);
 
-        await agent.send("continue");
+        await agent.send(ctx, "continue");
 
         const continuedUserText = contexts[1]?.messages.flatMap((message) =>
             message.role === "user" && typeof message.content !== "string"
@@ -2462,7 +2465,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        const run = agent.send("initial request");
+        const run = agent.send(ctx, "initial request");
         await started.promise;
         await agent.steer("pending error direction");
         release.resolve();
@@ -2501,13 +2504,13 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        const firstRun = agent.send("first");
+        const firstRun = agent.send(ctx, "first");
         await started.promise;
 
         await agent.reset();
 
         expect(agent.status).toBe("running");
-        await expect(agent.send("second")).rejects.toThrow("already running");
+        await expect(agent.send(ctx, "second")).rejects.toThrow("already running");
 
         release.resolve();
         await firstRun;
@@ -2550,7 +2553,7 @@ describe("Agent", () => {
             printToConsole: false,
         });
 
-        const compaction = agent.compact();
+        const compaction = agent.compact(ctx);
         await started.promise;
         await agent.reset();
         release.resolve();

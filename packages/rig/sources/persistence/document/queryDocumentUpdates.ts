@@ -1,17 +1,19 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { and, asc, eq, gt } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { DocumentUpdatePage } from "../../protocol/index.js";
 import { documents, documentUpdates } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryDocumentUpdates(
-    tx: DatabaseScope,
+    ctx: Context,
     documentId: string,
     afterVersion: number,
     limit: number,
 ): Promise<DocumentUpdatePage | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.documents.query_updates", async (ctx) => {
+        const tx = ctx.tx;
         const document = await tx
             .select({
                 firstRetainedVersion: documents.firstRetainedVersion,

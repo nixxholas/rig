@@ -1,0 +1,31 @@
+services:
+    grafana:
+        image: grafana/grafana:12.4.1
+        ports:
+            - "3000:3000"
+        volumes:
+            - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    otel-collector:
+        image: otel/opentelemetry-collector-contrib:0.143.0
+        command: ["--config=/etc/otelcol-contrib/config.yaml"]
+        ports:
+            - "4318:4318"
+        volumes:
+            - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+        depends_on:
+            - tempo
+    prometheus:
+        image: prom/prometheus:v3.9.1
+        ports:
+            - "9090:9090"
+        volumes:
+            - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
+    tempo:
+        image: grafana/tempo:2.10.3
+        command: ["-config.file=/etc/tempo.yaml"]
+        ports:
+            - "3200:3200"
+        volumes:
+            - ./tempo.yaml:/etc/tempo.yaml:ro

@@ -1,18 +1,20 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { ExternalToolCall } from "../../external-tools/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readExternalToolCallRow } from "./impl/externalToolCallRow.js";
 
 export async function queryExternalToolCalls(
-    tx: DatabaseScope,
+    ctx: Context,
     options: {
         limit?: number;
         status?: ExternalToolCall["status"];
     } = {},
 ): Promise<readonly ExternalToolCall[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_external_tool_calls", async (ctx) => {
+        const tx = ctx.tx;
         const rows =
             options.status === undefined
                 ? await tx.all<Record<string, unknown>>(sql`

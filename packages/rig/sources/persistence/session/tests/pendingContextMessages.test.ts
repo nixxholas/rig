@@ -4,6 +4,8 @@ import { sql } from "drizzle-orm";
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
 import { projects, sessions } from "../../database/schema.js";
+import { inTx } from "../../inTx.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { queryPendingContextMessages } from "../queryPendingContextMessages.js";
 import { querySessionTranscriptPage } from "../querySessionTranscriptPage.js";
 import { sessionDrainPendingContextMessages } from "../sessionDrainPendingContextMessages.js";
@@ -15,65 +17,59 @@ describe("pending context messages", () => {
         const first = pending("note-1", 0);
         const second = pending("note-2", 1);
 
-        await opened.database.transaction(async (tx) => {
-            await sessionSavePendingContextMessage(tx, "session-1", first, 10);
-            await sessionSavePendingContextMessage(tx, "session-1", second, 11);
+        await inTx(opened.ctx, "rig.sql.test.pending_context_messages.setup", async (ctx) => {
+            await sessionSavePendingContextMessage(ctx, "session-1", first, 10);
+            await sessionSavePendingContextMessage(ctx, "session-1", second, 11);
         });
 
-        expect(await queryPendingContextMessages(opened.database, "session-1")).toEqual([
-            first,
-            second,
-        ]);
+        expect(await queryPendingContextMessages(opened.ctx, "session-1")).toEqual([first, second]);
         expect(
-            (await querySessionTranscriptPage(opened.database, "session-1", 10))?.messages,
+            (await querySessionTranscriptPage(opened.ctx, "session-1", 10))?.messages,
         ).toMatchObject([
             { message: { id: "note-1" }, runId: "context:note-1" },
             { message: { id: "note-2" }, runId: "context:note-2" },
         ]);
-        expect(await sessionDrainPendingContextMessages(opened.database, "session-1")).toEqual([
+        expect(await sessionDrainPendingContextMessages(opened.ctx, "session-1")).toEqual([
             first,
             second,
         ]);
-        expect(await queryPendingContextMessages(opened.database, "session-1")).toEqual([]);
+        expect(await queryPendingContextMessages(opened.ctx, "session-1")).toEqual([]);
         expect(
-            await opened.database.all<{ messageId: string }>(sql`
+            await opened.ctx.tx.all<{ messageId: string }>(sql`
                 SELECT message_id AS messageId
                 FROM session_context_messages
                 WHERE session_id = 'session-1'
                 ORDER BY position
             `),
         ).toEqual([{ messageId: "note-1" }, { messageId: "note-2" }]);
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("keeps the queue intact when a surrounding actionable-boundary transaction fails", async () => {
         const opened = await createDatabase();
         const first = pending("note-1", 0);
         const second = pending("note-2", 1);
-        await opened.database.transaction(async (tx) => {
-            await sessionSavePendingContextMessage(tx, "session-1", first, 10);
-            await sessionSavePendingContextMessage(tx, "session-1", second, 11);
+        await inTx(opened.ctx, "rig.sql.test.pending_context_messages.setup", async (ctx) => {
+            await sessionSavePendingContextMessage(ctx, "session-1", first, 10);
+            await sessionSavePendingContextMessage(ctx, "session-1", second, 11);
         });
 
         await expect(
-            opened.database.transaction(async (tx) => {
-                await sessionDrainPendingContextMessages(tx, "session-1");
+            inTx(opened.ctx, "rig.sql.test.pending_context_messages.rollback", async (ctx) => {
+                await sessionDrainPendingContextMessages(ctx, "session-1");
                 throw new Error("actionable message could not be committed");
             }),
         ).rejects.toThrow("actionable message could not be committed");
 
-        expect(await queryPendingContextMessages(opened.database, "session-1")).toEqual([
-            first,
-            second,
-        ]);
+        expect(await queryPendingContextMessages(opened.ctx, "session-1")).toEqual([first, second]);
         expect(
-            await opened.database.all<{ count: number }>(sql`
+            await opened.ctx.tx.all<{ count: number }>(sql`
                 SELECT COUNT(*) AS count
                 FROM session_context_messages
                 WHERE session_id = 'session-1'
             `),
         ).toEqual([{ count: 0 }]);
-        opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 });
 
@@ -92,9 +88,9 @@ function pending(id: string, position: number) {
 }
 
 async function createDatabase() {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
-    await opened.database
+    const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+    await migrateSessionDatabase(opened.ctx);
+    await opened.ctx.tx
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -117,7 +113,7 @@ async function createDatabase() {
             worktreeSupport: "unknown",
         })
         .run();
-    await opened.database
+    await opened.ctx.tx
         .insert(sessions)
         .values({
             agentId: "agent-1",

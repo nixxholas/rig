@@ -1,27 +1,29 @@
 import { eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import { rigDataEpochSchema } from "../../protocol/InstallationProtocol.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { inDatabase } from "./inDatabase.js";
 import { rigDataIdentityTable } from "./schema.js";
-import type { DrizzleSessionTx } from "./SessionDatabase.js";
 
-export async function queryRigDataEpoch(tx: DatabaseScope): Promise<string> {
-    const epoch = await queryRigDataEpochIfPresent(tx);
+export async function queryRigDataEpoch(ctx: Context): Promise<string> {
+    const epoch = await queryRigDataEpochIfPresent(ctx);
     if (epoch === undefined) {
         throw new Error("The initialized Rig database has no data identity.");
     }
     return epoch;
 }
 
-export async function queryRigDataEpochIfPresent(tx: DatabaseScope): Promise<string | undefined> {
-    return await inDatabase(tx, queryRigDataEpochIfPresentInTx);
+export async function queryRigDataEpochIfPresent(ctx: Context): Promise<string | undefined> {
+    return await inDatabase(
+        ctx,
+        "rig.sql.database.query_data_epoch",
+        queryRigDataEpochIfPresentInTx,
+    );
 }
 
-export async function queryRigDataEpochIfPresentInTx(
-    tx: DrizzleSessionTx,
-): Promise<string | undefined> {
+export async function queryRigDataEpochIfPresentInTx(ctx: Context): Promise<string | undefined> {
+    const tx = ctx.tx;
     const rows = await tx
         .select({ epoch: rigDataIdentityTable.epoch })
         .from(rigDataIdentityTable)

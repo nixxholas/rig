@@ -1,5 +1,6 @@
 import { createId } from "@paralleldrive/cuid2";
 import type { HappyTracingEvent } from "happy-plugins";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 import {
     compactConversation,
@@ -376,6 +377,7 @@ export class Agent {
     }
 
     async send(
+        ctx: RuntimeContext,
         text: string | readonly ContentBlock[],
         options: AgentRunOptions = {},
     ): Promise<AgentRunResult> {
@@ -388,7 +390,7 @@ export class Agent {
             id: options.clientSubmissionId ?? this.#idFactory(),
             blocks: typeof text === "string" ? [{ type: "text", text }] : text,
         });
-        return this.run(options);
+        return this.run(ctx, options);
     }
 
     async steer(content: string | readonly ContentBlock[]): Promise<void> {
@@ -408,6 +410,7 @@ export class Agent {
     }
 
     async compact(
+        ctx: RuntimeContext,
         signal?: AbortSignal,
         onEvent?: AgentRunOptions["onEvent"],
         onMessage?: AgentRunOptions["onMessage"],
@@ -420,7 +423,7 @@ export class Agent {
         this.#activeRunId = runId;
         this.#status = "running";
         try {
-            const result = await this.#compactContext({
+            const result = await this.#compactContext(ctx, {
                 eventOptions: {
                     ...(onEvent === undefined ? {} : { onEvent }),
                     ...(onMessage === undefined ? {} : { onMessage }),
@@ -439,7 +442,7 @@ export class Agent {
         }
     }
 
-    async run(options: AgentRunOptions = {}): Promise<AgentRunResult> {
+    async run(ctx: RuntimeContext, options: AgentRunOptions = {}): Promise<AgentRunResult> {
         if (this.#activeRunId !== undefined) {
             throw new Error(`Agent '${this.id}' is already running`);
         }
@@ -485,7 +488,7 @@ export class Agent {
         };
 
         try {
-            await this.#compactContext({
+            await this.#compactContext(ctx, {
                 eventOptions: options,
                 force: false,
                 provider,
@@ -599,7 +602,7 @@ export class Agent {
                     toolStartedAt.delete(event.result.toolCallId);
                 }
             };
-            const loopOptions: Parameters<typeof runAgentLoop>[0] = {
+            const loopOptions: Parameters<typeof runAgentLoop>[1] = {
                 ...(this.#allowReviewerModel ? { allowReviewerModel: true } : {}),
                 provider,
                 ...(this.#createPermissionReviewAgent === undefined
@@ -640,7 +643,7 @@ export class Agent {
                 takeSteering: () => this.#takeSteering(),
                 getSteeringSignal: () => this.#steeringController.signal,
                 compactContext: async (messages, compaction) => {
-                    const result = await this.#compactMessages({
+                    const result = await this.#compactMessages(ctx, {
                         eventOptions: options,
                         messages,
                         createProviderContext: compaction.createProviderContext,
@@ -671,7 +674,7 @@ export class Agent {
             if (options.signal !== undefined) loopOptions.signal = options.signal;
             if (options.debug !== undefined) loopOptions.debug = options.debug;
 
-            const result = await runAgentLoop(loopOptions);
+            const result = await runAgentLoop(ctx, loopOptions);
             const finishedAt = this.#now();
             finishPendingInferences(finishedAt);
             this.#emitTrace({
@@ -792,17 +795,20 @@ export class Agent {
         }
     }
 
-    async #compactContext(options: {
-        eventOptions: AgentRunOptions;
-        force: boolean;
-        provider?: Provider;
-        reason: "context_window" | "manual" | "threshold";
-        signal?: AbortSignal;
-    }): Promise<AgentCompactionResult> {
+    async #compactContext(
+        ctx: RuntimeContext,
+        options: {
+            eventOptions: AgentRunOptions;
+            force: boolean;
+            provider?: Provider;
+            reason: "context_window" | "manual" | "threshold";
+            signal?: AbortSignal;
+        },
+    ): Promise<AgentCompactionResult> {
         const resetVersion = this.#resetVersion;
         const messages = this.#contextMessages ?? this.#messages;
         const reportedTokens = resolvePreInferenceContextTokens(messages);
-        const result = await this.#compactMessages({
+        const result = await this.#compactMessages(ctx, {
             messages,
             eventOptions: options.eventOptions,
             force: options.force,
@@ -828,16 +834,19 @@ export class Agent {
         };
     }
 
-    async #compactMessages(options: {
-        messages: readonly Message[];
-        createProviderContext?: (messages: readonly Message[]) => Promise<Context>;
-        eventOptions: AgentRunOptions;
-        force: boolean;
-        provider?: Provider;
-        reason: "context_window" | "manual" | "threshold";
-        reportedTokens?: number;
-        signal?: AbortSignal;
-    }): Promise<CompactConversationResult> {
+    async #compactMessages(
+        ctx: RuntimeContext,
+        options: {
+            messages: readonly Message[];
+            createProviderContext?: (messages: readonly Message[]) => Promise<Context>;
+            eventOptions: AgentRunOptions;
+            force: boolean;
+            provider?: Provider;
+            reason: "context_window" | "manual" | "threshold";
+            reportedTokens?: number;
+            signal?: AbortSignal;
+        },
+    ): Promise<CompactConversationResult> {
         return runCompactionWithEvents({
             compact: (onCompactionStart) =>
                 compactConversation({
@@ -847,7 +856,7 @@ export class Agent {
                     createProviderContext:
                         options.createProviderContext ??
                         (async (messages) => {
-                            const providerPrompt = await createProviderPrompt({
+                            const providerPrompt = await createProviderPrompt(ctx, {
                                 ...(this.#appendSystemPrompt !== undefined
                                     ? { appendSystemPrompt: this.#appendSystemPrompt }
                                     : {}),

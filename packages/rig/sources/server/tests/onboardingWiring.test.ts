@@ -3,6 +3,8 @@ import { rm } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { OnboardingService } from "../../onboarding/OnboardingService.js";
 import { RigProfileStore } from "../../profiles/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
@@ -13,14 +15,15 @@ const LOCAL_INSTANCE_ID = "alocalinstance00000000001";
 
 describe("onboarding daemon wiring", () => {
     it("advances through provider setup and profile creation over the real HTTP surface", async () => {
-        const store = await PersistentSessionStore.open({
+        const ctx = createTestRootContext();
+        const store = await PersistentSessionStore.open(ctx, {
             databasePath: ":memory:",
             localInstanceId: LOCAL_INSTANCE_ID,
         });
         const profiles = new RigProfileStore({
             database: store,
             localInstanceId: LOCAL_INSTANCE_ID,
-            publish: (event) => {
+            publish: (_publishCtx, event) => {
                 store.globalEventQueue.publishLive(event);
                 store.liveEvents.publish(event);
             },
@@ -29,21 +32,21 @@ describe("onboarding daemon wiring", () => {
         let murmurConfigured = false;
         const onboarding = new OnboardingService({
             murmurConfigured: () => murmurConfigured,
-            onboardMurmur: async (request) => {
+            onboardMurmur: async (_requestCtx, request) => {
                 murmurConfigured = true;
                 return request.enabled
                     ? Promise.reject(new Error("This fixture only exercises opt-out."))
                     : { enabled: false };
             },
             persistence: store,
-            profileComplete: async () =>
-                (await profiles.list()).some(
+            profileComplete: async (requestCtx) =>
+                (await profiles.list(requestCtx)).some(
                     (profile) => profile.parentInstanceId === LOCAL_INSTANCE_ID,
                 ),
             providersConfigured: () => providersConfigured,
         });
         const started = await startServer(
-            await createProtocolHttpServer({
+            await createProtocolHttpServer(createTestRootContext(), {
                 onboarding,
                 profiles,
                 store,
@@ -87,7 +90,7 @@ describe("onboarding daemon wiring", () => {
             });
         } finally {
             await started.close();
-            await store.close();
+            await store.close(ctx);
         }
     });
 });

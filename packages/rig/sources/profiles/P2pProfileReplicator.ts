@@ -1,5 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/index.js";
 
 import type { P2pNetwork } from "../p2p/index.js";
 import { p2pInstanceIdSchema } from "../protocol/index.js";
@@ -24,10 +26,10 @@ const secondaryConfigResponseSchema = Type.Object({
 });
 
 export interface P2pProfileReplicatorOptions {
-    listPeerIds: () => readonly string[] | Promise<readonly string[]>;
+    listPeerIds: (ctx: Context) => readonly string[] | Promise<readonly string[]>;
     localInstanceId: string;
     network: P2pNetwork;
-    onError?: (peerId: string, error: unknown) => void;
+    onError?: (ctx: Context, peerId: string, error: unknown) => void;
     profiles: RigProfileStore;
 }
 
@@ -40,10 +42,10 @@ export interface P2pProfileReplicatorOptions {
  */
 export class P2pProfileReplicator {
     readonly #abort = new AbortController();
-    readonly #listPeerIds: () => readonly string[] | Promise<readonly string[]>;
+    readonly #listPeerIds: (ctx: Context) => readonly string[] | Promise<readonly string[]>;
     readonly #localInstanceId: string;
     readonly #network: P2pNetwork;
-    readonly #onError: ((peerId: string, error: unknown) => void) | undefined;
+    readonly #onError: ((ctx: Context, peerId: string, error: unknown) => void) | undefined;
     readonly #pendingProfileVersions = new Map<string, number>();
     readonly #profiles: RigProfileStore;
     readonly #reportedFailures = new Set<string>();
@@ -64,7 +66,7 @@ export class P2pProfileReplicator {
         this.#profiles = options.profiles;
     }
 
-    syncProfile(profileId: string, version: number): void {
+    syncProfile(_ctx: Context, profileId: string, version: number): void {
         if (this.#abort.signal.aborted) return;
         this.#retryMissingProfileVersions.set(
             profileId,
@@ -78,22 +80,27 @@ export class P2pProfileReplicator {
         this.#startNow();
     }
 
-    async profileSynchronized(peerId: string, profileId: string, version: number): Promise<void> {
+    async profileSynchronized(
+        ctx: Context,
+        peerId: string,
+        profileId: string,
+        version: number,
+    ): Promise<void> {
         if (this.#abort.signal.aborted) return;
         const key = `${peerId}:${profileId}`;
         this.#syncedVersions.set(key, Math.max(version, this.#syncedVersions.get(key) ?? 0));
         this.#reportedFailures.delete(peerId);
-        const latest = await this.#profiles.get(profileId);
+        const latest = await this.#profiles.get(ctx, profileId);
         if (
             latest !== undefined &&
-            (await this.#profiles.isLocal(profileId)) &&
+            (await this.#profiles.isLocal(ctx, profileId)) &&
             latest.version > version
         ) {
-            this.syncProfile(profileId, latest.version);
+            this.syncProfile(ctx, profileId, latest.version);
         }
     }
 
-    syncAll(options: { recheckTargets?: boolean } = {}): void {
+    syncAll(_ctx: Context, options: { recheckTargets?: boolean } = {}): void {
         if (this.#abort.signal.aborted) return;
         if (options.recheckTargets === true) {
             this.#targetCheckedAt.clear();
@@ -105,20 +112,20 @@ export class P2pProfileReplicator {
         this.#startNow();
     }
 
-    peerChanged(peerId: string): void {
+    peerChanged(ctx: Context, peerId: string): void {
         this.#targetCheckedAt.delete(peerId);
         this.#targets.delete(peerId);
         for (const key of this.#syncedVersions.keys()) {
             if (key.startsWith(`${peerId}:`)) this.#syncedVersions.delete(key);
         }
-        this.syncAll();
+        this.syncAll(ctx);
     }
 
-    async flush(): Promise<void> {
+    async flush(_ctx: Context): Promise<void> {
         await this.#run;
     }
 
-    async close(): Promise<void> {
+    async close(_ctx: Context): Promise<void> {
         if (this.#abort.signal.aborted) return;
         this.#abort.abort();
         if (this.#timer !== undefined) clearTimeout(this.#timer);
@@ -132,9 +139,13 @@ export class P2pProfileReplicator {
             clearTimeout(this.#timer);
             this.#timer = undefined;
         }
-        const run = this.#pass().catch((error: unknown) => {
-            this.#report("local", error);
-        });
+        const run = withWorkerContext("p2p-profile-replication", (ctx) => this.#pass(ctx)).catch(
+            (error: unknown) => {
+                void withWorkerContext("p2p-profile-replication-error", (ctx) =>
+                    this.#report(ctx, "local", error),
+                );
+            },
+        );
         this.#run = run;
         const finish = (): void => {
             if (this.#run === run) this.#run = undefined;
@@ -161,10 +172,10 @@ export class P2pProfileReplicator {
         this.#timer.unref?.();
     }
 
-    async #pass(): Promise<void> {
+    async #pass(ctx: Context): Promise<void> {
         if (this.#syncAllRequested) {
-            for (const profile of await this.#profiles.list()) {
-                if (await this.#profiles.isLocal(profile.id)) {
+            for (const profile of await this.#profiles.list(ctx)) {
+                if (await this.#profiles.isLocal(ctx, profile.id)) {
                     this.#pendingProfileVersions.set(
                         profile.id,
                         Math.max(
@@ -176,7 +187,7 @@ export class P2pProfileReplicator {
             }
             this.#syncAllRequested = false;
         }
-        const peerIds = [...new Set(await this.#listPeerIds())];
+        const peerIds = [...new Set(await this.#listPeerIds(ctx))];
         if (peerIds.length === 0) {
             this.#pendingProfileVersions.clear();
             return;
@@ -184,8 +195,8 @@ export class P2pProfileReplicator {
         const pending = new Map(this.#pendingProfileVersions);
         for (const [profileId] of pending) {
             if (this.#abort.signal.aborted) return;
-            const profile = await this.#profiles.get(profileId);
-            if (profile === undefined || !(await this.#profiles.isLocal(profileId))) {
+            const profile = await this.#profiles.get(ctx, profileId);
+            if (profile === undefined || !(await this.#profiles.isLocal(ctx, profileId))) {
                 this.#pendingProfileVersions.delete(profileId);
                 this.#retryMissingProfileVersions.delete(profileId);
                 continue;
@@ -201,13 +212,13 @@ export class P2pProfileReplicator {
                     (!target && Date.now() - targetCheckedAt >= NON_TARGET_RECHECK_MS)
                 ) {
                     try {
-                        target = await this.#isSecondary(peerId);
+                        target = await this.#isSecondary(ctx, peerId);
                         this.#targets.set(peerId, target);
                         this.#targetCheckedAt.set(peerId, Date.now());
                         this.#reportedFailures.delete(peerId);
                     } catch (error) {
                         complete = false;
-                        this.#report(peerId, error);
+                        this.#report(ctx, peerId, error);
                         continue;
                     }
                 }
@@ -217,7 +228,7 @@ export class P2pProfileReplicator {
                 const key = `${peerId}:${profile.id}`;
                 if ((this.#syncedVersions.get(key) ?? 0) >= profile.version) continue;
                 try {
-                    const result = await replicateProfileToP2pPeer({
+                    const result = await replicateProfileToP2pPeer(ctx, {
                         createIfMissing: false,
                         network: this.#network,
                         peerId,
@@ -237,11 +248,11 @@ export class P2pProfileReplicator {
                         continue;
                     }
                     if (error instanceof P2pProfileReplicationError && error.status === 409) {
-                        this.#report(peerId, error);
+                        this.#report(ctx, peerId, error);
                         continue;
                     }
                     complete = false;
-                    this.#report(peerId, error);
+                    this.#report(ctx, peerId, error);
                 }
             }
             if (missing && this.#retryMissingProfileVersions.get(profileId) === profile.version) {
@@ -255,8 +266,9 @@ export class P2pProfileReplicator {
         }
     }
 
-    async #isSecondary(peerId: string): Promise<boolean> {
+    async #isSecondary(ctx: Context, peerId: string): Promise<boolean> {
         const { response } = await this.#network.fetch(
+            ctx,
             peerId,
             {
                 body: new Uint8Array(),
@@ -286,10 +298,10 @@ export class P2pProfileReplicator {
         return AbortSignal.any([this.#abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
     }
 
-    #report(peerId: string, error: unknown): void {
+    #report(ctx: Context, peerId: string, error: unknown): void {
         if (this.#reportedFailures.has(peerId)) return;
         this.#reportedFailures.add(peerId);
-        this.#onError?.(peerId, error);
+        this.#onError?.(ctx, peerId, error);
     }
 }
 

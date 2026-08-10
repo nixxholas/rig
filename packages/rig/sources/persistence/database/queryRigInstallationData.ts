@@ -2,6 +2,7 @@ import { lstatSync } from "node:fs";
 
 import { sql } from "drizzle-orm";
 import { TransformDecodeCheckError } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { RigInstallationData } from "../../protocol/InstallationProtocol.js";
 import {
@@ -12,7 +13,6 @@ import {
 import { inDatabase } from "./inDatabase.js";
 import { openSessionDatabase } from "./openSessionDatabase.js";
 import { queryRigDataEpochIfPresentInTx } from "./queryRigDataEpoch.js";
-import type { DrizzleSessionTx } from "./SessionDatabase.js";
 
 /**
  * Queries the authoritative initialization marker without creating or migrating the database.
@@ -20,6 +20,7 @@ import type { DrizzleSessionTx } from "./SessionDatabase.js";
  * WAL-mode database even though the database connection itself is read-only.
  */
 export async function queryRigInstallationData(
+    ctx: Context,
     path: string,
     options: {
         openDatabase?: typeof openSessionDatabase;
@@ -34,12 +35,13 @@ export async function queryRigInstallationData(
 
     let opened: Awaited<ReturnType<typeof openSessionDatabase>>;
     try {
-        opened = await (options.openDatabase ?? openSessionDatabase)(path, { readOnly: true });
+        opened = await (options.openDatabase ?? openSessionDatabase)(ctx, path, { readOnly: true });
     } catch (error) {
         return classifyInspectionError(error);
     }
     try {
-        return await inDatabase(opened.database, async (database) => {
+        return await inDatabase(opened.ctx, "rig.sql.database.query_installation", async (ctx) => {
+            const database = ctx.tx;
             const applicationId =
                 (await database.get<{ application_id: number }>(sql.raw("PRAGMA application_id")))
                     ?.application_id ?? 0;
@@ -64,7 +66,7 @@ export async function queryRigInstallationData(
 
             if (schemaVersion > CURRENT_SESSION_DATABASE_VERSION) {
                 return {
-                    ...(await queryFutureEpoch(database)),
+                    ...(await queryFutureEpoch(ctx)),
                     message: `Rig data uses newer schema version ${String(schemaVersion)}; this CLI supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}. Install a compatible Rig version before starting the daemon.`,
                     reason: "newer_schema",
                     schemaVersion,
@@ -78,7 +80,7 @@ export async function queryRigInstallationData(
                 )
             )[0];
             if (identityTable === undefined) return damagedData();
-            const epoch = await queryRigDataEpochIfPresentInTx(database);
+            const epoch = await queryRigDataEpochIfPresentInTx(ctx);
             if (epoch === undefined) return damagedData();
             return {
                 epoch,
@@ -93,15 +95,15 @@ export async function queryRigInstallationData(
     } catch (error) {
         return classifyInspectionError(error);
     } finally {
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     }
 }
 
-async function queryFutureEpoch(database: DrizzleSessionTx): Promise<{
+async function queryFutureEpoch(ctx: Context): Promise<{
     epoch?: string;
 }> {
     try {
-        const epoch = await queryRigDataEpochIfPresentInTx(database);
+        const epoch = await queryRigDataEpochIfPresentInTx(ctx);
         return epoch === undefined ? {} : { epoch };
     } catch {
         return {};

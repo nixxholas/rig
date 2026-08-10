@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import { FolderError } from "../folders/FolderRepository.js";
 import {
@@ -29,6 +30,7 @@ export interface FolderRoute {
  * or changed files: a folder is a name, some rules, an icon, a place in the tree, and a directory.
  */
 export async function serveFolderRequest(
+    ctx: Context,
     store: SessionStore,
     route: FolderRoute,
     request: Pick<IncomingMessage, "headers" | "method">,
@@ -38,7 +40,7 @@ export async function serveFolderRequest(
     try {
         if (route.name === "folders") {
             if (request.method === "GET") {
-                sendJson<ListFoldersResponse>(response, 200, await store.folderCatalog());
+                sendJson<ListFoldersResponse>(response, 200, await store.folderCatalog(ctx));
                 return;
             }
             if (request.method !== "POST") {
@@ -55,14 +57,14 @@ export async function serveFolderRequest(
                 sendFolderError(response, 400, "invalid_request", "The mutation ID did not match.");
                 return;
             }
-            const created = await store.createFolder({
+            const created = await store.createFolder(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
             sendJson<FolderResponse>(
                 response,
                 201,
-                await folderResponse(store, created.id, created),
+                await folderResponse(ctx, store, created.id, created),
             );
             return;
         }
@@ -73,7 +75,7 @@ export async function serveFolderRequest(
         }
         if (route.name === "folder") {
             if (request.method === "GET") {
-                const folder = await store.getFolder(folderId);
+                const folder = await store.getFolder(ctx, folderId);
                 if (folder === undefined) {
                     sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
                     return;
@@ -81,7 +83,7 @@ export async function serveFolderRequest(
                 sendJson<FolderResponse>(
                     response,
                     200,
-                    await folderResponse(store, folderId, folder),
+                    await folderResponse(ctx, store, folderId, folder),
                 );
                 return;
             }
@@ -115,6 +117,7 @@ export async function serveFolderRequest(
                 return;
             }
             const folder = await store.updateFolder(
+                ctx,
                 folderId,
                 { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
                 expectedVersion,
@@ -123,7 +126,11 @@ export async function serveFolderRequest(
                 sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
                 return;
             }
-            sendJson<FolderResponse>(response, 200, await folderResponse(store, folderId, folder));
+            sendJson<FolderResponse>(
+                response,
+                200,
+                await folderResponse(ctx, store, folderId, folder),
+            );
             return;
         }
         if (request.method !== "POST") {
@@ -142,6 +149,7 @@ export async function serveFolderRequest(
                 return;
             }
             const folder = await store.archiveFolder(
+                ctx,
                 folderId,
                 expectedVersion,
                 requestMutationId(request),
@@ -150,7 +158,11 @@ export async function serveFolderRequest(
                 sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
                 return;
             }
-            sendJson<FolderResponse>(response, 200, await folderResponse(store, folderId, folder));
+            sendJson<FolderResponse>(
+                response,
+                200,
+                await folderResponse(ctx, store, folderId, folder),
+            );
             return;
         }
         const body = await readJson(8 * 1024);
@@ -179,6 +191,7 @@ export async function serveFolderRequest(
             return;
         }
         const folder = await store.moveFolder(
+            ctx,
             folderId,
             { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
             expectedVersion,
@@ -187,16 +200,16 @@ export async function serveFolderRequest(
             sendFolderError(response, 404, "folder_not_found", "That folder is gone.");
             return;
         }
-        sendJson<FolderResponse>(response, 200, await folderResponse(store, folderId, folder));
+        sendJson<FolderResponse>(response, 200, await folderResponse(ctx, store, folderId, folder));
     } catch (error) {
         if (error instanceof FolderError) {
             if (error.code === "version_conflict" && route.folderId !== undefined) {
-                const current = await store.getFolder(route.folderId);
+                const current = await store.getFolder(ctx, route.folderId);
                 if (current !== undefined) {
                     sendJson<FolderResponse>(
                         response,
                         409,
-                        await folderResponse(store, route.folderId, current),
+                        await folderResponse(ctx, store, route.folderId, current),
                     );
                     return;
                 }
@@ -229,11 +242,12 @@ function statusForCode(code: FolderErrorCode): number {
 }
 
 async function folderResponse(
+    ctx: Context,
     store: SessionStore,
     folderId: string,
     fallback: FolderResponse["folder"],
 ): Promise<FolderResponse> {
-    const catalog = await store.folderCatalog();
+    const catalog = await store.folderCatalog(ctx);
     return {
         folder: catalog.folders.find((folder) => folder.id === folderId) ?? fallback,
         revision: catalog.revision,

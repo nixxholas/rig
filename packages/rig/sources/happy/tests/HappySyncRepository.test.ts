@@ -10,11 +10,13 @@ import { sessions } from "../../persistence/database/schema.js";
 import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
 import { HappySyncRepository } from "../HappySyncRepository.js";
 import { isDatabaseFailure } from "../../persistence/isDatabaseFailure.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
 const directories: string[] = [];
 const HOUR_MS = 60 * 60 * 1_000;
 const DAY_MS = 24 * HOUR_MS;
 const NOW = 1_700_000_000_000;
+const ctx = createTestRootContext().named("happy-sync-repository-test");
 
 afterEach(async () => {
     await Promise.all(
@@ -23,34 +25,56 @@ afterEach(async () => {
 });
 
 describe("HappySyncRepository", () => {
-    it("rejects new messages without deleting pending delivery work when the outbox is full", async () => {
-        const { databasePath, repository } = await createRepository();
-        await repository.close();
-        const bounded = await HappySyncRepository.open(databasePath, Date.now, 2);
-        const first = createMessage("message-1");
-        const second = createMessage("message-2");
-        await bounded.enqueue("session-1", [first, second]);
+    it("acknowledges the Happy outbox with the operation context", async () => {
+        const ctx = createTestRootContext().named("happy-outbox-acknowledge");
+        const { repository } = await createRepository();
+        const message = createMessage("message-1");
 
-        await expect(bounded.enqueue("session-1", [createMessage("message-3")])).rejects.toThrow(
-            "Happy sync outbox is full",
-        );
-        expect(await bounded.pending("session-1")).toEqual([first, second]);
-        await bounded.close();
-    });
-
-    it("keeps a random session key and remote cursor across daemon restarts", async () => {
-        const { databasePath, repository } = await createRepository();
-        const first = await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account-1",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
         });
-        await repository.setRemoteSession("session-1", "remote-1");
-        await repository.updateLastRemoteSeq("session-1", 12);
-        await repository.close();
+        await repository.enqueue(ctx, "session-1", [message]);
+        await repository.acknowledge(ctx, "session-1", [message.localId]);
 
-        const reopened = await HappySyncRepository.open(databasePath);
-        const second = await reopened.ensureSession({
+        expect(await repository.pending(ctx, "session-1")).toEqual([]);
+        await repository.close(ctx);
+    });
+
+    it("rejects new messages without deleting pending delivery work when the outbox is full", async () => {
+        const { databasePath, repository } = await createRepository();
+        await repository.close(ctx);
+        const bounded = await HappySyncRepository.open(
+            createTestRootContext(),
+            databasePath,
+            Date.now,
+            2,
+        );
+        const first = createMessage("message-1");
+        const second = createMessage("message-2");
+        await bounded.enqueue(ctx, "session-1", [first, second]);
+
+        await expect(
+            bounded.enqueue(ctx, "session-1", [createMessage("message-3")]),
+        ).rejects.toThrow("Happy sync outbox is full");
+        expect(await bounded.pending(ctx, "session-1")).toEqual([first, second]);
+        await bounded.close(ctx);
+    });
+
+    it("keeps a random session key and remote cursor across daemon restarts", async () => {
+        const { databasePath, repository } = await createRepository();
+        const first = await repository.ensureSession(ctx, {
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        await repository.setRemoteSession(ctx, "session-1", "remote-1");
+        await repository.updateLastRemoteSeq(ctx, "session-1", 12);
+        await repository.close(ctx);
+
+        const reopened = await HappySyncRepository.open(createTestRootContext(), databasePath);
+        const second = await reopened.ensureSession(ctx, {
             credentialFingerprint: "account-1",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
@@ -58,35 +82,35 @@ describe("HappySyncRepository", () => {
 
         expect(second.encryptionKey).toEqual(first.encryptionKey);
         expect(second).toMatchObject({ lastRemoteSeq: 12, remoteSessionId: "remote-1" });
-        await reopened.close();
+        await reopened.close(ctx);
     });
 
     it("never moves the remote sequence backwards", async () => {
         const { repository } = await createRepository();
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account-1",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
         });
 
-        await repository.updateLastRemoteSeq("session-1", 12);
-        await repository.updateLastRemoteSeq("session-1", 5);
+        await repository.updateLastRemoteSeq(ctx, "session-1", 12);
+        await repository.updateLastRemoteSeq(ctx, "session-1", 5);
 
-        expect((await repository.getSession("session-1"))?.lastRemoteSeq).toBe(12);
-        await repository.close();
+        expect((await repository.getSession(ctx, "session-1"))?.lastRemoteSeq).toBe(12);
+        await repository.close(ctx);
     });
 
     it("rotates remote state when the authenticated Happy account changes", async () => {
         const { repository } = await createRepository();
-        const first = await repository.ensureSession({
+        const first = await repository.ensureSession(ctx, {
             credentialFingerprint: "account-1",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
         });
-        await repository.setRemoteSession("session-1", "remote-1");
-        await repository.enqueue("session-1", [createMessage("encrypted-for-account-1")]);
+        await repository.setRemoteSession(ctx, "session-1", "remote-1");
+        await repository.enqueue(ctx, "session-1", [createMessage("encrypted-for-account-1")]);
 
-        const rotated = await repository.ensureSession({
+        const rotated = await repository.ensureSession(ctx, {
             credentialFingerprint: "account-2",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
@@ -94,23 +118,23 @@ describe("HappySyncRepository", () => {
 
         expect(rotated.remoteSessionId).toBeUndefined();
         expect(rotated.encryptionKey).not.toEqual(first.encryptionKey);
-        expect(await repository.pending("session-1")).toEqual([]);
-        await repository.close();
+        expect(await repository.pending(ctx, "session-1")).toEqual([]);
+        await repository.close(ctx);
     });
 
     it("lists only sessions mapped for the active Happy credentials", async () => {
         const { repository } = await createRepository();
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account-1",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
         });
 
-        expect(await repository.sessionIds("account-1", { activeSinceMs: 0 })).toEqual([
+        expect(await repository.sessionIds(ctx, "account-1", { activeSinceMs: 0 })).toEqual([
             "session-1",
         ]);
-        expect(await repository.sessionIds("account-2", { activeSinceMs: 0 })).toEqual([]);
-        await repository.close();
+        expect(await repository.sessionIds(ctx, "account-2", { activeSinceMs: 0 })).toEqual([]);
+        await repository.close(ctx);
     });
 
     it("restores only live, recently active sessions and keeps the batch bounded", async () => {
@@ -130,37 +154,37 @@ describe("HappySyncRepository", () => {
             "stale",
             "subagent",
         ]) {
-            await repository.ensureSession({
+            await repository.ensureSession(ctx, {
                 credentialFingerprint: "account-1",
                 encryptionVariant: "dataKey",
                 sessionId,
             });
         }
 
-        expect(await repository.sessionIds("account-1")).toEqual(["chatting", "recent"]);
-        expect(await repository.sessionIds("account-1", { limit: 1 })).toEqual(["chatting"]);
-        expect(await repository.sessionIds("account-1", { activeSinceMs: 0 })).toEqual([
+        expect(await repository.sessionIds(ctx, "account-1")).toEqual(["chatting", "recent"]);
+        expect(await repository.sessionIds(ctx, "account-1", { limit: 1 })).toEqual(["chatting"]);
+        expect(await repository.sessionIds(ctx, "account-1", { activeSinceMs: 0 })).toEqual([
             "chatting",
             "recent",
             "stale",
             "session-1",
         ]);
-        await repository.close();
+        await repository.close(ctx);
     });
 
     it("rolls back session rotation when clearing the stale outbox fails", async () => {
         const { databasePath, repository } = await createRepository();
-        await repository.ensureSession({
+        await repository.ensureSession(ctx, {
             credentialFingerprint: "account-1",
             encryptionVariant: "dataKey",
             sessionId: "session-1",
         });
         const pending = createMessage("encrypted-for-account-1");
-        await repository.enqueue("session-1", [pending]);
-        await repository.close();
+        await repository.enqueue(ctx, "session-1", [pending]);
+        await repository.close(ctx);
 
-        const opened = await openSessionDatabase(databasePath);
-        await opened.database.run(
+        const opened = await openSessionDatabase(createTestRootContext(), databasePath);
+        await opened.ctx.tx.run(
             sql.raw(`
             CREATE TRIGGER reject_happy_outbox_delete
             BEFORE DELETE ON happy_outbox
@@ -169,11 +193,11 @@ describe("HappySyncRepository", () => {
             END
         `),
         );
-        await opened.client.close();
+        await opened.database.close(opened.ctx);
 
-        const reopened = await HappySyncRepository.open(databasePath);
+        const reopened = await HappySyncRepository.open(createTestRootContext(), databasePath);
         const failure = await reopened
-            .ensureSession({
+            .ensureSession(ctx, {
                 credentialFingerprint: "account-2",
                 encryptionKey: new Uint8Array(32).fill(2),
                 encryptionVariant: "dataKey",
@@ -184,9 +208,11 @@ describe("HappySyncRepository", () => {
                 (error: unknown) => error,
             );
         expect(isDatabaseFailure(failure)).toBe(true);
-        expect((await reopened.getSession("session-1"))?.credentialFingerprint).toBe("account-1");
-        expect(await reopened.pending("session-1")).toEqual([pending]);
-        await reopened.close();
+        expect((await reopened.getSession(ctx, "session-1"))?.credentialFingerprint).toBe(
+            "account-1",
+        );
+        expect(await reopened.pending(ctx, "session-1")).toEqual([pending]);
+        await reopened.close(ctx);
     });
 });
 
@@ -209,7 +235,10 @@ async function createRepository(now: () => number = Date.now) {
     directories.push(directory);
     const databasePath = join(directory, "sessions.sqlite");
     await createSessionDatabaseFixture(databasePath);
-    return { databasePath, repository: await HappySyncRepository.open(databasePath, now) };
+    return {
+        databasePath,
+        repository: await HappySyncRepository.open(createTestRootContext(), databasePath, now),
+    };
 }
 
 /*
@@ -226,9 +255,9 @@ async function insertSessions(
         updatedAtMs: number;
     }[],
 ): Promise<void> {
-    const opened = await openSessionDatabase(databasePath);
+    const opened = await openSessionDatabase(createTestRootContext(), databasePath);
     for (const row of rows) {
-        await opened.database
+        await opened.ctx.tx
             .insert(sessions)
             .values({
                 agentId: `agent-${row.id}`,
@@ -267,5 +296,5 @@ async function insertSessions(
             })
             .run();
     }
-    await opened.client.close();
+    await opened.database.close(opened.ctx);
 }

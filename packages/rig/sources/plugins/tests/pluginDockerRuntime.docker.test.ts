@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { createPluginDockerContainerName } from "../createPluginDockerContainerOptions.js";
 import { PluginManager } from "../PluginManager.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
@@ -23,6 +24,7 @@ const dockerAvailable = await docker.ping().then(
     () => false,
 );
 const cleanup: (() => Promise<void> | void)[] = [];
+const ctx = createTestRootContext().named("plugin-docker-runtime-test");
 
 afterAll(async () => {
     for (const dispose of cleanup.splice(0).reverse()) await dispose();
@@ -87,7 +89,7 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
                 .catch(() => undefined),
         );
 
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -95,7 +97,7 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const manager = new PluginManager({
             daemonLog: new DaemonLog({
                 path: join(root, "daemon.log"),
@@ -112,19 +114,19 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
             startupTimeoutMs: 60_000,
             store,
         });
-        cleanup.push(() => manager.close());
-        await manager.start();
+        cleanup.push(() => manager.close(ctx));
+        await manager.start(ctx);
 
-        const installed = await manager.install({
+        const installed = await manager.install(ctx, {
             fs: createNodeFileSystemContext(workspace, {
                 permissionMode: () => "full_access",
             }),
             sourceDirectory: source,
         });
 
-        const catalog = await manager.list();
+        const catalog = await manager.list(ctx);
         const processLog = await readFile(join(installed.directory, "plugin.log"), "utf8");
-        const startupLog = await manager.readLog("Docker Clock");
+        const startupLog = await manager.readLog(ctx, "Docker Clock");
         expect(catalog.plugins[0]?.error, processLog).toBeUndefined();
         expect(processLog).toContain(`Building Docker image ${image}.`);
         expect(catalog).toMatchObject({
@@ -151,7 +153,7 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
             State: { Running: true },
         });
 
-        await manager.uninstall({
+        await manager.uninstall(ctx, {
             fs: createNodeFileSystemContext(workspace, {
                 permissionMode: () => "full_access",
             }),

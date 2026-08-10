@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, asc, eq, isNull } from "drizzle-orm";
 
 import { folderItems, folders } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /** One active folder or folder item in the same direct-child ordering space. */
 export interface FolderChildOrder {
@@ -15,10 +16,11 @@ export interface FolderChildOrder {
  * null. Folder items cannot be placed at the root, so the root query only returns folders.
  */
 export async function queryFolderChildren(
-    tx: DatabaseScope,
+    ctx: Context,
     parentId: string | null,
 ): Promise<readonly FolderChildOrder[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolderChildren", async (ctx) => {
+        const tx = ctx.tx;
         const childFolders = await tx
             .select({
                 id: folders.id,

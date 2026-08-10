@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { ScheduledMessage } from "../../scheduling/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import {
     readNumber,
     readOptionalNumber,
@@ -11,10 +12,11 @@ import {
 } from "../session/impl/sqliteRow.js";
 
 export async function queryScheduledMessages(
-    tx: DatabaseScope,
+    ctx: Context,
     senderSessionId: string,
 ): Promise<readonly ScheduledMessage[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.scheduling.queryScheduledMessages", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             SELECT *
@@ -27,18 +29,23 @@ export async function queryScheduledMessages(
 }
 
 export async function queryNextPendingScheduledMessage(
-    tx: DatabaseScope,
+    ctx: Context,
 ): Promise<ScheduledMessage | undefined> {
-    return await inDatabase(tx, async (tx) => {
-        const row = await tx.get<Record<string, unknown>>(sql`
+    return await inDatabase(
+        ctx,
+        "rig.sql.scheduling.queryNextPendingScheduledMessage",
+        async (ctx) => {
+            const tx = ctx.tx;
+            const row = await tx.get<Record<string, unknown>>(sql`
         SELECT *
         FROM scheduled_messages
         WHERE status = 'pending'
         ORDER BY due_at_ms ASC, created_at_ms ASC
         LIMIT 1
     `);
-        return row === undefined ? undefined : readScheduledMessage(row);
-    });
+            return row === undefined ? undefined : readScheduledMessage(row);
+        },
+    );
 }
 
 function readScheduledMessage(row: Record<string, unknown>): ScheduledMessage {

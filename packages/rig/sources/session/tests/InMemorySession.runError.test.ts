@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,12 +43,12 @@ describe("InMemorySession provider failures", () => {
     it("keeps the provider error text on the durable run boundary", async () => {
         const session = createSession();
 
-        const run = await session.submit({ text: "Fail this turn." });
-        await expect(session.waitForRun(run.runId)).resolves.toEqual({
+        const run = await session.submit(ctx, { text: "Fail this turn." });
+        await expect(session.waitForRun(ctx, run.runId)).resolves.toEqual({
             errorMessage: PROVIDER_FAILURE,
             status: "error",
         });
-        await expect(session.waitForRun(run.runId)).resolves.toEqual({
+        await expect(session.waitForRun(ctx, run.runId)).resolves.toEqual({
             errorMessage: PROVIDER_FAILURE,
             status: "error",
         });
@@ -82,8 +85,8 @@ describe("InMemorySession provider failures", () => {
     it("reports the failed turn to external consumers instead of a completed one", async () => {
         const session = createSession();
 
-        const run = await session.submit({ text: "Fail this turn." });
-        await session.waitForRun(run.runId);
+        const run = await session.submit(ctx, { text: "Fail this turn." });
+        await session.waitForRun(ctx, run.runId);
 
         const mapper = new HappyMessageMapper();
         const happy = (session.events.since(undefined) ?? [])
@@ -108,28 +111,28 @@ describe("InMemorySession provider failures", () => {
         const databasePath = join(directory, "sessions.sqlite");
         const fixture = createFixture();
         try {
-            const initial = await PersistentSessionStore.open({
+            const initial = await PersistentSessionStore.open(ctx, {
                 createRuntime: fixture.createRuntime,
                 databasePath,
                 modelCatalog: fixture.catalog,
             });
-            const session = await initial.create({
+            const session = await initial.create(ctx, {
                 cwd: "/tmp/rig-provider-failure-persistence",
                 modelId: fixture.model.id,
                 providerId: fixture.provider.id,
             });
-            const run = await session.submit({ text: "Persist this failure." });
-            await session.waitForRun(run.runId);
+            const run = await session.submit(ctx, { text: "Persist this failure." });
+            await session.waitForRun(ctx, run.runId);
             const sessionId = session.id;
-            await initial.close();
+            await initial.close(ctx);
 
-            const restoredStore = await PersistentSessionStore.open({
+            const restoredStore = await PersistentSessionStore.open(ctx, {
                 createRuntime: fixture.createRuntime,
                 databasePath,
                 modelCatalog: fixture.catalog,
             });
             try {
-                const restored = (await restoredStore.get(sessionId))!;
+                const restored = (await restoredStore.get(ctx, sessionId))!;
                 expect(
                     restored.state().messages.find((entry) => entry.message.role === "error")
                         ?.message,
@@ -151,7 +154,7 @@ describe("InMemorySession provider failures", () => {
                     requestedModelId: "test/provider-failure",
                 });
             } finally {
-                await restoredStore.close();
+                await restoredStore.close(ctx);
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
@@ -161,7 +164,7 @@ describe("InMemorySession provider failures", () => {
 
 function createSession(): InMemorySession {
     const fixture = createFixture();
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         createRuntime: fixture.createRuntime,
         modelCatalog: fixture.catalog,
@@ -212,7 +215,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

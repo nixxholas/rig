@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, asc, eq, inArray, lt, or } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -5,7 +7,6 @@ import { p2pPeerPairingTrustSchema, type P2pPeerPairingTrust } from "../../p2p/P
 import { p2pPeerPairings } from "../database/schema.js";
 import { inDatabase } from "../database/inDatabase.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { queryP2pPeers } from "./queryP2pPeers.js";
 
 export type P2pPeerPairingConfirmResult =
@@ -18,10 +19,9 @@ export type P2pPeerPairingLocalReadyResult = "already_ready" | "missing" | "upda
 
 export type P2pPeerPairingCompleteResult = "completed" | "missing" | "not_active" | "not_confirmed";
 
-export async function queryP2pPeerPairings(
-    tx: DatabaseScope,
-): Promise<readonly P2pPeerPairingTrust[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryP2pPeerPairings(ctx: Context): Promise<readonly P2pPeerPairingTrust[]> {
+    return await inDatabase(ctx, "rig.sql.p2p.queryP2pPeerPairings", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.select().from(p2pPeerPairings).orderBy(asc(p2pPeerPairings.pairingId)).all()
         ).map(readPairing);
@@ -29,13 +29,14 @@ export async function queryP2pPeerPairings(
 }
 
 export async function createP2pPeerPairing(
-    tx: DatabaseScope,
+    ctx: Context,
     pairing: P2pPeerPairingTrust,
 ): Promise<void> {
     if (!Value.Check(p2pPeerPairingTrustSchema, pairing)) {
         throw new Error("The P2P pairing transaction is invalid.");
     }
-    await inDatabase(tx, async (tx) => {
+    await inDatabase(ctx, "rig.sql.p2p.createP2pPeerPairing", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(p2pPeerPairings)
             .values({
@@ -53,8 +54,9 @@ export async function createP2pPeerPairing(
     });
 }
 
-export async function deleteExpiredP2pPeerPairings(tx: DatabaseScope, now: number): Promise<void> {
-    await inDatabase(tx, async (tx) => {
+export async function deleteExpiredP2pPeerPairings(ctx: Context, now: number): Promise<void> {
+    await inDatabase(ctx, "rig.sql.p2p.deleteExpiredP2pPeerPairings", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .delete(p2pPeerPairings)
             .where(
@@ -70,8 +72,9 @@ export async function deleteExpiredP2pPeerPairings(tx: DatabaseScope, now: numbe
     });
 }
 
-export async function abortP2pPeerPairing(tx: DatabaseScope, pairingId: string): Promise<void> {
-    await inDatabase(tx, async (tx) => {
+export async function abortP2pPeerPairing(ctx: Context, pairingId: string): Promise<void> {
+    await inDatabase(ctx, "rig.sql.p2p.abortP2pPeerPairing", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .delete(p2pPeerPairings)
             .where(
@@ -85,11 +88,12 @@ export async function abortP2pPeerPairing(tx: DatabaseScope, pairingId: string):
 }
 
 export async function markP2pPeerPairingLocallyReady(
-    tx: DatabaseScope,
+    ctx: Context,
     pairingId: string,
 ): Promise<P2pPeerPairingLocalReadyResult> {
-    return await inTx(tx, async (tx) => {
-        const current = (await queryP2pPeerPairings(tx)).find(
+    return await inTx(ctx, "rig.sql.p2p.markP2pPeerPairingLocallyReady", async (ctx) => {
+        const tx = ctx.tx;
+        const current = (await queryP2pPeerPairings(ctx)).find(
             (pairing) => pairing.pairingId === pairingId,
         );
         if (current === undefined) return "missing";
@@ -106,11 +110,12 @@ export async function markP2pPeerPairingLocallyReady(
 }
 
 export async function confirmP2pPeerPairing(
-    tx: DatabaseScope,
+    ctx: Context,
     pairingId: string,
 ): Promise<P2pPeerPairingConfirmResult> {
-    return await inTx(tx, async (tx) => {
-        const current = (await queryP2pPeerPairings(tx)).find(
+    return await inTx(ctx, "rig.sql.p2p.confirmP2pPeerPairing", async (ctx) => {
+        const tx = ctx.tx;
+        const current = (await queryP2pPeerPairings(ctx)).find(
             (pairing) => pairing.pairingId === pairingId,
         );
         if (current === undefined) return "missing";
@@ -126,16 +131,17 @@ export async function confirmP2pPeerPairing(
 }
 
 export async function completeP2pPeerPairing(
-    tx: DatabaseScope,
+    ctx: Context,
     pairingId: string,
 ): Promise<P2pPeerPairingCompleteResult> {
-    return await inTx(tx, async (tx) => {
-        const pending = (await queryP2pPeerPairings(tx)).find(
+    return await inTx(ctx, "rig.sql.p2p.completeP2pPeerPairing", async (ctx) => {
+        const tx = ctx.tx;
+        const pending = (await queryP2pPeerPairings(ctx)).find(
             (pairing) => pairing.pairingId === pairingId,
         );
         if (pending === undefined) return "missing";
         if (pending.state !== "confirmed") return "not_confirmed";
-        const active = (await queryP2pPeers(tx)).find(
+        const active = (await queryP2pPeers(ctx)).find(
             (peer) =>
                 peer.instanceId === pending.peer.instanceId &&
                 peer.publicKey === pending.peer.publicKey,

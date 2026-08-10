@@ -6,6 +6,17 @@ import { basename, extname, isAbsolute, relative } from "node:path";
 import { isCuid } from "@paralleldrive/cuid2";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+
+import {
+    recordApiRequest,
+    setSpanAttributes,
+    spanTraceId,
+    withRequestContext,
+    withUntracedRequestContext,
+} from "../observability/index.js";
+import { shouldTraceProtocolRoute } from "./protocolTracing.js";
+import { projectP2pApiStatus } from "./projectP2pApiStatus.js";
 
 import type {
     Attachment,
@@ -55,6 +66,8 @@ import type {
     ReplicateRigProfileRequest,
     RigProfileResponse,
     UpdateRigProfileRequest,
+    GitChangeSnapshot,
+    GitRepositoryFacts,
     GitStateResponse,
     GitWatchResponse,
     GoalSessionResponse,
@@ -180,6 +193,7 @@ import type {
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import type { SessionUsageSummary } from "../session/usage/index.js";
+import { projectClientTranscript } from "../session/projectClientTranscript.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import {
     FileSearchService,
@@ -196,7 +210,7 @@ import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
 import { parseGlobalEventCursor } from "../global-event/parseGlobalEventCursor.js";
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
 import { selectRecentSessionEvents } from "../session/selectRecentSessionEvents.js";
-import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
+import { SESSION_BOOTSTRAP_TURN_LIMIT, SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { parseTimelineRequest } from "./parseTimelineRequest.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
@@ -350,6 +364,8 @@ export interface ProtocolHttpServerOptions {
     resolveModelCatalog?: (ownerInstanceId: string) => ModelCatalog;
     p2pNetwork?: P2pNetwork;
     p2pPairing?: P2pPairingServiceContract;
+    resolveP2pNetwork?: () => P2pNetwork | undefined;
+    resolveP2pPairing?: () => P2pPairingServiceContract | undefined;
     p2pNode?: () => DaemonConfig["p2p"];
     p2pStatus?: () => P2pStatus;
     canP2pPeerConfigure?: (peerId: string) => boolean;
@@ -359,6 +375,7 @@ export interface ProtocolHttpServerOptions {
     profiles?: RigProfileStore;
     sharing?: SharingLifecycleServiceContract;
     replaceP2pCredentials?: (
+        ctx: Context,
         authenticatedOwnerId: string,
         envelope: P2pEncryptedCredentialSnapshot,
     ) => Promise<P2pCredentialReplaceResult>;
@@ -375,12 +392,13 @@ export interface ProtocolHttpServerOptions {
         ownerInstanceId?: string,
     ) => readonly ProviderUsageEntry[] | Promise<readonly ProviderUsageEntry[]>;
     onDaemonConfigChange?: (
+        ctx: Context,
         config: DaemonConfig,
     ) => AppliedDaemonSettings | undefined | Promise<AppliedDaemonSettings | undefined>;
     onShutdown?: () => void;
-    onReloadHappy?: () => boolean | Promise<boolean>;
-    onStartInspector?: () => StartInspectorResponse | Promise<StartInspectorResponse>;
-    onStopInspector?: () => StopInspectorResponse | Promise<StopInspectorResponse>;
+    onReloadHappy?: (ctx: Context) => boolean | Promise<boolean>;
+    onStartInspector?: (ctx: Context) => StartInspectorResponse | Promise<StartInspectorResponse>;
+    onStopInspector?: (ctx: Context) => StopInspectorResponse | Promise<StopInspectorResponse>;
     plugins?: Pick<
         PluginContext,
         | "callAppTool"
@@ -406,13 +424,16 @@ export interface ProtocolHttpServerOptions {
 }
 
 export async function createProtocolHttpServer(
+    ctx: Context,
     options: ProtocolHttpServerOptions,
     server: Server = createServer(),
 ): Promise<Server> {
-    const modelCatalog = options.modelCatalog ?? createModelCatalog();
+    const p2pProxyShutdown = new AbortController();
+    protocolP2pProxyShutdowns.set(server, p2pProxyShutdown);
+    const modelCatalog = options.modelCatalog ?? createModelCatalog(ctx);
     const store =
         options.store ??
-        (await InMemorySessionStore.open({
+        (await InMemorySessionStore.open(ctx, {
             ...(options.defaultDocker === undefined
                 ? {}
                 : { defaultDocker: options.defaultDocker }),
@@ -429,8 +450,8 @@ export async function createProtocolHttpServer(
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
-        p2pNetwork: options.p2pNetwork,
-        p2pPairing: options.p2pPairing,
+        resolveP2pNetwork: options.resolveP2pNetwork ?? (() => options.p2pNetwork),
+        resolveP2pPairing: options.resolveP2pPairing ?? (() => options.p2pPairing),
         p2pNode: options.p2pNode,
         p2pStatus: options.p2pStatus,
         canP2pPeerConfigure: options.canP2pPeerConfigure,
@@ -441,6 +462,7 @@ export async function createProtocolHttpServer(
         replaceP2pCredentials: options.replaceP2pCredentials,
         resolveModelCatalog: options.resolveModelCatalog,
         prepareP2pRequest: options.prepareP2pRequest,
+        p2pProxyShutdown: p2pProxyShutdown.signal,
         happyCloud: options.happyCloud,
         onDaemonConfigChange: options.onDaemonConfigChange,
         onboarding: options.onboarding,
@@ -453,22 +475,20 @@ export async function createProtocolHttpServer(
     // The persistent store caches sessions weakly; each open SSE stream needs its own strong lease.
     const sessionEventStreamLeases = new Set<SessionEventStreamLease>();
     const sessionTerminals = new SessionTerminalTracker();
-    const p2pNetwork = options.p2pNetwork;
-    const sshBridgeEnabled = p2pNetwork?.sshBridgeEnabled;
-    const acceptSshBridge =
-        p2pNetwork !== undefined &&
-        typeof sshBridgeEnabled === "function" &&
-        sshBridgeEnabled.call(p2pNetwork) === true
-            ? p2pNetwork.acceptSshBridge.bind(p2pNetwork)
-            : undefined;
+    const resolveP2pNetwork = options.resolveP2pNetwork ?? (() => options.p2pNetwork);
 
     attachRemoteTerminalWebSocketServer({ server, store, token: options.token });
     attachP2pPeerTunnels({
-        ...(p2pNetwork === undefined ? {} : { network: p2pNetwork }),
+        resolveNetwork: resolveP2pNetwork,
         server,
         token: options.token,
     });
-    attachP2pSshBridge(server, options.token, acceptSshBridge);
+    attachP2pSshBridge(server, options.token, undefined, () => {
+        const network = resolveP2pNetwork();
+        return network?.sshBridgeEnabled() === true
+            ? network.acceptSshBridge.bind(network)
+            : undefined;
+    });
     attachHttpConnectProxy(server, options.token, store);
 
     server.on("request", (request, response) => {
@@ -477,24 +497,60 @@ export async function createProtocolHttpServer(
             sendJson(response, 503, { error: "The local daemon is shutting down." });
             return;
         }
-        const handle = () =>
-            handleRequest(
-                request,
-                response,
-                store,
-                modelCatalog,
-                identity,
-                fileSearchService,
-                runtimeConfig,
-                options.token,
-                options.onShutdown,
-                options.defaultDocker,
-                options.taskDrain,
-                options.getProviderQuota,
-                sessionEventStreamLeases,
-                sessionTerminals,
-                appletContextTokens,
-            );
+        const url = new URL(request.url ?? "/", "http://unix");
+        const routeName = protocolTraceRoute(url);
+        const peerRoute = matchP2pPeerRoute(url);
+        const rejectedPeerPoll =
+            peerRoute !== undefined &&
+            resolveP2pNetwork()?.peerApiAvailable?.(peerRoute.peerId) === false;
+        const traced = shouldTraceProtocolRoute(routeName) && !rejectedPeerPoll;
+        const handle = async () => {
+            const startedAt = performance.now();
+            try {
+                const run = (requestCtx: Context) =>
+                    handleRequest(
+                        requestCtx,
+                        request,
+                        response,
+                        store,
+                        modelCatalog,
+                        identity,
+                        fileSearchService,
+                        runtimeConfig,
+                        options.token,
+                        options.onShutdown,
+                        options.defaultDocker,
+                        options.taskDrain,
+                        options.getProviderQuota,
+                        sessionEventStreamLeases,
+                        sessionTerminals,
+                        appletContextTokens,
+                    );
+                const logContext = {
+                    method: request.method ?? "UNKNOWN",
+                    route: routeName,
+                };
+                const runRequest = traced ? withRequestContext : withUntracedRequestContext;
+                await runRequest(routeName, logContext, async (requestCtx) => {
+                    if (traced) {
+                        setSpanAttributes(requestCtx, {
+                            "http.request.method": request.method ?? "UNKNOWN",
+                            "rig.api.route": routeName,
+                        });
+                        const traceId = spanTraceId(requestCtx);
+                        if (traceId !== undefined) response.setHeader("x-rig-trace-id", traceId);
+                    }
+                    await run(requestCtx);
+                });
+            } finally {
+                recordApiRequest(
+                    routeName,
+                    request.method ?? "UNKNOWN",
+                    response.statusCode,
+                    performance.now() - startedAt,
+                );
+            }
+        };
         const handling =
             mutating && options.taskDrain !== undefined ? options.taskDrain.run(handle) : handle();
         void handling.catch((error: unknown) => {
@@ -519,10 +575,33 @@ export async function createProtocolHttpServer(
         });
     });
     server.once("close", () => {
+        p2pProxyShutdown.abort();
+        protocolP2pProxyShutdowns.delete(server);
         fileSearchService.close();
         sessionTerminals.dispose();
     });
     return server;
+}
+
+const protocolP2pProxyShutdowns = new WeakMap<Server, AbortController>();
+
+export function beginProtocolHttpServerShutdown(server: Server): void {
+    protocolP2pProxyShutdowns.get(server)?.abort();
+}
+
+function protocolApiArea(pathname: string): string {
+    const area = pathname.split("/").find((part) => part.length > 0);
+    return area !== undefined && /^[a-z][a-z0-9-]*$/u.test(area) ? area : "unknown";
+}
+
+function protocolTraceRoute(url: URL): string {
+    const peerRoute = matchP2pPeerRoute(url);
+    if (peerRoute === undefined) {
+        return matchRoute(url.pathname)?.name ?? protocolApiArea(url.pathname);
+    }
+    const peerPathname = new URL(peerRoute.path, "http://rig.peer").pathname;
+    const peerOperation = matchRoute(peerPathname)?.name ?? protocolApiArea(peerPathname);
+    return `peer.${peerOperation}`;
 }
 
 interface ProtocolServerRuntimeConfig {
@@ -535,8 +614,8 @@ interface ProtocolServerRuntimeConfig {
     globalInstructionsPath: string;
     globalSecurityPolicyPath: string;
     listProviderUsage: ProtocolHttpServerOptions["listProviderUsage"];
-    p2pNetwork: P2pNetwork | undefined;
-    p2pPairing: P2pPairingServiceContract | undefined;
+    resolveP2pNetwork: () => P2pNetwork | undefined;
+    resolveP2pPairing: () => P2pPairingServiceContract | undefined;
     p2pNode: (() => DaemonConfig["p2p"]) | undefined;
     p2pStatus: (() => P2pStatus) | undefined;
     profiles: RigProfileStore | undefined;
@@ -544,12 +623,13 @@ interface ProtocolServerRuntimeConfig {
     replaceP2pCredentials: ProtocolHttpServerOptions["replaceP2pCredentials"];
     resolveModelCatalog: ProtocolHttpServerOptions["resolveModelCatalog"];
     prepareP2pRequest: PrepareP2pHttpRequest | undefined;
+    p2pProxyShutdown: AbortSignal;
     happyCloud: HappyCloudServiceContract | undefined;
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
     onboarding: OnboardingServiceContract | undefined;
-    onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
-    onStopInspector: (() => StopInspectorResponse | Promise<StopInspectorResponse>) | undefined;
-    onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
+    onStartInspector: ProtocolHttpServerOptions["onStartInspector"];
+    onStopInspector: ProtocolHttpServerOptions["onStopInspector"];
+    onReloadHappy: ProtocolHttpServerOptions["onReloadHappy"];
     plugins:
         | Pick<
               PluginContext,
@@ -610,6 +690,7 @@ const pluginAppStorageBodySchema = Type.Object(
 const emptyObjectSchema = Type.Object({}, { additionalProperties: false });
 
 async function handleRequest(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     store: SessionStore,
@@ -658,17 +739,30 @@ async function handleRequest(
         return;
     }
     if (p2pPeerRoute !== undefined) {
-        if (runtimeConfig.p2pNetwork === undefined) {
+        if (runtimeConfig.p2pProxyShutdown.aborted) {
+            sendJson(response, 503, { error: "The local daemon is shutting down." });
+            return;
+        }
+        const p2pNetwork = runtimeConfig.resolveP2pNetwork();
+        if (p2pNetwork === undefined) {
             sendJson(response, 503, { error: "P2P networking is unavailable." });
             return;
         }
+        if (p2pNetwork.peerApiAvailable?.(p2pPeerRoute.peerId) === false) {
+            sendJson(response, 403, {
+                error: "P2P API sharing is disabled for that peer connection.",
+            });
+            return;
+        }
         await proxyP2pHttpRequest(
-            runtimeConfig.p2pNetwork,
+            ctx,
+            p2pNetwork,
             p2pPeerRoute.peerId,
             p2pPeerRoute.path,
             request,
             response,
             runtimeConfig.prepareP2pRequest,
+            runtimeConfig.p2pProxyShutdown,
         );
         return;
     }
@@ -702,7 +796,7 @@ async function handleRequest(
             return;
         }
         if (route.name === "onboarding") {
-            sendJson(response, 200, await onboarding.status());
+            sendJson(response, 200, await onboarding.status(ctx));
             return;
         }
         const body = await readJson<unknown>(request, 8 * 1024);
@@ -714,7 +808,7 @@ async function handleRequest(
             sendJson<OnboardMurmurResponse>(
                 response,
                 200,
-                await onboarding.onboardMurmur(body as OnboardMurmurRequest),
+                await onboarding.onboardMurmur(ctx, body as OnboardMurmurRequest),
             );
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -724,13 +818,19 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "p2p-status") {
+        const status = runtimeConfig.p2pStatus?.() ?? {
+            name: runtimeConfig.p2pNode?.().name ?? "Rig",
+            transports: [],
+        };
+        const network = runtimeConfig.resolveP2pNetwork();
         sendJson<P2pStatus>(
             response,
             200,
-            runtimeConfig.p2pStatus?.() ?? {
-                name: runtimeConfig.p2pNode?.().name ?? "Rig",
-                transports: [],
-            },
+            projectP2pApiStatus(
+                status,
+                network === undefined ? undefined : (peerId) => network.peerApiAvailable(peerId),
+                p2pPeerId(request),
+            ),
         );
         return;
     }
@@ -759,7 +859,7 @@ async function handleRequest(
             sendJson(
                 response,
                 200,
-                await runtimeConfig.replaceP2pCredentials(authenticatedOwnerId, body),
+                await runtimeConfig.replaceP2pCredentials(ctx, authenticatedOwnerId, body),
             );
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -793,18 +893,18 @@ async function handleRequest(
         }
         try {
             if (route.name === "sharing" && request.method === "GET") {
-                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot(ctx));
                 return;
             }
             if (route.name === "sharing" && request.method === "DELETE") {
-                sendJson<SharingSnapshot>(response, 200, await sharing.reset());
+                sendJson<SharingSnapshot>(response, 200, await sharing.reset(ctx));
                 return;
             }
             if (route.name === "sharing-invitations" && request.method === "POST") {
                 sendJson<CreateSharingInvitationResponse>(
                     response,
                     201,
-                    await sharing.createInvitation(),
+                    await sharing.createInvitation(ctx),
                 );
                 return;
             }
@@ -820,7 +920,7 @@ async function handleRequest(
                 sendJson<FolderShareStatus>(
                     response,
                     201,
-                    await sharing.createFolderShare(input.folderId, input.contacts),
+                    await sharing.createFolderShare(ctx, input.folderId, input.contacts),
                 );
                 return;
             }
@@ -832,6 +932,7 @@ async function handleRequest(
                 }
                 sendJson<SharingOutgoingContactRequestResponse>(response, 202, {
                     request: await sharing.requestContact(
+                        ctx,
                         (body as RequestSharingContactRequest).invitation,
                     ),
                 });
@@ -842,8 +943,8 @@ async function handleRequest(
                 route.operation === "accept" &&
                 request.method === "POST"
             ) {
-                await sharing.acceptContact(route.requestId);
-                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                await sharing.acceptContact(ctx, route.requestId);
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot(ctx));
                 return;
             }
             if (
@@ -851,13 +952,13 @@ async function handleRequest(
                 route.operation === undefined &&
                 request.method === "DELETE"
             ) {
-                await sharing.rejectContact(route.requestId);
-                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                await sharing.rejectContact(ctx, route.requestId);
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot(ctx));
                 return;
             }
             if (route.name === "sharing-contact" && request.method === "DELETE") {
-                await sharing.removeContact(route.identity);
-                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot());
+                await sharing.removeContact(ctx, route.identity);
+                sendJson<SharingSnapshot>(response, 200, await sharing.snapshot(ctx));
                 return;
             }
         } catch (error) {
@@ -890,12 +991,12 @@ async function handleRequest(
         }
         if (request.method === "GET" && route.name === "profiles") {
             sendJson<ListRigProfilesResponse>(response, 200, {
-                profiles: [...(await profiles.list())],
+                profiles: [...(await profiles.list(ctx))],
             });
             return;
         }
         if (request.method === "GET" && route.name === "profile") {
-            const profile = await profiles.get(route.profileId);
+            const profile = await profiles.get(ctx, route.profileId);
             if (profile === undefined) {
                 sendJson(response, 404, { error: "Rig profile not found." });
                 return;
@@ -925,7 +1026,7 @@ async function handleRequest(
                         ? undefined
                         : await normalizeRigProfilePhoto(input.photo);
                 sendJson<RigProfileResponse>(response, 201, {
-                    profile: await profiles.create({
+                    profile: await profiles.create(ctx, {
                         email: input.email,
                         name: input.name,
                         ...(photo === undefined ? {} : { photo }),
@@ -958,7 +1059,7 @@ async function handleRequest(
                     input.photo === undefined || input.photo === null
                         ? input.photo
                         : await normalizeRigProfilePhoto(input.photo);
-                const profile = await profiles.update(route.profileId, {
+                const profile = await profiles.update(ctx, route.profileId, {
                     ...(input.email === undefined ? {} : { email: input.email }),
                     ...(input.name === undefined ? {} : { name: input.name }),
                     ...(photo === undefined ? {} : { photo }),
@@ -1005,7 +1106,7 @@ async function handleRequest(
             }
             try {
                 sendJson<RigProfileResponse>(response, 200, {
-                    profile: await profiles.replicate(input.profile, authenticatedPeerId),
+                    profile: await profiles.replicate(ctx, input.profile, authenticatedPeerId),
                 });
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
@@ -1021,15 +1122,12 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if (runtimeConfig.p2pPairing === undefined) {
+        const p2pPairing = runtimeConfig.resolveP2pPairing();
+        if (p2pPairing === undefined) {
             sendJson(response, 503, { error: "P2P pairing is unavailable." });
             return;
         }
-        sendJson<CreateP2pInvitationResponse>(
-            response,
-            201,
-            await runtimeConfig.p2pPairing.createInvitation(),
-        );
+        sendJson<CreateP2pInvitationResponse>(response, 201, await p2pPairing.createInvitation());
         return;
     }
     if (route.name === "p2p-joins") {
@@ -1037,7 +1135,8 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if (runtimeConfig.p2pPairing === undefined) {
+        const p2pPairing = runtimeConfig.resolveP2pPairing();
+        if (p2pPairing === undefined) {
             sendJson(response, 503, { error: "P2P pairing is unavailable." });
             return;
         }
@@ -1046,11 +1145,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "The P2P invitation request is invalid." });
             return;
         }
-        sendJson<JoinP2pInvitationResponse>(
-            response,
-            202,
-            await runtimeConfig.p2pPairing.join(body.invitation),
-        );
+        sendJson<JoinP2pInvitationResponse>(response, 202, await p2pPairing.join(body.invitation));
         return;
     }
     if (route.name === "p2p-pairing") {
@@ -1058,7 +1153,7 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const state = runtimeConfig.p2pPairing?.get(route.pairingId);
+        const state = runtimeConfig.resolveP2pPairing()?.get(route.pairingId);
         if (state === undefined) {
             sendJson(response, 404, { error: "P2P pairing not found." });
             return;
@@ -1071,7 +1166,8 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if (runtimeConfig.p2pPairing === undefined) {
+        const p2pPairing = runtimeConfig.resolveP2pPairing();
+        if (p2pPairing === undefined) {
             sendJson(response, 503, { error: "P2P pairing is unavailable." });
             return;
         }
@@ -1080,11 +1176,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "The P2P verification answer is invalid." });
             return;
         }
-        sendJson<P2pPairingState>(
-            response,
-            200,
-            runtimeConfig.p2pPairing.answer(route.pairingId, body.accept),
-        );
+        sendJson<P2pPairingState>(response, 200, p2pPairing.answer(route.pairingId, body.accept));
         return;
     }
 
@@ -1116,7 +1208,7 @@ async function handleRequest(
             return;
         }
         if (route.name === "happy-cloud-status") {
-            sendJson<HappyCloudStatus>(response, 200, await happyCloud.status());
+            sendJson<HappyCloudStatus>(response, 200, await happyCloud.status(ctx));
             return;
         }
         if (route.name === "happy-cloud-commands") {
@@ -1144,7 +1236,11 @@ async function handleRequest(
                 return;
             }
             try {
-                sendJson<HappyCloudCommandResponse>(response, 200, await happyCloud.apply(command));
+                sendJson<HappyCloudCommandResponse>(
+                    response,
+                    200,
+                    await happyCloud.apply(ctx, command),
+                );
                 return;
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
@@ -1154,7 +1250,7 @@ async function handleRequest(
                     sendJson(response, conflict ? 409 : 403, {
                         code: error.code,
                         error: error.message,
-                        status: await happyCloud.status(),
+                        status: await happyCloud.status(ctx),
                     });
                     return;
                 }
@@ -1162,7 +1258,7 @@ async function handleRequest(
             }
         }
         if (route.name === "happy-cloud-profile") {
-            const profile = await happyCloud.getProfile();
+            const profile = await happyCloud.getProfile(ctx);
             if (profile === undefined) {
                 sendJson(response, 404, { error: "No encrypted Happy Profile is stored." });
                 return;
@@ -1180,7 +1276,7 @@ async function handleRequest(
                 });
                 return;
             }
-            const blob = await happyCloud.getSessionBlob(cloudSessionId);
+            const blob = await happyCloud.getSessionBlob(ctx, cloudSessionId);
             if (blob === undefined) {
                 sendJson(response, 404, {
                     error: "No encrypted mobile session blob is stored.",
@@ -1208,7 +1304,7 @@ async function handleRequest(
             return;
         }
         const cursor = store.liveEvents.cursor();
-        sendJson(response, 200, { cursor, ...(await runtimeConfig.plugins.list()) });
+        sendJson(response, 200, { cursor, ...(await runtimeConfig.plugins.list(ctx)) });
         return;
     }
     if (request.method === "POST" && route.name === "plugin-catalog") {
@@ -1257,7 +1353,7 @@ async function handleRequest(
         }
         const operation = requestOperationSignal(request, response);
         try {
-            const catalog = await plugins.discoverRepository(body, operation.signal);
+            const catalog = await plugins.discoverRepository(ctx, body, operation.signal);
             if (!response.destroyed) sendJson(response, 200, catalog);
         } catch (error) {
             if (!response.destroyed && !operation.signal.aborted) {
@@ -1348,7 +1444,7 @@ async function handleRequest(
         try {
             const plugin =
                 body.source.type === "local-directory"
-                    ? await plugins.install({
+                    ? await plugins.install(ctx, {
                           fs: createNodeFileSystemContext(body.source.sourceDirectory, {
                               permissionMode: () => "full_access",
                           }),
@@ -1356,7 +1452,7 @@ async function handleRequest(
                           signal: operation.signal,
                           sourceDirectory: body.source.sourceDirectory,
                       })
-                    : await plugins.installFromGitHub(body.source, {
+                    : await plugins.installFromGitHub(ctx, body.source, {
                           fs: createNodeFileSystemContext(process.cwd(), {
                               permissionMode: () => "full_access",
                           }),
@@ -1403,7 +1499,7 @@ async function handleRequest(
         }
         const operation = requestOperationSignal(request, response);
         try {
-            const plugin = await plugins.uninstall({
+            const plugin = await plugins.uninstall(ctx, {
                 fs: createNodeFileSystemContext(process.cwd(), {
                     permissionMode: () => "full_access",
                 }),
@@ -1436,7 +1532,9 @@ async function handleRequest(
             sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
             return;
         }
-        sendJson(response, 200, { log: await runtimeConfig.plugins.readLog(route.pluginName) });
+        sendJson(response, 200, {
+            log: await runtimeConfig.plugins.readLog(ctx, route.pluginName),
+        });
         return;
     }
     if (request.method === "GET" && route.name === "plugin-icon") {
@@ -1447,7 +1545,12 @@ async function handleRequest(
         }
         const operation = requestOperationSignal(request, response);
         try {
-            const icon = await plugins.readIcon(route.pluginId, route.generation, operation.signal);
+            const icon = await plugins.readIcon(
+                ctx,
+                route.pluginId,
+                route.generation,
+                operation.signal,
+            );
             if (!response.destroyed) {
                 response.statusCode = 200;
                 response.setHeader("cache-control", "private, max-age=31536000, immutable");
@@ -1518,6 +1621,7 @@ async function handleRequest(
         response.once("close", abort);
         try {
             const result = await plugins.callAppTool(
+                ctx,
                 route.appId,
                 route.generation,
                 body.server,
@@ -1544,23 +1648,23 @@ async function handleRequest(
             if (route.operation === "list") {
                 Value.Decode(emptyObjectSchema, rawBody);
                 sendJson(response, 200, {
-                    keys: await plugins.storageList(route.appId, route.generation),
+                    keys: await plugins.storageList(ctx, route.appId, route.generation),
                 });
                 return;
             }
             const body = Value.Decode(pluginAppStorageBodySchema, rawBody);
             if (route.operation === "get") {
                 sendJson(response, 200, {
-                    value: await plugins.storageGet(route.appId, route.generation, body.key),
+                    value: await plugins.storageGet(ctx, route.appId, route.generation, body.key),
                 });
             } else if (route.operation === "set") {
                 if (!Object.hasOwn(body, "value")) {
                     throw new PluginAppError("invalid_input", "Storage set requires a value.");
                 }
-                await plugins.storageSet(route.appId, route.generation, body.key, body.value);
+                await plugins.storageSet(ctx, route.appId, route.generation, body.key, body.value);
                 sendJson(response, 200, {});
             } else {
-                await plugins.storageDelete(route.appId, route.generation, body.key);
+                await plugins.storageDelete(ctx, route.appId, route.generation, body.key);
                 sendJson(response, 200, {});
             }
         } catch (error) {
@@ -1585,7 +1689,7 @@ async function handleRequest(
             const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
             const sessionId = url.searchParams.get("sessionId") ?? undefined;
             sendJson<ListSlotEntriesResponse>(response, 200, {
-                entries: await store.slots.list({
+                entries: await store.slots.list(ctx, {
                     ...(slot === undefined ? {} : { slot }),
                     ...(projectId === undefined ? {} : { projectId }),
                     ...(workspaceId === undefined ? {} : { workspaceId }),
@@ -1604,7 +1708,7 @@ async function handleRequest(
             }
             try {
                 sendJson<SlotEntryResponse>(response, 201, {
-                    entry: await store.slots.create(body as CreateSlotEntryRequest),
+                    entry: await store.slots.create(ctx, body as CreateSlotEntryRequest),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryInvalidError) {
@@ -1630,6 +1734,7 @@ async function handleRequest(
             try {
                 sendJson<SlotEntryResponse>(response, 200, {
                     entry: await store.slots.update(
+                        ctx,
                         route.slotEntryId,
                         body as UpdateSlotEntryRequest,
                     ),
@@ -1650,7 +1755,7 @@ async function handleRequest(
         if (request.method === "DELETE") {
             try {
                 sendJson<SlotEntryResponse>(response, 200, {
-                    entry: await store.slots.remove(route.slotEntryId),
+                    entry: await store.slots.remove(ctx, route.slotEntryId),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryNotFoundError) {
@@ -1667,7 +1772,7 @@ async function handleRequest(
     if (route.name === "applets") {
         if (request.method === "GET") {
             sendJson<ListAppletsResponse>(response, 200, {
-                applets: await store.applets.list(),
+                applets: await store.applets.list(ctx),
             });
             return;
         }
@@ -1690,7 +1795,7 @@ async function handleRequest(
             }
             try {
                 sendJson<AppletResponse>(response, 201, {
-                    applet: await store.applets.create(body),
+                    applet: await store.applets.create(ctx, body),
                 });
             } catch (error) {
                 if (error instanceof AppletInvalidError) {
@@ -1719,8 +1824,12 @@ async function handleRequest(
         try {
             const applet =
                 route.name === "applet-versions"
-                    ? await store.applets.update(route.appletName, body as UpdateAppletRequest)
-                    : await store.applets.revert(route.appletName, body as RevertAppletRequest);
+                    ? await store.applets.update(ctx, route.appletName, body as UpdateAppletRequest)
+                    : await store.applets.revert(
+                          ctx,
+                          route.appletName,
+                          body as RevertAppletRequest,
+                      );
             sendJson<AppletResponse>(response, 200, { applet });
         } catch (error) {
             if (error instanceof AppletInvalidError) {
@@ -1756,7 +1865,7 @@ async function handleRequest(
             );
             return;
         }
-        const applet = await store.applets.get(route.appletName);
+        const applet = await store.applets.get(ctx, route.appletName);
         if (applet === undefined) {
             sendAppletManagementError(
                 response,
@@ -1766,7 +1875,7 @@ async function handleRequest(
             );
             return;
         }
-        const resolution = await resolveAppletContext(store, applet, body);
+        const resolution = await resolveAppletContext(ctx, store, applet, body);
         if (resolution.type === "error") {
             sendAppletManagementError(response, 400, resolution.code, resolution.message);
             return;
@@ -1781,7 +1890,7 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if ((await store.applets.get(route.appletName)) === undefined) {
+        if ((await store.applets.get(ctx, route.appletName)) === undefined) {
             sendAppletManagementError(
                 response,
                 404,
@@ -1790,7 +1899,7 @@ async function handleRequest(
             );
             return;
         }
-        const icon = await store.applets.readIcon(route.appletName, route.format);
+        const icon = await store.applets.readIcon(ctx, route.appletName, route.format);
         if (icon.type !== "file") {
             sendAppletManagementError(response, 404, "applet_not_found", "Applet icon not found.");
             return;
@@ -1809,7 +1918,7 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const applet = await store.applets.get(route.appletName);
+        const applet = await store.applets.get(ctx, route.appletName);
         if (applet === undefined) {
             sendAppletManagementError(
                 response,
@@ -1846,7 +1955,7 @@ async function handleRequest(
         return;
     }
     if (route.name === "worklets") {
-        await handleWorkletRequest(request, response, { name: "worklets" }, runtimeConfig);
+        await handleWorkletRequest(request, response, { name: "worklets" }, ctx, runtimeConfig);
         return;
     }
     if (
@@ -1856,7 +1965,7 @@ async function handleRequest(
         route.name === "worklet-log" ||
         route.name === "worklet-icon"
     ) {
-        await handleWorkletRequest(request, response, route, runtimeConfig);
+        await handleWorkletRequest(request, response, route, ctx, runtimeConfig);
         return;
     }
     if (request.method === "POST" && route.name === "debug-inspector") {
@@ -1864,7 +1973,7 @@ async function handleRequest(
             sendJson(response, 409, { error: "This daemon cannot start a debugger." });
             return;
         }
-        sendJson<StartInspectorResponse>(response, 200, await runtimeConfig.onStartInspector());
+        sendJson<StartInspectorResponse>(response, 200, await runtimeConfig.onStartInspector(ctx));
         return;
     }
 
@@ -1873,7 +1982,7 @@ async function handleRequest(
             sendJson(response, 409, { error: "This daemon cannot stop a debugger." });
             return;
         }
-        sendJson<StopInspectorResponse>(response, 200, await runtimeConfig.onStopInspector());
+        sendJson<StopInspectorResponse>(response, 200, await runtimeConfig.onStopInspector(ctx));
         return;
     }
 
@@ -1882,7 +1991,7 @@ async function handleRequest(
             sendJson(response, 409, { error: "This daemon cannot reload Happy credentials." });
             return;
         }
-        sendJson(response, 200, { enabled: await runtimeConfig.onReloadHappy() });
+        sendJson(response, 200, { enabled: await runtimeConfig.onReloadHappy(ctx) });
         return;
     }
 
@@ -1938,6 +2047,7 @@ async function handleRequest(
         routeName === "folder-move"
     ) {
         await serveFolderRequest(
+            ctx,
             store,
             {
                 name: routeName,
@@ -1958,6 +2068,7 @@ async function handleRequest(
         routeName === "folder-item-move"
     ) {
         await serveFolderItemRequest(
+            ctx,
             store,
             {
                 name: routeName,
@@ -1981,6 +2092,7 @@ async function handleRequest(
         routeName === "document-write"
     ) {
         await serveDocumentRequest(
+            ctx,
             store,
             {
                 name: routeName,
@@ -1994,7 +2106,7 @@ async function handleRequest(
             (limitBytes) => readJson<unknown>(request, limitBytes),
             async (profileId) => {
                 if (
-                    !(await authorizeMessageProfile(request, response, runtimeConfig, {
+                    !(await authorizeMessageProfile(ctx, request, response, runtimeConfig, {
                         identity: profileId ?? null,
                     }))
                 ) {
@@ -2012,7 +2124,7 @@ async function handleRequest(
     if (route.name === "projects") {
         if (request.method === "GET") {
             sendJson<ListProjectsResponse>(response, 200, {
-                projects: await store.listProjects(),
+                projects: await store.listProjects(ctx),
             });
             return;
         }
@@ -2031,7 +2143,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = await store.registerProject(body);
+            const project = await store.registerProject(ctx, body);
             sendJson<ProjectResponse>(response, 200, { project });
         } catch (error) {
             if (!(error instanceof ProjectRegistrationError)) throw error;
@@ -2072,6 +2184,7 @@ async function handleRequest(
         }
         if (
             !(await authorizeRemoteProjectCreator(
+                ctx,
                 request,
                 response,
                 runtimeConfig,
@@ -2085,7 +2198,7 @@ async function handleRequest(
             const existing =
                 decoded.request.projectId === undefined
                     ? undefined
-                    : await store.getProject(decoded.request.projectId);
+                    : await store.getProject(ctx, decoded.request.projectId);
             if (peerId !== undefined && existing === undefined) {
                 sendProjectRegistrationError(
                     response,
@@ -2110,15 +2223,17 @@ async function handleRequest(
         }
         try {
             const mutationId = requestMutationId(request);
-            const project = await store.createRemoteProject(decoded.request, {
+            const project = await store.createRemoteProject(ctx, decoded.request, {
                 ...(decoded.request.identity === undefined
                     ? {}
                     : {
                           createdBy: {
                               instanceId:
                                   peerId ??
-                                  (await runtimeConfig.profiles!.get(decoded.request.identity))!
-                                      .parentInstanceId,
+                                  (await runtimeConfig.profiles!.get(
+                                      ctx,
+                                      decoded.request.identity,
+                                  ))!.parentInstanceId,
                               profileId: decoded.request.identity,
                           },
                       }),
@@ -2152,7 +2267,7 @@ async function handleRequest(
         route.name === "project-file-tree" ||
         route.name === "project-files"
     ) {
-        const directory = await resolveProjectScopeDirectory(store, route);
+        const directory = await resolveProjectScopeDirectory(ctx, store, route);
         if (!directory.ok) {
             sendJson(response, directory.status, { error: directory.error });
             return;
@@ -2308,14 +2423,14 @@ async function handleRequest(
             projectId: route.projectId,
             ...(route.workspaceId === undefined ? {} : { workspaceId: route.workspaceId }),
         };
-        const project = await store.getProject(route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         if (
             route.workspaceId !== undefined &&
-            (await store.getWorkspace(route.projectId, route.workspaceId)) === undefined
+            (await store.getWorkspace(ctx, route.projectId, route.workspaceId)) === undefined
         ) {
             sendJson(response, 404, { error: "Workspace not found" });
             return;
@@ -2338,7 +2453,7 @@ async function handleRequest(
                     return;
                 }
                 try {
-                    const terminal = await store.remoteTerminals.create(scope, body);
+                    const terminal = await store.remoteTerminals.create(ctx, scope, body);
                     sendJson<CreateRemoteTerminalResponse>(response, 201, {
                         terminal: terminal.summary(),
                     });
@@ -2377,7 +2492,7 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "project-asset") {
-        const asset = await store.getProjectAvatar(route.assetHash);
+        const asset = await store.getProjectAvatar(ctx, route.assetHash);
         if (asset === undefined) {
             sendJson(response, 404, { error: "Project avatar not found" });
             return;
@@ -2393,7 +2508,7 @@ async function handleRequest(
     }
 
     if (route.name === "project") {
-        const project = await store.getProject(route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
@@ -2416,7 +2531,7 @@ async function handleRequest(
             const completed =
                 body.mutationId === undefined
                     ? undefined
-                    : (await store.globalEventQueue.list())?.find(
+                    : (await store.globalEventQueue.list(ctx))?.find(
                           (entry) =>
                               entry.event.type === "project_updated" &&
                               entry.event.projectId === project.id &&
@@ -2424,7 +2539,7 @@ async function handleRequest(
                       );
             if (completed !== undefined) {
                 sendJson<ProjectResponse>(response, 200, {
-                    project: (await store.getProject(project.id))!,
+                    project: (await store.getProject(ctx, project.id))!,
                 });
                 return;
             }
@@ -2436,6 +2551,7 @@ async function handleRequest(
             try {
                 sendJson<ProjectResponse>(response, 200, {
                     project: (await store.renameProject(
+                        ctx,
                         project.id,
                         body.name,
                         expectedVersion,
@@ -2446,7 +2562,7 @@ async function handleRequest(
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
-                    project: await store.getProject(project.id),
+                    project: await store.getProject(ctx, project.id),
                 });
             }
             return;
@@ -2454,7 +2570,7 @@ async function handleRequest(
     }
 
     if (route.name === "project-settings" && request.method === "PUT") {
-        const project = await store.getProject(route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
@@ -2469,7 +2585,7 @@ async function handleRequest(
         const completed =
             body.mutationId === undefined
                 ? undefined
-                : (await store.globalEventQueue.list())?.find(
+                : (await store.globalEventQueue.list(ctx))?.find(
                       (entry) =>
                           entry.event.type === "project_updated" &&
                           entry.event.projectId === project.id &&
@@ -2477,7 +2593,7 @@ async function handleRequest(
                   );
         if (completed !== undefined) {
             sendJson<ProjectResponse>(response, 200, {
-                project: (await store.getProject(project.id))!,
+                project: (await store.getProject(ctx, project.id))!,
             });
             return;
         }
@@ -2489,6 +2605,7 @@ async function handleRequest(
         try {
             const { mutationId, ...settings } = body;
             const updated = await store.setProjectSettings(
+                ctx,
                 project.id,
                 settings,
                 expectedVersion,
@@ -2503,7 +2620,7 @@ async function handleRequest(
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: errorToMessage(error),
-                project: await store.getProject(project.id),
+                project: await store.getProject(ctx, project.id),
             });
         }
         return;
@@ -2522,11 +2639,11 @@ async function handleRequest(
         }
         for (const requested of body.entities as { projectId?: unknown; workspaceId?: unknown }[]) {
             if (typeof requested?.projectId !== "string") continue;
-            const project = await store.getProject(requested.projectId);
+            const project = await store.getProject(ctx, requested.projectId);
             if (project === undefined) continue;
             const workspace =
                 typeof requested.workspaceId === "string"
-                    ? await store.getWorkspace(requested.projectId, requested.workspaceId)
+                    ? await store.getWorkspace(ctx, requested.projectId, requested.workspaceId)
                     : undefined;
             if (typeof requested.workspaceId === "string" && workspace === undefined) continue;
             const entity = resolveGitTrackedEntity(project, workspace);
@@ -2544,14 +2661,14 @@ async function handleRequest(
             sendJson(response, 503, { error: "Git tracking is unavailable." });
             return;
         }
-        const project = await store.getProject(route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         const workspace =
             route.name === "project-workspace-git"
-                ? await store.getWorkspace(route.projectId, route.workspaceId)
+                ? await store.getWorkspace(ctx, route.projectId, route.workspaceId)
                 : undefined;
         if (route.name === "project-workspace-git" && workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found" });
@@ -2568,23 +2685,26 @@ async function handleRequest(
             // Asking for a snapshot is itself the demand signal, so the entity stays warm.
             tracker.watch(entity);
             const cached = tracker.snapshot(entity);
-            if (cached !== undefined && url.searchParams.get("refresh") !== "1") {
+            if (cached !== undefined) {
+                // Legacy clients may still append `refresh=1`, but reads never manufacture Git
+                // work. The filesystem watcher and bounded reconciliation loop own freshness;
+                // turning every poll into a scan lets one view continuously rescan every project.
                 sendJson<GitStateResponse>(response, 200, { git: cached });
                 return;
             }
-            const fresh = await tracker.refresh(entity);
-            if (fresh === undefined) {
-                sendJson(response, 503, { error: "Git tracking is unavailable." });
-                return;
-            }
-            sendJson<GitStateResponse>(response, 200, { git: fresh });
+            // The first scan stays on the bounded background queue. Git counts are optional UI
+            // enrichment and the live channel publishes the real snapshot as soon as it is ready,
+            // so a cold catalog must not wait behind every repository on the machine.
+            sendJson<GitStateResponse>(response, 200, {
+                git: pendingGitSnapshot(tracker.generation, (workspace ?? project).git),
+            });
             return;
         }
     }
 
     if (route.name === "project-refresh" && request.method === "POST") {
         try {
-            const project = await store.refreshProject(route.projectId);
+            const project = await store.refreshProject(ctx, route.projectId);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2611,7 +2731,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = await store.reorderProject(route.projectId, body, expectedVersion);
+            const project = await store.reorderProject(ctx, route.projectId, body, expectedVersion);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2631,7 +2751,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = await store.archiveProject(route.projectId, expectedVersion);
+            const project = await store.archiveProject(ctx, route.projectId, expectedVersion);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2666,6 +2786,7 @@ async function handleRequest(
             try {
                 const bytes = await readBuffer(request, 8 * 1024 * 1024);
                 const project = await store.setProjectAvatar(
+                    ctx,
                     route.projectId,
                     bytes,
                     expectedVersion,
@@ -2691,7 +2812,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            const project = await store.clearProjectAvatar(route.projectId);
+            const project = await store.clearProjectAvatar(ctx, route.projectId);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2702,13 +2823,13 @@ async function handleRequest(
     }
 
     if (route.name === "project-workspaces") {
-        if ((await store.getProject(route.projectId)) === undefined) {
+        if ((await store.getProject(ctx, route.projectId)) === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         if (request.method === "GET") {
             sendJson<ListProjectWorkspacesResponse>(response, 200, {
-                workspaces: await store.listWorkspaces(route.projectId),
+                workspaces: await store.listWorkspaces(ctx, route.projectId),
             });
             return;
         }
@@ -2744,7 +2865,8 @@ async function handleRequest(
                 sendJson(response, 400, { error: "Workspace settings are invalid." });
                 return;
             }
-            if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
+            if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body)))
+                return;
             try {
                 const peerId = p2pPeerId(request);
                 const createdBy =
@@ -2753,7 +2875,7 @@ async function handleRequest(
                         : {
                               instanceId:
                                   peerId ??
-                                  (await runtimeConfig.profiles!.get(body.identity))!
+                                  (await runtimeConfig.profiles!.get(ctx, body.identity))!
                                       .parentInstanceId,
                               profileId: body.identity,
                           };
@@ -2774,6 +2896,7 @@ async function handleRequest(
                     }
                 }
                 const workspace = await store.createWorkspace(
+                    ctx,
                     route.projectId,
                     {
                         ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
@@ -2809,7 +2932,7 @@ async function handleRequest(
     }
 
     if (route.name === "project-workspace") {
-        const workspace = await store.getWorkspace(route.projectId, route.workspaceId);
+        const workspace = await store.getWorkspace(ctx, route.projectId, route.workspaceId);
         if (workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found" });
             return;
@@ -2828,7 +2951,7 @@ async function handleRequest(
             const completed =
                 body.mutationId === undefined
                     ? undefined
-                    : (await store.globalEventQueue.list())?.find(
+                    : (await store.globalEventQueue.list(ctx))?.find(
                           (entry) =>
                               entry.event.type === "workspace_updated" &&
                               entry.event.workspaceId === route.workspaceId &&
@@ -2836,7 +2959,7 @@ async function handleRequest(
                       );
             if (completed !== undefined) {
                 sendJson<ProjectWorkspaceResponse>(response, 200, {
-                    workspace: (await store.getWorkspace(route.projectId, route.workspaceId))!,
+                    workspace: (await store.getWorkspace(ctx, route.projectId, route.workspaceId))!,
                 });
                 return;
             }
@@ -2847,6 +2970,7 @@ async function handleRequest(
                     return;
                 }
                 const renamed = await store.renameWorkspace(
+                    ctx,
                     route.projectId,
                     route.workspaceId,
                     body.name,
@@ -2864,7 +2988,7 @@ async function handleRequest(
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
-                    workspace: await store.getWorkspace(route.projectId, route.workspaceId),
+                    workspace: await store.getWorkspace(ctx, route.projectId, route.workspaceId),
                 });
             }
             return;
@@ -2879,6 +3003,7 @@ async function handleRequest(
                 return;
             }
             const workspace = await store.archiveWorkspace(
+                ctx,
                 route.projectId,
                 route.workspaceId,
                 expectedVersion,
@@ -2910,6 +3035,7 @@ async function handleRequest(
         }
         try {
             const workspace = await store.reorderWorkspace(
+                ctx,
                 route.projectId,
                 route.workspaceId,
                 body,
@@ -2944,10 +3070,11 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message settings are invalid." });
             return;
         }
-        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
+        if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
         const broadcast = body as BroadcastMessageRequest;
         const authenticatedOwnerId = p2pPeerId(request);
-        const allTargets = broadcast.all === true ? await store.list({ limit: 501 }) : undefined;
+        const allTargets =
+            broadcast.all === true ? await store.list(ctx, { limit: 501 }) : undefined;
         if (allTargets !== undefined && allTargets.length > 500) {
             sendJson(response, 409, {
                 error: "A single broadcast can target at most 500 sessions.",
@@ -2977,7 +3104,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session IDs must be unique." });
             return;
         }
-        const sessions = await Promise.all(targets.map((id) => store.get(id)));
+        const sessions = await Promise.all(targets.map((id) => store.get(ctx, id)));
         if (sessions.some((candidate) => candidate === undefined)) {
             sendJson(response, 404, { error: "One or more sessions were not found." });
             return;
@@ -3010,6 +3137,7 @@ async function handleRequest(
             await Promise.all(
                 sessions.map((candidate) =>
                     store.refreshSessionGitCredential(
+                        ctx,
                         candidate!.id,
                         { instanceId: authenticatedOwnerId, profileId: body.identity! },
                         githubToken,
@@ -3018,7 +3146,9 @@ async function handleRequest(
             );
         }
         sendJson<BroadcastMessageResponse>(response, 202, {
-            submissions: await Promise.all(sessions.map((candidate) => candidate!.submit(message))),
+            submissions: await Promise.all(
+                sessions.map((candidate) => candidate!.submit(ctx, message)),
+            ),
         });
         return;
     }
@@ -3118,7 +3248,7 @@ async function handleRequest(
             name: "Rig",
             role: "primary" as const,
         };
-        const applied = await runtimeConfig.onDaemonConfigChange({
+        const applied = await runtimeConfig.onDaemonConfigChange(ctx, {
             p2p: {
                 ...currentP2p,
                 ...(body.p2p === undefined ? {} : { name: body.p2p.name }),
@@ -3164,7 +3294,7 @@ async function handleRequest(
                 : (runtimeConfig.resolveModelCatalog?.(ownerInstanceId) ?? modelCatalog);
         sendJson<GlobalStreamHello>(response, 200, {
             cursor: store.liveEvents.cursor(),
-            ...(await buildGroupCatalog(store, scopedCatalog, identity, sessionTerminals)),
+            ...(await buildGroupCatalog(ctx, store, scopedCatalog, identity, sessionTerminals)),
         });
         return;
     }
@@ -3179,7 +3309,7 @@ async function handleRequest(
         // agents, so a client can tell whether a later event is already included.
         const cursor = store.liveEvents.cursor();
         sendJson<GetTimelineResponse>(response, 200, {
-            agents: await store.timeline(parsed.request),
+            agents: await store.timeline(ctx, parsed.request),
             cursor,
             scope: parsed.request.scope,
         });
@@ -3213,7 +3343,7 @@ async function handleRequest(
                 sendJson(response, 400, { error: "The event limit must be a positive number." });
                 return;
             }
-            const events = await globalEventQueue.list({
+            const events = await globalEventQueue.list(ctx, {
                 ...(after === undefined ? {} : { after }),
                 limit: limit ?? 100,
             });
@@ -3229,6 +3359,7 @@ async function handleRequest(
             await streamGlobalEvents(
                 request,
                 response,
+                ctx,
                 globalEventQueue,
                 url.searchParams.get("after"),
             );
@@ -3241,7 +3372,7 @@ async function handleRequest(
                 sendJson(response, 400, { error: "The trim cursor is invalid." });
                 return;
             }
-            const result = await globalEventQueue.trim(body.through);
+            const result = await globalEventQueue.trim(ctx, body.through);
             if (result === undefined) {
                 sendJson(response, 409, { error: "The global event cursor is not available." });
                 return;
@@ -3270,7 +3401,7 @@ async function handleRequest(
             return;
         }
         sendJson<ListExternalToolCallsResponse>(response, 200, {
-            calls: await store.listExternalToolCalls({
+            calls: await store.listExternalToolCalls(ctx, {
                 limit: limit ?? 100,
                 status: status as import("../external-tools/index.js").ExternalToolCall["status"],
             }),
@@ -3279,7 +3410,7 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "secret-registrations") {
-        sendJson<ListSecretsResponse>(response, 200, { secrets: await store.listSecrets() });
+        sendJson<ListSecretsResponse>(response, 200, { secrets: await store.listSecrets(ctx) });
         return;
     }
 
@@ -3293,7 +3424,7 @@ async function handleRequest(
         }
         try {
             sendJson<RegisterSecretResponse>(response, 200, {
-                secret: await store.registerSecret(body),
+                secret: await store.registerSecret(ctx, body),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3306,7 +3437,7 @@ async function handleRequest(
 
     if (request.method === "DELETE" && route.name === "secret-registration") {
         sendJson<UnregisterSecretResponse>(response, 200, {
-            removed: await store.unregisterSecret(route.secretId),
+            removed: await store.unregisterSecret(ctx, route.secretId),
         });
         return;
     }
@@ -3320,7 +3451,7 @@ async function handleRequest(
             return;
         }
         try {
-            const secret = await store.updateSecret(route.secretId, body);
+            const secret = await store.updateSecret(ctx, route.secretId, body);
             if (secret === undefined) {
                 sendJson(response, 404, { error: "Secret not found." });
                 return;
@@ -3405,8 +3536,8 @@ async function handleRequest(
             });
             return;
         }
-        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
-        if (!(await authorizeRemoteSessionTarget(request, response, store, body))) return;
+        if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
+        if (!(await authorizeRemoteSessionTarget(ctx, request, response, store, body))) return;
         try {
             const effectiveBody =
                 authenticatedPeerId !== undefined &&
@@ -3418,7 +3549,7 @@ async function handleRequest(
             const sessionRequest =
                 effectiveBody.scope === undefined
                     ? await configureSessionRequest(effectiveBody, defaultDocker, () =>
-                          store.queryProjectSettings(effectiveBody.cwd),
+                          store.queryProjectSettings(ctx, effectiveBody.cwd),
                       )
                     : (() => {
                           const {
@@ -3436,7 +3567,8 @@ async function handleRequest(
                 ...(body.identity === undefined ? {} : { profileId: body.identity }),
             };
             const githubToken = transport.githubToken;
-            const existingSession = body.id === undefined ? undefined : await store.get(body.id);
+            const existingSession =
+                body.id === undefined ? undefined : await store.get(ctx, body.id);
             if (
                 authenticatedOwnerId !== undefined &&
                 transport.gitSecretRequested &&
@@ -3450,14 +3582,15 @@ async function handleRequest(
             }
             const session =
                 body.id === undefined
-                    ? await store.create(sessionRequest, creationOptions)
-                    : await store.createWithId(body.id, sessionRequest, creationOptions);
+                    ? await store.create(ctx, sessionRequest, creationOptions)
+                    : await store.createWithId(ctx, body.id, sessionRequest, creationOptions);
             if (
                 githubToken !== undefined &&
                 authenticatedOwnerId !== undefined &&
                 body.identity !== undefined
             ) {
                 await store.refreshSessionGitCredential(
+                    ctx,
                     session.id,
                     { instanceId: authenticatedOwnerId, profileId: body.identity },
                     githubToken,
@@ -3482,7 +3615,7 @@ async function handleRequest(
             });
             return;
         }
-        const summaries = await store.list();
+        const summaries = await store.list(ctx);
         const filtered =
             archived === "all"
                 ? summaries
@@ -3502,7 +3635,9 @@ async function handleRequest(
         return;
     }
 
-    const session = await store.get(sessionId);
+    const session = await store.get(ctx, sessionId, {
+        loadAgentTree: route.name !== "session-state",
+    });
     if (session === undefined) {
         sendJson(response, 404, { error: "Session not found" });
         return;
@@ -3516,7 +3651,7 @@ async function handleRequest(
             return;
         }
         try {
-            const attachment = await store.attachment(sessionId, route.attachmentId);
+            const attachment = await store.attachment(ctx, sessionId, route.attachmentId);
             const file =
                 attachment === undefined
                     ? undefined
@@ -3566,7 +3701,7 @@ async function handleRequest(
                 const hadFocusedTerminal = sessionTerminals.hasFocusedTerminal(sessionId);
                 sessionTerminals.heartbeat(sessionId, body);
                 if (hadFocusedTerminal || sessionTerminals.hasFocusedTerminal(sessionId)) {
-                    await session.markRead();
+                    await session.markRead(ctx);
                 }
                 sendJson<SessionTerminalHeartbeatResponse>(response, 200, { connected: true });
             } catch (error) {
@@ -3576,7 +3711,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            if (sessionTerminals.hasFocusedTerminal(sessionId)) await session.markRead();
+            if (sessionTerminals.hasFocusedTerminal(sessionId)) await session.markRead(ctx);
             sendJson<DisconnectSessionTerminalResponse>(response, 200, {
                 disconnected: sessionTerminals.disconnect(sessionId, route.connectionId),
             });
@@ -3623,7 +3758,7 @@ async function handleRequest(
             if (
                 sessionMutationCompleted(session, mutationId) ||
                 (mutationId !== undefined &&
-                    (await store.sessionScopeMutationApplied(sessionId, mutationId)))
+                    (await store.sessionScopeMutationApplied(ctx, sessionId, mutationId)))
             ) {
                 sendJson(response, 200, { session: session.snapshot() });
                 return;
@@ -3636,6 +3771,7 @@ async function handleRequest(
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
             const filed = await store.setSessionFolder(
+                ctx,
                 sessionId,
                 body.scope.kind === "folder" ? body.scope.folderId : null,
                 body.afterId,
@@ -3645,7 +3781,7 @@ async function handleRequest(
                 sendJson(response, 404, { error: "That chat is gone." });
                 return;
             }
-            await filed.recordMutationApplied(mutationId);
+            await filed.recordMutationApplied(ctx, mutationId);
             sendJson(response, 200, { session: filed.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3676,7 +3812,7 @@ async function handleRequest(
         }
         try {
             sendJson(response, 200, {
-                session: (await store.reorderSession(sessionId, body))!.snapshot(),
+                session: (await store.reorderSession(ctx, sessionId, body))!.snapshot(),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3698,7 +3834,7 @@ async function handleRequest(
          * answers with its current state rather than failing, so a repeated
          * request after a retry is harmless.
          */
-        await session.markRead();
+        await session.markRead(ctx);
         sendJson<SessionReadResponse>(response, 200, { session: session.snapshot() });
         return;
     }
@@ -3712,7 +3848,11 @@ async function handleRequest(
             return;
         }
         try {
-            const result = await store.transferSession(sessionId, body as TransferSessionRequest);
+            const result = await store.transferSession(
+                ctx,
+                sessionId,
+                body as TransferSessionRequest,
+            );
             if (result === undefined) {
                 sendJson(response, 404, { error: "Session not found" });
                 return;
@@ -3743,7 +3883,7 @@ async function handleRequest(
                 return;
             }
             if (snapshot.scope.kind === "folder") {
-                const folder = await store.getFolder(snapshot.scope.folderId);
+                const folder = await store.getFolder(ctx, snapshot.scope.folderId);
                 if (folder === undefined || folder.archivedAt !== undefined) {
                     sendJson(response, 409, {
                         error: "A chat cannot be restored while its folder is archived.",
@@ -3773,11 +3913,11 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        const archived = await session.setArchived(route.name === "archive", mutationId);
+        const archived = await session.setArchived(ctx, route.name === "archive", mutationId);
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
             if (archived.scope.kind === "project" || archived.scope.kind === "workspace") {
-                await store.unarchiveProject(archived.scope.projectId);
+                await store.unarchiveProject(ctx, archived.scope.projectId);
             }
         }
         sendJson<SessionArchiveResponse>(response, 200, { session: archived });
@@ -3804,7 +3944,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: await session.update({
+            session: await session.update(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -3834,9 +3974,10 @@ async function handleRequest(
         const cursor = store.liveEvents.cursor();
         const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
         const baseHello = await sessionStateHello(
+            ctx,
             session,
             turnLimit,
-            await store.listSubagents(sessionId),
+            await store.listSubagents(ctx, sessionId),
         );
         const hello = baseHello;
         // A client catching up says which message it already holds, and receives
@@ -3846,13 +3987,13 @@ async function handleRequest(
         // incrementally rather than from the beginning.
         const after = url.searchParams.get("after") ?? undefined;
         const forward =
-            after === undefined ? undefined : await session.transcriptSince(after, turnLimit);
+            after === undefined ? undefined : await session.transcriptSince(ctx, after, turnLimit);
         if (after !== undefined && forward !== undefined) {
             sendJson<SessionStateResponse>(response, 200, {
                 ...hello,
                 append: true,
                 cursor,
-                transcript: forward,
+                transcript: projectClientTranscript(forward),
             });
             return;
         }
@@ -3867,18 +4008,18 @@ async function handleRequest(
         // backward is how it reads further into the past.
         const after = url.searchParams.get("after") ?? undefined;
         if (after !== undefined) {
-            const forward = await session.transcriptSince(after, SESSION_STREAM_TURN_LIMIT);
+            const forward = await session.transcriptSince(ctx, after, SESSION_STREAM_TURN_LIMIT);
             if (forward === undefined) {
                 sendJson(response, 409, {
                     error: "That part of the conversation is no longer available.",
                 });
                 return;
             }
-            sendJson(response, 200, forward);
+            sendJson(response, 200, projectClientTranscript(forward));
             return;
         }
         const before = url.searchParams.get("before") ?? undefined;
-        const page = await session.transcriptPage(SESSION_STREAM_TURN_LIMIT, before);
+        const page = await session.transcriptPage(ctx, SESSION_STREAM_TURN_LIMIT, before);
         if (page === undefined) {
             // The anchor turn is gone, so the reader's view of the conversation
             // is stale and paging from it would duplicate or misplace content.
@@ -3887,7 +4028,7 @@ async function handleRequest(
             });
             return;
         }
-        sendJson(response, 200, page);
+        sendJson(response, 200, projectClientTranscript(page));
         return;
     }
 
@@ -3938,7 +4079,7 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "subagents") {
         sendJson<ListSubagentsResponse>(response, 200, {
-            subagents: await store.listSubagents(sessionId),
+            subagents: await store.listSubagents(ctx, sessionId),
         });
         return;
     }
@@ -3957,12 +4098,12 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        const workflow = session.stopWorkflow(route.workflowRunId);
+        const workflow = session.stopWorkflow(ctx, route.workflowRunId);
         if (workflow === undefined) {
             sendJson(response, 404, { error: "Workflow not found" });
             return;
         }
-        await session.recordMutationApplied(mutationId);
+        await session.recordMutationApplied(ctx, mutationId);
         sendJson<StopWorkflowResponse>(response, 200, { workflow });
         return;
     }
@@ -3975,7 +4116,7 @@ async function handleRequest(
         const targetSessionId = requestMutationId(request);
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const forked = await store.fork(sessionId, targetSessionId);
+            const forked = await store.fork(ctx, sessionId, targetSessionId);
             if (forked === undefined) {
                 sendJson(response, 404, { error: "Session not found" });
                 return;
@@ -4012,7 +4153,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
-        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
+        if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -4026,6 +4167,7 @@ async function handleRequest(
         }
         if (
             !(await prepareSessionGitCredential(
+                ctx,
                 request,
                 response,
                 store,
@@ -4042,7 +4184,7 @@ async function handleRequest(
         sendJson<SubmitMessageResponse>(
             response,
             202,
-            await session.submit({
+            await session.submit(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4063,7 +4205,7 @@ async function handleRequest(
             });
             return;
         }
-        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
+        if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted?.data.delivery === "context") {
@@ -4078,6 +4220,7 @@ async function handleRequest(
         }
         if (
             !(await prepareSessionGitCredential(
+                ctx,
                 request,
                 response,
                 store,
@@ -4093,7 +4236,7 @@ async function handleRequest(
         sendJson<SubmitContextMessageResponse>(
             response,
             202,
-            await session.submitContext({
+            await session.submitContext(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4114,6 +4257,7 @@ async function handleRequest(
         }
         try {
             const result = await session.resolveExternalToolCall(
+                ctx,
                 route.externalToolCallId,
                 body as ResolveExternalToolCallRequest,
             );
@@ -4131,7 +4275,11 @@ async function handleRequest(
 
     if (request.method === "POST" && route.name === "scheduled-message-cancel") {
         const mutationId = requestMutationId(request);
-        const result = await session.cancelScheduledMessage(route.scheduledMessageId, mutationId);
+        const result = await session.cancelScheduledMessage(
+            ctx,
+            route.scheduledMessageId,
+            mutationId,
+        );
         if (result.message === undefined) {
             sendJson(response, 404, { error: "Scheduled message not found." });
             return;
@@ -4157,7 +4305,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
-        if (!(await authorizeMessageProfile(request, response, runtimeConfig, body))) return;
+        if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
         if (body.clientSubmissionId !== undefined) {
             const submitted = session.events.messageSubmission(body.clientSubmissionId);
             if (submitted !== undefined) {
@@ -4172,6 +4320,7 @@ async function handleRequest(
         }
         if (
             !(await prepareSessionGitCredential(
+                ctx,
                 request,
                 response,
                 store,
@@ -4183,7 +4332,7 @@ async function handleRequest(
             return;
         }
         try {
-            sendJson<SteerMessageResponse>(response, 202, await session.steer(body));
+            sendJson<SteerMessageResponse>(response, 202, await session.steer(ctx, body));
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
@@ -4220,7 +4369,7 @@ async function handleRequest(
             sendJson<AbortRunResponse>(
                 response,
                 200,
-                await session.abort({
+                await session.abort(ctx, {
                     continuePendingSteering:
                         url.searchParams.get("continuePendingSteering") === "1",
                     ...(expectedRunId === undefined ? {} : { expectedRunId }),
@@ -4238,7 +4387,7 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "background-processes-stop") {
-        const stoppedProcesses = await session.stopBackgroundProcesses();
+        const stoppedProcesses = await session.stopBackgroundProcesses(ctx);
         sendJson(response, 200, { stoppedProcesses });
         return;
     }
@@ -4250,7 +4399,7 @@ async function handleRequest(
                 rawWaitMs === null
                     ? 0
                     : Math.max(0, Math.min(30_000, Number.parseInt(rawWaitMs, 10) || 0));
-            const process = await session.readBackgroundProcess(route.processSessionId, {
+            const process = await session.readBackgroundProcess(ctx, route.processSessionId, {
                 waitMs,
             });
             if (process === undefined) {
@@ -4261,7 +4410,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            const result = await session.stopBackgroundProcess(route.processSessionId);
+            const result = await session.stopBackgroundProcess(ctx, route.processSessionId);
             sendJson<StopBackgroundProcessResponse>(response, 200, result);
             return;
         }
@@ -4289,8 +4438,8 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        const result = await session.runShellCommand(candidate as RunShellCommandRequest);
-        await session.recordMutationApplied(mutationId);
+        const result = await session.runShellCommand(ctx, candidate as RunShellCommandRequest);
+        await session.recordMutationApplied(ctx, mutationId);
         sendJson<RunShellCommandResponse>(response, 200, result);
         return;
     }
@@ -4302,8 +4451,8 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        await session.reset();
-        await session.recordMutationApplied(mutationId);
+        await session.reset(ctx);
+        await session.recordMutationApplied(ctx, mutationId);
         sendJson(response, 200, { session: session.snapshot() });
         return;
     }
@@ -4321,8 +4470,8 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const result = await session.rewind(body.messageId);
-            await session.recordMutationApplied(mutationId);
+            const result = await session.rewind(ctx, body.messageId);
+            await session.recordMutationApplied(ctx, mutationId);
             sendJson<RewindSessionResponse>(response, 200, {
                 ...result,
                 session: session.snapshot(),
@@ -4343,8 +4492,8 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        const result = await session.compact();
-        await session.recordMutationApplied(mutationId);
+        const result = await session.compact(ctx);
+        await session.recordMutationApplied(ctx, mutationId);
         sendJson<CompactSessionResponse>(response, 200, {
             result,
             session: session.snapshot(),
@@ -4361,7 +4510,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: await session.changeEffort({
+            session: await session.changeEffort(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4378,7 +4527,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: await session.changeServiceTier({
+            session: await session.changeServiceTier(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4406,7 +4555,7 @@ async function handleRequest(
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
             sendJson(response, 200, {
-                session: await session.changeModel({
+                session: await session.changeModel(ctx, {
                     ...body,
                     ...(mutationId === undefined ? {} : { mutationId }),
                 }),
@@ -4436,7 +4585,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: await session.changePermissionMode({
+            session: await session.changePermissionMode(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4468,7 +4617,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: await session.setDraft({
+            session: await session.setDraft(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4502,7 +4651,7 @@ async function handleRequest(
             sendJson<SecretSessionResponse>(response, 200, {
                 session:
                     (
-                        await store.attachSecret(session.id, body.secretId, scope, mutationId)
+                        await store.attachSecret(ctx, session.id, body.secretId, scope, mutationId)
                     )?.snapshot() ?? session.snapshot(),
             });
         } catch (error) {
@@ -4529,7 +4678,7 @@ async function handleRequest(
         sendJson<SecretSessionResponse>(response, 200, {
             session:
                 (
-                    await store.detachSecret(session.id, route.secretId, scope, mutationId)
+                    await store.detachSecret(ctx, session.id, route.secretId, scope, mutationId)
                 )?.snapshot() ?? session.snapshot(),
         });
         return;
@@ -4548,7 +4697,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            await session.setGoal(body, mutationId);
+            await session.setGoal(ctx, body, mutationId);
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -4574,7 +4723,11 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            await session.changeGoalStatus(body, mutationId === undefined ? {} : { mutationId });
+            await session.changeGoalStatus(
+                ctx,
+                body,
+                mutationId === undefined ? {} : { mutationId },
+            );
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -4592,7 +4745,7 @@ async function handleRequest(
             return;
         }
         if (!sessionMutationCanApply(request, response, session)) return;
-        await session.clearGoal(mutationId);
+        await session.clearGoal(ctx, mutationId);
         sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         return;
     }
@@ -4606,7 +4759,7 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const snapshot = await session.answerUserInput(route.requestId, {
+            const snapshot = await session.answerUserInput(ctx, route.requestId, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
@@ -4657,18 +4810,40 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "stream") {
         await streamEvents(
+            ctx,
             request,
             response,
             session,
             url.searchParams.get("after") ?? undefined,
             sessionEventStreamLeases,
             parseTurnLimit(url.searchParams.get("turns")),
-            await store.listSubagents(sessionId),
+            await store.listSubagents(ctx, sessionId),
         );
         return;
     }
 
     sendJson(response, 405, { error: "Method not allowed" });
+}
+
+function pendingGitSnapshot(
+    generation: string,
+    facts: GitRepositoryFacts | undefined,
+): GitChangeSnapshot {
+    return {
+        changedFiles: 0,
+        comparison: "unavailable",
+        conflicted: false,
+        countsExact: false,
+        deletions: 0,
+        error: "Git state is loading.",
+        facts: facts ?? { ahead: 0, behind: 0, detached: false },
+        files: [],
+        filesTruncated: false,
+        generation,
+        insertions: 0,
+        scannedAt: Date.now(),
+        version: 0,
+    };
 }
 
 function providerCredential(
@@ -4679,13 +4854,14 @@ function providerCredential(
 }
 
 async function resolveProjectScopeDirectory(
+    ctx: Context,
     store: SessionStore,
     scope: ProjectScope,
 ): Promise<{ ok: true; path: string } | { error: string; ok: false; status: 404 | 409 }> {
-    const project = await store.getProject(scope.projectId);
+    const project = await store.getProject(ctx, scope.projectId);
     if (project === undefined) return { error: "Project not found", ok: false, status: 404 };
     if (scope.workspaceId === undefined) return { ok: true, path: project.path };
-    const workspace = await store.getWorkspace(scope.projectId, scope.workspaceId);
+    const workspace = await store.getWorkspace(ctx, scope.projectId, scope.workspaceId);
     if (workspace === undefined) {
         return { error: "Workspace not found", ok: false, status: 404 };
     }
@@ -4735,6 +4911,7 @@ function parseArchivedFilter(value: string | null): boolean | "all" | undefined 
 }
 
 async function resolveAppletContext(
+    ctx: Context,
     store: SessionStore,
     applet: Applet,
     request: ResolveAppletOpenRequest,
@@ -4749,7 +4926,7 @@ async function resolveAppletContext(
     let context: AppletContext;
     let scope: SlotScope;
     if (request.sessionId !== undefined) {
-        const session = await store.get(request.sessionId);
+        const session = await store.get(ctx, request.sessionId);
         if (session === undefined) {
             return {
                 code: "invalid_request",
@@ -4796,7 +4973,7 @@ async function resolveAppletContext(
         }
         if (
             request.projectId !== undefined &&
-            (await store.getProject(request.projectId)) === undefined
+            (await store.getProject(ctx, request.projectId)) === undefined
         ) {
             return {
                 code: "invalid_request",
@@ -4807,7 +4984,7 @@ async function resolveAppletContext(
         if (
             request.projectId !== undefined &&
             request.workspaceId !== undefined &&
-            (await store.getWorkspace(request.projectId, request.workspaceId)) === undefined
+            (await store.getWorkspace(ctx, request.projectId, request.workspaceId)) === undefined
         ) {
             return {
                 code: "invalid_request",
@@ -5763,6 +5940,7 @@ async function handleWorkletRequest(
                       | "worklet-versions";
               }
           >,
+    ctx: Context,
     runtimeConfig: ProtocolServerRuntimeConfig,
 ): Promise<void> {
     const worklets = runtimeConfig.worklets;
@@ -5777,7 +5955,7 @@ async function handleWorkletRequest(
     }
     if (route.name === "worklets") {
         if (request.method === "GET") {
-            sendJson<ListWorkletsResponse>(response, 200, await worklets.catalog());
+            sendJson<ListWorkletsResponse>(response, 200, await worklets.catalog(ctx));
             return;
         }
         if (request.method !== "POST") {
@@ -5801,7 +5979,9 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            sendJson<WorkletResponse>(response, 201, { worklet: await worklets.install(body) });
+            sendJson<WorkletResponse>(response, 201, {
+                worklet: await worklets.install(ctx, body),
+            });
         } catch (error) {
             sendWorkletFailure(response, error);
         }
@@ -5812,7 +5992,7 @@ async function handleWorkletRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const icon = await worklets.readIcon(route.workletName, route.format);
+        const icon = await worklets.readIcon(ctx, route.workletName, route.format);
         if (icon.type !== "file") {
             sendWorkletManagementError(
                 response,
@@ -5837,7 +6017,7 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            const log = await worklets.readLog(route.workletName);
+            const log = await worklets.readLog(ctx, route.workletName);
             sendJson<WorkletLogResponse>(response, 200, log);
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5846,7 +6026,7 @@ async function handleWorkletRequest(
     }
     if (route.name === "worklet") {
         if (request.method === "GET") {
-            const worklet = await worklets.get(route.workletName);
+            const worklet = await worklets.get(ctx, route.workletName);
             if (worklet === undefined) {
                 sendWorkletManagementError(
                     response,
@@ -5864,7 +6044,7 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            await worklets.uninstall(route.workletName);
+            await worklets.uninstall(ctx, route.workletName);
             sendJson(response, 200, {});
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5894,7 +6074,7 @@ async function handleWorkletRequest(
         }
         try {
             sendJson<WorkletResponse>(response, 200, {
-                worklet: await worklets.update(route.workletName, body),
+                worklet: await worklets.update(ctx, route.workletName, body),
             });
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5912,7 +6092,7 @@ async function handleWorkletRequest(
     }
     try {
         sendJson<WorkletResponse>(response, 200, {
-            worklet: await worklets.revert(route.workletName, body),
+            worklet: await worklets.revert(ctx, route.workletName, body),
         });
     } catch (error) {
         sendWorkletFailure(response, error);
@@ -6305,6 +6485,7 @@ function isExternalToolCallResolution(value: unknown): value is ResolveExternalT
 }
 
 async function streamEvents(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     session: SessionEventSource,
@@ -6334,7 +6515,7 @@ async function streamEvents(
     });
     // The hello frame is written before the catch-up batch so a client can apply
     // everything that follows without asking the daemon anything else.
-    const hello = await sessionStreamHello(session, resumed, turnLimit, subagents);
+    const hello = await sessionStreamHello(ctx, session, resumed, turnLimit, subagents);
 
     // A resumed client applies durable history first, then the current overlay.
     // If the connection drops mid-catch-up, its cursor advances only through
@@ -6365,9 +6546,10 @@ interface SessionEventSource {
     readonly events: SessionEventLog;
     activity: () => SessionActivity;
     partialMessage: () => SessionPartialMessage | undefined;
+    clientSnapshot: () => ProtocolSession;
     snapshot: () => ProtocolSession;
-    transcriptWindow: (turnLimit?: number) => Promise<SessionTranscriptWindow>;
-    usage: (events?: readonly SessionEvent[]) => SessionUsageSummary;
+    transcriptWindow: (ctx: Context, turnLimit?: number) => Promise<SessionTranscriptWindow>;
+    usage: () => SessionUsageSummary;
 }
 
 interface SessionEventStreamLease {
@@ -6393,10 +6575,10 @@ function writeSseEvent(response: ServerResponse, event: SessionEvent): void {
  * not a positive whole number is ignored in favour of the default rather than
  * failing the stream.
  */
-function parseTurnLimit(value: string | null): number | undefined {
-    if (value === null) return undefined;
+function parseTurnLimit(value: string | null): number {
+    if (value === null) return SESSION_BOOTSTRAP_TURN_LIMIT;
     const parsed = Number(value);
-    if (!Number.isInteger(parsed) || parsed < 1) return undefined;
+    if (!Number.isInteger(parsed) || parsed < 1) return SESSION_BOOTSTRAP_TURN_LIMIT;
     return Math.min(parsed, SESSION_STREAM_TURN_LIMIT);
 }
 
@@ -6409,6 +6591,7 @@ function parseTurnLimit(value: string | null): number | undefined {
  * arrives on the stream with a cursor that says whether it is newer.
  */
 async function buildGroupCatalog(
+    ctx: Context,
     store: SessionStore,
     modelCatalog: ModelCatalog,
     identity: DaemonIdentity,
@@ -6418,11 +6601,11 @@ async function buildGroupCatalog(
         string,
         Awaited<ReturnType<SessionStore["listDurableUserInputs"]>>
     >();
-    for (const call of await store.listDurableUserInputs()) {
+    for (const call of await store.listDurableUserInputs(ctx)) {
         if (!isOpenQuestion(call) && call.response === undefined) continue;
         inboxItems.set(call.sessionId, [...(inboxItems.get(call.sessionId) ?? []), call]);
     }
-    const sessions = (await store.listActive())
+    const sessions = (await store.listActive(ctx))
         .map((summary) => ({
             ...summary,
             inboxItems: (inboxItems.get(summary.id) ?? []).map((call) => ({
@@ -6436,11 +6619,11 @@ async function buildGroupCatalog(
         }))
         .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
         .filter((summary) => !summary.archived);
-    const projects = (await store.listProjects()).filter(
+    const projects = (await store.listProjects(ctx)).filter(
         (project) => project.archivedAt === undefined,
     );
     const projectIds = new Set(projects.map((project) => project.id));
-    const workspaces = (await store.listWorkspaces()).filter(
+    const workspaces = (await store.listWorkspaces(ctx)).filter(
         (workspace) =>
             projectIds.has(workspace.projectId) &&
             workspace.archivedAt === undefined &&
@@ -6450,8 +6633,8 @@ async function buildGroupCatalog(
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
     return {
         catalog: modelCatalog,
-        folders: (await store.listFolders()).filter((folder) => folder.archivedAt === undefined),
-        folderItems: (await store.folderCatalog()).items.filter(
+        folders: (await store.listFolders(ctx)).filter((folder) => folder.archivedAt === undefined),
+        folderItems: (await store.folderCatalog(ctx)).items.filter(
             (item) => item.archivedAt === undefined,
         ),
         identity,
@@ -6487,6 +6670,7 @@ async function buildGroupCatalog(
  * cannot drift into describing the same session differently.
  */
 async function sessionStreamHello(
+    ctx: Context,
     session: SessionEventSource,
     resumed: boolean,
     turnLimit: number | undefined,
@@ -6497,17 +6681,12 @@ async function sessionStreamHello(
     // A resuming client already holds the transcript, so it is sent only to a
     // client attaching fresh. The window is cut on turn boundaries so a tool
     // result never arrives without the call it belongs to.
-    const transcript = resumed ? undefined : await session.transcriptWindow(turnLimit);
-    const currentSession = session.snapshot();
+    const transcript = resumed
+        ? undefined
+        : projectClientTranscript(await session.transcriptWindow(ctx, turnLimit));
+    const currentSession = session.clientSnapshot();
     const full = resumed ? undefined : currentSession;
-    // Materialise the durable log once. A long-running session may have many
-    // events, and opening a stream must not allocate and walk three separate
-    // copies merely to derive current side-state.
-    const durableEvents = full === undefined ? undefined : session.events.all();
-    const usage =
-        full === undefined || durableEvents === undefined
-            ? undefined
-            : session.usage(durableEvents);
+    const usage = full === undefined ? undefined : session.usage();
     const snapshot =
         full === undefined || transcript === undefined
             ? undefined
@@ -6515,7 +6694,8 @@ async function sessionStreamHello(
                   ...full,
                   shellCommands: session.events.shellCommandStates(),
                   subagents,
-                  snapshot: { ...full.snapshot, messages: transcript.messages },
+                  // The bounded transcript is the single copy of visible history.
+                  snapshot: { ...full.snapshot, messages: [] },
               };
     const hello: SessionStreamHello = {
         activity: session.activity(),
@@ -6573,8 +6753,6 @@ async function sessionStreamHello(
                   usage: {
                       currentProviderId: full.providerId,
                       groups: usage.groups,
-                      // The daemon-wide readings arrive with the usage request;
-                      // what this session itself observed is known right away.
                       quotas: [...session.events.latestProviderQuotas().entries()].map(
                           ([providerId, quota]) => ({ providerId, quota }),
                       ),
@@ -6597,16 +6775,16 @@ async function sessionStreamHello(
  * The request-response bootstrap has a dedicated transcript field, so its
  * current-state snapshot carries no second copy of conversation history.
  *
- * The session-scoped stream the terminal subscribes to keeps the complete hello,
- * which still carries its transcript; this projection is only for the
- * `GET /sessions/{sessionId}/state` bootstrap.
+ * The session-scoped stream uses the same single-copy transcript projection.
+ * This request-response variant additionally drops completed shell commands.
  */
 async function sessionStateHello(
+    ctx: Context,
     session: SessionEventSource,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
 ): Promise<SessionStreamHello> {
-    const hello = await sessionStreamHello(session, false, turnLimit, subagents);
+    const hello = await sessionStreamHello(ctx, session, false, turnLimit, subagents);
     if (hello.session === undefined) return hello;
     const { contextMessages: _contextMessages, ...agentSnapshot } = hello.session.snapshot;
     return {
@@ -6680,6 +6858,7 @@ function decodeTemporaryGitCredential(value: unknown):
 }
 
 async function authorizeRemoteProjectCreator(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     runtimeConfig: ProtocolServerRuntimeConfig,
@@ -6695,7 +6874,7 @@ async function authorizeRemoteProjectCreator(
             return false;
         }
         if (!authorizeP2pRemoteWork(peerId, response, runtimeConfig)) return false;
-        if ((await runtimeConfig.profiles?.owns(body.identity, peerId)) !== true) {
+        if ((await runtimeConfig.profiles?.owns(ctx, body.identity, peerId)) !== true) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
                 error: "That human profile is not owned by the authenticated peer Rig.",
@@ -6705,7 +6884,7 @@ async function authorizeRemoteProjectCreator(
         return true;
     }
     if (body.identity === undefined) return true;
-    if ((await runtimeConfig.profiles?.isLocal(body.identity)) === true) return true;
+    if ((await runtimeConfig.profiles?.isLocal(ctx, body.identity)) === true) return true;
     sendJson(response, 403, {
         code: "profile_not_owned",
         error: "That human profile is not owned by this Rig.",
@@ -6714,6 +6893,7 @@ async function authorizeRemoteProjectCreator(
 }
 
 async function authorizeRemoteSessionTarget(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     store: SessionStore,
@@ -6725,9 +6905,11 @@ async function authorizeRemoteSessionTarget(
     const workspace =
         body.workspaceId === undefined
             ? undefined
-            : (await store.listWorkspaces()).find((candidate) => candidate.id === body.workspaceId);
+            : (await store.listWorkspaces(ctx)).find(
+                  (candidate) => candidate.id === body.workspaceId,
+              );
     const projectId = body.projectId ?? workspace?.projectId;
-    const project = projectId === undefined ? undefined : await store.getProject(projectId);
+    const project = projectId === undefined ? undefined : await store.getProject(ctx, projectId);
     if (
         project === undefined ||
         (body.workspaceId !== undefined && workspace === undefined) ||
@@ -6745,6 +6927,7 @@ async function authorizeRemoteSessionTarget(
 }
 
 async function authorizeMessageProfile(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     runtimeConfig: ProtocolServerRuntimeConfig,
@@ -6761,7 +6944,7 @@ async function authorizeMessageProfile(
             return false;
         }
         if (!authorizeP2pRemoteWork(peerId, response, runtimeConfig)) return false;
-        if ((await runtimeConfig.profiles?.owns(profileId, peerId)) !== true) {
+        if ((await runtimeConfig.profiles?.owns(ctx, profileId, peerId)) !== true) {
             sendJson(response, 403, {
                 code: "profile_not_owned",
                 error: "That human profile is not registered to the authenticated peer Rig.",
@@ -6771,7 +6954,7 @@ async function authorizeMessageProfile(
         return true;
     }
     if (profileId === null) return true;
-    if ((await runtimeConfig.profiles?.isLocal(profileId)) !== true) {
+    if ((await runtimeConfig.profiles?.isLocal(ctx, profileId)) !== true) {
         sendJson(response, 403, {
             code: "profile_not_owned",
             error: "That human profile is not owned by this Rig.",
@@ -6795,6 +6978,7 @@ function authorizeP2pRemoteWork(
 }
 
 async function prepareSessionGitCredential(
+    ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
     store: SessionStore,
@@ -6812,6 +6996,7 @@ async function prepareSessionGitCredential(
     }
     try {
         await store.refreshSessionGitCredential(
+            ctx,
             sessionId,
             { instanceId: peerId, profileId: identity },
             githubToken,

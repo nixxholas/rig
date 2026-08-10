@@ -1,5 +1,6 @@
 /* eslint-disable no-control-regex -- Terminal rendering intentionally parses ANSI controls. */
 import { createId } from "@paralleldrive/cuid2";
+import type { Context } from "@steve.kite/stdlib";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -202,6 +203,7 @@ export interface CodingAssistantAppOptions {
     agent: CodingAssistantAgentBackend;
     attachSecret?: (id: string, scope: SecretAttachmentScope) => void | Promise<void>;
     cwd: string;
+    ctx: Context;
     initialBackgroundProcesses?: readonly BashSessionActivity[];
     initialUsage?: Usage;
     initialMcpServers?: readonly McpServerSummary[];
@@ -412,6 +414,7 @@ export class CodingAssistantApp implements Component, Focusable {
         | ((requestId: string, response: UserInputResponse) => void | Promise<void>)
         | undefined;
     readonly #processManager: NativeProcessManager;
+    readonly #ctx: Context;
     readonly #readClipboardImage: (
         options?: ReadClipboardImageOptions,
     ) => Promise<ClipboardImage | undefined>;
@@ -541,6 +544,7 @@ export class CodingAssistantApp implements Component, Focusable {
     #lastNormalRender: { height: number; lines: readonly string[]; width: number } | undefined;
 
     constructor(options: CodingAssistantAppOptions) {
+        this.#ctx = options.ctx;
         this.#activeAgentLabel =
             options.activeAgentLabel === undefined
                 ? undefined
@@ -758,7 +762,10 @@ export class CodingAssistantApp implements Component, Focusable {
         try {
             // We are leaving for good, so background work goes with us:
             // nothing Rig started outlives Rig.
-            await this.#processManager.killAll({ forceAfterMs: 500, includeDetached: true });
+            await this.#processManager.killAll(this.#ctx, {
+                forceAfterMs: 500,
+                includeDetached: true,
+            });
             await this.#onExit?.();
         } finally {
             this.#exitResolve?.(reason);
@@ -2436,7 +2443,7 @@ export class CodingAssistantApp implements Component, Focusable {
         const plugins = this.#agent.context.plugins;
         if (plugins === undefined) throw new Error("Plugins are unavailable in this session.");
         if (name.length > 0) {
-            const log = await plugins.readLog(name);
+            const log = await plugins.readLog(this.#ctx, name);
             const text = `${log.truncated ? "[Earlier plugin output omitted.]\n" : ""}${log.text}`;
             const displayText =
                 log.error !== undefined && log.error !== log.text
@@ -2453,7 +2460,7 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#requestRender();
             return;
         }
-        const result = await plugins.list();
+        const result = await plugins.list(this.#ctx);
         const lines = [
             ...result.plugins.map(
                 (plugin) =>
@@ -2748,6 +2755,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#requestRender();
         try {
             const result = await this.#agent.compact(
+                this.#ctx,
                 undefined,
                 this.#sessionBacked ? undefined : (event) => this.#applyAgentEvent(event),
             );
@@ -2908,7 +2916,7 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#claimTranscriptRowForPrompt(prompt);
             this.#activeTurnEntryStart = this.#entries.length;
 
-            const result = await this.#agent.send(prompt.content, {
+            const result = await this.#agent.send(this.#ctx, prompt.content, {
                 ...(this.#sessionBacked && prompt.transcriptEntryId !== undefined
                     ? { clientSubmissionId: prompt.transcriptEntryId }
                     : {}),
@@ -3554,9 +3562,11 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#runningToolCallIds.clear();
         this.#toolStatusByCallId.clear();
         this.#stopActivityAnimation();
-        void this.#processManager.killAll({ forceAfterMs: 500 }).catch((error: unknown) => {
-            this.#appendEntry({ role: "error", text: errorToMessage(error) });
-        });
+        void this.#processManager
+            .killAll(this.#ctx, { forceAfterMs: 500 })
+            .catch((error: unknown) => {
+                this.#appendEntry({ role: "error", text: errorToMessage(error) });
+            });
         if (options.silent !== true) {
             this.#appendAbortNotice();
         }
@@ -3569,7 +3579,7 @@ export class CodingAssistantApp implements Component, Focusable {
             const localProcessCount = this.#processManager.activeCount();
             let response;
             if (this.#agent.abort === undefined) {
-                await this.#processManager.killAll({ forceAfterMs: 500 });
+                await this.#processManager.killAll(this.#ctx, { forceAfterMs: 500 });
                 response = { aborted: false, stoppedProcesses: localProcessCount };
             } else {
                 response = await this.#agent.abort();
@@ -6371,7 +6381,7 @@ export class CodingAssistantApp implements Component, Focusable {
             return this.#skillCommandsRefresh ?? Promise.resolve();
         }
 
-        const refresh = loadAgentSkillCatalog(this.#agent.context)
+        const refresh = loadAgentSkillCatalog(this.#ctx, this.#agent.context)
             .then((skills) => {
                 this.#skillsByName = new Map(skills.map((skill) => [skill.name, skill]));
                 this.#skillCommands = skills.map((skill) => ({

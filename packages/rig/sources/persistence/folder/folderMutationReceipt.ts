@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq, sql } from "drizzle-orm";
 
 import { folderMutations } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { inDatabase } from "../database/inDatabase.js";
 import { inTx } from "../inTx.js";
 
@@ -13,10 +14,11 @@ export interface FolderMutationReceipt {
 }
 
 export async function queryFolderMutationReceipt(
-    tx: DatabaseScope,
+    ctx: Context,
     mutationId: string,
 ): Promise<FolderMutationReceipt | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolderMutationReceipt", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select({
                 action: folderMutations.action,
@@ -30,7 +32,7 @@ export async function queryFolderMutationReceipt(
 }
 
 export async function recordFolderMutationReceipt(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         action: string;
         folderId: string;
@@ -38,7 +40,8 @@ export async function recordFolderMutationReceipt(
         now: number;
     },
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.folder.recordFolderMutationReceipt", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(folderMutations)
             .values({

@@ -1,14 +1,16 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
 
 import { projects } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryProjectUserMutationVersion(
-    tx: DatabaseScope,
+    ctx: Context,
     projectId: string,
 ): Promise<number | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.queryProjectUserMutationVersion", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx
                 .select({ userMutationVersion: projects.userMutationVersion })

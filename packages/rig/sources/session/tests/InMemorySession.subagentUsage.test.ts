@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -37,7 +40,7 @@ describe("InMemorySession subagent usage", () => {
             models: [model],
             providers: [{ models: [model], providerId: provider.id }],
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             metadata: {
@@ -55,10 +58,14 @@ describe("InMemorySession subagent usage", () => {
             },
         });
 
-        const first = await session.submit({ text: "First turn." });
-        await expect(session.waitForRun(first.runId)).resolves.toEqual({ status: "completed" });
-        const second = await session.submit({ text: "Second turn." });
-        await expect(session.waitForRun(second.runId)).resolves.toEqual({ status: "completed" });
+        const first = await session.submit(ctx, { text: "First turn." });
+        await expect(session.waitForRun(ctx, first.runId)).resolves.toEqual({
+            status: "completed",
+        });
+        const second = await session.submit(ctx, { text: "Second turn." });
+        await expect(session.waitForRun(ctx, second.runId)).resolves.toEqual({
+            status: "completed",
+        });
 
         expect(session.subagentSummary().usage).toMatchObject({
             cacheRead: 1_000,
@@ -90,7 +97,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

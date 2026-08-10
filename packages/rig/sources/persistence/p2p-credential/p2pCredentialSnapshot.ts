@@ -1,3 +1,6 @@
+import type { Context } from "@steve.kite/stdlib";
+import type { DatabaseScope } from "../Transaction.js";
+
 import { eq } from "drizzle-orm";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -6,7 +9,6 @@ import { p2pInstanceIdSchema } from "../../protocol/P2pIdentityProtocol.js";
 import { p2pCredentialSnapshots } from "../database/schema.js";
 import { inDatabase } from "../database/inDatabase.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import {
     p2pProvisionedProviderRecordSchema,
     type P2pProvisionedProviderRecord,
@@ -41,32 +43,37 @@ export type P2pCredentialSnapshotFastForwardResult =
     | { outcome: "source_changed" };
 
 export async function queryP2pCredentialSnapshot(
-    tx: DatabaseScope,
+    ctx: Context,
     ownerInstanceId: string,
 ): Promise<P2pCredentialSnapshotRecord | undefined> {
     assertOwner(ownerInstanceId);
-    return await inDatabase(tx, async (tx) => {
-        const row = await tx
-            .select()
-            .from(p2pCredentialSnapshots)
-            .where(eq(p2pCredentialSnapshots.ownerInstanceId, ownerInstanceId))
-            .get();
-        if (row === undefined) return undefined;
-        const record: unknown = {
-            ownerInstanceId: row.ownerInstanceId,
-            sourceDigest: row.sourceDigest,
-            updatedAt: row.updatedAtMs,
-            version: row.version,
-        };
-        if (!Value.Check(p2pCredentialSnapshotRecordSchema, record)) {
-            throw new Error("The saved P2P credential snapshot is invalid.");
-        }
-        return record;
-    });
+    return await inDatabase(
+        ctx,
+        "rig.sql.p2pCredential.queryP2pCredentialSnapshot",
+        async (ctx) => {
+            const tx = ctx.tx;
+            const row = await tx
+                .select()
+                .from(p2pCredentialSnapshots)
+                .where(eq(p2pCredentialSnapshots.ownerInstanceId, ownerInstanceId))
+                .get();
+            if (row === undefined) return undefined;
+            const record: unknown = {
+                ownerInstanceId: row.ownerInstanceId,
+                sourceDigest: row.sourceDigest,
+                updatedAt: row.updatedAtMs,
+                version: row.version,
+            };
+            if (!Value.Check(p2pCredentialSnapshotRecordSchema, record)) {
+                throw new Error("The saved P2P credential snapshot is invalid.");
+            }
+            return record;
+        },
+    );
 }
 
 export async function replaceP2pCredentialSnapshot(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         ownerInstanceId: string;
         providers: readonly P2pProvisionedProviderRecord[];
@@ -90,8 +97,9 @@ export async function replaceP2pCredentialSnapshot(
     if (input.providers.some((provider) => provider.sourceDigest !== input.sourceDigest)) {
         throw new Error("The P2P credential snapshot digest does not match its providers.");
     }
-    return await inTx(tx, async (tx) => {
-        const current = await queryP2pCredentialSnapshot(tx, input.ownerInstanceId);
+    return await inTx(ctx, "rig.sql.p2pCredential.replaceP2pCredentialSnapshot", async (ctx) => {
+        const tx = ctx.tx;
+        const current = await queryP2pCredentialSnapshot(ctx, input.ownerInstanceId);
         if (current !== undefined) {
             if (input.version < current.version) {
                 return { outcome: "stale", version: current.version };
@@ -102,14 +110,14 @@ export async function replaceP2pCredentialSnapshot(
                     : { outcome: "conflict", version: current.version };
             }
         }
-        await p2pProvisionedProvidersReplace(tx, input.ownerInstanceId, input.providers);
+        await p2pProvisionedProvidersReplace(ctx, input.ownerInstanceId, input.providers);
         await writeSnapshot(tx, input);
         return { outcome: "changed", version: input.version };
     });
 }
 
 export async function prepareP2pCredentialSnapshotVersion(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         ownerInstanceId: string;
         sourceDigest: string;
@@ -118,20 +126,25 @@ export async function prepareP2pCredentialSnapshotVersion(
 ): Promise<number> {
     assertOwner(input.ownerInstanceId);
     assertSourceDigest(input.sourceDigest);
-    return await inTx(tx, async (tx) => {
-        const current = await queryP2pCredentialSnapshot(tx, input.ownerInstanceId);
-        if (current?.sourceDigest === input.sourceDigest) return current.version;
-        const version = (current?.version ?? 0) + 1;
-        await writeSnapshot(tx, {
-            ...input,
-            version,
-        });
-        return version;
-    });
+    return await inTx(
+        ctx,
+        "rig.sql.p2pCredential.prepareP2pCredentialSnapshotVersion",
+        async (ctx) => {
+            const tx = ctx.tx;
+            const current = await queryP2pCredentialSnapshot(ctx, input.ownerInstanceId);
+            if (current?.sourceDigest === input.sourceDigest) return current.version;
+            const version = (current?.version ?? 0) + 1;
+            await writeSnapshot(tx, {
+                ...input,
+                version,
+            });
+            return version;
+        },
+    );
 }
 
 export async function fastForwardP2pCredentialSnapshotVersion(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         ownerInstanceId: string;
         receiverVersion: number;
@@ -144,25 +157,30 @@ export async function fastForwardP2pCredentialSnapshotVersion(
     assertSnapshotVersion(input.receiverVersion);
     assertSnapshotVersion(input.snapshotVersion);
     assertSourceDigest(input.sourceDigest);
-    return await inTx(tx, async (tx) => {
-        const current = await queryP2pCredentialSnapshot(tx, input.ownerInstanceId);
-        if (current !== undefined && current.sourceDigest !== input.sourceDigest) {
-            return { outcome: "source_changed" };
-        }
-        const version = Math.max(
-            input.receiverVersion + 1,
-            input.snapshotVersion,
-            current?.version ?? 0,
-        );
-        if (current?.version === version) return { outcome: "advanced", version };
-        await writeSnapshot(tx, {
-            ownerInstanceId: input.ownerInstanceId,
-            sourceDigest: input.sourceDigest,
-            updatedAt: input.updatedAt,
-            version,
-        });
-        return { outcome: "advanced", version };
-    });
+    return await inTx(
+        ctx,
+        "rig.sql.p2pCredential.fastForwardP2pCredentialSnapshotVersion",
+        async (ctx) => {
+            const tx = ctx.tx;
+            const current = await queryP2pCredentialSnapshot(ctx, input.ownerInstanceId);
+            if (current !== undefined && current.sourceDigest !== input.sourceDigest) {
+                return { outcome: "source_changed" };
+            }
+            const version = Math.max(
+                input.receiverVersion + 1,
+                input.snapshotVersion,
+                current?.version ?? 0,
+            );
+            if (current?.version === version) return { outcome: "advanced", version };
+            await writeSnapshot(tx, {
+                ownerInstanceId: input.ownerInstanceId,
+                sourceDigest: input.sourceDigest,
+                updatedAt: input.updatedAt,
+                version,
+            });
+            return { outcome: "advanced", version };
+        },
+    );
 }
 
 async function writeSnapshot(

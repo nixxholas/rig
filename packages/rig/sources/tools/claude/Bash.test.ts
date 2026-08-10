@@ -40,7 +40,7 @@ describe("Claude Code Bash tool", () => {
         const result = await claudeBashTool.execute(
             { command: "echo claude > note.txt && cat note.txt" },
             harness.context,
-            { onProgress: (display) => progress.push(display) },
+            { ctx: harness.ctx, onProgress: (display) => progress.push(display) },
         );
 
         expect(result.stdout).toBe("claude\n");
@@ -59,7 +59,7 @@ describe("Claude Code Bash tool", () => {
                 command: `printf 'old-head-'; printf '%060000d' 0; printf '%s' '-new-tail'`,
             },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
         const rendered = claudeBashTool.toLLM(result);
         const text = rendered[0]?.type === "text" ? rendered[0].text : "";

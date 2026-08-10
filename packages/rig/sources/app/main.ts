@@ -15,6 +15,8 @@ import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
 import { runP2pBridgeCommand } from "./runP2pBridgeCommand.js";
 import { runP2pPairingCommand } from "./runP2pPairingCommand.js";
 import { runUpgradeCommand } from "./runUpgradeCommand.js";
+import type { Context, Logger } from "@steve.kite/stdlib";
+import { initializeDaemonContext, withProcessContext } from "../observability/index.js";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<0 | 2 | void> {
     if (argv.length === 1 && argv[0] === "--server") {
@@ -29,6 +31,11 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         });
         return;
     }
+    initializeDaemonContext(cliLogger());
+    return await withProcessContext("cli", (ctx) => runMain(ctx, argv));
+}
+
+async function runMain(appCtx: Context, argv: readonly string[]): Promise<0 | 2 | void> {
     if (argv.length === 3 && argv[0] === "p2p" && argv[1] === "bridge" && argv[2] === "--stdio") {
         await runP2pBridgeCommand();
         return;
@@ -51,7 +58,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
                 hint: "Usage: rig inspect [--json]",
             });
         }
-        const inspection = await runRigInspection({ json: commandArgs[0] === "--json" });
+        const inspection = await runRigInspection(appCtx, {
+            json: commandArgs[0] === "--json",
+        });
         return rigInspectionExitCode(inspection);
     }
     if (command === "upgrade") {
@@ -160,12 +169,17 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
     let runOptions = options;
     for (;;) {
-        const result = await runApp(runOptions);
+        const result = await runApp(appCtx, runOptions);
         if (result.action === "exit") return;
         // A reload reopens the session that was already chosen, so the picker must not run again.
         const { sessionSelection: _, ...reloadOptions } = runOptions;
         runOptions = { ...reloadOptions, resumeSessionId: result.sessionId };
     }
+}
+
+function cliLogger(): Logger {
+    const write = () => undefined;
+    return { debug: write, error: write, fatal: write, info: write, trace: write, warn: write };
 }
 
 function isDaemonCommand(value: string | undefined): value is DaemonCommand {

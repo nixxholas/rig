@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -49,7 +52,7 @@ function createDelegatedSession(): InMemorySession {
         providers: [{ providerId: provider.id, models: [model] }],
     };
     const sessionId = "delegated-session";
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         createRuntime: (options) => createRuntime(options, provider),
         id: sessionId,
@@ -73,7 +76,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

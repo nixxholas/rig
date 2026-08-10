@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
 import { sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { sessionAppendEvent } from "./sessionAppendEvent.js";
 import { sessionDeleteQueuedRun } from "./sessionDeleteQueuedRun.js";
 
@@ -16,12 +17,13 @@ export interface SessionFailQueuedRunInput {
 
 /** Fails one queued run durably while retaining its already-committed user message. */
 export async function sessionFailQueuedRun(
-    tx: DatabaseScope,
+    ctx: Context,
     input: SessionFailQueuedRunInput,
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
-        await sessionDeleteQueuedRun(tx, input.sessionId, input.runId);
-        await sessionAppendEvent(tx, input.event, { runId: input.runId }, input.now);
+    await inTx(ctx, "rig.sql.session.session_fail_queued_run", async (ctx) => {
+        const tx = ctx.tx;
+        await sessionDeleteQueuedRun(ctx, input.sessionId, input.runId);
+        await sessionAppendEvent(ctx, input.event, { runId: input.runId }, input.now);
         await tx
             .update(sessions)
             .set({

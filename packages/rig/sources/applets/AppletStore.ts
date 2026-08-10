@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import { withDatabase } from "../persistence/databaseContext.js";
 import { inTx } from "../persistence/inTx.js";
-import type { TX } from "../persistence/Transaction.js";
 import { queryApplet } from "../persistence/applets/queryApplet.js";
 import { queryApplets } from "../persistence/applets/queryApplets.js";
 import { appletAddVersion } from "../persistence/applets/appletAddVersion.js";
@@ -45,11 +47,11 @@ import {
 } from "./readAppletIcon.js";
 
 export interface AppletStoreOptions {
+    database: SessionDatabase;
     environment?: NodeJS.ProcessEnv;
     now?: () => number;
     /** Delivers a change to the live global stream after the database write committed. */
-    publish: (event: AppletsChangedEvent) => void | Promise<void>;
-    tx: () => TX;
+    publish: (ctx: Context, event: AppletsChangedEvent) => void | Promise<void>;
 }
 
 /**
@@ -63,27 +65,32 @@ export interface AppletStoreOptions {
  */
 export class AppletStore {
     readonly #createEventId = createEventIdFactory();
+    readonly #database: SessionDatabase;
     readonly #environment: NodeJS.ProcessEnv;
     readonly #now: () => number;
-    readonly #publish: (event: AppletsChangedEvent) => void | Promise<void>;
-    readonly #tx: () => TX;
+    readonly #publish: (ctx: Context, event: AppletsChangedEvent) => void | Promise<void>;
     readonly #mutationByName = new Map<string, Promise<void>>();
 
     constructor(options: AppletStoreOptions) {
+        this.#database = options.database;
         this.#environment = options.environment ?? process.env;
         this.#now = options.now ?? Date.now;
         this.#publish = options.publish;
-        this.#tx = options.tx;
     }
 
     async create(
+        ctx: Context,
         request: CreateAppletRequest,
         sourceFileSystem?: FileSystemContext | AppletSourceReader,
     ): Promise<Applet> {
-        return this.#serializeMutation(request.name, () => this.#create(request, sourceFileSystem));
+        ctx = withDatabase(ctx, this.#database);
+        return this.#serializeMutation(request.name, () =>
+            this.#create(ctx, request, sourceFileSystem),
+        );
     }
 
     async #create(
+        ctx: Context,
         request: CreateAppletRequest,
         sourceFileSystem?: FileSystemContext | AppletSourceReader,
     ): Promise<Applet> {
@@ -95,23 +102,23 @@ export class AppletStore {
                 `An applet name must be kebab-case, such as "usage-dashboard". Got ${JSON.stringify(request.name)}.`,
             );
         }
-        if ((await queryApplet(this.#tx(), request.name)) !== undefined) {
+        if ((await queryApplet(ctx, request.name)) !== undefined) {
             throw new AppletInvalidError(
                 `An applet named ${JSON.stringify(request.name)} already exists. Update it to import a new version.`,
             );
         }
         const sourceReader = resolveAppletSourceReader(sourceFileSystem);
-        const icon = await this.#readIcon(request.iconPath, sourceReader);
-        const files = await this.#createFiles(request.name, request.path, icon, sourceReader);
+        const icon = await this.#readIcon(ctx, request.iconPath, sourceReader);
+        const files = await this.#createFiles(ctx, request.name, request.path, icon, sourceReader);
         let created;
         try {
-            created = await inTx(this.#tx(), async (tx) => {
-                if ((await queryApplet(tx, request.name)) !== undefined) {
+            created = await inTx(ctx, "rig.sql.applets.store_create", async (ctx) => {
+                if ((await queryApplet(ctx, request.name)) !== undefined) {
                     throw new AppletInvalidError(
                         `An applet named ${JSON.stringify(request.name)} already exists. Update it to import a new version.`,
                     );
                 }
-                await appletCreate(tx, {
+                await appletCreate(ctx, {
                     allowedScopes: request.allowedScopes ?? [...defaultAppletAllowedScopes],
                     authorSessionId: request.authorSessionId,
                     changeDescription: "Initial import",
@@ -124,31 +131,34 @@ export class AppletStore {
                         ? {}
                         : { sourceDescription: request.sourceDescription }),
                 });
-                return queryApplet(tx, request.name);
+                return queryApplet(ctx, request.name);
             });
         } catch (error) {
             await files.rollback();
             throw error;
         }
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         if (created === undefined) throw new Error("The applet was not stored.");
         return created;
     }
 
-    async get(name: string): Promise<Applet | undefined> {
-        return queryApplet(this.#tx(), name);
+    async get(ctx: Context, name: string): Promise<Applet | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return queryApplet(ctx, name);
     }
 
-    async list(): Promise<readonly Applet[]> {
-        return queryApplets(this.#tx());
+    async list(ctx: Context): Promise<readonly Applet[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return queryApplets(ctx);
     }
 
-    async revert(name: string, request: RevertAppletRequest): Promise<Applet> {
+    async revert(ctx: Context, name: string, request: RevertAppletRequest): Promise<Applet> {
+        ctx = withDatabase(ctx, this.#database);
         if (!Value.Check(revertAppletRequestSchema, request)) {
             throw new AppletInvalidError("The applet revert request is invalid.");
         }
-        const reverted = await inTx(this.#tx(), async (tx) => {
-            const applet = await queryApplet(tx, name);
+        const reverted = await inTx(ctx, "rig.sql.applets.store_revert", async (ctx) => {
+            const applet = await queryApplet(ctx, name);
             if (applet === undefined) {
                 throw new AppletNotFoundError(`No applet named ${JSON.stringify(name)} exists.`);
             }
@@ -157,23 +167,28 @@ export class AppletStore {
                     `The applet ${JSON.stringify(name)} has no version ${String(request.version)}.`,
                 );
             }
-            await appletSetCurrentVersion(tx, name, request.version, this.#now());
-            return queryApplet(tx, name);
+            await appletSetCurrentVersion(ctx, name, request.version, this.#now());
+            return queryApplet(ctx, name);
         });
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         if (reverted === undefined) throw new Error("The applet was not stored.");
         return reverted;
     }
 
     async update(
+        ctx: Context,
         name: string,
         request: UpdateAppletRequest,
         sourceFileSystem?: FileSystemContext | AppletSourceReader,
     ): Promise<Applet> {
-        return this.#serializeMutation(name, () => this.#update(name, request, sourceFileSystem));
+        ctx = withDatabase(ctx, this.#database);
+        return this.#serializeMutation(name, () =>
+            this.#update(ctx, name, request, sourceFileSystem),
+        );
     }
 
     async #update(
+        ctx: Context,
         name: string,
         request: UpdateAppletRequest,
         sourceFileSystem?: FileSystemContext | AppletSourceReader,
@@ -183,7 +198,7 @@ export class AppletStore {
                 "An applet update needs the source folder path and a description of the change.",
             );
         }
-        const existing = await queryApplet(this.#tx(), name);
+        const existing = await queryApplet(ctx, name);
         if (existing === undefined) {
             throw new AppletNotFoundError(`No applet named ${JSON.stringify(name)} exists.`);
         }
@@ -191,32 +206,38 @@ export class AppletStore {
             existing.versions.reduce((highest, version) => Math.max(highest, version.version), 0) +
             1;
         await this.#importVersion(
+            ctx,
             name,
             nextVersion,
             request.path,
             resolveAppletSourceReader(sourceFileSystem),
         );
-        const updated = await inTx(this.#tx(), async (tx) => {
+        const updated = await inTx(ctx, "rig.sql.applets.store_update", async (ctx) => {
             await appletAddVersion(
-                tx,
+                ctx,
                 name,
                 nextVersion,
                 request.changeDescription,
                 this.#now(),
                 request.allowedScopes,
             );
-            return queryApplet(tx, name);
+            return queryApplet(ctx, name);
         });
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         if (updated === undefined) throw new Error("The applet was not stored.");
         return updated;
     }
 
-    async readIcon(name: string, format: AppletIconFormat): Promise<AppletIconFileResult> {
+    async readIcon(
+        _ctx: Context,
+        name: string,
+        format: AppletIconFormat,
+    ): Promise<AppletIconFileResult> {
         return readAppletIcon(name, format, this.#environment);
     }
 
     async #createFiles(
+        ctx: Context,
         name: string,
         sourcePath: string,
         icon: Awaited<ReturnType<typeof createAppletIconArtifacts>>,
@@ -225,7 +246,7 @@ export class AppletStore {
         const root = getAppletsDirectory(this.#environment);
         const target = join(root, name);
         await mkdir(root, { recursive: true });
-        const orphan = await this.#moveExistingTargetAside(target, name, root);
+        const orphan = await this.#moveExistingTargetAside(ctx, target, name, root);
         const staging = join(root, `.${name}-${randomUUID()}`);
         try {
             await mkdir(staging);
@@ -257,6 +278,7 @@ export class AppletStore {
     }
 
     async #importVersion(
+        ctx: Context,
         name: string,
         version: number,
         sourcePath: string,
@@ -264,7 +286,7 @@ export class AppletStore {
     ): Promise<void> {
         const root = join(getAppletsDirectory(this.#environment), name);
         const target = join(root, `v${String(version)}`);
-        await this.#assertMissingTarget(target, name);
+        await this.#assertMissingTarget(ctx, target, name);
         const staging = join(root, `.v${String(version)}-${randomUUID()}`);
         try {
             await mkdir(root, { recursive: true });
@@ -281,6 +303,7 @@ export class AppletStore {
     }
 
     async #readIcon(
+        _ctx: Context,
         iconPath: string,
         sourceReader: AppletSourceReader,
     ): Promise<Awaited<ReturnType<typeof createAppletIconArtifacts>>> {
@@ -324,7 +347,7 @@ export class AppletStore {
         }
     }
 
-    async #assertMissingTarget(target: string, name: string): Promise<void> {
+    async #assertMissingTarget(_ctx: Context, target: string, name: string): Promise<void> {
         try {
             await lstat(target);
         } catch (error) {
@@ -338,6 +361,7 @@ export class AppletStore {
     }
 
     async #moveExistingTargetAside(
+        _ctx: Context,
         target: string,
         name: string,
         root: string,
@@ -371,9 +395,9 @@ export class AppletStore {
         }
     }
 
-    async #publishChanged(): Promise<void> {
-        const applets = await this.list();
-        await this.#publish({
+    async #publishChanged(ctx: Context): Promise<void> {
+        const applets = await this.list(ctx);
+        await this.#publish(ctx, {
             createdAt: this.#now(),
             data: { applets },
             id: this.#createEventId(),

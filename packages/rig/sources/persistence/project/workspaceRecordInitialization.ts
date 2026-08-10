@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, sql } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { workspaceScope } from "./workspaceScope.js";
 
 export interface WorkspaceInitializationFacts {
@@ -19,13 +20,14 @@ export interface WorkspaceInitializationFacts {
  * result.
  */
 export async function workspaceRecordInitialization(
-    tx: DatabaseScope,
+    ctx: Context,
     projectId: string,
     id: string,
     facts: WorkspaceInitializationFacts,
     now: number,
 ): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.workspaceRecordInitialization", async (ctx) => {
+        const tx = ctx.tx;
         return Number(
             (
                 await tx

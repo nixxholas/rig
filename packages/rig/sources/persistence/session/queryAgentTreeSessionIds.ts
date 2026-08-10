@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql } from "drizzle-orm";
 
 import { MAX_AGENT_TREE_USAGE_SESSIONS } from "../../agent/context/AgentTreeUsageContext.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { inDatabase } from "../database/inDatabase.js";
 import { readString } from "./impl/sqliteRow.js";
 
@@ -12,10 +13,11 @@ import { readString } from "./impl/sqliteRow.js";
  * the durable usage query, including delegated sessions whose own root ID differs from the caller.
  */
 export async function queryAgentTreeSessionIds(
-    tx: DatabaseScope,
+    ctx: Context,
     rootSessionId: string,
 ): Promise<readonly string[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_agent_tree_session_ids", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx.all<Record<string, unknown>>(sql`
             WITH RECURSIVE descendants(id) AS (
                 SELECT id

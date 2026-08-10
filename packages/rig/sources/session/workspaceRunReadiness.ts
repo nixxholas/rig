@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { ProjectRepository } from "../project/ProjectRepository.js";
 import { normalizeProjectCwd } from "../utils/normalizeProjectCwd.js";
@@ -12,11 +13,12 @@ export interface WorkspaceRunTarget {
 
 /** The one durable gate every session store applies before a managed-workspace runtime exists. */
 export async function workspaceRunReadiness(
+    ctx: Context,
     projects: Pick<ProjectRepository, "getWorkspace">,
     target: WorkspaceRunTarget,
     stat: typeof statSync = statSync,
 ): Promise<WorkspaceRunReadiness> {
-    const workspace = await projects.getWorkspace(target.projectId, target.workspaceId);
+    const workspace = await projects.getWorkspace(ctx, target.projectId, target.workspaceId);
     if (workspace === undefined) {
         return {
             message:

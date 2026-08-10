@@ -1,15 +1,14 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql } from "drizzle-orm";
 
 import type { RegisterSecretRequest } from "../../protocol/index.js";
 import { secretEnvironmentVariables, secretRegistrations } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
-export async function secretRegister(
-    tx: DatabaseScope,
-    request: RegisterSecretRequest,
-): Promise<void> {
-    await inTx(tx, async (tx) => {
+export async function secretRegister(ctx: Context, request: RegisterSecretRequest): Promise<void> {
+    await inTx(ctx, "rig.sql.session.secret_register", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(secretRegistrations)
             .values({

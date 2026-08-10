@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { projects } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Records the trunk a project's workspaces are cut from.
@@ -12,15 +13,15 @@ import type { DatabaseScope } from "../Transaction.js";
  * conditional on the branch still being unknown.
  */
 export async function projectSetDefaultBranch(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     branch: string,
     now: number,
 ): Promise<number> {
-    return await inTx(tx, async (tx) =>
+    return await inTx(ctx, "rig.sql.project.projectSetDefaultBranch", async (ctx) =>
         Number(
             (
-                await tx
+                await ctx.tx
                     .update(projects)
                     .set({
                         defaultBranch: branch,

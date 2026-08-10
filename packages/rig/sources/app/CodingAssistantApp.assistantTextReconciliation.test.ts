@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { type TUI } from "@earendil-works/pi-tui";
 import { defineModel, defineProvider, type AssistantMessage } from "@slopus/rig-execution";
 import { describe, expect, it, vi } from "vitest";
@@ -108,6 +109,7 @@ function createApp(): CodingAssistantApp {
     });
     const harness = createJustBashToolHarness();
     return new CodingAssistantApp({
+        ctx: createTestRootContext().named("app"),
         agent: new Agent({
             context: harness.context,
             modelId: model.id,

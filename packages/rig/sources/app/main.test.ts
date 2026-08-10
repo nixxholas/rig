@@ -104,7 +104,7 @@ describe("main command dispatch", () => {
     it("inspects machine-readable installation state without starting a session or daemon", async () => {
         await expect(main(["inspect", "--json"])).resolves.toBe(0);
 
-        expect(runRigInspection).toHaveBeenCalledWith({ json: true });
+        expect(runRigInspection).toHaveBeenCalledWith(expect.anything(), { json: true });
         expect(runApp).not.toHaveBeenCalled();
         expect(runLocalProtocolServer).not.toHaveBeenCalled();
     });
@@ -192,10 +192,12 @@ describe("main command dispatch", () => {
         expect(runApp).toHaveBeenCalledTimes(2);
         expect(runApp).toHaveBeenNthCalledWith(
             1,
+            expect.anything(),
             expect.not.objectContaining({ resumeSessionId: expect.anything() }),
         );
         expect(runApp).toHaveBeenNthCalledWith(
             2,
+            expect.anything(),
             expect.objectContaining({ resumeSessionId: "session-reload-1" }),
         );
     });

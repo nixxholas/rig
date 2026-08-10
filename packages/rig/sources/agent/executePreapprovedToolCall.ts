@@ -1,4 +1,5 @@
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import { errorToMessage } from "../errorToMessage.js";
 import type { AgentContext } from "./context/AgentContext.js";
@@ -9,6 +10,7 @@ import type { AnyDefinedTool, Message, ToolResultBlock } from "./types.js";
 
 export async function executePreapprovedToolCall(options: {
     batchId: string;
+    ctx: Context;
     context: AgentContext;
     messages: readonly Message[];
     onBeforeExecute?: () => void;
@@ -54,6 +56,7 @@ export async function executePreapprovedToolCall(options: {
 
     try {
         const execution = {
+            ctx: options.ctx,
             messages: options.messages,
             toolBatchId: options.batchId,
             toolCallId: options.toolCall.id,

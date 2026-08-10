@@ -63,7 +63,9 @@ describe("runLocalProtocolServer database failures", () => {
             .trim()
             .split("\n")
             .map((line) => JSON.parse(line) as Record<string, unknown>);
-        expect(records.map((record) => record.event)).toEqual([
+        expect(
+            records.map((record) => record.event).filter((event) => event !== "daemon_log"),
+        ).toEqual([
             "daemon_starting",
             "daemon_startup_failed",
             "daemon_stopping",
@@ -107,7 +109,9 @@ describe("runLocalProtocolServer database failures", () => {
             .trim()
             .split("\n")
             .map((line) => JSON.parse(line) as Record<string, unknown>);
-        expect(records.map((record) => record.event)).toEqual([
+        expect(
+            records.map((record) => record.event).filter((event) => event !== "daemon_log"),
+        ).toEqual([
             "daemon_starting",
             "daemon_ready",
             "daemon_stopping",

@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
 import { sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { sessionAppendEvent } from "./sessionAppendEvent.js";
 import { sessionDeleteQueuedRun } from "./sessionDeleteQueuedRun.js";
 
@@ -17,12 +18,13 @@ export interface SessionStartQueuedRunInput {
 
 /** Moves one run from the durable FIFO into the active slot without a crash-visible gap. */
 export async function sessionStartQueuedRun(
-    tx: DatabaseScope,
+    ctx: Context,
     input: SessionStartQueuedRunInput,
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
-        await sessionDeleteQueuedRun(tx, input.sessionId, input.runId);
-        await sessionAppendEvent(tx, input.event, { runId: input.runId }, input.now);
+    await inTx(ctx, "rig.sql.session.session_start_queued_run", async (ctx) => {
+        const tx = ctx.tx;
+        await sessionDeleteQueuedRun(ctx, input.sessionId, input.runId);
+        await sessionAppendEvent(ctx, input.event, { runId: input.runId }, input.now);
         await tx
             .update(sessions)
             .set({

@@ -1,27 +1,33 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { eq, sql } from "drizzle-orm";
 
 import { folderItemMutations } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryFolderItemMutationReceipt(
-    tx: DatabaseScope,
+    ctx: Context,
     mutationId: string,
 ): Promise<{ action: string; fingerprint: string; itemId: string } | undefined> {
-    return await inDatabase(tx, async (tx) => {
-        const row = await tx
-            .select()
-            .from(folderItemMutations)
-            .where(eq(folderItemMutations.mutationId, mutationId))
-            .get();
-        return row === undefined
-            ? undefined
-            : { action: row.action, fingerprint: row.requestFingerprint, itemId: row.itemId };
-    });
+    return await inDatabase(
+        ctx,
+        "rig.sql.folderItem.queryFolderItemMutationReceipt",
+        async (ctx) => {
+            const tx = ctx.tx;
+            const row = await tx
+                .select()
+                .from(folderItemMutations)
+                .where(eq(folderItemMutations.mutationId, mutationId))
+                .get();
+            return row === undefined
+                ? undefined
+                : { action: row.action, fingerprint: row.requestFingerprint, itemId: row.itemId };
+        },
+    );
 }
 
 export async function recordFolderItemMutationReceipt(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         action: string;
         fingerprint: string;
@@ -30,19 +36,23 @@ export async function recordFolderItemMutationReceipt(
         now: number;
     },
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
-        await tx
-            .insert(folderItemMutations)
-            .values({
-                action: input.action,
-                createdAtMs: input.now,
-                itemId: input.itemId,
-                mutationId: input.mutationId,
-                requestFingerprint: input.fingerprint,
-            })
-            .run();
-        await tx.run(
-            sql`
+    return await inDatabase(
+        ctx,
+        "rig.sql.folderItem.recordFolderItemMutationReceipt",
+        async (ctx) => {
+            const tx = ctx.tx;
+            await tx
+                .insert(folderItemMutations)
+                .values({
+                    action: input.action,
+                    createdAtMs: input.now,
+                    itemId: input.itemId,
+                    mutationId: input.mutationId,
+                    requestFingerprint: input.fingerprint,
+                })
+                .run();
+            await tx.run(
+                sql`
         DELETE FROM folder_item_mutations
         WHERE item_id = ${input.itemId}
           AND action != 'create'
@@ -54,6 +64,7 @@ export async function recordFolderItemMutationReceipt(
             LIMIT -1 OFFSET 10000
         )
         `,
-        );
-    });
+            );
+        },
+    );
 }

@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -26,6 +27,7 @@ function hasLocalCodexAuth(): boolean {
 }
 
 const describeLive = LIVE && hasLocalCodexAuth() ? describe : describe.skip;
+const ctx = createTestRootContext();
 
 describeLive("configured Codex provider live", () => {
     it("accepts Rig's provider-neutral agent namespace", async () => {
@@ -39,6 +41,7 @@ describeLive("configured Codex provider live", () => {
             taskName: "live_rig_probe",
         };
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: process.cwd(),
             modelId: modelOpenaiGpt56Sol.id,
             subagents: {
@@ -60,7 +63,7 @@ describeLive("configured Codex provider live", () => {
             runtime.agent.enqueueUserMessage(
                 "Call rig.spawn_agent exactly once, then reply exactly: live rig ok",
             );
-            const result = await runtime.agent.run();
+            const result = await runtime.agent.run(ctx);
             if (result.stopReason === "error") {
                 throw new Error(result.errorMessage ?? "Codex inference failed.");
             }
@@ -80,6 +83,7 @@ describeLive("configured Codex provider live", () => {
             taskName: "live_probe",
         };
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: process.cwd(),
             modelId: modelOpenaiGpt56Sol.id,
             serviceTier: "fast",
@@ -97,7 +101,7 @@ describeLive("configured Codex provider live", () => {
 
         try {
             runtime.agent.enqueueUserMessage("Reply with exactly: live collaboration schema ok");
-            const result = await runtime.agent.run();
+            const result = await runtime.agent.run(ctx);
             if (result.stopReason === "error") {
                 throw new Error(result.errorMessage ?? "Codex inference failed.");
             }

@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
@@ -198,7 +200,7 @@ async function startServer(): Promise<{
     const directory = await mkdtemp(join(tmpdir(), "rig-remote-terminal-"));
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "daemon.sock");
-    const server = await createProtocolHttpServer({ token: "test-token" });
+    const server = await createProtocolHttpServer(createTestRootContext(), { token: "test-token" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, resolve);

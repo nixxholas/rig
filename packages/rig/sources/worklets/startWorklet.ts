@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 import { createSandboxedCommand } from "../agent/context/createSandboxedCommand.js";
 import { getRigHome } from "../config/getRigHome.js";
 import { createToolEnvironment } from "../agent/context/createToolEnvironment.js";
 import { startSandboxedProcessNetwork } from "../agent/context/startSandboxedProcessNetwork.js";
+import type { SandboxedProcessNetwork } from "../agent/context/startSandboxedProcessNetwork.js";
 import { killProcessTree } from "../processes/killProcessTree.js";
 import type { WorkletPermissions } from "../protocol/WorkletProtocol.js";
 import { BoundedProcessLog } from "../utils/BoundedProcessLog.js";
@@ -64,7 +66,10 @@ export interface StartWorkletOptions {
  * Anything beyond that — other writable paths, or any network at all — comes from the permissions
  * its own manifest declared, so what a worklet can reach is what a person approved at install.
  */
-export async function startWorklet(options: StartWorkletOptions): Promise<RunningWorklet> {
+export async function startWorklet(
+    ctx: Context,
+    options: StartWorkletOptions,
+): Promise<RunningWorklet> {
     const environment = options.environment ?? process.env;
     const permissions = resolveWorkletPermissions(options.permissions, { environment });
     const entryPath = builtWorkletEntry(options.versionDirectory);
@@ -127,7 +132,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
     let child;
     // A worklet that named specific hosts reaches them through Rig's managed proxy, which lives
     // for exactly as long as the worklet process does.
-    let network;
+    let network: SandboxedProcessNetwork | undefined;
     try {
         network = await startSandboxedProcessNetwork(permissions.networkPolicy);
         const node = await createWorkletNodeRuntime({ entryPath });
@@ -172,13 +177,15 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
             TMP: temporaryDirectory,
             TMPDIR: temporaryDirectory,
         };
-        child = spawn(command.command, command.args ?? [], {
-            cwd: options.dataDirectory,
-            detached: process.platform !== "win32",
-            env: network?.withProxyEnvironment(workletEnvironment) ?? workletEnvironment,
-            stdio: ["ignore", "pipe", "pipe"],
-            windowsHide: true,
-        });
+        child = await ctx.span("rig.worklet.process.spawn", async () =>
+            spawn(command.command, command.args ?? [], {
+                cwd: options.dataDirectory,
+                detached: process.platform !== "win32",
+                env: network?.withProxyEnvironment(workletEnvironment) ?? workletEnvironment,
+                stdio: ["ignore", "pipe", "pipe"],
+                windowsHide: true,
+            }),
+        );
         processState = "running";
     } catch (error) {
         await tools.close();
@@ -204,7 +211,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
     let finalized: Promise<void> | undefined;
     const finalize = () =>
         (finalized ??= Promise.allSettled([
-            closeChild(child, completion, true),
+            closeChild(ctx, child, completion, true),
             closeServer(server),
             log.close(),
             network?.close(),
@@ -238,7 +245,7 @@ export async function startWorklet(options: StartWorkletOptions): Promise<Runnin
         async close(closeOptions = {}) {
             if (processState !== "exited") processState = "closing";
             try {
-                await closeChild(child, completion, closeOptions.force === true);
+                await closeChild(ctx, child, completion, closeOptions.force === true);
             } finally {
                 await finalize();
             }
@@ -286,16 +293,17 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 async function closeChild(
+    ctx: Context,
     child: ReturnType<typeof spawn>,
     completion: Promise<unknown>,
     force: boolean,
 ): Promise<void> {
     const running = child.exitCode === null && child.signalCode === null;
     if (!running) {
-        signalChildTree(child, "SIGKILL");
+        await signalChildTree(ctx, child, "SIGKILL");
         return;
     }
-    signalChildTree(child, force ? "SIGKILL" : "SIGTERM");
+    await signalChildTree(ctx, child, force ? "SIGKILL" : "SIGTERM");
     if (force) {
         await completion.catch(() => undefined);
         return;
@@ -313,18 +321,22 @@ async function closeChild(
     // The process group can still contain descendants after its leader exits. A final group-only
     // kill is safe even then and ensures an old worklet generation cannot survive replacement.
     if (stopped) {
-        signalChildTree(child, "SIGKILL");
+        await signalChildTree(ctx, child, "SIGKILL");
         return;
     }
-    signalChildTree(child, "SIGKILL");
+    await signalChildTree(ctx, child, "SIGKILL");
     await completion.catch(() => undefined);
 }
 
-function signalChildTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+async function signalChildTree(
+    ctx: Context,
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+): Promise<void> {
     const pid = child.pid;
     if (pid === undefined) return;
     if (process.platform === "win32") {
-        killProcessTree(pid, signal);
+        await killProcessTree(ctx, pid, signal);
         return;
     }
     try {

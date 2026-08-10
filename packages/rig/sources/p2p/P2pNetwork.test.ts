@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 
 import type { P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import type { P2pTransport } from "./P2pTransport.js";
@@ -7,6 +8,7 @@ import { createP2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.j
 import type { P2pTrustedPeer } from "./P2pPeer.js";
 import type { P2pPeerTrustStoreContract } from "./P2pPeerTrustStore.js";
 
+const ctx = createTestRootContext();
 const disabledConfig = {
     direct: {},
     enableDirect: false,
@@ -31,8 +33,22 @@ const peerTrustStore: P2pPeerTrustStoreContract = {
 };
 
 describe("P2pNetwork", () => {
+    it("passes the startup context into durable peer discovery", async () => {
+        const ctx = createTestRootContext();
+        const peers = vi.fn(async () => []);
+        const network = await P2pNetwork.create(ctx, {
+            config: disabledConfig,
+            identity,
+            irohSecretKeyPath: "unused",
+            peerTrustStore: { ...peerTrustStore, peers },
+        });
+
+        expect(peers).toHaveBeenCalledWith(ctx);
+        await network.close();
+    });
+
     it("starts with no transports when all transports are disabled", async () => {
-        const network = await P2pNetwork.create({
+        const network = await P2pNetwork.create(createTestRootContext(), {
             config: disabledConfig,
             identity,
             irohSecretKeyPath: "unused",
@@ -54,7 +70,7 @@ describe("P2pNetwork", () => {
     it("contains malformed saved trust without taking down the daemon", async () => {
         const unavailable = vi.fn();
         const createIrohTransport = vi.fn();
-        const network = await P2pNetwork.create({
+        const network = await P2pNetwork.create(createTestRootContext(), {
             config: { ...disabledConfig, enableIroh: true },
             createIrohTransport,
             identity,
@@ -78,7 +94,7 @@ describe("P2pNetwork", () => {
 
     it("contains one transport failure without failing the P2P service", async () => {
         const unavailable = vi.fn();
-        const network = await P2pNetwork.create({
+        const network = await P2pNetwork.create(createTestRootContext(), {
             config: { ...disabledConfig, enableIroh: true },
             createIrohTransport: async () => {
                 throw new Error("binding unavailable");
@@ -121,7 +137,7 @@ describe("P2pNetwork", () => {
             kind: "iroh",
             status: () => initial,
         };
-        const network = await P2pNetwork.create({
+        const network = await P2pNetwork.create(createTestRootContext(), {
             config: { ...disabledConfig, enableIroh: true },
             createIrohTransport: async (onStatusChange) => {
                 publish = onStatusChange;
@@ -175,7 +191,7 @@ describe("P2pNetwork", () => {
             state: "ready",
             transport: "iroh",
         };
-        const network = await P2pNetwork.create({
+        const network = await P2pNetwork.create(createTestRootContext(), {
             config: { ...disabledConfig, enableIroh: true },
             createIrohTransport: async (_onStatusChange, authenticate) => {
                 validateIrohPeer = authenticate;
@@ -189,7 +205,7 @@ describe("P2pNetwork", () => {
             irohSecretKeyPath: "unused",
             peerTrustStore: {
                 ...peerTrustStore,
-                peerForBinding: async (_transport, address) =>
+                peerForBinding: async (_ctx, _transport, address) =>
                     persistedPeer?.bindings.some((binding) => binding.address === address) === true
                         ? remoteIdentity
                         : undefined,
@@ -211,7 +227,12 @@ describe("P2pNetwork", () => {
         network.addTrustedPeer(persistedPeer);
 
         await expect(validateIrohPeer(remoteIdentity, endpointId)).resolves.toBeUndefined();
-        expect(validate).toHaveBeenCalledWith(remoteIdentity, "iroh", endpointId);
+        expect(validate).toHaveBeenCalledWith(
+            expect.anything(),
+            remoteIdentity,
+            "iroh",
+            endpointId,
+        );
         await network.close();
     });
 
@@ -232,7 +253,7 @@ describe("P2pNetwork", () => {
             publicKey: createP2pInstanceIdentity(peerId).publicKey,
             status: "connected" as const,
         };
-        const network = await P2pNetwork.create({
+        const network = await P2pNetwork.create(createTestRootContext(), {
             config: {
                 ...disabledConfig,
                 enableDirect: true,
@@ -265,14 +286,17 @@ describe("P2pNetwork", () => {
             peerTrustStore,
         });
 
-        const selected = await network.fetch(
-            peerId,
-            { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/health" },
-            new AbortController().signal,
-        );
+        const request = {
+            body: Buffer.alloc(0),
+            headers: {},
+            method: "GET",
+            path: "/health",
+        } as const;
+        const signal = new AbortController().signal;
+        const selected = await network.fetch(ctx, peerId, request, signal);
 
         expect(selected.transport).toBe("direct");
-        expect(directFetch).toHaveBeenCalledOnce();
+        expect(directFetch).toHaveBeenCalledWith(ctx, peerId, request, signal);
         expect(sshFetch).not.toHaveBeenCalled();
         await network.close();
     });

@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, gte, sql } from "drizzle-orm";
 
@@ -5,18 +7,18 @@ import type { Message } from "../../agent/types.js";
 import { sessionContextMessages, sessionCredentialBindings, sessions } from "../database/schema.js";
 import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { sessionScopeValues } from "./impl/sessionScope.js";
 
 export async function sessionSave(
-    tx: DatabaseScope,
+    ctx: Context,
     state: PersistedSessionState,
     input: {
         contextMessages: readonly Message[];
         now: number;
     },
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.session.session_save", async (ctx) => {
+        const tx = ctx.tx;
         const values = {
             ...sessionScopeValues(state.scope),
             activeRunId: state.activeRunId ?? null,
@@ -119,16 +121,17 @@ export async function sessionSave(
                 target: sessionCredentialBindings.sessionId,
             })
             .run();
-        await replaceContextMessages(tx, state.id, input.contextMessages);
+        await replaceContextMessages(ctx, state.id, input.contextMessages);
     });
 }
 
 export async function replaceContextMessages(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     messages: readonly Message[],
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.replace_context_messages", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .delete(sessionContextMessages)
             .where(

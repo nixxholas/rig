@@ -1,11 +1,12 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq } from "drizzle-orm";
 
 import { queuedRuns, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function sessionReconcileTerminalRun(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         lastEventId: string | null;
         runId: string;
@@ -14,7 +15,8 @@ export async function sessionReconcileTerminalRun(
         updatedAt: number;
     },
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.session.session_reconcile_terminal_run", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .update(sessions)
             .set({

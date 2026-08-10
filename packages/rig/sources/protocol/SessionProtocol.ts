@@ -625,6 +625,8 @@ export interface SessionStreamCurrentState {
  * event log is never replayed on top of it.
  */
 export const SESSION_STREAM_TURN_LIMIT = 20;
+/** Default recent history carried while opening a chat; clients may explicitly request more. */
+export const SESSION_BOOTSTRAP_TURN_LIMIT = 1;
 /** Service rows are bounded separately and never consume the conversational turn budget. */
 export const SESSION_TRANSCRIPT_NOTICE_LIMIT = 50;
 

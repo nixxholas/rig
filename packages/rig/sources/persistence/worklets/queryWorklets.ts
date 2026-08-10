@@ -1,13 +1,13 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     workletPermissionsSchema,
     type WorkletPermissions,
     type WorkletVersion,
 } from "../../protocol/WorkletProtocol.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 import { workletIconUrl } from "../../worklets/readWorkletIcon.js";
 
@@ -33,8 +33,9 @@ export interface StoredWorklet {
 }
 
 /** Lists every worklet with its complete version history, alphabetically by name. */
-export async function queryWorklets(tx: DatabaseScope): Promise<readonly StoredWorklet[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryWorklets(ctx: Context): Promise<readonly StoredWorklet[]> {
+    return await inDatabase(ctx, "rig.sql.worklets.query_all", async (ctx) => {
+        const tx = ctx.tx;
         const workletRows = await tx.all<Record<string, unknown>>(
             sql`SELECT * FROM worklets ORDER BY name ASC`,
         );

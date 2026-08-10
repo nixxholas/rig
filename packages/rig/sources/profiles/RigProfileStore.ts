@@ -1,4 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
+import type { Context } from "@steve.kite/stdlib";
 
 import { createEventIdFactory, type RigProfileChangedEvent } from "../protocol/index.js";
 import type {
@@ -6,7 +7,6 @@ import type {
     RigProfilePhoto,
     UpdateRigProfileRequest,
 } from "../protocol/ProfileProtocol.js";
-import type { TX } from "../persistence/Transaction.js";
 import { queryRigProfile, queryRigProfiles } from "../persistence/profile/queryRigProfiles.js";
 import { rigProfileCreate } from "../persistence/profile/rigProfileCreate.js";
 import { rigProfileUpdate } from "../persistence/profile/rigProfileUpdate.js";
@@ -16,12 +16,12 @@ export interface RigProfileStoreOptions {
     database: RigProfileDatabase;
     localInstanceId: string;
     now?: () => number;
-    publish: (event: RigProfileChangedEvent) => void | Promise<void>;
+    publish: (ctx: Context, event: RigProfileChangedEvent) => void | Promise<void>;
 }
 
 export interface RigProfileDatabase {
-    query<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
-    transaction<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
+    query<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
+    transaction<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
 }
 
 export const MAXIMUM_RIG_PROFILES_PER_PARENT = 64;
@@ -31,7 +31,7 @@ export class RigProfileStore {
     readonly #localInstanceId: string;
     readonly #nextEventId: () => string;
     readonly #now: () => number;
-    readonly #publish: (event: RigProfileChangedEvent) => void | Promise<void>;
+    readonly #publish: (ctx: Context, event: RigProfileChangedEvent) => void | Promise<void>;
 
     constructor(options: RigProfileStoreOptions) {
         this.#database = options.database;
@@ -41,19 +41,22 @@ export class RigProfileStore {
         this.#publish = options.publish;
     }
 
-    async list(): Promise<readonly RigProfile[]> {
-        return this.#database.query(async (tx) => queryRigProfiles(tx));
+    async list(ctx: Context): Promise<readonly RigProfile[]> {
+        return this.#database.query(ctx, async (ctx) => queryRigProfiles(ctx));
     }
 
-    async get(profileId: string): Promise<RigProfile | undefined> {
-        return this.#database.query(async (tx) => queryRigProfile(tx, profileId));
+    async get(ctx: Context, profileId: string): Promise<RigProfile | undefined> {
+        return this.#database.query(ctx, async (ctx) => queryRigProfile(ctx, profileId));
     }
 
-    async create(input: {
-        email: string;
-        name: string;
-        photo?: RigProfilePhoto;
-    }): Promise<RigProfile> {
+    async create(
+        ctx: Context,
+        input: {
+            email: string;
+            name: string;
+            photo?: RigProfilePhoto;
+        },
+    ): Promise<RigProfile> {
         const now = this.#now();
         const profile: RigProfile = {
             createdAt: now,
@@ -65,23 +68,25 @@ export class RigProfileStore {
             updatedAt: now,
             version: 1,
         };
-        await this.#database.transaction(async (tx) => {
-            await this.#assertParentCapacity(tx, this.#localInstanceId);
-            await rigProfileCreate(tx, profile);
+        await this.#database.transaction(ctx, async (ctx) => {
+            await this.#assertParentCapacity(ctx, this.#localInstanceId);
+            await rigProfileCreate(ctx, profile);
         });
-        await this.#publishChanged(profile);
+        await this.#publishChanged(ctx, profile);
         return profile;
     }
 
     async update(
+        ctx: Context,
         profileId: string,
         input: Omit<UpdateRigProfileRequest, "photo"> & {
             photo?: RigProfilePhoto | null;
         },
     ): Promise<RigProfile | undefined> {
         const updated = await this.#database.transaction(
-            async (tx): Promise<RigProfile | undefined> => {
-                const current = await queryRigProfile(tx, profileId);
+            ctx,
+            async (ctx): Promise<RigProfile | undefined> => {
+                const current = await queryRigProfile(ctx, profileId);
                 if (current === undefined) return undefined;
                 if (current.parentInstanceId !== this.#localInstanceId) {
                     throw new Error("Only a profile's parent Rig may change it.");
@@ -102,15 +107,19 @@ export class RigProfileStore {
                     updatedAt: now,
                     version: current.version + 1,
                 };
-                await rigProfileUpdate(tx, next);
+                await rigProfileUpdate(ctx, next);
                 return next;
             },
         );
-        if (updated !== undefined) await this.#publishChanged(updated);
+        if (updated !== undefined) await this.#publishChanged(ctx, updated);
         return updated;
     }
 
-    async replicate(profile: RigProfile, authenticatedParentId: string): Promise<RigProfile> {
+    async replicate(
+        ctx: Context,
+        profile: RigProfile,
+        authenticatedParentId: string,
+    ): Promise<RigProfile> {
         if (
             profile.parentInstanceId !== authenticatedParentId ||
             profile.parentInstanceId === this.#localInstanceId
@@ -119,11 +128,11 @@ export class RigProfileStore {
         }
         let stored = profile;
         let changed = false;
-        await this.#database.transaction(async (tx) => {
-            const current = await queryRigProfile(tx, profile.id);
+        await this.#database.transaction(ctx, async (ctx) => {
+            const current = await queryRigProfile(ctx, profile.id);
             if (current === undefined) {
-                await this.#assertParentCapacity(tx, profile.parentInstanceId);
-                await rigProfileCreate(tx, profile);
+                await this.#assertParentCapacity(ctx, profile.parentInstanceId);
+                await rigProfileCreate(ctx, profile);
                 changed = true;
                 return;
             }
@@ -144,23 +153,23 @@ export class RigProfileStore {
                 stored = current;
                 return;
             }
-            await rigProfileUpdate(tx, profile);
+            await rigProfileUpdate(ctx, profile);
             changed = true;
         });
-        if (changed) await this.#publishChanged(stored);
+        if (changed) await this.#publishChanged(ctx, stored);
         return stored;
     }
 
-    async owns(profileId: string, parentInstanceId: string): Promise<boolean> {
-        return (await this.get(profileId))?.parentInstanceId === parentInstanceId;
+    async owns(ctx: Context, profileId: string, parentInstanceId: string): Promise<boolean> {
+        return (await this.get(ctx, profileId))?.parentInstanceId === parentInstanceId;
     }
 
-    async isLocal(profileId: string): Promise<boolean> {
-        return this.owns(profileId, this.#localInstanceId);
+    async isLocal(ctx: Context, profileId: string): Promise<boolean> {
+        return this.owns(ctx, profileId, this.#localInstanceId);
     }
 
-    async #publishChanged(profile: RigProfile): Promise<void> {
-        await this.#publish({
+    async #publishChanged(ctx: Context, profile: RigProfile): Promise<void> {
+        await this.#publish(ctx, {
             createdAt: this.#now(),
             data: { profileId: profile.id, version: profile.version },
             id: this.#nextEventId(),
@@ -168,8 +177,8 @@ export class RigProfileStore {
         });
     }
 
-    async #assertParentCapacity(tx: TX, parentInstanceId: string): Promise<void> {
-        const count = (await queryRigProfiles(tx)).filter(
+    async #assertParentCapacity(ctx: Context, parentInstanceId: string): Promise<void> {
+        const count = (await queryRigProfiles(ctx)).filter(
             (profile) => profile.parentInstanceId === parentInstanceId,
         ).length;
         if (count >= MAXIMUM_RIG_PROFILES_PER_PARENT) {

@@ -1,13 +1,15 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
 
 import { onboardingState } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 import { onboardingStateSchema, type OnboardingState } from "./OnboardingState.js";
 
-export async function queryOnboardingState(tx: DatabaseScope): Promise<OnboardingState> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryOnboardingState(ctx: Context): Promise<OnboardingState> {
+    return await inDatabase(ctx, "rig.sql.onboarding.query_state", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select({
                 completedVersion: onboardingState.completedVersion,

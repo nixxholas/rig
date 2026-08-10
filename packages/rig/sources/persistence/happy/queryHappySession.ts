@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { HappyEncryptionVariant } from "../../happy/types.js";
 import { happySessions } from "../database/schema.js";
@@ -7,10 +8,11 @@ import type { HappySessionState } from "./happySessionEnsure.js";
 import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryHappySession(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
 ): Promise<HappySessionState | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.happy.query_session", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select()
             .from(happySessions)

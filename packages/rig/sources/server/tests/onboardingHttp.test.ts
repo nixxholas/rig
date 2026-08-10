@@ -3,6 +3,8 @@ import { rm } from "node:fs/promises";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import type { OnboardingServiceContract } from "../../onboarding/OnboardingService.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
@@ -25,7 +27,10 @@ describe("onboarding HTTP", () => {
             })),
         };
         const started = await startServer(
-            await createProtocolHttpServer({ onboarding, token: "secret" }),
+            await createProtocolHttpServer(createTestRootContext(), {
+                onboarding,
+                token: "secret",
+            }),
         );
         close.push(started.close);
 
@@ -47,7 +52,10 @@ describe("onboarding HTTP", () => {
             })),
         };
         const started = await startServer(
-            await createProtocolHttpServer({ onboarding, token: "secret" }),
+            await createProtocolHttpServer(createTestRootContext(), {
+                onboarding,
+                token: "secret",
+            }),
         );
         close.push(started.close);
 
@@ -74,7 +82,10 @@ describe("onboarding HTTP", () => {
             })),
         };
         const started = await startServer(
-            await createProtocolHttpServer({ onboarding, token: "secret" }),
+            await createProtocolHttpServer(createTestRootContext(), {
+                onboarding,
+                token: "secret",
+            }),
         );
         close.push(started.close);
 
@@ -87,7 +98,9 @@ describe("onboarding HTTP", () => {
                 JSON.stringify({ enabled: false }),
             ),
         ).toEqual({ body: { enabled: false }, status: 200 });
-        expect(onboarding.onboardMurmur).toHaveBeenCalledWith({ enabled: false });
+        expect(onboarding.onboardMurmur).toHaveBeenCalledWith(expect.anything(), {
+            enabled: false,
+        });
         expect(
             await send(
                 started.socketPath,
@@ -100,7 +113,9 @@ describe("onboarding HTTP", () => {
     });
 
     it("reports when daemon-owned onboarding is unavailable", async () => {
-        const started = await startServer(await createProtocolHttpServer({ token: "secret" }));
+        const started = await startServer(
+            await createProtocolHttpServer(createTestRootContext(), { token: "secret" }),
+        );
         close.push(started.close);
 
         expect(await send(started.socketPath, "GET", "/onboarding")).toEqual({

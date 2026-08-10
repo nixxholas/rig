@@ -1,21 +1,22 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, isNotNull, sql } from "drizzle-orm";
 
 import { folders } from "../database/schema.js";
 import { inDatabase } from "../database/inDatabase.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /** Restores one previously archived folder while applying a newer shared-folder operation. */
 export async function folderRestoreShared(
-    tx: DatabaseScope,
+    ctx: Context,
     folderId: string,
     parentId: string,
     orderKey: string,
     now: number,
 ): Promise<number> {
-    return await inDatabase(tx, async (tx) =>
+    return await inDatabase(ctx, "rig.sql.folder.folderRestoreShared", async (ctx) =>
         Number(
             (
-                await tx
+                await ctx.tx
                     .update(folders)
                     .set({
                         archivedAtMs: null,

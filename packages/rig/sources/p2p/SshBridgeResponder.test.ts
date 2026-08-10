@@ -3,12 +3,16 @@ import { Duplex, PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
 import type { P2pSshPeer, P2pTrustedPeer } from "./P2pPeer.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import type { P2pTunnelRequestHead } from "./P2pTunnel.js";
 import { SshBridgeResponder } from "./SshBridgeResponder.js";
 import { SshTransport, type SshBridgeChannel } from "./SshTransport.js";
+
+const ctx = createTestRootContext();
 
 const hostKeyHash = new Uint8Array(createHash("sha256").update("ssh host").digest());
 const ssh: P2pSshPeer = {
@@ -47,6 +51,7 @@ describe("SSH bridge responder", () => {
         });
 
         const response = await transport.fetch(
+            ctx,
             responderIdentity.instanceId,
             { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/health" },
             new AbortController().signal,
@@ -112,6 +117,7 @@ describe("SSH bridge responder", () => {
             peers: [peer(responderIdentity)],
         });
         const connection = await transport.openTunnel(
+            ctx,
             responderIdentity.instanceId,
             {
                 headers: {
@@ -167,6 +173,7 @@ describe("SSH bridge responder", () => {
         });
 
         const connection = await transport.openTunnel(
+            ctx,
             responderIdentity.instanceId,
             { headers: {}, method: "GET", path: "/terminal" },
             controller.signal,
@@ -199,6 +206,7 @@ describe("SSH bridge responder", () => {
         });
 
         const connection = await transport.openTunnel(
+            ctx,
             responderIdentity.instanceId,
             { headers: {}, method: "GET", path: "/forbidden" },
             new AbortController().signal,

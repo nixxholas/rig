@@ -7,6 +7,7 @@ import { modelOpenaiGpt56Sol } from "@slopus/rig-execution";
 
 import { codexExecution } from "../../../executor/codexExecution.js";
 import { createCodexWebSearchTool } from "../CodexWebSearch.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 
 const LIVE = process.env.RIG_LIVE_TEST === "1";
 const CODEX_AUTH_PATH = path.join(homedir(), ".codex", "auth.json");
@@ -33,13 +34,14 @@ describeLive("codex_web_search live", () => {
                 currentProviderId: provider.id,
                 routes: [{ profile, provider }],
             });
+            const ctx = createTestRootContext().named("codex-web-search-live-test");
 
             const result = await tool.execute(
                 {
                     query: "Search the web for the current Node.js LTS release and cite an official nodejs.org page.",
                 },
                 {} as never,
-                { signal: AbortSignal.timeout(30_000) },
+                { ctx, signal: AbortSignal.timeout(30_000) },
             );
 
             expect(result.answer.trim().length).toBeGreaterThan(0);

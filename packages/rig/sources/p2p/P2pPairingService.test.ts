@@ -1,6 +1,7 @@
 import * as Iroh from "@number0/iroh/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import type { P2pPairingState } from "../protocol/P2pPairingProtocol.js";
 import { createIrohFrameDuplex, finishWrites, writeBytes } from "./P2pFrameDuplex.js";
 import { createP2pInstanceIdentity } from "./P2pIdentity.js";
@@ -9,6 +10,7 @@ import type { P2pPeerPairingTrust, P2pTrustedPeer } from "./P2pPeer.js";
 import type { P2pPeerTrustStoreContract } from "./P2pPeerTrustStore.js";
 
 const services: P2pPairingService[] = [];
+createTestRootContext();
 
 afterEach(async () => {
     await Promise.all(services.splice(0).map((service) => service.close()));
@@ -382,6 +384,7 @@ function recordingTrustStore(options: { failMarkReady?: boolean; failPrepare?: b
             ).length,
         store: {
             preparePairing: async (
+                _ctx,
                 pairingId,
                 identity,
                 transport,

@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { DurableWait } from "../../scheduling/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 
 export async function queryDurableWaits(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
 ): Promise<readonly DurableWait[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.scheduling.queryDurableWaits", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             SELECT *

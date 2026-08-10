@@ -1,15 +1,16 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import { sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { replaceContextMessages } from "./sessionSave.js";
 import type { SessionWorkspaceTransferState } from "../../session/sessionWorkspaceTransferState.js";
 import { sessionScopeValues } from "./impl/sessionScope.js";
 
 export async function sessionTransferWorkspace(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         contextMessages: readonly Message[];
         cwd: string;
@@ -21,7 +22,8 @@ export async function sessionTransferWorkspace(
         workspaceId: string;
     },
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.session.session_transfer_workspace", async (ctx) => {
+        const tx = ctx.tx;
         const changed = (
             await tx
                 .update(sessions)
@@ -43,6 +45,6 @@ export async function sessionTransferWorkspace(
         ).rowsAffected;
         if (changed === 0) throw new Error("The session is no longer available.");
 
-        await replaceContextMessages(tx, input.sessionId, input.contextMessages);
+        await replaceContextMessages(ctx, input.sessionId, input.contextMessages);
     });
 }

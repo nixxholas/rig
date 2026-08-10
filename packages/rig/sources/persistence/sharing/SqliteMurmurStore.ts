@@ -9,10 +9,12 @@ import {
     type StoreTransaction,
 } from "@slopus/murmur";
 import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../../observability/daemonContext.js";
 
 import { asyncLock, type AsyncLock } from "../../concurrency/index.js";
 import { createHeldMemorySqliteClient } from "../database/createHeldMemorySqliteClient.js";
-import { runSqliteTransaction } from "./runSqliteTransaction.js";
+import { runSqliteTransactionBody } from "./runSqliteTransaction.js";
 
 interface MurmurStoreRow {
     key: string;
@@ -34,7 +36,9 @@ export class SqliteMurmurStore implements MurmurStore {
 
     constructor(path: string) {
         this.#client = createMurmurClient(path);
-        this.#ready = this.#initialize(path);
+        this.#ready = withWorkerContext("murmur-store-initialize", (ctx) =>
+            this.#initialize(ctx, path),
+        );
     }
 
     get(key: string): Promise<Uint8Array | undefined> {
@@ -72,7 +76,7 @@ export class SqliteMurmurStore implements MurmurStore {
                 scan: (prefix, options) => this.#scan(sqliteTransaction, prefix, options),
                 set: (key, value) => this.#set(sqliteTransaction, key, value),
             };
-            return await runSqliteTransaction(sqliteTransaction, () => operation(transaction));
+            return await runSqliteTransactionBody(sqliteTransaction, () => operation(transaction));
         });
     }
 
@@ -83,28 +87,34 @@ export class SqliteMurmurStore implements MurmurStore {
         // Mark closing before queueing the lock holder. Calls arriving after this point reject;
         // work admitted while the lifecycle was open is already ahead of this close operation.
         this.#lifecycle = "closing";
-        this.#closePromise = this.#lock.runInLock(async () => {
-            try {
-                await this.#ready.catch(() => undefined);
-                await this.#client.close();
-            } finally {
-                this.#lifecycle = "closed";
-            }
-        });
+        this.#closePromise = withWorkerContext("murmur-store-close", (ctx) =>
+            ctx.span("rig.sql.sharing.murmur.close", () =>
+                this.#lock.runInLock(async () => {
+                    try {
+                        await this.#ready.catch(() => undefined);
+                        await this.#client.close();
+                    } finally {
+                        this.#lifecycle = "closed";
+                    }
+                }),
+            ),
+        );
         await this.#closePromise;
     }
 
-    async #initialize(path: string): Promise<void> {
-        if (path !== ":memory:") {
-            await mkdir(dirname(path), { mode: 0o700, recursive: true });
-        }
-        await this.#client.execute(`
+    async #initialize(ctx: Context, path: string): Promise<void> {
+        await ctx.span("rig.sql.sharing.murmur.initialize", async () => {
+            if (path !== ":memory:") {
+                await mkdir(dirname(path), { mode: 0o700, recursive: true });
+            }
+            await this.#client.execute(`
             CREATE TABLE IF NOT EXISTS murmur_store (
                 key TEXT NOT NULL PRIMARY KEY COLLATE BINARY,
                 value BLOB NOT NULL
             )
         `);
-        if (path !== ":memory:") await chmod(path, 0o600);
+            if (path !== ":memory:") await chmod(path, 0o600);
+        });
     }
 
     async #get(database: SqlExecutor, key: string): Promise<Uint8Array | undefined> {

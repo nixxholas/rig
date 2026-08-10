@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, ne } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
 import { projectNameKey } from "../../project/projectIdentity.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Finds a workspace name no other workspace in the project already answers to.
@@ -12,10 +13,11 @@ import type { DatabaseScope } from "../Transaction.js";
  * suffix rather than failing the request that asked for it.
  */
 export async function reserveUniqueWorkspaceName(
-    tx: DatabaseScope,
+    ctx: Context,
     options: { excludeWorkspaceId?: string; name: string; projectId: string },
 ): Promise<string> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.reserveUniqueWorkspaceName", async (ctx) => {
+        const tx = ctx.tx;
         const taken = async (candidate: string): Promise<boolean> => {
             const scope =
                 options.excludeWorkspaceId === undefined

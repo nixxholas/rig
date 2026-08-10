@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { asc, eq } from "drizzle-orm";
 
 import type { FolderItem } from "../../protocol/index.js";
 import { folderItems } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryFolderItems(
-    tx: DatabaseScope,
+    ctx: Context,
     folderId?: string,
 ): Promise<readonly FolderItem[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderItem.queryFolderItems", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx
                 .select()
@@ -22,10 +24,11 @@ export async function queryFolderItems(
 }
 
 export async function queryFolderItem(
-    tx: DatabaseScope,
+    ctx: Context,
     itemId: string,
 ): Promise<FolderItem | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderItem.queryFolderItem", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx.select().from(folderItems).where(eq(folderItems.id, itemId)).get();
         return row === undefined ? undefined : read(row);
     });

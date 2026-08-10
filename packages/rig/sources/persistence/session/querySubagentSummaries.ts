@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import type { SessionTokenCount, SubagentSummary } from "../../protocol/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { parsePersistedUsage } from "./impl/persistedUsage.js";
 import {
     readNumber,
@@ -11,10 +12,11 @@ import {
 } from "./impl/sqliteRow.js";
 
 export async function querySubagentSummaries(
-    tx: DatabaseScope,
+    ctx: Context,
     parentSessionId: string,
 ): Promise<readonly SubagentSummary[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_subagent_summaries", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             WITH RECURSIVE descendants(id) AS (

@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { P2pInstanceIdentity } from "../p2p/P2pIdentity.js";
-import type { TX } from "../persistence/Transaction.js";
 import {
     fastForwardP2pCredentialSnapshotVersion,
     prepareP2pCredentialSnapshotVersion,
@@ -37,8 +37,8 @@ const encryptedMaterialEnvelopeSchema = Type.Object(
 type EncryptedMaterialEnvelope = Static<typeof encryptedMaterialEnvelopeSchema>;
 
 export interface P2pCredentialDatabase {
-    query<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
-    transaction<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
+    query<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
+    transaction<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
 }
 
 export interface P2pCredentialStoreOptions {
@@ -80,21 +80,21 @@ export class P2pCredentialStore {
         this.#now = options.now ?? Date.now;
     }
 
-    async list(ownerInstanceId: string): Promise<readonly ProvisionedProvider[]> {
+    async list(ctx: Context, ownerInstanceId: string): Promise<readonly ProvisionedProvider[]> {
         if (!Value.Check(p2pInstanceIdSchema, ownerInstanceId)) {
             throw new Error("The P2P credential owner is invalid.");
         }
-        return this.#database.query(async (tx) =>
-            (await queryP2pProvisionedProviders(tx, ownerInstanceId)).map((record) =>
+        return this.#database.query(ctx, async (ctx) =>
+            (await queryP2pProvisionedProviders(ctx, ownerInstanceId)).map((record) =>
                 this.#decodeProvider(record),
             ),
         );
     }
 
-    async listAll(): Promise<ReadonlyMap<string, readonly ProvisionedProvider[]>> {
+    async listAll(ctx: Context): Promise<ReadonlyMap<string, readonly ProvisionedProvider[]>> {
         const grouped = new Map<string, ProvisionedProvider[]>();
-        for (const record of await this.#database.query(async (tx) =>
-            queryP2pProvisionedProviders(tx),
+        for (const record of await this.#database.query(ctx, async (ctx) =>
+            queryP2pProvisionedProviders(ctx),
         )) {
             const providers = grouped.get(record.ownerInstanceId) ?? [];
             providers.push(this.#decodeProvider(record));
@@ -107,6 +107,7 @@ export class P2pCredentialStore {
      * Persists an already-authenticated owner's complete decoded snapshot.
      */
     async replace(
+        ctx: Context,
         ownerInstanceId: string,
         snapshot: P2pCredentialSnapshot,
     ): Promise<P2pCredentialReplaceResult> {
@@ -136,8 +137,8 @@ export class P2pCredentialStore {
                 visibility: provider.visibility,
             }),
         );
-        const result = await this.#database.transaction((tx) =>
-            replaceP2pCredentialSnapshot(tx, {
+        const result = await this.#database.transaction(ctx, (ctx) =>
+            replaceP2pCredentialSnapshot(ctx, {
                 ownerInstanceId,
                 providers: records,
                 sourceDigest,
@@ -167,7 +168,10 @@ export class P2pCredentialStore {
      * Assigns the next durable version to this Rig's outgoing snapshot. Unchanged credentials keep
      * their version across reconnects and restarts; changed or empty snapshots advance it.
      */
-    async prepareOwnSnapshot(snapshot: P2pCredentialSnapshot): Promise<P2pCredentialSnapshot> {
+    async prepareOwnSnapshot(
+        ctx: Context,
+        snapshot: P2pCredentialSnapshot,
+    ): Promise<P2pCredentialSnapshot> {
         if (
             !Value.Check(p2pCredentialSnapshotSchema, snapshot) ||
             snapshot.owner.instanceId !== this.#identity.instanceId ||
@@ -176,8 +180,8 @@ export class P2pCredentialStore {
             throw new Error("This Rig may only version its own credential snapshot.");
         }
         const sourceDigest = snapshotDigest(snapshot);
-        const version = await this.#database.transaction((tx) =>
-            prepareP2pCredentialSnapshotVersion(tx, {
+        const version = await this.#database.transaction(ctx, (ctx) =>
+            prepareP2pCredentialSnapshotVersion(ctx, {
                 ownerInstanceId: this.#identity.instanceId,
                 sourceDigest,
                 updatedAt: this.#now(),
@@ -192,6 +196,7 @@ export class P2pCredentialStore {
      * the current locally prepared payload, so a concurrent credential change cannot be reverted.
      */
     async fastForwardOwnSnapshot(
+        ctx: Context,
         snapshot: P2pCredentialSnapshot,
         receiverVersion: number,
     ): Promise<P2pCredentialSnapshot> {
@@ -210,8 +215,8 @@ export class P2pCredentialStore {
             throw new Error("The remote P2P credential version cannot be reconciled.");
         }
         const sourceDigest = snapshotDigest(snapshot);
-        const result = await this.#database.transaction((tx) =>
-            fastForwardP2pCredentialSnapshotVersion(tx, {
+        const result = await this.#database.transaction(ctx, (ctx) =>
+            fastForwardP2pCredentialSnapshotVersion(ctx, {
                 ownerInstanceId: this.#identity.instanceId,
                 receiverVersion,
                 snapshotVersion: snapshot.version,
@@ -232,6 +237,7 @@ export class P2pCredentialStore {
      * and decoded owner all describe the same authenticated Rig.
      */
     async replaceEncrypted(
+        ctx: Context,
         authenticatedOwnerId: string,
         senderPublicKey: string,
         envelope: P2pEncryptedCredentialSnapshot,
@@ -271,7 +277,7 @@ export class P2pCredentialStore {
                 "The decrypted P2P credential snapshot owner does not match its envelope.",
             );
         }
-        return this.replace(authenticatedOwnerId, snapshot);
+        return this.replace(ctx, authenticatedOwnerId, snapshot);
     }
 
     /**

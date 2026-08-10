@@ -1,13 +1,15 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { asc, eq } from "drizzle-orm";
 
 import type { Project } from "../../protocol/index.js";
 import { projectAvatarAssets, projects } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { projectReadRow } from "./impl/projectReadRow.js";
 
-export async function queryProjects(tx: DatabaseScope): Promise<readonly Project[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryProjects(ctx: Context): Promise<readonly Project[]> {
+    return await inDatabase(ctx, "rig.sql.project.queryProjects", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx
                 .select({ asset: projectAvatarAssets, project: projects })

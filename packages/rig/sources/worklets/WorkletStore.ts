@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import { withDatabase } from "../persistence/databaseContext.js";
+import type { SessionDatabase } from "../persistence/database/SessionDatabase.js";
 import { inTx } from "../persistence/inTx.js";
-import type { TX } from "../persistence/Transaction.js";
 import { queryWorklet } from "../persistence/worklets/queryWorklet.js";
 import { queryWorklets, type StoredWorklet } from "../persistence/worklets/queryWorklets.js";
 import { workletAddVersion } from "../persistence/worklets/workletAddVersion.js";
@@ -52,9 +54,9 @@ const DATA_FOLDER_NAME = "Data";
 const IMPORT_STAGING_PREFIX = ".import-";
 
 export interface WorkletStoreOptions {
+    database: SessionDatabase;
     environment?: NodeJS.ProcessEnv;
     now?: () => number;
-    tx: () => TX;
 }
 
 export interface ExpectedWorkletDeclaration {
@@ -73,15 +75,15 @@ export interface ExpectedWorkletDeclaration {
  * The store knows nothing about running processes. `WorkletManager` owns those.
  */
 export class WorkletStore {
+    readonly #database: SessionDatabase;
     readonly #environment: NodeJS.ProcessEnv;
     readonly #now: () => number;
-    readonly #tx: () => TX;
     readonly #mutationByName = new Map<string, Promise<void>>();
 
     constructor(options: WorkletStoreOptions) {
+        this.#database = options.database;
         this.#environment = options.environment ?? process.env;
         this.#now = options.now ?? Date.now;
-        this.#tx = options.tx;
     }
 
     get directory(): string {
@@ -96,16 +98,18 @@ export class WorkletStore {
         return join(this.directory, name, `v${String(version)}`);
     }
 
-    async get(name: string): Promise<StoredWorklet | undefined> {
-        return queryWorklet(this.#tx(), name);
+    async get(ctx: Context, name: string): Promise<StoredWorklet | undefined> {
+        ctx = withDatabase(ctx, this.#database);
+        return queryWorklet(ctx, name);
     }
 
-    async list(): Promise<readonly StoredWorklet[]> {
-        return queryWorklets(this.#tx());
+    async list(ctx: Context): Promise<readonly StoredWorklet[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return queryWorklets(ctx);
     }
 
     /** Removes imports interrupted before they became a version. Called before management opens. */
-    async cleanupStaging(): Promise<void> {
+    async cleanupStaging(_ctx: Context): Promise<void> {
         let entries: readonly string[];
         try {
             entries = await readdir(this.directory);
@@ -122,23 +126,25 @@ export class WorkletStore {
 
     /** The worklet names itself in its manifest, so the folder is read before anything is locked. */
     async install(
+        ctx: Context,
         request: InstallWorkletRequest,
         sourceFileSystem?: FileSystemContext | WorkletSourceReader,
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<StoredWorklet> {
+        ctx = withDatabase(ctx, this.#database);
         if (!Value.Check(installWorkletRequestSchema, request)) {
             throw new WorkletInvalidError("The worklet install request is invalid.");
         }
         const sourceReader = resolveWorkletSourceReader(sourceFileSystem);
-        const staging = await this.#stageSource(request.path, sourceReader);
+        const staging = await this.#stageSource(ctx, request.path, sourceReader);
         try {
-            const icon = await this.#readIcon(request.iconPath, sourceReader);
+            const icon = await this.#readIcon(ctx, request.iconPath, sourceReader);
             const stagedReader = resolveWorkletSourceReader(undefined);
-            const manifest = await this.#readDeclaration(staging, stagedReader);
+            const manifest = await this.#readDeclaration(ctx, staging, stagedReader);
             this.#assertExpectedDeclaration(manifest, expected);
             await buildWorkletSource(staging, manifest.name);
             return await this.#serializeMutation(manifest.name, () =>
-                this.#install(request, manifest, icon, staging),
+                this.#install(ctx, request, manifest, icon, staging),
             );
         } finally {
             await rm(staging, { force: true, recursive: true }).catch(() => undefined);
@@ -146,30 +152,33 @@ export class WorkletStore {
     }
 
     async update(
+        ctx: Context,
         name: string,
         request: UpdateWorkletRequest,
         sourceFileSystem?: FileSystemContext | WorkletSourceReader,
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<StoredWorklet> {
+        ctx = withDatabase(ctx, this.#database);
         if (!Value.Check(updateWorkletRequestSchema, request)) {
             throw new WorkletInvalidError(
                 "A worklet update needs the source folder path and a description of the change.",
             );
         }
-        if ((await queryWorklet(this.#tx(), name)) === undefined) {
+        if ((await queryWorklet(ctx, name)) === undefined) {
             throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
         }
         const sourceReader = resolveWorkletSourceReader(sourceFileSystem);
-        const staging = await this.#stageSource(request.path, sourceReader);
+        const staging = await this.#stageSource(ctx, request.path, sourceReader);
         try {
             const manifest = await this.#readDeclaration(
+                ctx,
                 staging,
                 resolveWorkletSourceReader(undefined),
             );
             this.#assertExpectedDeclaration(manifest, { ...expected, name });
             await buildWorkletSource(staging, manifest.name);
             return await this.#serializeMutation(name, () =>
-                this.#update(name, request, manifest, staging),
+                this.#update(ctx, name, request, manifest, staging),
             );
         } finally {
             await rm(staging, { force: true, recursive: true }).catch(() => undefined);
@@ -177,15 +186,17 @@ export class WorkletStore {
     }
 
     async revert(
+        ctx: Context,
         name: string,
         request: RevertWorkletRequest,
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<StoredWorklet> {
+        ctx = withDatabase(ctx, this.#database);
         if (!Value.Check(revertWorkletRequestSchema, request)) {
             throw new WorkletInvalidError("The worklet revert request is invalid.");
         }
-        const reverted = await inTx(this.#tx(), async (tx) => {
-            const worklet = await queryWorklet(tx, name);
+        const reverted = await inTx(ctx, "rig.sql.worklets.store_revert", async (ctx) => {
+            const worklet = await queryWorklet(ctx, name);
             if (worklet === undefined) {
                 throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
             }
@@ -203,8 +214,8 @@ export class WorkletStore {
                     "The permissions supplied for review do not match that stored worklet version.",
                 );
             }
-            await workletSetCurrentVersion(tx, name, request.version, this.#now());
-            return queryWorklet(tx, name);
+            await workletSetCurrentVersion(ctx, name, request.version, this.#now());
+            return queryWorklet(ctx, name);
         });
         if (reverted === undefined) throw new Error("The worklet was not stored.");
         return reverted;
@@ -214,23 +225,31 @@ export class WorkletStore {
      * Removes a worklet's catalog row and every version of its code, and keeps its `Data` folder.
      * The data outlives the code that wrote it, so uninstalling never destroys it.
      */
-    async remove(name: string): Promise<void> {
+    async remove(ctx: Context, name: string): Promise<void> {
+        ctx = withDatabase(ctx, this.#database);
         return this.#serializeMutation(name, async () => {
-            const existing = await queryWorklet(this.#tx(), name);
+            const existing = await queryWorklet(ctx, name);
             if (existing === undefined) {
                 throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
             }
-            await inTx(this.#tx(), async (tx) => workletDelete(tx, name));
-            await this.#removeCodeKeepingData(name);
+            await inTx(ctx, "rig.sql.worklets.store_remove", async (ctx) =>
+                workletDelete(ctx, name),
+            );
+            await this.#removeCodeKeepingData(ctx, name);
         });
     }
 
-    async readIcon(name: string, format: WorkletIconFormat): Promise<WorkletIconFileResult> {
+    async readIcon(
+        _ctx: Context,
+        name: string,
+        format: WorkletIconFormat,
+    ): Promise<WorkletIconFileResult> {
         return readWorkletIcon(name, format, this.#environment);
     }
 
     /** Everything an import must declare about itself before any of it is copied anywhere. */
     async #readDeclaration(
+        _ctx: Context,
         sourcePath: string,
         sourceReader: WorkletSourceReader,
     ): Promise<WorkletManifest> {
@@ -242,26 +261,27 @@ export class WorkletStore {
     }
 
     async #install(
+        ctx: Context,
         request: InstallWorkletRequest,
         manifest: WorkletManifest,
         icon: WorkletIconArtifacts,
         stagedSourcePath: string,
     ): Promise<StoredWorklet> {
-        if ((await queryWorklet(this.#tx(), manifest.name)) !== undefined) {
+        if ((await queryWorklet(ctx, manifest.name)) !== undefined) {
             throw new WorkletInvalidError(
                 `A worklet named ${JSON.stringify(manifest.name)} already exists. Update it to import a new version.`,
             );
         }
-        await this.#installFiles(manifest.name, stagedSourcePath, icon);
+        await this.#installFiles(ctx, manifest.name, stagedSourcePath, icon);
         let created;
         try {
-            created = await inTx(this.#tx(), async (tx) => {
-                if ((await queryWorklet(tx, manifest.name)) !== undefined) {
+            created = await inTx(ctx, "rig.sql.worklets.store_install", async (ctx) => {
+                if ((await queryWorklet(ctx, manifest.name)) !== undefined) {
                     throw new WorkletInvalidError(
                         `A worklet named ${JSON.stringify(manifest.name)} already exists. Update it to import a new version.`,
                     );
                 }
-                await workletCreate(tx, {
+                await workletCreate(ctx, {
                     authorSessionId: request.authorSessionId,
                     changeDescription: "Initial import",
                     createdAt: this.#now(),
@@ -273,10 +293,10 @@ export class WorkletStore {
                         ? {}
                         : { sourceDescription: request.sourceDescription }),
                 });
-                return queryWorklet(tx, manifest.name);
+                return queryWorklet(ctx, manifest.name);
             });
         } catch (error) {
-            await this.#removeCodeKeepingData(manifest.name).catch(() => undefined);
+            await this.#removeCodeKeepingData(ctx, manifest.name).catch(() => undefined);
             throw error;
         }
         if (created === undefined) throw new Error("The worklet was not stored.");
@@ -284,12 +304,13 @@ export class WorkletStore {
     }
 
     async #update(
+        ctx: Context,
         name: string,
         request: UpdateWorkletRequest,
         manifest: WorkletManifest,
         stagedSourcePath: string,
     ): Promise<StoredWorklet> {
-        const existing = await queryWorklet(this.#tx(), name);
+        const existing = await queryWorklet(ctx, name);
         if (existing === undefined) {
             throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
         }
@@ -303,20 +324,20 @@ export class WorkletStore {
         const nextVersion =
             existing.versions.reduce((highest, version) => Math.max(highest, version.version), 0) +
             1;
-        await this.#importVersion(name, nextVersion, stagedSourcePath);
+        await this.#importVersion(ctx, name, nextVersion, stagedSourcePath);
         // A version folder with no catalog row behind it would make every later update collide
         // with it, so a failed write takes the folder it just landed with it.
         let updated;
         try {
-            updated = await inTx(this.#tx(), async (tx) => {
-                await workletAddVersion(tx, name, {
+            updated = await inTx(ctx, "rig.sql.worklets.store_update", async (ctx) => {
+                await workletAddVersion(ctx, name, {
                     changeDescription: request.changeDescription,
                     createdAt: this.#now(),
                     description: manifest.description,
                     permissions: manifest.permissions,
                     version: nextVersion,
                 });
-                return queryWorklet(tx, name);
+                return queryWorklet(ctx, name);
             });
         } catch (error) {
             await rm(this.versionDirectory(name, nextVersion), {
@@ -336,13 +357,14 @@ export class WorkletStore {
      * always produces exactly the imported source.
      */
     async #installFiles(
+        ctx: Context,
         name: string,
         stagedSourcePath: string,
         icon: WorkletIconArtifacts,
     ): Promise<void> {
         const root = join(this.directory, name);
         await mkdir(root, { mode: 0o755, recursive: true });
-        await this.#removeCodeKeepingData(name);
+        await this.#removeCodeKeepingData(ctx, name);
         const target = join(root, "v1");
         try {
             await rename(stagedSourcePath, target);
@@ -352,7 +374,7 @@ export class WorkletStore {
             ]);
             await mkdir(join(root, DATA_FOLDER_NAME), { mode: 0o755, recursive: true });
         } catch (error) {
-            await this.#removeCodeKeepingData(name).catch(() => undefined);
+            await this.#removeCodeKeepingData(ctx, name).catch(() => undefined);
             if (error instanceof WorkletInvalidError) throw error;
             throw new WorkletInvalidError(
                 `The worklet ${JSON.stringify(name)} could not be installed from the staged source.`,
@@ -360,7 +382,12 @@ export class WorkletStore {
         }
     }
 
-    async #importVersion(name: string, version: number, stagedSourcePath: string): Promise<void> {
+    async #importVersion(
+        _ctx: Context,
+        name: string,
+        version: number,
+        stagedSourcePath: string,
+    ): Promise<void> {
         const root = join(this.directory, name);
         const target = join(root, `v${String(version)}`);
         // A process crash can leave a renamed version whose database transaction never committed.
@@ -378,13 +405,18 @@ export class WorkletStore {
     }
 
     async inspect(
+        ctx: Context,
         sourcePath: string,
         sourceFileSystem?: FileSystemContext | WorkletSourceReader,
     ): Promise<WorkletManifest> {
-        return this.#readDeclaration(sourcePath, resolveWorkletSourceReader(sourceFileSystem));
+        return this.#readDeclaration(ctx, sourcePath, resolveWorkletSourceReader(sourceFileSystem));
     }
 
-    async #stageSource(sourcePath: string, sourceReader: WorkletSourceReader): Promise<string> {
+    async #stageSource(
+        _ctx: Context,
+        sourcePath: string,
+        sourceReader: WorkletSourceReader,
+    ): Promise<string> {
         await mkdir(this.directory, { recursive: true });
         const staging = join(this.directory, `${IMPORT_STAGING_PREFIX}${randomUUID()}`);
         try {
@@ -416,7 +448,7 @@ export class WorkletStore {
         }
     }
 
-    async #removeCodeKeepingData(name: string): Promise<void> {
+    async #removeCodeKeepingData(_ctx: Context, name: string): Promise<void> {
         const root = join(this.directory, name);
         let entries: readonly string[];
         try {
@@ -434,6 +466,7 @@ export class WorkletStore {
     }
 
     async #readIcon(
+        _ctx: Context,
         iconPath: string,
         sourceReader: WorkletSourceReader,
     ): Promise<WorkletIconArtifacts> {

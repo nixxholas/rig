@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     P2P_HTTP_MAXIMUM_BODY_BYTES,
@@ -10,32 +11,40 @@ import {
 import { selectP2pRequestHeaders } from "./p2pHttpHeaders.js";
 import { P2pProfileReplicationError } from "../profiles/index.js";
 
-export type PrepareP2pHttpRequest = (input: {
-    body: Uint8Array;
-    path: string;
-    peerId: string;
-    signal: AbortSignal;
-}) => Promise<Uint8Array | void>;
+export type PrepareP2pHttpRequest = (
+    ctx: Context,
+    input: {
+        body: Uint8Array;
+        path: string;
+        peerId: string;
+        signal: AbortSignal;
+    },
+) => Promise<Uint8Array | void>;
 
 export async function proxyP2pHttpRequest(
+    ctx: Context,
     network: P2pNetwork,
     peerId: string,
     path: string,
     request: IncomingMessage,
     response: ServerResponse,
     prepare?: PrepareP2pHttpRequest,
+    shutdownSignal?: AbortSignal,
 ): Promise<void> {
+    ctx.log.debug("Forwarding daemon API request to a peer.");
     if (isP2pPath(path)) {
         sendJsonError(response, 403, "P2P routes cannot be forwarded through another peer.");
         return;
     }
     const controller = new AbortController();
     const abort = () => controller.abort();
+    const abortForShutdown = () => controller.abort();
     request.once("aborted", abort);
     response.once("close", abort);
+    shutdownSignal?.addEventListener("abort", abortForShutdown, { once: true });
     try {
         const body = await readBody(request);
-        const preparedBody = await prepare?.({
+        const preparedBody = await prepare?.(ctx, {
             body,
             path,
             peerId,
@@ -52,6 +61,7 @@ export async function proxyP2pHttpRequest(
             return;
         }
         const { response: forwarded, transport } = await network.fetch(
+            ctx,
             peerId,
             {
                 body: forwardedBody,
@@ -65,14 +75,23 @@ export async function proxyP2pHttpRequest(
             "x-rig-p2p-transport": transport,
         });
         for await (const chunk of forwarded.body) {
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted) {
+                if (shutdownSignal?.aborted === true) response.destroy();
+                return;
+            }
             if (!response.write(chunk) && !(await waitForDrain(response, controller.signal))) {
                 return;
             }
         }
         response.end();
     } catch (error) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+            if (shutdownSignal?.aborted === true) {
+                if (response.headersSent) response.destroy();
+                else sendJsonError(response, 503, "The local daemon is shutting down.");
+            }
+            return;
+        }
         if (error instanceof P2pRequestBodyTooLargeError) {
             sendJsonError(response, 413, "Request body is larger than the P2P limit.");
         } else if (error instanceof P2pProfileReplicationError) {
@@ -86,6 +105,7 @@ export async function proxyP2pHttpRequest(
         controller.abort();
         request.off("aborted", abort);
         response.off("close", abort);
+        shutdownSignal?.removeEventListener("abort", abortForShutdown);
     }
 }
 

@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, inArray, isNull, sql } from "drizzle-orm";
 
 import { folderItems, folders, sessions } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Archives one folder together with everything nested under it.
@@ -11,11 +12,12 @@ import type { DatabaseScope } from "../Transaction.js";
  * that was partly put away earlier only touches what is still visible.
  */
 export async function folderArchive(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     now: number,
 ): Promise<{ folders: number; sessionIds: readonly string[] }> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folder.folderArchive", async (ctx) => {
+        const tx = ctx.tx;
         const subtree = sql`
         WITH RECURSIVE subtree(id) AS (
             SELECT id FROM folders WHERE id = ${id}

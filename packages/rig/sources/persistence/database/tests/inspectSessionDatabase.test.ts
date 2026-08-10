@@ -6,14 +6,15 @@ import {
     migrateSessionDatabase,
 } from "../migrateSessionDatabase.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 
 describe("inspectSessionDatabase", () => {
     it("inspects a migrated database through the locked async connection", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         try {
-            await migrateSessionDatabase(opened.database);
+            await migrateSessionDatabase(opened.ctx);
 
-            expect(await inspectSessionDatabase(opened.database)).toEqual({
+            expect(await inspectSessionDatabase(opened.ctx)).toEqual({
                 counts: {
                     activeProjects: 0,
                     activeRootSessions: 0,
@@ -31,7 +32,7 @@ describe("inspectSessionDatabase", () => {
                 schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
             });
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
     });
 });

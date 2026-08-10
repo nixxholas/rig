@@ -23,6 +23,7 @@ import type {
     ManagedNetworkRule,
     ManagedNetworkInterceptor,
 } from "./ManagedNetworkPolicy.js";
+import { withWorkerContext } from "../../observability/index.js";
 
 const DEFAULT_DNS_RESOLUTION_TIMEOUT_MS = 2_000;
 const DEFAULT_INTERCEPTION_BODY_TIMEOUT_MS = 5_000;
@@ -433,13 +434,15 @@ async function proxyHttpRequest(
             try {
                 const action = Value.Decode(
                     happyNetworkRequestCompletionSchema,
-                    await networkInterceptor.interceptHttp({
-                        body: buffered,
-                        headers: normalizeHeaders(incoming.headers),
-                        hostname: normalizedHostname,
-                        method: requestMethod,
-                        url: target.toString(),
-                    }),
+                    await withWorkerContext("managed-network-interception", (ctx) =>
+                        networkInterceptor.interceptHttp(ctx, {
+                            body: buffered,
+                            headers: normalizeHeaders(incoming.headers),
+                            hostname: normalizedHostname,
+                            method: requestMethod,
+                            url: target.toString(),
+                        }),
+                    ),
                 );
                 if (action.type === "error") {
                     throw new Error(`The plugin network handler failed: ${action.error}`);

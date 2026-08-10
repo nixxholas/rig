@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -23,7 +26,7 @@ describe("InMemorySession reset", () => {
                 throw new Error("Inference is not expected.");
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -39,8 +42,11 @@ describe("InMemorySession reset", () => {
             },
         });
 
-        await session.runShellCommand({ command: "sleep 60", commandId: "shell-before-reset" });
-        await session.reset();
+        await session.runShellCommand(ctx, {
+            command: "sleep 60",
+            commandId: "shell-before-reset",
+        });
+        await session.reset(ctx);
         await new Promise((resolve) => setTimeout(resolve, 25));
 
         expect(session.state().messages).toEqual([]);
@@ -66,7 +72,7 @@ describe("InMemorySession reset", () => {
                 return abortableStream(options?.signal, started.resolve);
             },
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -78,12 +84,12 @@ describe("InMemorySession reset", () => {
             request: { cwd: "/tmp/rig-reset-boundary", modelId: model.id },
         });
 
-        const active = await session.submit({ text: "Active before reset." });
+        const active = await session.submit(ctx, { text: "Active before reset." });
         await started.promise;
-        await session.steer({ text: "Pending steering before reset." });
-        const queued = await session.submit({ text: "Queued before reset." });
+        await session.steer(ctx, { text: "Pending steering before reset." });
+        const queued = await session.submit(ctx, { text: "Queued before reset." });
 
-        await session.reset();
+        await session.reset(ctx);
 
         const events = session.events.since(undefined) ?? [];
         const boundaryIndex = events.findIndex((event) => event.type === "session_reset");
@@ -121,7 +127,7 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
         cwd: options.cwd,
         permissionMode: "full_access",
         processManager,

@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, sql } from "drizzle-orm";
 
 import { folderItems, folders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export type FolderItemMoveResult =
     | { outcome: "folder_not_found" }
@@ -11,14 +12,15 @@ export type FolderItemMoveResult =
     | { outcome: "version_conflict" };
 
 export async function folderItemMove(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     folderId: string,
     orderKey: string,
     now: number,
     version?: number,
 ): Promise<FolderItemMoveResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.folderItem.folderItemMove", async (ctx) => {
+        const tx = ctx.tx;
         const item = await tx
             .select({ version: folderItems.version })
             .from(folderItems)

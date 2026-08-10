@@ -4,6 +4,7 @@ import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { ToolExecutionOptions } from "../../agent/types.js";
 import type { ProviderUsageEntry } from "../../protocol/index.js";
 import { getProviderUsageTool } from "./get_provider_usage.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
 describe("get_provider_usage", () => {
     it("reports the most recent reading each provider has given", async () => {
@@ -39,7 +40,10 @@ describe("get_provider_usage", () => {
 });
 
 function options(): ToolExecutionOptions {
-    return { signal: new AbortController().signal };
+    return {
+        ctx: createTestRootContext().named("provider-usage-test"),
+        signal: new AbortController().signal,
+    };
 }
 
 function entry(): ProviderUsageEntry {

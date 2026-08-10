@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, sql } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
 import { projectNameKey, workspaceBranchName } from "../../project/projectIdentity.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
 import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
 import { workspaceScope } from "./workspaceScope.js";
@@ -22,7 +23,7 @@ export interface WorkspaceInheritNameResult {
  * workspace — and it makes this a no-op rather than a correction.
  */
 export async function workspaceInheritName(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         id: string;
         isBranchUnavailable?: (branch: string) => boolean;
@@ -31,13 +32,14 @@ export async function workspaceInheritName(
         projectId: string;
     },
 ): Promise<WorkspaceInheritNameResult> {
-    return await inTx(tx, async (tx) => {
-        const name = await reserveUniqueWorkspaceName(tx, {
+    return await inTx(ctx, "rig.sql.project.workspaceInheritName", async (ctx) => {
+        const tx = ctx.tx;
+        const name = await reserveUniqueWorkspaceName(ctx, {
             excludeWorkspaceId: input.id,
             name: input.name,
             projectId: input.projectId,
         });
-        const branch = await reserveUniqueBranch(tx, {
+        const branch = await reserveUniqueBranch(ctx, {
             branch: workspaceBranchName(name),
             excludeWorkspaceId: input.id,
             ...(input.isBranchUnavailable === undefined

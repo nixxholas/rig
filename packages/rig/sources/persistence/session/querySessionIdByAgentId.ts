@@ -1,14 +1,16 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
 export async function querySessionIdByAgentId(
-    tx: DatabaseScope,
+    ctx: Context,
     agentId: string,
 ): Promise<string | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_id_by_agent_id", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx.all<Record<string, unknown>>(sql`
         SELECT id FROM sessions WHERE agent_id = ${agentId} LIMIT 2
     `);

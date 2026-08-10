@@ -1,15 +1,20 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function querySessionHasLaterTranscriptMessage(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     position: number,
 ): Promise<boolean> {
-    return await inDatabase(tx, async (tx) => {
-        return (
-            (await tx.get(sql`
+    return await inDatabase(
+        ctx,
+        "rig.sql.session.query_session_has_later_transcript_message",
+        async (ctx) => {
+            const tx = ctx.tx;
+            return (
+                (await tx.get(sql`
             SELECT 1 FROM session_messages
             WHERE session_id = ${sessionId}
               AND position > ${position}
@@ -18,6 +23,7 @@ export async function querySessionHasLaterTranscriptMessage(
               AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
             LIMIT 1
         `)) !== undefined
-        );
-    });
+            );
+        },
+    );
 }

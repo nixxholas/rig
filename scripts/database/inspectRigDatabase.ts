@@ -1,4 +1,5 @@
 import {
+    createDatabaseInspectionContext,
     inspectSessionDatabase,
     type SessionDatabaseInspection,
 } from "../../packages/rig/sources/persistence/database/inspectSessionDatabase.js";
@@ -10,10 +11,12 @@ export async function inspectRigDatabase(
     databasePath: string,
     options: { fullIntegrityCheck?: boolean } = {},
 ): Promise<RigDatabaseInspection> {
-    const opened = await openSessionDatabase(databasePath, { readOnly: true });
+    const opened = await openSessionDatabase(createDatabaseInspectionContext(), databasePath, {
+        readOnly: true,
+    });
     try {
-        return await inspectSessionDatabase(opened.database, options);
+        return await inspectSessionDatabase(opened.ctx, options);
     } finally {
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     }
 }

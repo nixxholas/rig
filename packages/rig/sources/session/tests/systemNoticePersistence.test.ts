@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,26 +20,37 @@ import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntim
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
 import { PersistentSessionStore } from "../PersistentSessionStore.js";
 
+const ctx = createTestRootContext();
+
 describe("persistent standalone system notices", () => {
     it("restores and pages runless notices without inventing transcript turns", async () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-system-notices-"));
         const databasePath = join(directory, "sessions.sqlite");
         try {
-            const initial = await PersistentSessionStore.open({ databasePath });
-            const session = await initial.create({ cwd: "/tmp/rig-system-notice-persistence" });
-            await session.recordSystemNotice(notice("Preparing compute.", "preparing_compute"));
-            await session.recordSystemNotice(notice("Compute is ready.", "ready"));
+            const initial = await PersistentSessionStore.open(ctx, {
+                databasePath,
+            });
+            const session = await initial.create(ctx, {
+                cwd: "/tmp/rig-system-notice-persistence",
+            });
+            await session.recordSystemNotice(
+                ctx,
+                notice("Preparing compute.", "preparing_compute"),
+            );
+            await session.recordSystemNotice(ctx, notice("Compute is ready.", "ready"));
             const firstNotice = session.events
                 .all()
                 .find((event) => event.type === "system_notice");
             expect(firstNotice).toBeDefined();
             const sessionId = session.id;
-            await initial.close();
+            await initial.close(ctx);
 
-            const restoredStore = await PersistentSessionStore.open({ databasePath });
+            const restoredStore = await PersistentSessionStore.open(ctx, {
+                databasePath,
+            });
             try {
-                const restored = (await restoredStore.get(sessionId))!;
-                const transcript = await restored.transcriptWindow();
+                const restored = (await restoredStore.get(ctx, sessionId))!;
+                const transcript = await restored.transcriptWindow(ctx);
                 expect(transcript.messages).toEqual([]);
                 expect(transcript.turns).toEqual([]);
                 expect(
@@ -60,7 +72,7 @@ describe("persistent standalone system notices", () => {
                     },
                 ]);
                 expect(
-                    (await restored.transcriptSince(firstNotice!.id))?.notices?.map(
+                    (await restored.transcriptSince(ctx, firstNotice!.id))?.notices?.map(
                         (entry) => entry.message.blocks[0],
                     ),
                 ).toEqual([
@@ -68,7 +80,7 @@ describe("persistent standalone system notices", () => {
                     { text: "Compute is ready.", type: "text" },
                 ]);
             } finally {
-                await restoredStore.close();
+                await restoredStore.close(ctx);
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
@@ -79,10 +91,12 @@ describe("persistent standalone system notices", () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-system-notice-archived-"));
         const databasePath = join(directory, "sessions.sqlite");
         try {
-            const initial = await PersistentSessionStore.open({ databasePath });
-            const session = await initial.create({ cwd: "/tmp/rig-system-notice-archived" });
-            await session.setArchived(true);
-            await session.recordSystemNotice(notice("Ignored progress.", "preparing_compute"));
+            const initial = await PersistentSessionStore.open(ctx, {
+                databasePath,
+            });
+            const session = await initial.create(ctx, { cwd: "/tmp/rig-system-notice-archived" });
+            await session.setArchived(ctx, true);
+            await session.recordSystemNotice(ctx, notice("Ignored progress.", "preparing_compute"));
             const terminal: SystemNoticePayload = {
                 structured: {
                     computeInstanceId: "compute-1",
@@ -100,14 +114,16 @@ describe("persistent standalone system notices", () => {
                 },
                 text: "Compute preparation failed: The compute provider disconnected.",
             };
-            await session.recordSystemNotice(terminal, { settleArchived: true });
+            await session.recordSystemNotice(ctx, terminal, { settleArchived: true });
             const sessionId = session.id;
-            await initial.close();
+            await initial.close(ctx);
 
-            const restored = await PersistentSessionStore.open({ databasePath });
+            const restored = await PersistentSessionStore.open(ctx, {
+                databasePath,
+            });
             try {
                 expect(
-                    (await (await restored.get(sessionId))?.transcriptWindow())?.notices,
+                    (await (await restored.get(ctx, sessionId))?.transcriptWindow(ctx))?.notices,
                 ).toMatchObject([
                     {
                         message: {
@@ -116,7 +132,7 @@ describe("persistent standalone system notices", () => {
                     },
                 ]);
             } finally {
-                await restored.close();
+                await restored.close(ctx);
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
@@ -128,37 +144,40 @@ describe("persistent standalone system notices", () => {
         const databasePath = join(directory, "sessions.sqlite");
         const runtime = immediateRuntimeFixture();
         try {
-            const initial = await PersistentSessionStore.open({
+            const initial = await PersistentSessionStore.open(ctx, {
                 createRuntime: runtime.createRuntime,
                 databasePath,
                 modelCatalog: runtime.modelCatalog,
             });
-            const session = await initial.create({
+            const session = await initial.create(ctx, {
                 cwd: "/tmp/rig-system-notice-mixed",
                 modelId: runtime.modelId,
                 providerId: runtime.providerId,
             });
-            await session.recordSystemNotice(notice("Before the first turn.", "preparing_compute"));
+            await session.recordSystemNotice(
+                ctx,
+                notice("Before the first turn.", "preparing_compute"),
+            );
             const firstNotice = session.events
                 .all()
                 .find((event) => event.type === "system_notice")!;
-            const first = await session.submit({ text: "First real turn." });
-            await session.waitForRun(first.runId);
-            await session.recordSystemNotice(notice("Between turns.", "preparing_compute"));
-            const second = await session.submit({ text: "Second real turn." });
-            await session.waitForRun(second.runId);
-            await session.recordSystemNotice(notice("After the second turn.", "ready"));
+            const first = await session.submit(ctx, { text: "First real turn." });
+            await session.waitForRun(ctx, first.runId);
+            await session.recordSystemNotice(ctx, notice("Between turns.", "preparing_compute"));
+            const second = await session.submit(ctx, { text: "Second real turn." });
+            await session.waitForRun(ctx, second.runId);
+            await session.recordSystemNotice(ctx, notice("After the second turn.", "ready"));
             const sessionId = session.id;
-            await initial.close();
+            await initial.close(ctx);
 
-            const restoredStore = await PersistentSessionStore.open({
+            const restoredStore = await PersistentSessionStore.open(ctx, {
                 createRuntime: runtime.createRuntime,
                 databasePath,
                 modelCatalog: runtime.modelCatalog,
             });
             try {
-                const restored = (await restoredStore.get(sessionId))!;
-                const oldest = await restored.transcriptPage(1, second.runId);
+                const restored = (await restoredStore.get(ctx, sessionId))!;
+                const oldest = await restored.transcriptPage(ctx, 1, second.runId);
                 expect(oldest?.complete).toBe(true);
                 expect(oldest?.messages.map(firstText)).toContain("First real turn.");
                 expect(oldest?.notices?.map((entry) => firstText(entry.message))).toEqual([
@@ -166,7 +185,7 @@ describe("persistent standalone system notices", () => {
                     "Between turns.",
                 ]);
 
-                const since = await restored.transcriptSince(firstNotice.id, 10);
+                const since = await restored.transcriptSince(ctx, firstNotice.id, 10);
                 expect(since?.messages.map(firstText)).toEqual([
                     "First real turn.",
                     "Done.",
@@ -179,7 +198,7 @@ describe("persistent standalone system notices", () => {
                     "After the second turn.",
                 ]);
             } finally {
-                await restoredStore.close();
+                await restoredStore.close(ctx);
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
@@ -191,52 +210,53 @@ describe("persistent standalone system notices", () => {
         const databasePath = join(directory, "sessions.sqlite");
         const runtime = blockingRuntimeFixture();
         try {
-            const initial = await PersistentSessionStore.open({
+            const initial = await PersistentSessionStore.open(ctx, {
                 createRuntime: runtime.createRuntime,
                 databasePath,
                 modelCatalog: runtime.modelCatalog,
             });
-            const session = await initial.create({
+            const session = await initial.create(ctx, {
                 cwd: "/tmp/rig-system-notice-persistent-active",
                 modelId: runtime.modelId,
                 providerId: runtime.providerId,
                 trackUnread: true,
             });
-            const submitted = await session.submit({ text: "Run the blocking tool." });
+            const submitted = await session.submit(ctx, { text: "Run the blocking tool." });
             await runtime.toolStarted.promise;
-            await session.markRead();
+            await session.markRead(ctx);
             const activityBefore = session.activity();
             const unreadBefore = session.snapshot().unread;
 
             await session.recordSystemNotice(
+                ctx,
                 notice("Preparing while the tool runs.", "preparing_compute"),
             );
 
             expect(session.activity()).toEqual(activityBefore);
             expect(session.snapshot().unread).toEqual(unreadBefore);
             expect(
-                (await session.transcriptWindow()).notices?.map((entry) =>
+                (await session.transcriptWindow(ctx)).notices?.map((entry) =>
                     firstText(entry.message),
                 ),
             ).toEqual(["Preparing while the tool runs."]);
             runtime.releaseTool.resolve();
-            await session.waitForRun(submitted.runId);
+            await session.waitForRun(ctx, submitted.runId);
             const sessionId = session.id;
-            await initial.close();
+            await initial.close(ctx);
 
-            const restoredStore = await PersistentSessionStore.open({
+            const restoredStore = await PersistentSessionStore.open(ctx, {
                 createRuntime: runtime.createRuntime,
                 databasePath,
                 modelCatalog: runtime.modelCatalog,
             });
             try {
                 expect(
-                    (await (await restoredStore.get(sessionId))?.transcriptWindow())?.notices?.map(
-                        (entry) => firstText(entry.message),
-                    ),
+                    (
+                        await (await restoredStore.get(ctx, sessionId))?.transcriptWindow(ctx)
+                    )?.notices?.map((entry) => firstText(entry.message)),
                 ).toEqual(["Preparing while the tool runs."]);
             } finally {
-                await restoredStore.close();
+                await restoredStore.close(ctx);
             }
         } finally {
             runtime.releaseTool.resolve();
@@ -245,10 +265,14 @@ describe("persistent standalone system notices", () => {
     });
 
     it("rejects a partial-only run as a SQL page anchor", async () => {
-        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const store = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         try {
-            const session = await store.create({ cwd: "/tmp/rig-system-notice-partial-anchor" });
-            await store.upsertMessage(session.id, {
+            const session = await store.create(ctx, {
+                cwd: "/tmp/rig-system-notice-partial-anchor",
+            });
+            await store.upsertMessage(ctx, session.id, {
                 isPartial: true,
                 message: {
                     blocks: [{ text: "Still streaming.", type: "text" }],
@@ -259,10 +283,10 @@ describe("persistent standalone system notices", () => {
                 runId: "partial-only-run",
             });
             expect(
-                await store.loadTranscriptPage(session.id, 20, "partial-only-run"),
+                await store.loadTranscriptPage(ctx, session.id, 20, "partial-only-run"),
             ).toBeUndefined();
         } finally {
-            await store.close();
+            await store.close(ctx);
         }
     });
 
@@ -270,26 +294,33 @@ describe("persistent standalone system notices", () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-system-notice-truncated-"));
         const databasePath = join(directory, "sessions.sqlite");
         try {
-            const initial = await PersistentSessionStore.open({ databasePath });
-            const session = await initial.create({ cwd: "/tmp/rig-system-notice-truncated" });
+            const initial = await PersistentSessionStore.open(ctx, {
+                databasePath,
+            });
+            const session = await initial.create(ctx, { cwd: "/tmp/rig-system-notice-truncated" });
             for (let index = 0; index < 51; index += 1) {
                 await session.recordSystemNotice(
+                    ctx,
                     notice(`Preparation update ${String(index)}.`, "preparing_compute"),
                 );
             }
             const sessionId = session.id;
-            await initial.close();
+            await initial.close(ctx);
 
-            const restoredStore = await PersistentSessionStore.open({ databasePath });
+            const restoredStore = await PersistentSessionStore.open(ctx, {
+                databasePath,
+            });
             try {
-                const window = await (await restoredStore.get(sessionId))?.transcriptWindow();
+                const window = await (
+                    await restoredStore.get(ctx, sessionId)
+                )?.transcriptWindow(ctx);
                 expect(window?.notices).toHaveLength(50);
                 expect(window?.noticesTruncated).toBe(true);
                 expect(window?.notices?.[0] && firstText(window.notices[0].message)).toBe(
                     "Preparation update 1.",
                 );
             } finally {
-                await restoredStore.close();
+                await restoredStore.close(ctx);
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
@@ -414,7 +445,10 @@ function createRuntime(
     tools: readonly AnyDefinedTool[],
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

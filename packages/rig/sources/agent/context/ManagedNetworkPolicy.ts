@@ -1,13 +1,17 @@
 import type { PermissionMode } from "../../permissions/index.js";
 import { type Static, Type } from "@sinclair/typebox";
 import type { HappyNetworkRequestCompletion, HappyNetworkTunnel } from "happy-plugins";
+import type { Context } from "@steve.kite/stdlib";
 import { happyNetworkRequestSchema } from "happy-plugins";
 
 export const managedNetworkHttpRequestSchema = Type.Omit(happyNetworkRequestSchema, ["mode"]);
 export type ManagedNetworkHttpRequest = Static<typeof managedNetworkHttpRequestSchema>;
 
 export interface ManagedNetworkInterceptor {
-    interceptHttp(request: ManagedNetworkHttpRequest): Promise<HappyNetworkRequestCompletion>;
+    interceptHttp(
+        ctx: Context,
+        request: ManagedNetworkHttpRequest,
+    ): Promise<HappyNetworkRequestCompletion>;
     observeTunnel(tunnel: HappyNetworkTunnel): void;
     recordFailure(hostname: string, error: unknown): void;
     shouldIntercept(hostname: string): boolean;

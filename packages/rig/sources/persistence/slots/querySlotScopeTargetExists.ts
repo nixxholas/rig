@@ -1,4 +1,5 @@
 import { inDatabase } from "../database/inDatabase.js";
+import type { Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 
 import type { DatabaseScope } from "../Transaction.js";
@@ -9,11 +10,12 @@ import type { DatabaseScope } from "../Transaction.js";
  * rejection instead of a foreign-key crash.
  */
 export async function querySlotScopeTargetExists(
-    tx: DatabaseScope,
+    ctx: Context,
     scope: "project" | "session" | "workspace",
     id: string,
 ): Promise<boolean> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.slots.query_scope_target", async (ctx) => {
+        const tx = ctx.tx;
         const row =
             scope === "project"
                 ? await tx.get<Record<string, unknown>>(

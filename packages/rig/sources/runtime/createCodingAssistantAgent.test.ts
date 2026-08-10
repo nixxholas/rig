@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
@@ -16,12 +17,15 @@ import { createSystemPrompt } from "../agent/prompt/createSystemPrompt.js";
 import { toExecutorTool } from "../agent/tools/toExecutorTool.js";
 import { createCodingAssistantAgent } from "./createCodingAssistantAgent.js";
 
+const ctx = createTestRootContext();
+
 describe("createCodingAssistantAgent", () => {
     it("creates a Codex agent with node filesystem and bash contexts", () => {
         const cwd = "/tmp/rig-app-test";
         const processManager = new NativeProcessManager();
 
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd,
             env: {},
             effort: "medium",
@@ -49,6 +53,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("automatically enables universal Gemini tools from the daemon environment", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { GEMINI_API_KEY: "gemini-key" },
         });
@@ -65,6 +70,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("allows same-project delegation without cross-workspace access", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {},
             workspaces: {
@@ -100,6 +106,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("gives the Auto permission reviewer read-only tools and its own permissions", async () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             agentId: "agent-session",
             cwd: "/tmp/rig-app-test",
             env: {},
@@ -121,6 +128,7 @@ describe("createCodingAssistantAgent", () => {
         const processManager = new NativeProcessManager();
 
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd,
             env: {},
             modelId: modelAnthropicFable5.id,
@@ -195,6 +203,7 @@ describe("createCodingAssistantAgent", () => {
         ["Grok", modelXaiGrokBuild.id, { XAI_API_KEY: "xai-test-key" }],
     ])("gives every %s tool a provider-compatible input schema", (_name, modelId, env) => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             chatHistory: {
                 read: () => {
                     throw new Error("unused");
@@ -276,6 +285,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("creates a Claude SDK agent for Opus 5", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {},
             modelId: modelAnthropicOpus5.id,
@@ -287,6 +297,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("keeps image generation out of the reserved Responses image tool and namespace", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {},
             modelId: modelOpenaiGpt56Sol.id,
@@ -301,6 +312,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("omits image generation when no Codex cloud provider is configured", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {},
             modelId: modelAnthropicFable5.id,
@@ -314,6 +326,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("creates a Grok Build agent with the native Grok tool surface", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { XAI_API_KEY: "xai-test-key" },
             modelId: modelXaiGrokBuild.id,
@@ -370,6 +383,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("creates a Grok agent for a curated model", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { XAI_API_KEY: "xai-test-key" },
             modelId: modelXaiGrok45.id,
@@ -397,12 +411,14 @@ describe("createCodingAssistantAgent", () => {
         };
 
         const codex = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelOpenaiGpt56Sol.id,
             providerId: "work_codex",
             providers,
         });
         const claude = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelAnthropicFable5.id,
             providerId: "work_claude",
@@ -418,6 +434,7 @@ describe("createCodingAssistantAgent", () => {
     it("rejects disabled provider instances", () => {
         expect(() =>
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 providerId: "codex",
                 providers: {
@@ -430,6 +447,7 @@ describe("createCodingAssistantAgent", () => {
     it("rejects an explicitly selected provider whose filters remove every model", () => {
         expect(() =>
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 modelId: modelOpenaiGpt56Sol.id,
                 providerId: "work_codex",
@@ -448,6 +466,7 @@ describe("createCodingAssistantAgent", () => {
     it("does not fall back to the default Bedrock credential for a named instance", () => {
         expect(() =>
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 env: { AWS_BEARER_TOKEN_BEDROCK: "default-token" },
                 modelId: modelOpenaiGpt56Sol.id,
@@ -467,6 +486,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("applies a Bedrock model-specific region override", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { WORK_BEDROCK_TOKEN: "work-token" },
             modelId: modelOpenaiGpt56Sol.id,
@@ -489,6 +509,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("allows a Bedrock endpoint override to bypass regional availability", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { WORK_BEDROCK_TOKEN: "work-token" },
             modelId: modelOpenaiGpt56Sol.id,
@@ -519,6 +540,7 @@ describe("createCodingAssistantAgent", () => {
             updatedAt: 1,
         };
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             goals: {
                 create: async () => currentGoal,
@@ -535,6 +557,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("assembles a flat Codex tool list", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelOpenaiGpt56Sol.id,
             subagents: {
@@ -598,10 +621,12 @@ describe("createCodingAssistantAgent", () => {
 
     it("defers long-tail tools while keeping the coding core eager", () => {
         const codex = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelOpenaiGpt56Sol.id,
         });
         const claude = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelAnthropicFable5.id,
         });
@@ -652,11 +677,13 @@ describe("createCodingAssistantAgent", () => {
             wait: async () => undefined,
         };
         const parent = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             subagents: { ...controls, canSpawn: true },
             workflows,
         });
         const deepest = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             subagents: { ...controls, canSpawn: false, depth: 3 },
         });
@@ -686,6 +713,7 @@ describe("createCodingAssistantAgent", () => {
         expect(deepest.agent.tools.map((tool) => tool.name)).not.toContain("workflow");
 
         const claudeParent = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelAnthropicFable5.id,
             subagents: { ...controls, canSpawn: true },
@@ -698,6 +726,7 @@ describe("createCodingAssistantAgent", () => {
         expect(claudeParent.agent.tools.map((tool) => tool.name)).not.toContain("spawn_agent");
 
         const claudeDeepest = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelAnthropicFable5.id,
             subagents: { ...controls, canSpawn: false, depth: 3 },
@@ -708,6 +737,7 @@ describe("createCodingAssistantAgent", () => {
         expect(claudeDeepest.agent.tools.map((tool) => tool.name)).not.toContain("Workflow");
 
         const grokParent = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { XAI_API_KEY: "xai-test-key" },
             modelId: modelXaiGrok45.id,
@@ -717,6 +747,7 @@ describe("createCodingAssistantAgent", () => {
         expect(grokParent.agent.tools.map((tool) => tool.name)).toContain("followup_subagent");
 
         const grokDeepest = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: { XAI_API_KEY: "xai-test-key" },
             modelId: modelXaiGrok45.id,
@@ -745,16 +776,19 @@ describe("createCodingAssistantAgent", () => {
         };
         const runtimes = [
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 modelId: modelOpenaiGpt56Sol.id,
                 subagents: controls,
             }),
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 modelId: modelAnthropicFable5.id,
                 subagents: controls,
             }),
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 env: { XAI_API_KEY: "xai-test-key" },
                 modelId: modelXaiGrok45.id,
@@ -763,7 +797,7 @@ describe("createCodingAssistantAgent", () => {
         ];
 
         for (const runtime of runtimes) {
-            const prompt = await createSystemPrompt({
+            const prompt = await createSystemPrompt(ctx, {
                 context: runtime.context,
                 messages: [],
                 model: runtime.agent.model,
@@ -786,14 +820,17 @@ describe("createCodingAssistantAgent", () => {
     it("explains incoming steering whenever steerable tools are available", async () => {
         const runtimes = [
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 modelId: modelOpenaiGpt56Sol.id,
             }),
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 modelId: modelAnthropicFable5.id,
             }),
             createCodingAssistantAgent({
+                ctx: createTestRootContext().named("agent"),
                 cwd: "/tmp/rig-app-test",
                 env: { XAI_API_KEY: "xai-test-key" },
                 modelId: modelXaiGrok45.id,
@@ -801,7 +838,7 @@ describe("createCodingAssistantAgent", () => {
         ];
 
         for (const runtime of runtimes) {
-            const prompt = await createSystemPrompt({
+            const prompt = await createSystemPrompt(ctx, {
                 context: runtime.context,
                 messages: [],
                 model: runtime.agent.model,
@@ -816,7 +853,7 @@ describe("createCodingAssistantAgent", () => {
         }
 
         const runtime = runtimes[0]!;
-        const promptWithoutSteerableTools = await createSystemPrompt({
+        const promptWithoutSteerableTools = await createSystemPrompt(ctx, {
             context: runtime.context,
             messages: [],
             model: runtime.agent.model,
@@ -855,23 +892,25 @@ describe("createCodingAssistantAgent", () => {
             },
         };
         const withWorkspaces = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {},
             workspaces,
         });
         const withoutWorkspaces = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {},
         });
 
-        const promptWith = await createSystemPrompt({
+        const promptWith = await createSystemPrompt(ctx, {
             context: withWorkspaces.context,
             messages: [],
             model: withWorkspaces.agent.model,
             provider: withWorkspaces.executor,
             tools: withWorkspaces.agent.tools,
         });
-        const promptWithout = await createSystemPrompt({
+        const promptWithout = await createSystemPrompt(ctx, {
             context: withoutWorkspaces.context,
             messages: [],
             model: withoutWorkspaces.agent.model,
@@ -905,24 +944,26 @@ describe("createCodingAssistantAgent", () => {
             wait: async () => ({ agents: [managed], timedOut: false }),
         };
         const deepest = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelOpenaiGpt56Sol.id,
             subagents: { ...controls, canSpawn: false },
         });
         const luna = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             modelId: modelOpenaiGpt56Luna.id,
             subagents: { ...controls, canSpawn: true, depth: 0 },
         });
 
-        const deepestPrompt = await createSystemPrompt({
+        const deepestPrompt = await createSystemPrompt(ctx, {
             context: deepest.context,
             messages: [],
             model: deepest.agent.model,
             provider: deepest.executor,
             tools: deepest.agent.tools,
         });
-        const lunaPrompt = await createSystemPrompt({
+        const lunaPrompt = await createSystemPrompt(ctx, {
             context: luna.context,
             messages: [],
             model: luna.agent.model,
@@ -942,6 +983,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("omits workflow tools when workflow support is disabled", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             subagents: {
                 canSpawn: true,
@@ -983,6 +1025,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("creates an Amazon Bedrock agent for Bedrock Anthropic models", () => {
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {
                 AWS_BEARER_TOKEN_BEDROCK: "bedrock-token",
@@ -1010,6 +1053,7 @@ describe("createCodingAssistantAgent", () => {
             taskName: "test",
         };
         const runtime = createCodingAssistantAgent({
+            ctx: createTestRootContext().named("agent"),
             cwd: "/tmp/rig-app-test",
             env: {
                 AWS_BEARER_TOKEN_BEDROCK: "bedrock-token",

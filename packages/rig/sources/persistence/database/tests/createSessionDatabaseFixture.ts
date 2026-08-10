@@ -1,14 +1,15 @@
 import { migrateSessionDatabase } from "../migrateSessionDatabase.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import { projects, sessions } from "../schema.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 
 export async function createSessionDatabaseFixture(
     path: string,
     sessionId = "session-1",
 ): Promise<void> {
-    const opened = await openSessionDatabase(path);
-    await migrateSessionDatabase(opened.database);
-    await opened.database
+    const opened = await openSessionDatabase(createTestRootContext(), path);
+    await migrateSessionDatabase(opened.ctx);
+    await opened.ctx.tx
         .insert(projects)
         .values({
             createdAtMs: 1,
@@ -31,7 +32,7 @@ export async function createSessionDatabaseFixture(
             worktreeSupport: "unknown",
         })
         .run();
-    await opened.database
+    await opened.ctx.tx
         .insert(sessions)
         .values({
             agentId: "agent-1",
@@ -66,5 +67,5 @@ export async function createSessionDatabaseFixture(
             workflowsJson: "[]",
         })
         .run();
-    await opened.database.close();
+    await opened.database.close(opened.ctx);
 }

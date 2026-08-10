@@ -38,7 +38,7 @@ describe("wait_commands_or_subagents", () => {
         const result = await grokWaitCommandsOrSubagentsTool.execute(
             { mode: "wait_any", task_ids: ["1"], timeout_ms: 500 },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
 
         expect(result.results).toEqual([
@@ -69,7 +69,7 @@ describe("wait_commands_or_subagents", () => {
                 timeout_ms: 500,
             },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
 
         expect(result.results).toEqual([

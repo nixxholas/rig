@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import {
     HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
@@ -65,7 +67,7 @@ describe("Happy Cloud HTTP API", () => {
                 },
             );
             expect(malformed.status).toBe(400);
-            expect((await fixture.service.status()).version).toBe(3);
+            expect((await fixture.service.status(createTestRootContext())).version).toBe(3);
             const futureContract = await rawRequest(
                 fixture.socketPath,
                 "secret",
@@ -186,9 +188,10 @@ describe("Happy Cloud HTTP API", () => {
                     }),
                 ),
             ).rejects.toMatchObject({ statusCode: 409 });
-            expect((await fixture.service.status()).capabilities.remote_control.consent).toBe(
-                "denied",
-            );
+            expect(
+                (await fixture.service.status(createTestRootContext())).capabilities.remote_control
+                    .consent,
+            ).toBe("denied");
         } finally {
             await fixture.close();
         }
@@ -262,11 +265,16 @@ async function startServer() {
     const directory = await createTestSocketDirectory();
     directories.push(directory);
     const socketPath = join(directory, "rig.sock");
-    const store = await PersistentSessionStore.open({
+    const ctx = createTestRootContext();
+    const store = await PersistentSessionStore.open(ctx, {
         databasePath: join(directory, "sessions.sqlite"),
     });
     const service = store.happyCloud;
-    const server = await createProtocolHttpServer({ happyCloud: service, store, token: "secret" });
+    const server = await createProtocolHttpServer(createTestRootContext(), {
+        happyCloud: service,
+        store,
+        token: "secret",
+    });
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
     return {
         client: new ProtocolHttpClient({ socketPath, token: "secret" }),
@@ -274,7 +282,7 @@ async function startServer() {
             await new Promise<void>((resolve, reject) =>
                 server.close((error) => (error === undefined ? resolve() : reject(error))),
             );
-            await store.close();
+            await store.close(ctx);
         },
         service,
         socketPath,

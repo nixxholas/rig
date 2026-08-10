@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 
-export function killProcessTree(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
+import type { Context } from "@steve.kite/stdlib";
+
+export function killProcessTree(
+    ctx: Context,
+    pid: number,
+    signal: NodeJS.Signals = "SIGTERM",
+): Promise<void> {
+    return ctx.span("rig.process.signal_tree", async () => signalProcessTree(pid, signal));
+}
+
+function signalProcessTree(pid: number, signal: NodeJS.Signals): void {
     if (process.platform === "win32") {
         try {
             const args =

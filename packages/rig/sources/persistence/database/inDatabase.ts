@@ -1,5 +1,7 @@
-import type { DatabaseScope } from "../Transaction.js";
-import type { DrizzleSessionDatabase, DrizzleSessionTransaction } from "./SessionDatabase.js";
+import type { Context } from "@steve.kite/stdlib";
+
+import { withDatabase } from "../databaseContext.js";
+import type { DrizzleSessionDatabase } from "./SessionDatabase.js";
 import {
     assertSessionDatabaseTransaction,
     currentSessionDatabaseTransaction,
@@ -8,9 +10,7 @@ import {
     type SessionDatabase,
 } from "./SessionDatabase.js";
 
-export type SessionDatabaseOperation<T> = (
-    tx: DrizzleSessionDatabase | DrizzleSessionTransaction,
-) => T | Promise<T>;
+export type SessionDatabaseOperation<T> = (ctx: Context) => T | Promise<T>;
 
 /**
  * Runs one plain persistence operation under its connection lock.
@@ -20,18 +20,24 @@ export type SessionDatabaseOperation<T> = (
  * do not accidentally open a second connection critical section.
  */
 export async function inDatabase<T>(
-    tx: DatabaseScope,
+    ctx: Context,
+    name: string,
     operation: SessionDatabaseOperation<T>,
 ): Promise<T> {
-    if (isSessionDatabaseTransaction(tx)) {
-        return await operation(assertSessionDatabaseTransaction(tx).facade);
-    }
+    return await ctx.span(name, async (ctx) => {
+        const tx = ctx.tx;
+        if (isSessionDatabaseTransaction(tx)) {
+            return await operation(withDatabase(ctx, assertSessionDatabaseTransaction(tx).facade));
+        }
 
-    const owner = getSessionDatabaseOwner(tx as SessionDatabase | DrizzleSessionDatabase);
-    if (owner === undefined) {
-        throw new Error("The database operation is not associated with a SessionDatabase.");
-    }
-    const current = currentSessionDatabaseTransaction(owner);
-    if (current !== undefined) return await operation(current.facade);
-    return owner.runInLock((database) => Promise.resolve(operation(database)));
+        const owner = getSessionDatabaseOwner(tx as SessionDatabase | DrizzleSessionDatabase);
+        if (owner === undefined) {
+            throw new Error("The database operation is not associated with a SessionDatabase.");
+        }
+        const current = currentSessionDatabaseTransaction(owner);
+        if (current !== undefined) return await operation(withDatabase(ctx, current.facade));
+        return owner.runInLock(ctx, (ctx, database) =>
+            Promise.resolve(operation(withDatabase(ctx, database))),
+        );
+    });
 }

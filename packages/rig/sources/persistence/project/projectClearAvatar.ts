@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { count, eq, sql } from "drizzle-orm";
 
 import { projectAvatarAssets, projects } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function projectClearAvatar(
-    tx: DatabaseScope,
+    ctx: Context,
     projectId: string,
     now: number,
 ): Promise<number> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.project.projectClearAvatar", async (ctx) => {
+        const tx = ctx.tx;
         const current = await tx
             .select({ avatarHash: projects.avatarHash })
             .from(projects)

@@ -1,16 +1,18 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { asc, gt } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { GlobalEvent, GlobalEventQueueEntry } from "../../protocol/index.js";
 import { durableGlobalEvents } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryGlobalEvents(
-    tx: DatabaseScope,
+    ctx: Context,
     after: string | undefined,
     limit: number,
 ): Promise<readonly GlobalEventQueueEntry[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.global_events.query", async (ctx) => {
+        const tx = ctx.tx;
         const query = tx
             .select({
                 cursor: durableGlobalEvents.cursor,

@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -49,7 +52,7 @@ describe("InMemorySession assistant message identity", () => {
             models: [model],
             providers: [{ providerId: provider.id, models: [model] }],
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: catalog,
@@ -64,8 +67,8 @@ describe("InMemorySession assistant message identity", () => {
             observed.push(event);
         });
 
-        const submitted = await session.submit({ text: "Say hello." });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        const submitted = await session.submit(ctx, { text: "Say hello." });
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
         unsubscribe();
@@ -96,7 +99,7 @@ describe("InMemorySession assistant message identity", () => {
         });
         expect(session.snapshot().snapshot.messages.at(-1)?.id).toBe(messageId);
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 });
 
@@ -105,7 +108,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import type { TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
@@ -760,7 +761,7 @@ describe("CodingAssistantApp steering submit and Escape race", () => {
         });
 
         await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
-        expect(send.mock.calls[1]?.[0]).toBe("Retain this startup-window input.");
+        expect(send.mock.calls[1]?.[1]).toBe("Retain this startup-window input.");
         expect(steer).not.toHaveBeenCalled();
     });
 });
@@ -800,6 +801,7 @@ function createRaceApp(options: {
         agentOverrides,
     );
     const app = new CodingAssistantApp({
+        ctx: createTestRootContext().named("app"),
         agent,
         cwd: harness.context.fs.cwd,
         processManager: new NativeProcessManager(),

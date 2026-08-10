@@ -1,11 +1,13 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import { pendingContextMessages, sessionMessages, sessionTurns } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
-export async function sessionClearMessages(tx: DatabaseScope, sessionId: string): Promise<void> {
-    await inTx(tx, async (tx) => {
+export async function sessionClearMessages(ctx: Context, sessionId: string): Promise<void> {
+    await inTx(ctx, "rig.sql.session.session_clear_messages", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .delete(pendingContextMessages)
             .where(eq(pendingContextMessages.sessionId, sessionId))

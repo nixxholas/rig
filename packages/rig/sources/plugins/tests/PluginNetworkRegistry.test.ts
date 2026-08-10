@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { HappyNetworkEvent } from "happy-plugins";
 import { HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES } from "happy-plugins";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { PluginNetworkRegistry } from "../PluginNetworkRegistry.js";
+
+const ctx = createTestRootContext().named("plugin-network-registry-test");
 
 describe("PluginNetworkRegistry", () => {
     it("lets the first plugin folder handle and sends later plugins observations only", async () => {
@@ -37,7 +40,7 @@ describe("PluginNetworkRegistry", () => {
         });
 
         await expect(
-            registry.interceptHttp({
+            registry.interceptHttp(ctx, {
                 body: Buffer.alloc(0),
                 headers: {},
                 hostname: "api.example.com",
@@ -75,7 +78,7 @@ describe("PluginNetworkRegistry", () => {
         );
 
         await expect(
-            registry.interceptHttp({
+            registry.interceptHttp(ctx, {
                 body: Buffer.alloc(256 * 1024),
                 headers,
                 hostname: "api.example.com",

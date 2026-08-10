@@ -44,12 +44,8 @@ describe("builtinModelProfiles", () => {
         expect(reviewerModelForProvider(claude)).toBeUndefined();
         expect(reviewerModelForProvider(builtinModelProfiles("grok", "grok"))).toBeUndefined();
         for (const activeModelId of ["anthropic/opus-5", "anthropic/fable-5"]) {
-            expect(reviewerModelForProvider(claude, activeModelId)?.id).toBe(
-                "anthropic/sonnet-5",
-            );
-            expect(reviewerModelForProvider(bedrock, activeModelId)?.id).toBe(
-                "anthropic/sonnet-5",
-            );
+            expect(reviewerModelForProvider(claude, activeModelId)?.id).toBe("anthropic/sonnet-5");
+            expect(reviewerModelForProvider(bedrock, activeModelId)?.id).toBe("anthropic/sonnet-5");
         }
         expect(
             codex.find((profile) => profile.id === "openai/codex-auto-review")?.defaultEffort,

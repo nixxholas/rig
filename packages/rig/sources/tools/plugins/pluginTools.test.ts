@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { PluginContext } from "../../agent/context/PluginContext.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import {
     pluginDiscoverTool,
     pluginInstallTool,
@@ -81,19 +82,20 @@ describe("plugin tools", () => {
             name: "Clock",
         }));
         const context = createContext({ install, uninstall });
+        const ctx = createTestRootContext().named("plugin-tools-test");
 
         await expect(
-            pluginInstallTool.execute({ path: "./clock" }, context, {}),
+            pluginInstallTool.execute({ path: "./clock" }, context, { ctx }),
         ).resolves.toMatchObject({ name: "Clock" });
-        expect(install).toHaveBeenCalledWith({
+        expect(install).toHaveBeenCalledWith(ctx, {
             fs: context.fs,
             sourceDirectory: "/workspace/clock",
         });
 
         await expect(
-            pluginUninstallTool.execute({ name: "Clock" }, context, {}),
+            pluginUninstallTool.execute({ name: "Clock" }, context, { ctx }),
         ).resolves.toMatchObject({ dataDirectory: "/home/steve/Happy/Plugins/clock" });
-        expect(uninstall).toHaveBeenCalledWith({ fs: context.fs, name: "Clock" });
+        expect(uninstall).toHaveBeenCalledWith(ctx, { fs: context.fs, name: "Clock" });
     });
 
     it("discovers and installs an indexed GitHub plugin through the plugin context", async () => {
@@ -135,12 +137,13 @@ describe("plugin tools", () => {
             version: "1.2.0",
         }));
         const context = createContext({ discoverRepository, installFromGitHub });
+        const ctx = createTestRootContext().named("plugin-tools-test");
 
         await expect(
             pluginDiscoverTool.execute(
                 { ref: "v1.2.0", repository: "happy-dev/plugins" },
                 context,
-                {},
+                { ctx },
             ),
         ).resolves.toMatchObject({ plugins: [{ name: "clock" }] });
         await expect(
@@ -151,14 +154,16 @@ describe("plugin tools", () => {
                     repository: "happy-dev/plugins",
                 },
                 context,
-                {},
+                { ctx },
             ),
         ).resolves.toMatchObject({ name: "Clock" });
         expect(discoverRepository).toHaveBeenCalledWith(
+            ctx,
             { ref: "v1.2.0", repository: "happy-dev/plugins" },
             undefined,
         );
         expect(installFromGitHub).toHaveBeenCalledWith(
+            ctx,
             {
                 plugin: "clock",
                 ref: "v1.2.0",
@@ -172,6 +177,7 @@ describe("plugin tools", () => {
         const install = vi.fn();
         const installFromGitHub = vi.fn();
         const context = createContext({ install, installFromGitHub });
+        const ctx = createTestRootContext().named("plugin-tools-test");
 
         await expect(
             pluginInstallTool.execute(
@@ -181,7 +187,7 @@ describe("plugin tools", () => {
                     repository: "happy-dev/plugins",
                 },
                 context,
-                {},
+                { ctx },
             ),
         ).rejects.toThrow(
             "Provide either a local plugin path or a GitHub repository and plugin name, but not both.",
@@ -218,8 +224,9 @@ describe("plugin tools", () => {
                 version: "01900000-0000-7000-8000-000000000001",
             }),
         });
+        const ctx = createTestRootContext().named("plugin-tools-test");
 
-        const result = await pluginListTool.execute({}, context, {});
+        const result = await pluginListTool.execute({}, context, { ctx });
         expect(result.plugins).toMatchObject([
             {
                 name: "Clock",
@@ -245,16 +252,18 @@ describe("plugin tools", () => {
                 updatedAt: 42,
             }),
         });
+        const ctx = createTestRootContext().named("plugin-tools-test");
 
-        await expect(pluginLogsTool.execute({ name: "Clock" }, context, {})).resolves.toMatchObject(
-            { status: "stopped", text: "[stdout] tick\n" },
-        );
+        await expect(
+            pluginLogsTool.execute({ name: "Clock" }, context, { ctx }),
+        ).resolves.toMatchObject({ status: "stopped", text: "[stdout] tick\n" });
     });
 
     it("says so when a session cannot manage plugins", async () => {
         const context = { fs: { cwd: "/workspace" } } as AgentContext;
+        const ctx = createTestRootContext().named("plugin-tools-test");
 
-        await expect(pluginListTool.execute({}, context, {})).rejects.toThrow(
+        await expect(pluginListTool.execute({}, context, { ctx })).rejects.toThrow(
             "Plugins are unavailable in this session.",
         );
     });

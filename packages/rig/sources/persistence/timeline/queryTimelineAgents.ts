@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { SessionAgentType, TimelineScope } from "../../protocol/index.js";
 import type { TimelineAgentSource } from "../../timeline/index.js";
@@ -22,18 +23,19 @@ const COLUMNS = sql`
  * deeply they nest.
  */
 export async function queryTimelineAgents(
-    tx: DatabaseScope,
+    ctx: Context,
     scope: TimelineScope,
     includeArchived: boolean,
 ): Promise<readonly TimelineAgentSource[]> {
-    return await inDatabase(tx, async (tx) =>
-        (await agentRows(tx, scope))
+    return await inDatabase(ctx, "rig.sql.timeline.query_agents", async (ctx) =>
+        (await agentRows(ctx, scope))
             .map(readTimelineAgentRow)
             .filter((agent) => includeArchived || !agent.archived),
     );
 }
 
-async function agentRows(tx: TX, scope: TimelineScope): Promise<Record<string, unknown>[]> {
+async function agentRows(ctx: Context, scope: TimelineScope): Promise<Record<string, unknown>[]> {
+    const tx = ctx.tx;
     if (scope.kind === "global") {
         // Deliberately unfiltered. A global timeline grows with everything Rig
         // has ever run, and callers bound it with `since` when that matters.

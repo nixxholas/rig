@@ -7,11 +7,19 @@ export type P2pTransportKind = "direct" | "iroh" | "ssh";
 export interface P2pTransport {
     readonly kind: P2pTransportKind;
     close(): Promise<void>;
-    fetch?(peerId: string, request: P2pHttpRequest, signal: AbortSignal): Promise<P2pHttpResponse>;
+    peerApiAvailable?(peerId: string): boolean;
+    fetch?(
+        ctx: Context,
+        peerId: string,
+        request: P2pHttpRequest,
+        signal: AbortSignal,
+    ): Promise<P2pHttpResponse>;
     openTunnel?(
+        ctx: Context,
         peerId: string,
         request: P2pTunnelRequestHead,
         signal: AbortSignal,
     ): Promise<P2pTunnelConnection>;
     status(): P2pTransportStatus;
 }
+import type { Context } from "@steve.kite/stdlib";

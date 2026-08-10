@@ -43,6 +43,7 @@ export const pluginDiscoverTool = defineTool({
         `read the plugin catalog from ${quoteVisibleExact(repository)} on GitHub at ${quoteVisibleExact(ref ?? "the default branch")}. ${GITHUB_ACCESS}`,
     execute: async ({ repository, ref }, context, execution) => {
         const catalog = await requirePlugins(context).discoverRepository(
+            execution.ctx,
             {
                 ...(ref === undefined ? {} : { ref }),
                 repository,
@@ -125,7 +126,7 @@ export const pluginInstallTool = defineTool({
                     "Provide either a local plugin path or a GitHub repository and plugin name, but not both.",
                 );
             }
-            return requirePlugins(context).install({
+            return requirePlugins(context).install(execution.ctx, {
                 fs: context.fs,
                 ...(execution.signal === undefined ? {} : { signal: execution.signal }),
                 sourceDirectory: resolvePluginSource(source.path, context),
@@ -137,6 +138,7 @@ export const pluginInstallTool = defineTool({
             );
         }
         return requirePlugins(context).installFromGitHub(
+            execution.ctx,
             {
                 plugin: source.plugin,
                 ...(source.ref === undefined ? {} : { ref: source.ref }),
@@ -171,7 +173,8 @@ export const pluginUninstallTool = defineTool({
     shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ name }) =>
         `stop the plugin ${quoteVisibleExact(name)} and delete its installed code under ${quoteVisibleExact(getPluginsDirectory())}, keeping the folder it writes to. ${OUTSIDE_WORKSPACE}`,
-    execute: ({ name }, context) => requirePlugins(context).uninstall({ fs: context.fs, name }),
+    execute: ({ name }, context, execution) =>
+        requirePlugins(context).uninstall(execution.ctx, { fs: context.fs, name }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Uninstalled the ${result.name} plugin and kept its data.`,
     locks: ["plugins"],
@@ -207,8 +210,8 @@ export const pluginListTool = defineTool({
     shouldReviewInAutoMode: () => true,
     describeAutoPermissionAction: () =>
         `list the plugins installed under ${quoteVisibleExact(getPluginsDirectory())}. ${OUTSIDE_WORKSPACE}`,
-    execute: async (_args, context) => {
-        const { failures, plugins } = await requirePlugins(context).list();
+    execute: async (_args, context, execution) => {
+        const { failures, plugins } = await requirePlugins(context).list(execution.ctx);
         return {
             failures: failures.map((failure) => ({ ...failure })),
             plugins: plugins.map((plugin) => ({ ...plugin })),
@@ -251,7 +254,7 @@ export const pluginLogsTool = defineTool({
     shouldReviewInAutoMode: () => true,
     describeAutoPermissionAction: ({ name }) =>
         `read the bounded current log for ${quoteVisibleExact(name)} under ${quoteVisibleExact(getPluginsDirectory())}. ${OUTSIDE_WORKSPACE}`,
-    execute: ({ name }, context) => requirePlugins(context).readLog(name),
+    execute: ({ name }, context, execution) => requirePlugins(context).readLog(execution.ctx, name),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
         `Read the ${result.status === "failed" ? "startup diagnostic" : "current log"} for ${result.name}.`,

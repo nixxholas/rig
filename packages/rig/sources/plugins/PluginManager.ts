@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 import type Dockerode from "dockerode";
 import {
@@ -63,6 +64,7 @@ import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./star
 import { removePluginDockerContainers } from "./startPluginDockerContainer.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS } from "./PluginStartupState.js";
 import { formatComputePreparationNotice } from "./formatComputePreparationNotice.js";
+import { withWorkerContext } from "../observability/index.js";
 
 const PLUGIN_STATUS_PUBLICATION_INTERVAL_MS = 100;
 const PLUGIN_PROCESS_EXIT_SETTLE_MS = 100;
@@ -187,10 +189,15 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#unsubscribeCompute = this.#computeRegistry.subscribe((event) => {
             if (!this.#started) return undefined;
             if (event.type === "catalog_changed") {
-                void this.#publishChanged();
+                void withWorkerContext("plugin-catalog-change", (workerCtx) =>
+                    this.#publishChanged(workerCtx),
+                );
                 return undefined;
             } else {
-                const publish = () => this.#publishComputePreparation(event);
+                const publish = () =>
+                    withWorkerContext("plugin-compute-preparation", (workerCtx) =>
+                        this.#publishComputePreparation(workerCtx, event),
+                    );
                 const next = this.#computePublication.then(publish, publish);
                 this.#computePublication = next.catch(() => undefined);
                 return next;
@@ -229,10 +236,12 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.directory = options.directory ?? getPluginsDirectory(this.#environment);
     }
 
-    async start(): Promise<void> {
+    async start(ctx: Context): Promise<void> {
         if (this.#started) return;
         this.#started = true;
-        const discovery = await discoverPlugins(this.directory, { iconCache: this.#iconCache });
+        const discovery = await ctx.span("rig.daemon.plugins.discover", () =>
+            discoverPlugins(this.directory, { iconCache: this.#iconCache }),
+        );
         for (const failure of discovery.failures) {
             this.#daemonLog.record(
                 "error",
@@ -245,37 +254,47 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 },
             );
         }
-        await Promise.all(
-            discovery.plugins.map((plugin) =>
-                this.#closed ? Promise.resolve() : this.#startRegistered(plugin.folderName),
+        await ctx.span("rig.daemon.plugins.activate", () =>
+            Promise.all(
+                discovery.plugins.map((plugin) =>
+                    this.#closed
+                        ? Promise.resolve()
+                        : this.#startRegistered(ctx, plugin.folderName),
+                ),
             ),
         );
-        await this.#publishChanged();
+        await ctx.span("rig.daemon.plugins.publish", () => this.#publishChanged(ctx));
     }
 
     /** Installs a plugin from a folder on this machine and starts it. */
-    async install(options: {
-        fs: FileSystemContext;
-        requestId?: string;
-        signal?: AbortSignal;
-        sourceDirectory: string;
-    }): Promise<InstalledPlugin> {
+    async install(
+        ctx: Context,
+        options: {
+            fs: FileSystemContext;
+            requestId?: string;
+            signal?: AbortSignal;
+            sourceDirectory: string;
+        },
+    ): Promise<InstalledPlugin> {
         this.#assertOpen();
         if (options.requestId !== undefined) {
             return this.#installationRequests.run(
                 options.requestId,
                 { sourceDirectory: options.sourceDirectory, type: "local-directory" },
-                () => this.#installFromPath(options),
+                () => this.#installFromPath(ctx, options),
             );
         }
-        return this.#installFromPath(options);
+        return this.#installFromPath(ctx, options);
     }
 
-    async #installFromPath(options: {
-        fs: FileSystemContext;
-        signal?: AbortSignal;
-        sourceDirectory: string;
-    }): Promise<InstalledPlugin> {
+    async #installFromPath(
+        ctx: Context,
+        options: {
+            fs: FileSystemContext;
+            signal?: AbortSignal;
+            sourceDirectory: string;
+        },
+    ): Promise<InstalledPlugin> {
         const installed = await installPluginFromPath({
             docker: this.#docker,
             fs: options.fs,
@@ -283,12 +302,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             sourceDirectory: options.sourceDirectory,
         });
-        await this.#activateInstalled(installed);
+        await this.#activateInstalled(ctx, installed);
         return installed;
     }
 
     /** Lists the plugins published by a GitHub repository index. */
     async discoverRepository(
+        ctx: Context,
         source: GitHubPluginSource,
         signal?: AbortSignal,
     ): Promise<GitHubPluginCatalog> {
@@ -297,7 +317,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             ...(this.#githubFetch === undefined ? {} : { fetcher: this.#githubFetch }),
             ...(signal === undefined ? {} : { signal }),
         });
-        const installed = (await this.list()).plugins;
+        const installed = (await this.list(ctx)).plugins;
         return {
             catalogId: catalog.catalogId,
             plugins: catalog.plugins.map((plugin) => {
@@ -344,17 +364,19 @@ export class PluginManager implements ManagedNetworkInterceptor {
 
     /** Installs one indexed plugin from a GitHub repository and starts it. */
     async installFromGitHub(
+        ctx: Context,
         source: GitHubPluginInstallationSource,
         options: { fs: FileSystemContext; requestId?: string; signal?: AbortSignal },
     ): Promise<InstalledPlugin> {
         this.#assertOpen();
-        if (options.requestId === undefined) return this.#installFromGitHub(source, options);
+        if (options.requestId === undefined) return this.#installFromGitHub(ctx, source, options);
         return this.#installationRequests.run(options.requestId, source, () =>
-            this.#installFromGitHub(source, options),
+            this.#installFromGitHub(ctx, source, options),
         );
     }
 
     async #installFromGitHub(
+        ctx: Context,
         source: GitHubPluginInstallationSource,
         options: { fs: FileSystemContext; signal?: AbortSignal },
     ): Promise<InstalledPlugin> {
@@ -366,14 +388,14 @@ export class PluginManager implements ManagedNetworkInterceptor {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             source,
         });
-        await this.#activateInstalled(installed);
+        await this.#activateInstalled(ctx, installed);
         return installed;
     }
 
-    async #activateInstalled(installed: InstalledPlugin): Promise<void> {
+    async #activateInstalled(ctx: Context, installed: InstalledPlugin): Promise<void> {
         // Replacing an installed plugin retires the process built from the previous code.
-        await this.#stopRunning(installed.folder, true);
-        await this.#startRegistered(installed.folder, { preserveLog: true });
+        await this.#stopRunning(ctx, installed.folder, true);
+        await this.#startRegistered(ctx, installed.folder, { preserveLog: true });
         try {
             const plugin = await readPluginManifest(installed.directory, {
                 iconCache: this.#iconCache,
@@ -392,15 +414,18 @@ export class PluginManager implements ManagedNetworkInterceptor {
         } catch (error) {
             this.#recordDockerCleanupFailure(installed.name, "remove superseded images", error);
         }
-        await this.#publishChanged({ installation: installed });
+        await this.#publishChanged(ctx, { installation: installed });
     }
 
     /** Stops a plugin and removes its installed code, keeping the folder it writes to. */
-    async uninstall(options: {
-        fs: FileSystemContext;
-        name: string;
-        signal?: AbortSignal;
-    }): Promise<UninstalledPlugin> {
+    async uninstall(
+        ctx: Context,
+        options: {
+            fs: FileSystemContext;
+            name: string;
+            signal?: AbortSignal;
+        },
+    ): Promise<UninstalledPlugin> {
         this.#assertOpen();
         options.signal?.throwIfAborted();
         const discovery = await discoverPlugins(this.directory, { iconCache: this.#iconCache });
@@ -419,7 +444,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             );
         }
         options.signal?.throwIfAborted();
-        await this.#stopRunning(installed.folderName);
+        await this.#stopRunning(ctx, installed.folderName);
         if (installed.docker !== undefined) {
             await Promise.all([
                 removePluginDockerContainers(installed.folderName, {
@@ -452,7 +477,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             force: true,
             recursive: true,
         });
-        this.#store.slots.removeByPluginAuthor(installed.folderName);
+        await this.#store.slots.removeByPluginAuthor(ctx, installed.folderName);
         this.#states.delete(installed.folderName);
         this.#daemonLog.record(
             "info",
@@ -464,7 +489,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 pluginFolder: installed.folderName,
             },
         );
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         return {
             dataDirectory: getPluginDataDirectory(installed.folderName, this.#environment),
             folder: installed.folderName,
@@ -473,14 +498,14 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     /** Every installed plugin, with the ones currently running marked. */
-    async list(): Promise<PluginCatalog> {
+    async list(ctx: Context): Promise<PluginCatalog> {
         for (;;) {
             const version = this.#catalogVersion;
             const cached =
                 this.#catalog?.version === version
                     ? this.#catalog
                     : {
-                          promise: this.#readCatalog(version),
+                          promise: this.#readCatalog(ctx, version),
                           version,
                       };
             this.#catalog = cached;
@@ -496,10 +521,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     /** Loads the normal skill catalog with contributions from active plugins. */
-    async loadSkills(fs: FileSystemContext): Promise<readonly Skill[]> {
+    async loadSkills(ctx: Context, fs: FileSystemContext): Promise<readonly Skill[]> {
         let discovery: PluginDiscovery;
         try {
-            discovery = await this.#discoverCurrentPlugins();
+            discovery = await this.#discoverCurrentPlugins(ctx);
         } catch (error) {
             this.#daemonLog.record(
                 "warning",
@@ -557,10 +582,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     /** Appends active static contributions in deterministic plugin-folder order. */
-    async loadSystemPrompt(): Promise<string | undefined> {
+    async loadSystemPrompt(ctx: Context): Promise<string | undefined> {
         let discovery: PluginDiscovery;
         try {
-            discovery = await this.#discoverCurrentPlugins();
+            discovery = await this.#discoverCurrentPlugins(ctx);
         } catch (error) {
             this.#daemonLog.record(
                 "warning",
@@ -599,7 +624,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         return contributions.length === 0 ? undefined : contributions.join("\n\n");
     }
 
-    applySystemPrompt(input: HappySystemPromptHookInput): Promise<string> {
+    applySystemPrompt(ctx: Context, input: HappySystemPromptHookInput): Promise<string> {
         return this.#hookRegistry.applySystemPrompt(input);
     }
 
@@ -607,8 +632,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#hookRegistry.emit(event);
     }
 
-    async #readCatalog(version: EventId): Promise<PluginCatalog> {
-        const discovery = await this.#readDiscovery(version);
+    async #readCatalog(ctx: Context, version: EventId): Promise<PluginCatalog> {
+        const discovery = await this.#readDiscovery(ctx, version);
         return {
             failures: discovery.failures.map((failure) => ({
                 error: failure.error,
@@ -658,15 +683,15 @@ export class PluginManager implements ManagedNetworkInterceptor {
         };
     }
 
-    async #discoverCurrentPlugins(): Promise<PluginDiscovery> {
+    async #discoverCurrentPlugins(ctx: Context): Promise<PluginDiscovery> {
         for (;;) {
             const version = this.#catalogVersion;
-            const discovery = await this.#readDiscovery(version);
+            const discovery = await this.#readDiscovery(ctx, version);
             if (version === this.#catalogVersion) return discovery;
         }
     }
 
-    async #readDiscovery(version: EventId): Promise<PluginDiscovery> {
+    async #readDiscovery(ctx: Context, version: EventId): Promise<PluginDiscovery> {
         const cached =
             this.#discovery?.version === version
                 ? this.#discovery
@@ -684,7 +709,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     /** Reads at most the current plugin log's fixed retention bound. */
-    async readLog(name: string): Promise<PluginLogSnapshot> {
+    async readLog(ctx: Context, name: string): Promise<PluginLogSnapshot> {
         const discovery = await discoverPlugins(this.directory, { iconCache: this.#iconCache });
         const wanted = name.trim().toLowerCase();
         const plugin = discovery.plugins.find(
@@ -727,12 +752,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     async readIcon(
+        ctx: Context,
         folder: string,
         generation: string,
         signal?: AbortSignal,
     ): Promise<PluginIconResource> {
         signal?.throwIfAborted();
-        const discovery = await this.#discoverCurrentPlugins();
+        const discovery = await this.#discoverCurrentPlugins(ctx);
         const plugin = discovery.plugins.find((candidate) => candidate.folderName === folder);
         if (plugin === undefined) {
             throw new PluginIconError(
@@ -745,20 +771,20 @@ export class PluginManager implements ManagedNetworkInterceptor {
             icon = await readPluginIcon(plugin.iconPath, signal === undefined ? {} : { signal });
         } catch (error) {
             if (signal?.aborted) throw error;
-            await this.#refreshIconCatalog(plugin.iconPath);
+            await this.#refreshIconCatalog(ctx, plugin.iconPath);
             throw new PluginIconError("icon_unavailable", "The plugin icon is unavailable.");
         }
         if (icon.generation !== generation) {
-            await this.#refreshIconCatalog(plugin.iconPath);
+            await this.#refreshIconCatalog(ctx, plugin.iconPath);
             throw new PluginIconError("stale_generation", "That plugin icon generation is stale.");
         }
         return icon;
     }
 
-    async #refreshIconCatalog(iconPath: string): Promise<void> {
+    async #refreshIconCatalog(ctx: Context, iconPath: string): Promise<void> {
         this.#iconCache.invalidate(iconPath);
         try {
-            await this.#publishChanged();
+            await this.#publishChanged(ctx);
         } catch (error) {
             this.#daemonLog.record(
                 "warning",
@@ -770,6 +796,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     callAppTool(
+        _ctx: Context,
         applicationId: string,
         generation: string,
         server: string,
@@ -780,21 +807,30 @@ export class PluginManager implements ManagedNetworkInterceptor {
         return this.#appRegistry.callTool(applicationId, generation, server, tool, input, signal);
     }
 
-    storageGet(applicationId: string, generation: string, key: string) {
+    storageGet(_ctx: Context, applicationId: string, generation: string, key: string) {
         return this.#appRegistry.storageGet(applicationId, generation, key);
     }
-    storageList(applicationId: string, generation: string) {
+    storageList(_ctx: Context, applicationId: string, generation: string) {
         return this.#appRegistry.storageList(applicationId, generation);
     }
-    storageSet(applicationId: string, generation: string, key: string, value: unknown) {
+    storageSet(
+        _ctx: Context,
+        applicationId: string,
+        generation: string,
+        key: string,
+        value: unknown,
+    ) {
         return this.#appRegistry.storageSet(applicationId, generation, key, value);
     }
-    storageDelete(applicationId: string, generation: string, key: string) {
+    storageDelete(_ctx: Context, applicationId: string, generation: string, key: string) {
         return this.#appRegistry.storageDelete(applicationId, generation, key);
     }
 
-    interceptHttp(request: ManagedNetworkHttpRequest): Promise<HappyNetworkRequestCompletion> {
-        return this.#networkRegistry.interceptHttp(request);
+    interceptHttp(
+        ctx: Context,
+        request: ManagedNetworkHttpRequest,
+    ): Promise<HappyNetworkRequestCompletion> {
+        return this.#networkRegistry.interceptHttp(ctx, request);
     }
 
     observeTunnel(tunnel: HappyNetworkTunnel): void {
@@ -809,7 +845,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         return this.#networkRegistry.shouldIntercept(hostname);
     }
 
-    async close(): Promise<void> {
+    async close(ctx: Context): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
         if (this.#statusPublication.status === "scheduled") {
@@ -843,6 +879,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     async #startRegistered(
+        ctx: Context,
         folderName: string,
         options: { preserveLog?: boolean } = {},
     ): Promise<void> {
@@ -887,7 +924,11 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 ...(this.#listProviderUsage === undefined
                     ? {}
                     : { listProviderUsage: this.#listProviderUsage }),
-                listPlugins: async () => (await this.list()).plugins,
+                listPlugins: () =>
+                    withWorkerContext(
+                        "plugin-list",
+                        async (workerCtx) => (await this.list(workerCtx)).plugins,
+                    ),
                 ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
                 networkRegistry: this.#networkRegistry,
                 onStatus: (status) => this.#updatePluginStatus(folderName, status),
@@ -903,15 +944,18 @@ export class PluginManager implements ManagedNetworkInterceptor {
             this.#running.set(folderName, running);
             const currentRunning = running;
             void running.retirement.then((retirement) =>
-                retirement.status === "failed"
-                    ? this.#failRunning(
-                          folderName,
-                          name,
-                          directory,
-                          currentRunning,
-                          retirement.reason,
-                      )
-                    : this.#stopRetiredRunning(folderName, currentRunning),
+                withWorkerContext("plugin-retirement", (workerCtx) =>
+                    retirement.status === "failed"
+                        ? this.#failRunning(
+                              workerCtx,
+                              folderName,
+                              name,
+                              directory,
+                              currentRunning,
+                              retirement.reason,
+                          )
+                        : this.#stopRetiredRunning(workerCtx, folderName, currentRunning),
+                ),
             );
             const startupElapsedMs = Date.now() - startupStartedAt;
             const startup = await waitForPluginStartup(
@@ -961,40 +1005,43 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 pluginDirectory: directory,
             });
             void running.completion.then(
-                ({ code, signal }) => {
-                    const exitError =
-                        code !== null && code !== 0
-                            ? `The plugin exited with code ${String(code)}.`
-                            : signal === null
-                              ? undefined
-                              : `The plugin exited after receiving ${signal}.`;
-                    this.#forgetExited(
-                        folderName,
-                        currentRunning,
-                        exitError === undefined ? {} : { error: exitError },
-                    );
-                    this.#daemonLog.record(
-                        code === 0 ? "info" : "warning",
-                        "plugin_exited",
-                        `The ${name} plugin exited.`,
-                        {
-                            ...(code === null ? {} : { exitCode: code }),
-                            plugin: name,
-                            ...(signal === null ? {} : { signal }),
-                        },
-                    );
-                },
-                (error: unknown) => {
-                    this.#forgetExited(folderName, currentRunning, {
-                        error: errorToMessage(error),
-                    });
-                    this.#daemonLog.record(
-                        "error",
-                        "plugin_process_failed",
-                        `The ${name} plugin process failed.`,
-                        { error: errorToMessage(error), plugin: name },
-                    );
-                },
+                ({ code, signal }) =>
+                    withWorkerContext("plugin-process-exit", async (workerCtx) => {
+                        const exitError =
+                            code !== null && code !== 0
+                                ? `The plugin exited with code ${String(code)}.`
+                                : signal === null
+                                  ? undefined
+                                  : `The plugin exited after receiving ${signal}.`;
+                        this.#forgetExited(
+                            workerCtx,
+                            folderName,
+                            currentRunning,
+                            exitError === undefined ? {} : { error: exitError },
+                        );
+                        this.#daemonLog.record(
+                            code === 0 ? "info" : "warning",
+                            "plugin_exited",
+                            `The ${name} plugin exited.`,
+                            {
+                                ...(code === null ? {} : { exitCode: code }),
+                                plugin: name,
+                                ...(signal === null ? {} : { signal }),
+                            },
+                        );
+                    }),
+                (error: unknown) =>
+                    withWorkerContext("plugin-process-failure", async (workerCtx) => {
+                        this.#forgetExited(workerCtx, folderName, currentRunning, {
+                            error: errorToMessage(error),
+                        });
+                        this.#daemonLog.record(
+                            "error",
+                            "plugin_process_failed",
+                            `The ${name} plugin process failed.`,
+                            { error: errorToMessage(error), plugin: name },
+                        );
+                    }),
             );
         } catch (error) {
             if (this.#closed || !isCurrentStartup()) {
@@ -1025,7 +1072,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
     }
 
-    async #stopRunning(folderName: string, publishStopped = false): Promise<void> {
+    async #stopRunning(ctx: Context, folderName: string, publishStopped = false): Promise<void> {
         this.#startupGenerations.delete(folderName);
         const running = this.#running.get(folderName);
         if (running === undefined) {
@@ -1034,7 +1081,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 status: "stopped",
                 updatedAt: this.#now(),
             });
-            if (publishStopped) await this.#publishChanged();
+            if (publishStopped) await this.#publishChanged(ctx);
             return;
         }
         this.#running.delete(folderName);
@@ -1054,7 +1101,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 : { statusMessage: running.statusMessage }),
             updatedAt: this.#now(),
         });
-        if (publishStopped) await this.#publishChanged();
+        if (publishStopped) await this.#publishChanged(ctx);
     }
 
     #recordDockerCleanupFailure(plugin: string, action: string, error: unknown): void {
@@ -1092,7 +1139,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 return;
             }
             this.#statusPublication = { status: "publishing" };
-            void this.#publishChanged().finally(() => this.#finishStatusPublication());
+            void withWorkerContext("plugin-status-publication", (workerCtx) =>
+                this.#publishChanged(workerCtx),
+            ).finally(() => this.#finishStatusPublication());
         }, PLUGIN_STATUS_PUBLICATION_INTERVAL_MS);
         timer.unref();
         this.#statusPublication = { status: "scheduled", timer };
@@ -1109,6 +1158,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     async #failRunning(
+        ctx: Context,
         folderName: string,
         name: string,
         directory: string,
@@ -1136,10 +1186,14 @@ export class PluginManager implements ManagedNetworkInterceptor {
             `The ${name} plugin failed while it was running.`,
             { error: diagnostic.text, plugin: name, pluginDirectory: directory },
         );
-        await Promise.allSettled([running.close({ force: true }), this.#publishChanged()]);
+        await Promise.allSettled([running.close({ force: true }), this.#publishChanged(ctx)]);
     }
 
-    async #stopRetiredRunning(folderName: string, running: RunningPlugin): Promise<void> {
+    async #stopRetiredRunning(
+        ctx: Context,
+        folderName: string,
+        running: RunningPlugin,
+    ): Promise<void> {
         if (this.#closed || this.#running.get(folderName) !== running) return;
         this.#running.delete(folderName);
         await running.close();
@@ -1151,11 +1205,16 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 : { statusMessage: running.statusMessage }),
             updatedAt: this.#now(),
         });
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
     }
 
     /** A plugin that ends on its own leaves the running set, and clients see it stop. */
-    #forgetExited(folderName: string, running: RunningPlugin, options: { error?: string }): void {
+    #forgetExited(
+        ctx: Context,
+        folderName: string,
+        running: RunningPlugin,
+        options: { error?: string },
+    ): void {
         if (this.#running.get(folderName) !== running) return;
         this.#running.delete(folderName);
         const boundedError =
@@ -1171,17 +1230,20 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 : { statusMessage: running.statusMessage }),
             updatedAt: this.#now(),
         });
-        void this.#publishChanged();
+        void this.#publishChanged(ctx);
     }
 
-    async #publishChanged(options: { installation?: InstalledPlugin } = {}): Promise<void> {
+    async #publishChanged(
+        ctx: Context,
+        options: { installation?: InstalledPlugin } = {},
+    ): Promise<void> {
         const eventId = this.#createEventId();
         this.#catalogVersion = eventId;
         const publish = async () => {
             if (this.#closed) return;
             let catalog: Awaited<ReturnType<PluginManager["list"]>>;
             try {
-                catalog = await this.list();
+                catalog = await this.list(ctx);
             } catch (error) {
                 this.#daemonLog.record(
                     "warning",
@@ -1212,6 +1274,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     async #publishComputePreparation(
+        ctx: Context,
         progress: Extract<PluginComputeRegistryEvent, { type: "preparation" }>,
     ): Promise<void> {
         const event: ComputePreparationEvent = {
@@ -1234,7 +1297,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             type: "compute_preparation",
         };
         try {
-            const entry = await this.#store.globalEventQueue.append(event);
+            const entry = await this.#store.globalEventQueue.append(ctx, event);
             if (entry === undefined) {
                 this.#daemonLog.record(
                     "warning",
@@ -1267,7 +1330,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#store.liveEvents.publish(event);
         const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
         try {
-            await this.#publishComputePreparationToSessions(progress, event);
+            await this.#publishComputePreparationToSessions(ctx, progress, event);
         } catch (error) {
             if (previous === undefined) {
                 this.#computeSessionPreparation.delete(event.computeInstanceId);
@@ -1289,6 +1352,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     async #publishComputePreparationToSessions(
+        ctx: Context,
         progress: Extract<PluginComputeRegistryEvent, { type: "preparation" }>,
         event: ComputePreparationEvent,
     ): Promise<void> {
@@ -1347,6 +1411,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         for (const { session, settleArchived } of recipients) {
             try {
                 await session.recordSystemNotice(
+                    ctx,
                     payload,
                     settleArchived ? { settleArchived: true } : {},
                 );

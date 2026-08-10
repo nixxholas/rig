@@ -2,7 +2,10 @@ import { chmod, open } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 
-import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
+import {
+    beginProtocolHttpServerShutdown,
+    createProtocolHttpServer,
+} from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
 import { recordProviderFailure } from "./recordProviderFailure.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
@@ -18,6 +21,7 @@ import { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyInte
 import { markGitStateFromSessionEvent } from "../git/markGitStateFromSessionEvent.js";
 import { publishGitLiveEvent } from "../git/publishGitLiveEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
+import { createP2pStatusChangedEvent } from "./createP2pStatusChangedEvent.js";
 import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { TrackedTaskDrain } from "../utils/TrackedTaskDrain.js";
 import { readLocalServerToken } from "./readLocalServerToken.js";
@@ -96,6 +100,13 @@ import {
 import { OnboardingService } from "../onboarding/OnboardingService.js";
 import { prepareRemoteWorkGitSecret } from "./prepareRemoteWorkGitSecret.js";
 import { resetMurmurStore, SharingLifecycleService, SharingService } from "../sharing/index.js";
+import {
+    createDaemonLogger,
+    initializeDaemonContext,
+    startObservability,
+    withWorkerContext,
+} from "../observability/index.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -107,10 +118,19 @@ export async function runLocalProtocolServer(
     options: RunLocalProtocolServerOptions = {},
 ): Promise<void> {
     const paths = getEnvironmentLocalServerPaths();
+    const identity = getDaemonIdentity();
+    const daemonLog = new DaemonLog({ path: paths.logPath, version: identity.version });
+    const observability = startObservability();
+    // Contexts must capture the SDK-backed tracer. Creating them first leaves the stdlib adapter
+    // attached to OpenTelemetry's non-recording bootstrap tracer, which has no usable trace ID.
+    initializeDaemonContext(createDaemonLogger(daemonLog), observability.tracer);
     let databaseLock: SqliteProcessLock;
     try {
-        databaseLock = await acquireSqliteProcessLock(`${paths.databasePath}.lock`);
+        databaseLock = await withWorkerContext("database-lock", () =>
+            acquireSqliteProcessLock(`${paths.databasePath}.lock`),
+        );
     } catch (error) {
+        await observability.shutdown();
         if (error instanceof SqliteProcessLockUnavailableError) {
             throw new RigUserError("Another Rig daemon already owns the session database.", {
                 hint: "Connect to the running daemon or stop it before starting another.",
@@ -119,13 +139,19 @@ export async function runLocalProtocolServer(
         throw error;
     }
     try {
-        await runOwnedLocalProtocolServer(options, paths);
+        await runOwnedLocalProtocolServer(daemonLog, identity, options, paths);
     } finally {
-        databaseLock.release();
+        try {
+            await observability.shutdown();
+        } finally {
+            databaseLock.release();
+        }
     }
 }
 
 async function runOwnedLocalProtocolServer(
+    daemonLog: DaemonLog,
+    identity: ReturnType<typeof getDaemonIdentity>,
     options: RunLocalProtocolServerOptions,
     paths: LocalServerPaths,
 ): Promise<void> {
@@ -133,8 +159,6 @@ async function runOwnedLocalProtocolServer(
     const socketPath = options.socketPath ?? paths.socketPath;
     const tokenPath = options.tokenPath ?? paths.tokenPath;
     const startedAt = new Date().toISOString();
-    const identity = getDaemonIdentity();
-    const daemonLog = new DaemonLog({ path: paths.logPath, version: identity.version });
     daemonLog.record("info", "daemon_starting", "Rig daemon is starting.", {
         databasePath: paths.databasePath,
         ...(identity.developmentBuildId === undefined
@@ -198,6 +222,7 @@ async function runOwnedLocalProtocolServer(
         // Disposal comes before the drain closes: it aborts in-flight Git scans, so draining waits
         // on work that has already been told to stop rather than on a full scan timeout.
         gitStateTracker?.dispose();
+        beginProtocolHttpServerShutdown(server);
         taskDrain?.beginClose();
         void (async () => {
             // Background loops are told to stop first, and the names of any
@@ -221,7 +246,9 @@ async function runOwnedLocalProtocolServer(
             }
             if (store !== undefined) {
                 try {
-                    await store.prepareForShutdown("shutdown");
+                    await withWorkerContext("session-store-shutdown", (ctx) =>
+                        store!.prepareForShutdown(ctx, "shutdown"),
+                    );
                 } catch (error) {
                     if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
                     daemonLog.record(
@@ -234,7 +261,9 @@ async function runOwnedLocalProtocolServer(
             }
             if (store !== undefined) {
                 try {
-                    await store.remoteTerminals.close();
+                    await withWorkerContext("remote-terminals-shutdown", (ctx) =>
+                        store!.remoteTerminals.close(ctx),
+                    );
                 } catch (error) {
                     if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
                     daemonLog.record(
@@ -253,12 +282,14 @@ async function runOwnedLocalProtocolServer(
             resolveStopped?.();
         })();
     };
-    const startupRequestListener = createDaemonStartupRequestListener({
-        getState: () => startupState,
-        identity,
-        onShutdown: () => stopServer("Shutdown requested through the daemon protocol."),
-        token,
-    });
+    const startupRequestListener = await withWorkerContext("startup-listener", (ctx) =>
+        createDaemonStartupRequestListener(ctx, {
+            getState: () => startupState,
+            identity,
+            onShutdown: () => stopServer("Shutdown requested through the daemon protocol."),
+            token,
+        }),
+    );
     const server = createServer(startupRequestListener);
     const writeServerRegistry = () => {
         const inspectorUrl = getNodeInspectorUrl();
@@ -333,7 +364,9 @@ async function runOwnedLocalProtocolServer(
             return;
         }
 
-        initialization = initializeDaemon().catch(reportInitializationFailure);
+        initialization = withWorkerContext("daemon-initialize", initializeDaemon).catch(
+            reportInitializationFailure,
+        );
 
         await stopped;
         await initialization;
@@ -360,7 +393,7 @@ async function runOwnedLocalProtocolServer(
             await runHappyLifecycle(async () => {
                 const service = happySyncService;
                 happySyncService = undefined;
-                await service?.close();
+                await withWorkerContext("happy-sync-shutdown", (ctx) => service?.close(ctx));
             });
         } catch (error) {
             daemonLog.record(
@@ -372,7 +405,9 @@ async function runOwnedLocalProtocolServer(
             if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
         }
         try {
-            await store?.close();
+            if (store !== undefined) {
+                await withWorkerContext("session-store-close", (ctx) => store!.close(ctx));
+            }
         } finally {
             daemonLog.record("info", "daemon_stopped", "Rig daemon stopped.");
             uninstallProcessFailureLogging();
@@ -380,9 +415,10 @@ async function runOwnedLocalProtocolServer(
     }
     if (fatalDatabaseFailure !== undefined) throw fatalDatabaseFailure;
 
-    async function initializeDaemon(): Promise<void> {
+    async function initializeDaemon(ctx: Context): Promise<void> {
+        const postReadyTasks: Array<() => void> = [];
         try {
-            await ensureUserConfigurationFiles();
+            await ctx.span("rig.daemon.configuration.ensure", () => ensureUserConfigurationFiles());
         } catch (error) {
             daemonLog.record(
                 "warning",
@@ -391,11 +427,15 @@ async function runOwnedLocalProtocolServer(
                 { error: errorToMessage(error) },
             );
         }
-        const loadedConfig = await loadConfig({ cwd: process.cwd() });
+        const loadedConfig = await ctx.span("rig.daemon.configuration.load", () =>
+            loadConfig({ cwd: process.cwd() }),
+        );
         // Session inference ownership is keyed by the same durable identity used to authenticate
         // P2P transport. Starting without it would make credential ownership unstable across
         // restarts, so identity initialization is now part of the daemon's core startup.
-        const p2pIdentity = await loadOrCreateP2pIdentity(paths.p2pIdentityPath);
+        const p2pIdentity = await ctx.span("rig.daemon.identity.load", () =>
+            loadOrCreateP2pIdentity(paths.p2pIdentityPath),
+        );
         const machineProtectedPaths = [
             ...new Set([
                 ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
@@ -434,16 +474,15 @@ async function runOwnedLocalProtocolServer(
             shutdown,
         });
         providerUsageTracker.start();
-        const disabledProviderReasons = await resolveProviderDisabledReasons(
-            loadedConfig.config.providers,
-            process.env,
+        const disabledProviderReasons = await ctx.span("rig.daemon.providers.resolve", () =>
+            resolveProviderDisabledReasons(loadedConfig.config.providers, process.env),
         );
         if (stopping) return;
         const availableProviders = disableUnavailableProviders(
             loadedConfig.config.providers,
             disabledProviderReasons,
         );
-        const modelCatalog = createModelCatalog({
+        const modelCatalog = createModelCatalog(ctx, {
             cwd: process.cwd(),
             disabledProviderReasons,
             providers: loadedConfig.config.providers,
@@ -485,72 +524,77 @@ async function runOwnedLocalProtocolServer(
                     },
                 );
             },
-            onSnapshot: async (entity, snapshot) => {
-                const target = {
-                    projectId: entity.projectId,
-                    ...(entity.workspaceId === undefined
-                        ? {}
-                        : { workspaceId: entity.workspaceId }),
-                };
-                // Sessions carry Git state on their own stream, so a client
-                // watching a conversation never has to open the project stream
-                // as well to see which files changed.
-                try {
-                    await store?.applyGitSnapshot(target, snapshot);
-                    if (snapshot.comparison === "ready") {
-                        await store?.applyGitFacts(target, snapshot.facts);
+            onSnapshot: (entity, snapshot) =>
+                withWorkerContext("git-snapshot", async (ctx) => {
+                    const target = {
+                        projectId: entity.projectId,
+                        ...(entity.workspaceId === undefined
+                            ? {}
+                            : { workspaceId: entity.workspaceId }),
+                    };
+                    // Sessions carry Git state on their own stream, so a client
+                    // watching a conversation never has to open the project stream
+                    // as well to see which files changed.
+                    try {
+                        await store?.applyGitSnapshot(ctx, target, snapshot);
+                        if (snapshot.comparison === "ready") {
+                            await store?.applyGitFacts(ctx, target, snapshot.facts);
+                        }
+                    } catch (error: unknown) {
+                        if (isDatabaseFailure(error)) {
+                            rethrowDatabaseFailure(error);
+                            return;
+                        }
+                        daemonLog.record(
+                            "error",
+                            "git_state_persistence_failed",
+                            "Rig could not persist a Git state update.",
+                            {
+                                error: errorToMessage(error),
+                                projectId: entity.projectId,
+                                ...(entity.workspaceId === undefined
+                                    ? {}
+                                    : { workspaceId: entity.workspaceId }),
+                            },
+                        );
                     }
-                } catch (error: unknown) {
-                    if (isDatabaseFailure(error)) {
-                        rethrowDatabaseFailure(error);
-                        return;
-                    }
-                    daemonLog.record(
-                        "error",
-                        "git_state_persistence_failed",
-                        "Rig could not persist a Git state update.",
-                        {
-                            error: errorToMessage(error),
-                            projectId: entity.projectId,
-                            ...(entity.workspaceId === undefined
-                                ? {}
-                                : { workspaceId: entity.workspaceId }),
-                        },
-                    );
-                }
-            },
+                }),
             taskDrain,
         });
-        const happyModule = await loadHappyIntegration(
-            resolveHappyIntegrationMode(
-                options.happyIntegration,
-                loadedConfig.config.settings.happyIntegration,
+        const happyModule = await ctx.span("rig.daemon.happy_integration.load", () =>
+            loadHappyIntegration(
+                resolveHappyIntegrationMode(
+                    options.happyIntegration,
+                    loadedConfig.config.settings.happyIntegration,
+                ),
             ),
         );
-        const happyConfiguration = await happyModule?.importHappyCredentials({
-            machineScope: socketPath,
-        });
+        const happyConfiguration = await ctx.span("rig.daemon.happy_credentials.load", async () =>
+            happyModule?.importHappyCredentials({
+                machineScope: socketPath,
+            }),
+        );
         // Sessions are created before the plugin manager exists, so they reach it through a stable
         // handle rather than a captured instance.
         let pluginManager: PluginManager | undefined;
         const plugins: PluginContext = {
-            applySystemPrompt: (input) =>
-                requirePluginManager(pluginManager).applySystemPrompt(input),
+            applySystemPrompt: (ctx, input) =>
+                requirePluginManager(pluginManager).applySystemPrompt(ctx, input),
             callAppTool: (...parameters) =>
                 requirePluginManager(pluginManager).callAppTool(...parameters),
             discoverRepository: (...parameters) =>
                 requirePluginManager(pluginManager).discoverRepository(...parameters),
-            install: (request) => requirePluginManager(pluginManager).install(request),
+            install: (ctx, request) => requirePluginManager(pluginManager).install(ctx, request),
             installFromGitHub: (...parameters) =>
                 requirePluginManager(pluginManager).installFromGitHub(...parameters),
-            loadSkills: (fs) => requirePluginManager(pluginManager).loadSkills(fs),
-            loadSystemPrompt: () => requirePluginManager(pluginManager).loadSystemPrompt(),
-            list: () => requirePluginManager(pluginManager).list(),
+            loadSkills: (ctx, fs) => requirePluginManager(pluginManager).loadSkills(ctx, fs),
+            loadSystemPrompt: (ctx) => requirePluginManager(pluginManager).loadSystemPrompt(ctx),
+            list: (ctx) => requirePluginManager(pluginManager).list(ctx),
             readIcon: (...parameters) =>
                 requirePluginManager(pluginManager).readIcon(...parameters),
             network: {
-                interceptHttp: (request) =>
-                    requirePluginManager(pluginManager).interceptHttp(request),
+                interceptHttp: (ctx, request) =>
+                    requirePluginManager(pluginManager).interceptHttp(ctx, request),
                 observeTunnel: (tunnel) =>
                     requirePluginManager(pluginManager).observeTunnel(tunnel),
                 recordFailure: (hostname, error) =>
@@ -560,7 +604,7 @@ async function runOwnedLocalProtocolServer(
             },
             readAppResource: (...parameters) =>
                 requirePluginManager(pluginManager).readAppResource(...parameters),
-            readLog: (name) => requirePluginManager(pluginManager).readLog(name),
+            readLog: (ctx, name) => requirePluginManager(pluginManager).readLog(ctx, name),
             storageDelete: (...parameters) =>
                 requirePluginManager(pluginManager).storageDelete(...parameters),
             storageGet: (...parameters) =>
@@ -570,143 +614,179 @@ async function runOwnedLocalProtocolServer(
             storageSet: (...parameters) =>
                 requirePluginManager(pluginManager).storageSet(...parameters),
             trace: (event) => requirePluginManager(pluginManager).trace(event),
-            uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
+            uninstall: (ctx, request) =>
+                requirePluginManager(pluginManager).uninstall(ctx, request),
         };
         // Worklets are reached the same way, except every session gets its own context with its id
         // baked in, so a tool can never claim another agent's authorship through its arguments.
         const workletsFor = (authorSessionId: string): WorkletContext => ({
-            install: (request, sourceFileSystem, expectedPermissions) =>
+            install: (ctx, request, sourceFileSystem, expectedPermissions) =>
                 requireWorkletManager(worklets).install(
+                    ctx,
                     { ...request, authorSessionId },
                     sourceFileSystem,
                     expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
                 ),
-            list: () => requireWorkletManager(worklets).list(),
-            readLog: (name) => requireWorkletManager(worklets).readLog(name),
+            list: (ctx) => requireWorkletManager(worklets).list(ctx),
+            readLog: (ctx, name) => requireWorkletManager(worklets).readLog(ctx, name),
             toolRevision: () => workletToolRegistry.revision,
-            revert: (name, request, expectedPermissions) =>
+            revert: (ctx, name, request, expectedPermissions) =>
                 requireWorkletManager(worklets).revert(
+                    ctx,
                     name,
                     request,
                     expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
                 ),
-            uninstall: (name) => requireWorkletManager(worklets).uninstall(name),
-            update: (name, request, sourceFileSystem, expectedPermissions) =>
+            uninstall: (ctx, name) => requireWorkletManager(worklets).uninstall(ctx, name),
+            update: (ctx, name, request, sourceFileSystem, expectedPermissions) =>
                 requireWorkletManager(worklets).update(
+                    ctx,
                     name,
                     request,
                     sourceFileSystem,
                     expectedPermissions === undefined ? {} : { permissions: expectedPermissions },
                 ),
         });
-        store = await PersistentSessionStore.open({
-            createRuntime: (options) => {
-                const ownerInstanceId = options.ownerInstanceId ?? p2pIdentity.instanceId;
-                const scopedProviders =
-                    p2pCredentialRuntimeRegistry?.providers(ownerInstanceId) ?? availableProviders;
-                return createCodingAssistantAgent({
-                    ...options,
-                    // What a provider says about the account while it answers is
-                    // both the daemon's freshest reading and the session's, so
-                    // the session is told the complete merged picture.
-                    onAccountUsage: (usage) => {
-                        const merged = credentialUsageRouter.record(ownerInstanceId, usage);
-                        options.onAccountUsage?.(merged);
-                    },
-                    plugins,
-                    worklets: workletsFor(options.sessionId ?? options.agentId ?? "standalone"),
-                    providerUsage: {
-                        current: () =>
-                            Promise.all(
-                                Object.keys(scopedProviders).map((providerId) =>
-                                    credentialUsageRouter.entry(ownerInstanceId, providerId),
+        store = await ctx.span("rig.daemon.session_store.open", () =>
+            PersistentSessionStore.open(ctx, {
+                createRuntime: (options) => {
+                    const ownerInstanceId = options.ownerInstanceId ?? p2pIdentity.instanceId;
+                    const scopedProviders =
+                        p2pCredentialRuntimeRegistry?.providers(ownerInstanceId) ??
+                        availableProviders;
+                    return createCodingAssistantAgent({
+                        ...options,
+                        // What a provider says about the account while it answers is
+                        // both the daemon's freshest reading and the session's, so
+                        // the session is told the complete merged picture.
+                        onAccountUsage: (usage) => {
+                            const merged = credentialUsageRouter.record(ownerInstanceId, usage);
+                            options.onAccountUsage?.(merged);
+                        },
+                        plugins,
+                        worklets: workletsFor(options.sessionId ?? options.agentId ?? "standalone"),
+                        providerUsage: {
+                            current: () =>
+                                Promise.all(
+                                    Object.keys(scopedProviders).map((providerId) =>
+                                        credentialUsageRouter.entry(ownerInstanceId, providerId),
+                                    ),
                                 ),
+                        },
+                        providers: scopedProviders,
+                        protectedPaths: resolveProtectedPaths(options.cwd, machineProtectedPaths),
+                        resolveInferenceMaxRetries: () => runtimeSettings.inferenceMaxRetries,
+                    });
+                },
+                databasePath: paths.databasePath,
+                ...(loadedConfig.config.docker === undefined
+                    ? {}
+                    : { defaultDocker: loadedConfig.config.docker }),
+                durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
+                toolResultRetentionMs:
+                    loadedConfig.config.settings.toolResultRetentionDays * MILLISECONDS_PER_DAY,
+                presence: createConfiguredPresenceStore(loadedConfig.config.presence),
+                ...(mcpToolProvider === undefined ? {} : { mcpToolProvider }),
+                localInstanceId: p2pIdentity.instanceId,
+                modelCatalog,
+                resolveModelCatalog: (ownerInstanceId) =>
+                    p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
+                workspacesDirectory: getManagedWorkspacesDirectory(),
+                workspaceFeatures: {
+                    crossWorkspace: loadedConfig.config.features.crossWorkspace,
+                    workspaces: loadedConfig.config.features.workspaces,
+                },
+                ...(happyModule === undefined
+                    ? {}
+                    : {
+                          onSessionAccess: (session) => {
+                              void withWorkerContext("happy-session-access", (ctx) =>
+                                  happySyncService?.attach(ctx, session),
+                              ).catch(rethrowDatabaseFailure);
+                          },
+                      }),
+                onSessionEvent: async (event, session) => {
+                    recordProviderFailure(daemonLog, event);
+                    if (happyModule !== undefined) {
+                        await withWorkerContext("happy-session-event", (ctx) =>
+                            happySyncService?.observe(ctx, event, session),
+                        );
+                    }
+                    if (store !== undefined && gitStateTracker !== undefined) {
+                        const identity = session?.projectIdentity();
+                        await withWorkerContext("git-session-event", (ctx) =>
+                            markGitStateFromSessionEvent(
+                                ctx,
+                                event,
+                                store!,
+                                gitStateTracker!,
+                                ...(identity === undefined ? [] : ([identity] as const)),
                             ),
-                    },
-                    providers: scopedProviders,
-                    protectedPaths: resolveProtectedPaths(options.cwd, machineProtectedPaths),
-                    resolveInferenceMaxRetries: () => runtimeSettings.inferenceMaxRetries,
-                });
-            },
-            databasePath: paths.databasePath,
-            ...(loadedConfig.config.docker === undefined
-                ? {}
-                : { defaultDocker: loadedConfig.config.docker }),
-            durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
-            toolResultRetentionMs:
-                loadedConfig.config.settings.toolResultRetentionDays * MILLISECONDS_PER_DAY,
-            presence: createConfiguredPresenceStore(loadedConfig.config.presence),
-            mcpToolProvider,
-            localInstanceId: p2pIdentity.instanceId,
-            modelCatalog,
-            resolveModelCatalog: (ownerInstanceId) =>
-                p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
-            workspacesDirectory: getManagedWorkspacesDirectory(),
-            workspaceFeatures: {
-                crossWorkspace: loadedConfig.config.features.crossWorkspace,
-                workspaces: loadedConfig.config.features.workspaces,
-            },
-            ...(happyModule === undefined
-                ? {}
-                : { onSessionAccess: (session) => happySyncService?.attach(session) }),
-            onSessionEvent: async (event, session) => {
-                recordProviderFailure(daemonLog, event);
-                if (happyModule !== undefined) happySyncService?.observe(event, session);
-                if (store !== undefined && gitStateTracker !== undefined) {
-                    const identity = session?.projectIdentity();
-                    await markGitStateFromSessionEvent(
-                        event,
-                        store,
-                        gitStateTracker,
-                        ...(identity === undefined ? [] : ([identity] as const)),
+                        );
+                    }
+                },
+                onWorkspaceBranchError: (error, projectId, workspaceId) => {
+                    daemonLog.record(
+                        "warning",
+                        "workspace_branch_rename_failed",
+                        "Rig renamed the workspace, but its Git branch kept the name it already had.",
+                        {
+                            error: errorToMessage(error),
+                            projectId,
+                            workspaceId,
+                        },
                     );
-                }
-            },
-            onWorkspaceBranchError: (error, projectId, workspaceId) => {
-                daemonLog.record(
-                    "warning",
-                    "workspace_branch_rename_failed",
-                    "Rig renamed the workspace, but its Git branch kept the name it already had.",
-                    {
-                        error: errorToMessage(error),
-                        projectId,
-                        workspaceId,
-                    },
-                );
-            },
-            onWorkspaceCleanupError: (error, projectId, workspaceId) => {
-                daemonLog.record(
-                    "warning",
-                    "workspace_cleanup_failed",
-                    "Rig archived the workspace, but could not remove all of its local residue.",
-                    {
-                        error: errorToMessage(error),
-                        projectId,
-                        workspaceId,
-                    },
-                );
-            },
-            taskDrain,
-        });
+                },
+                onWorkspaceCleanupError: (error, projectId, workspaceId) => {
+                    daemonLog.record(
+                        "warning",
+                        "workspace_cleanup_failed",
+                        "Rig archived the workspace, but could not remove all of its local residue.",
+                        {
+                            error: errorToMessage(error),
+                            projectId,
+                            workspaceId,
+                        },
+                    );
+                },
+                taskDrain: taskDrain!,
+            }),
+        );
         const githubSecretSync = new GitHubSecretSync({
             register: (secret) => {
-                store?.registerSpecialSecret(secret);
+                void withWorkerContext("github-secret-register", async (ctx) => {
+                    await store?.registerSpecialSecret(ctx, secret);
+                });
             },
             unregister: () => {
-                store?.unregisterSpecialSecret("github");
+                void withWorkerContext("github-secret-unregister", async (ctx) => {
+                    await store?.unregisterSpecialSecret(ctx, "github");
+                });
             },
         });
-        try {
-            await githubSecretSync.refresh();
-        } catch {
-            // GitHub credentials are optional; a failed refresh must not stop the daemon.
-        }
-        const githubSecretRefreshLoop = githubSecretSync.run(shutdown.signal);
-        shutdown.register("GitHub credential refresh", () => githubSecretRefreshLoop);
+        let githubSecretStartup: Promise<void> | undefined;
+        let githubSecretRefreshLoop: Promise<void> | undefined;
+        postReadyTasks.push(() => {
+            githubSecretStartup = withWorkerContext("github-credentials-refresh", (ctx) =>
+                ctx.span("rig.daemon.github_credentials.refresh", () => githubSecretSync.refresh()),
+            )
+                .catch(() => undefined)
+                .then(() => {
+                    if (!stopping) githubSecretRefreshLoop = githubSecretSync.run(shutdown.signal);
+                });
+        });
+        shutdown.register("GitHub credential refresh", async () => {
+            await githubSecretStartup;
+            await githubSecretRefreshLoop;
+        });
         const activeStore = store;
         const p2pPeerTrustStore = new P2pPeerTrustStore(activeStore);
         const trustedPeerIds = new Set(
-            (await p2pPeerTrustStore.peers()).map((peer) => peer.instanceId),
+            (
+                await ctx.span("rig.daemon.p2p.trusted_peers.load", () =>
+                    p2pPeerTrustStore.peers(ctx),
+                )
+            ).map((peer) => peer.instanceId),
         );
         const p2pNode: {
             name: string;
@@ -746,7 +826,9 @@ async function runOwnedLocalProtocolServer(
             return assignment;
         };
         try {
-            await recoverP2pPairings(p2pPeerTrustStore, setP2pPrimaryIfUnset);
+            await ctx.span("rig.daemon.p2p.pairings.recover", () =>
+                recoverP2pPairings(ctx, p2pPeerTrustStore, setP2pPrimaryIfUnset),
+            );
         } catch (error) {
             daemonLog.record(
                 "warning",
@@ -759,29 +841,33 @@ async function runOwnedLocalProtocolServer(
             database: activeStore,
             identity: p2pIdentity,
         });
-        p2pCredentialRuntimeRegistry = await P2pCredentialRuntimeRegistry.open({
-            localCatalog: modelCatalog,
-            localInstanceId: p2pIdentity.instanceId,
-            localName: () => p2pNode.name,
-            localProviders: availableProviders,
-            peers: async () => p2pPeerTrustStore.peers(),
-            runtimeDirectory: join(paths.directory, "p2p-credential-runtime"),
-            store: p2pCredentialStore,
-        });
+        p2pCredentialRuntimeRegistry = await ctx.span(
+            "rig.daemon.p2p.credential_runtime.open",
+            () =>
+                P2pCredentialRuntimeRegistry.open(ctx, {
+                    localCatalog: modelCatalog,
+                    localInstanceId: p2pIdentity.instanceId,
+                    localName: () => p2pNode.name,
+                    localProviders: availableProviders,
+                    peers: (ctx) => p2pPeerTrustStore.peers(ctx),
+                    runtimeDirectory: join(paths.directory, "p2p-credential-runtime"),
+                    store: p2pCredentialStore!,
+                }),
+        );
         const profilesStore = new RigProfileStore({
             database: activeStore,
             localInstanceId: p2pIdentity.instanceId,
-            publish: (event) => {
+            publish: (_ctx, event) => {
                 activeStore.globalEventQueue.publishLive(event);
                 activeStore.liveEvents.publish(event);
-                p2pProfileReplicator?.syncProfile(event.data.profileId, event.data.version);
+                p2pProfileReplicator?.syncProfile(_ctx, event.data.profileId, event.data.version);
             },
         });
         rigProfiles = profilesStore;
         const sharingLifecycle = new SharingLifecycleService({
             database: activeStore,
-            open: () =>
-                SharingService.open({
+            open: (ctx) =>
+                SharingService.open(ctx, {
                     database: activeStore,
                     directory: dirname(paths.databasePath),
                     folders: activeStore,
@@ -799,25 +885,31 @@ async function runOwnedLocalProtocolServer(
                         );
                     },
                     profiles: profilesStore,
-                    publish: (event) => {
+                    publish: (_ctx, event) => {
                         activeStore.globalEventQueue.publishLive(event);
                         activeStore.liveEvents.publish(event);
                     },
                 }),
             profiles: profilesStore,
-            resetState: async () => {
+            resetState: async (ctx) => {
                 await resetMurmurStore(dirname(paths.databasePath));
-                await activeStore.resetSharingState();
+                await activeStore.resetSharingState(ctx);
             },
         });
         sharing = sharingLifecycle;
         const unsubscribeFolderSharing = activeStore.liveEvents.subscribe(({ event }) => {
-            if (event.type === "folders_changed") sharingLifecycle.foldersChanged();
+            if (event.type === "folders_changed") {
+                void withWorkerContext("folder-sharing-change", (ctx) =>
+                    sharingLifecycle.foldersChanged(ctx),
+                );
+            }
         });
         shutdown.register("folder sharing observer", async () => unsubscribeFolderSharing());
-        shutdown.register("sharing", () => sharingLifecycle.close());
+        shutdown.register("sharing", () =>
+            withWorkerContext("sharing-shutdown", (ctx) => sharingLifecycle.close(ctx)),
+        );
         try {
-            await sharingLifecycle.start();
+            await ctx.span("rig.daemon.sharing.start", () => sharingLifecycle.start(ctx));
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             daemonLog.record(
@@ -828,174 +920,239 @@ async function runOwnedLocalProtocolServer(
             );
         }
         onboarding = new OnboardingService({
-            murmurConfigured: () => sharingLifecycle.configured(),
-            onboardMurmur: (request) => sharingLifecycle.onboardMurmur(request),
+            murmurConfigured: (ctx) => sharingLifecycle.configured(ctx),
+            onboardMurmur: (ctx, request) => sharingLifecycle.onboardMurmur(ctx, request),
             persistence: activeStore,
-            profileComplete: async () =>
-                (await profilesStore.list()).some(
+            profileComplete: async (ctx) =>
+                (await profilesStore.list(ctx)).some(
                     (profile) => profile.parentInstanceId === p2pIdentity.instanceId,
                 ),
             providersConfigured: () => modelCatalog.models.length > 0,
         });
-        {
-            try {
-                const irohSecret = await loadOrCreateIrohSecretKey(paths.irohSecretKeyPath);
-                p2pPairingService = new P2pPairingService({
-                    config: loadedConfig.config.p2p.iroh,
-                    identity: p2pIdentity,
-                    name: () => p2pNode.name,
-                    onPeerTrusted: (peer) => {
-                        trustedPeerIds.add(peer.instanceId);
-                        p2pNetwork?.addTrustedPeer(peer);
-                        p2pProfileReplicator?.peerChanged(peer.instanceId);
-                        p2pCredentialRuntimeRegistry?.refresh();
-                        p2pCredentialReplicator?.peerChanged(peer.instanceId);
-                    },
-                    peerTrustStore: p2pPeerTrustStore,
-                    setPrimaryIfUnset: setP2pPrimaryIfUnset,
-                    stableIrohEndpointId: irohSecret.public().toString(),
-                    stableIrohEndpointTicket: async () => {
-                        const ticket = await p2pNetwork?.irohEndpointTicket();
-                        if (ticket === undefined) {
-                            throw new Error("The stable Iroh P2P endpoint is unavailable.");
+        let p2pStartup: Promise<void> | undefined;
+        let publishP2pStatus = (_status: P2pStatus): void => undefined;
+        postReadyTasks.push(() => {
+            p2pStartup = withWorkerContext("p2p-startup", (ctx) =>
+                ctx
+                    .span("rig.daemon.p2p.start", async (ctx) => {
+                        {
+                            try {
+                                const irohSecret = await ctx.span(
+                                    "rig.daemon.p2p.iroh_identity.load",
+                                    () => loadOrCreateIrohSecretKey(paths.irohSecretKeyPath),
+                                );
+                                p2pPairingService = new P2pPairingService({
+                                    config: loadedConfig.config.p2p.iroh,
+                                    identity: p2pIdentity,
+                                    name: () => p2pNode.name,
+                                    onPeerTrusted: (peer) => {
+                                        trustedPeerIds.add(peer.instanceId);
+                                        p2pNetwork?.addTrustedPeer(peer);
+                                        void withWorkerContext("p2p-profile-peer-change", (ctx) =>
+                                            p2pProfileReplicator?.peerChanged(ctx, peer.instanceId),
+                                        );
+                                        void withWorkerContext("p2p-credential-refresh", (ctx) =>
+                                            p2pCredentialRuntimeRegistry!.refresh(ctx),
+                                        );
+                                        void withWorkerContext(
+                                            "p2p-credential-peer-change",
+                                            (ctx) =>
+                                                p2pCredentialReplicator?.peerChanged(
+                                                    ctx,
+                                                    peer.instanceId,
+                                                ),
+                                        );
+                                    },
+                                    peerTrustStore: p2pPeerTrustStore,
+                                    setPrimaryIfUnset: setP2pPrimaryIfUnset,
+                                    stableIrohEndpointId: irohSecret.public().toString(),
+                                    stableIrohEndpointTicket: async () => {
+                                        const ticket = await p2pNetwork?.irohEndpointTicket();
+                                        if (ticket === undefined) {
+                                            throw new Error(
+                                                "The stable Iroh P2P endpoint is unavailable.",
+                                            );
+                                        }
+                                        return ticket;
+                                    },
+                                });
+                            } catch (error) {
+                                daemonLog.record(
+                                    "warning",
+                                    "p2p_pairing_unavailable",
+                                    "P2P invitation and join are unavailable.",
+                                    { error: errorToMessage(error) },
+                                );
+                            }
                         }
-                        return ticket;
-                    },
-                });
-            } catch (error) {
-                daemonLog.record(
-                    "warning",
-                    "p2p_pairing_unavailable",
-                    "P2P invitation and join are unavailable.",
-                    { error: errorToMessage(error) },
-                );
-            }
-        }
-        const createP2pStatusEventId = createEventIdFactory();
-        const credentialConnectedPeers = new Set<string>();
-        const publishP2pStatus = (status: P2pStatus): void => {
-            const event: GlobalLiveEvent = {
-                createdAt: Date.now(),
-                data: { status },
-                id: createP2pStatusEventId(),
-                type: "p2p_status_changed",
-            };
-            activeStore.globalEventQueue.publishLive(event);
-            activeStore.liveEvents.publish(event);
-            const connected = new Set(
-                status.transports.flatMap((transport) =>
-                    transport.state === "ready"
-                        ? transport.peers.flatMap((peer) =>
-                              peer.status === "connected" && peer.peerId !== undefined
-                                  ? [peer.peerId]
-                                  : [],
-                          )
-                        : [],
-                ),
-            );
-            for (const peerId of connected) {
-                if (!credentialConnectedPeers.has(peerId)) {
-                    p2pCredentialReplicator?.peerChanged(peerId);
-                }
-            }
-            credentialConnectedPeers.clear();
-            for (const peerId of connected) credentialConnectedPeers.add(peerId);
-        };
-        p2pNetwork = await P2pNetwork.create({
-            config: loadedConfig.config.p2p,
-            ...(p2pIdentity === undefined ? {} : { identity: p2pIdentity }),
-            identityPath: paths.p2pIdentityPath,
-            irohSecretKeyPath: paths.irohSecretKeyPath,
-            onStatusChange: publishP2pStatus,
-            onTransportUnavailable: (transport, error) => {
-                daemonLog.record(
-                    "warning",
-                    "p2p_transport_unavailable",
-                    "A P2P transport is unavailable.",
-                    { error: errorToMessage(error), transport },
-                );
-            },
-            peerTrustStore: p2pPeerTrustStore,
-            serveRequest: createServeP2pHttpRequest({
-                allowRequest: (peerId, request) =>
-                    loadedConfig.config.p2p.exposeApi ||
-                    ((isP2pCredentialPath(request.path) || isP2pProfilePath(request.path)) &&
-                        isTrustedP2pPeer(peerId)) ||
-                    (isTrustedP2pPeer(peerId) &&
-                        isP2pRemoteWorkPath(request.path, request.method)) ||
-                    (canP2pPeerConfigure(peerId) && isP2pConfigurationPath(request.path)),
-                socketPath,
-                token,
-            }),
-            serveTunnel: createServeP2pTunnel({ socketPath, token }),
-        });
-        p2pCredentialReplicator = new P2pCredentialReplicator({
-            listPeers: async () => p2pPeerTrustStore.peers(),
-            network: p2pNetwork,
-            onError: (peerId, error) => {
-                daemonLog.record(
-                    "warning",
-                    "p2p_credential_replication_failed",
-                    "Rig could not synchronize inference credentials with a peer Rig.",
-                    { error: errorToMessage(error), peerId },
-                );
-            },
-            snapshot: async () =>
-                p2pCredentialStore!.prepareOwnSnapshot(
-                    await createLocalCredentialSnapshot({
-                        credentialRecoveryDirectory: join(
-                            paths.directory,
-                            "p2p-credential-owner-recovery",
-                        ),
-                        owner: {
-                            instanceId: p2pIdentity.instanceId,
-                            publicKey: p2pIdentity.publicKey,
-                        },
-                        providers: availableProviders,
+                        const createP2pStatusEventId = createEventIdFactory();
+                        const credentialConnectedPeers = new Set<string>();
+                        publishP2pStatus = (status: P2pStatus): void => {
+                            const event: GlobalLiveEvent = createP2pStatusChangedEvent(
+                                status,
+                                (peerId) => p2pNetwork?.peerApiAvailable(peerId) === true,
+                                createP2pStatusEventId(),
+                            );
+                            activeStore.globalEventQueue.publishLive(event);
+                            activeStore.liveEvents.publish(event);
+                            const connected = new Set(
+                                status.transports.flatMap((transport) =>
+                                    transport.state === "ready"
+                                        ? transport.peers.flatMap((peer) =>
+                                              peer.status === "connected" &&
+                                              peer.peerId !== undefined
+                                                  ? [peer.peerId]
+                                                  : [],
+                                          )
+                                        : [],
+                                ),
+                            );
+                            for (const peerId of connected) {
+                                if (!credentialConnectedPeers.has(peerId)) {
+                                    void withWorkerContext("p2p-credential-peer-change", (ctx) =>
+                                        p2pCredentialReplicator?.peerChanged(ctx, peerId),
+                                    );
+                                }
+                            }
+                            credentialConnectedPeers.clear();
+                            for (const peerId of connected) credentialConnectedPeers.add(peerId);
+                        };
+                        const startedP2pNetwork = await ctx.span("rig.daemon.p2p.initialize", () =>
+                            P2pNetwork.create(ctx, {
+                                config: loadedConfig.config.p2p,
+                                ...(p2pIdentity === undefined ? {} : { identity: p2pIdentity }),
+                                identityPath: paths.p2pIdentityPath,
+                                irohSecretKeyPath: paths.irohSecretKeyPath,
+                                onStatusChange: publishP2pStatus,
+                                onTransportUnavailable: (transport, error) => {
+                                    daemonLog.record(
+                                        "warning",
+                                        "p2p_transport_unavailable",
+                                        "A P2P transport is unavailable.",
+                                        { error: errorToMessage(error), transport },
+                                    );
+                                },
+                                peerTrustStore: p2pPeerTrustStore,
+                                serveRequest: createServeP2pHttpRequest({
+                                    allowRequest: (peerId, request) =>
+                                        loadedConfig.config.p2p.exposeApi ||
+                                        ((isP2pCredentialPath(request.path) ||
+                                            isP2pProfilePath(request.path)) &&
+                                            isTrustedP2pPeer(peerId)) ||
+                                        (isTrustedP2pPeer(peerId) &&
+                                            isP2pRemoteWorkPath(request.path, request.method)) ||
+                                        (canP2pPeerConfigure(peerId) &&
+                                            isP2pConfigurationPath(request.path)),
+                                    socketPath,
+                                    token,
+                                }),
+                                serveTunnel: createServeP2pTunnel({ socketPath, token }),
+                            }),
+                        );
+                        if (stopping) {
+                            await startedP2pNetwork.close();
+                            return;
+                        }
+                        p2pNetwork = startedP2pNetwork;
+                        p2pCredentialReplicator = new P2pCredentialReplicator({
+                            listPeers: (ctx) => p2pPeerTrustStore.peers(ctx),
+                            network: p2pNetwork,
+                            onError: (_ctx, peerId, error) => {
+                                daemonLog.record(
+                                    "warning",
+                                    "p2p_credential_replication_failed",
+                                    "Rig could not synchronize inference credentials with a peer Rig.",
+                                    { error: errorToMessage(error), peerId },
+                                );
+                            },
+                            snapshot: async (ctx) =>
+                                p2pCredentialStore!.prepareOwnSnapshot(
+                                    ctx,
+                                    await createLocalCredentialSnapshot({
+                                        credentialRecoveryDirectory: join(
+                                            paths.directory,
+                                            "p2p-credential-owner-recovery",
+                                        ),
+                                        owner: {
+                                            instanceId: p2pIdentity.instanceId,
+                                            publicKey: p2pIdentity.publicKey,
+                                        },
+                                        providers: availableProviders,
+                                    }),
+                                ),
+                            store: p2pCredentialStore!,
+                        });
+                        await ctx.span("rig.daemon.p2p.credentials.sync", () =>
+                            p2pCredentialReplicator!.syncAll(ctx),
+                        );
+                        if (rigProfiles !== undefined && p2pIdentity !== undefined) {
+                            p2pProfileReplicator = new P2pProfileReplicator({
+                                listPeerIds: async (ctx) =>
+                                    (await p2pPeerTrustStore.peers(ctx)).map(
+                                        (peer) => peer.instanceId,
+                                    ),
+                                localInstanceId: p2pIdentity.instanceId,
+                                network: p2pNetwork,
+                                onError: (_ctx, peerId, error) => {
+                                    daemonLog.record(
+                                        "warning",
+                                        "p2p_profile_replication_failed",
+                                        "Rig could not synchronize a human profile with a secondary Rig.",
+                                        { error: errorToMessage(error), peerId },
+                                    );
+                                },
+                                profiles: rigProfiles,
+                            });
+                            p2pProfileReplicator.syncAll(ctx, { recheckTargets: true });
+                        }
+                        const irohStatus = p2pNetwork
+                            .status()
+                            .transports.find(
+                                (transport) =>
+                                    transport.transport === "iroh" && transport.state === "ready",
+                            );
+                        if (irohStatus?.state === "ready") {
+                            daemonLog.record(
+                                "info",
+                                "iroh_started",
+                                "Rig P2P networking is ready.",
+                                {
+                                    endpointId: irohStatus.localAddress,
+                                    instanceId: p2pNetwork.status().instanceId,
+                                    peers: (await p2pPeerTrustStore.peers(ctx)).filter(
+                                        (peer) => peer.connections.iroh !== undefined,
+                                    ).length,
+                                    ...(loadedConfig.config.p2p.iroh.relayUrl === undefined
+                                        ? {}
+                                        : { relayUrl: loadedConfig.config.p2p.iroh.relayUrl }),
+                                },
+                            );
+                        }
+                    })
+                    .catch((error: unknown) => {
+                        if (isDatabaseFailure(error)) {
+                            fatalDatabaseFailure ??= error;
+                            stopServer("Database failure while starting P2P networking.");
+                            return;
+                        }
+                        daemonLog.record(
+                            "warning",
+                            "p2p_start_failed",
+                            "P2P networking could not finish starting.",
+                            { error: errorToMessage(error) },
+                        );
                     }),
-                ),
-            store: p2pCredentialStore,
-        });
-        await p2pCredentialReplicator.syncAll();
-        if (rigProfiles !== undefined && p2pIdentity !== undefined) {
-            p2pProfileReplicator = new P2pProfileReplicator({
-                listPeerIds: async () =>
-                    (await p2pPeerTrustStore.peers()).map((peer) => peer.instanceId),
-                localInstanceId: p2pIdentity.instanceId,
-                network: p2pNetwork,
-                onError: (peerId, error) => {
-                    daemonLog.record(
-                        "warning",
-                        "p2p_profile_replication_failed",
-                        "Rig could not synchronize a human profile with a secondary Rig.",
-                        { error: errorToMessage(error), peerId },
-                    );
-                },
-                profiles: rigProfiles,
-            });
-            p2pProfileReplicator.syncAll({ recheckTargets: true });
-        }
-        const irohStatus = p2pNetwork
-            .status()
-            .transports.find(
-                (transport) => transport.transport === "iroh" && transport.state === "ready",
             );
-        if (irohStatus?.state === "ready") {
-            daemonLog.record("info", "iroh_started", "Rig P2P networking is ready.", {
-                endpointId: irohStatus.localAddress,
-                instanceId: p2pNetwork.status().instanceId,
-                peers: (await p2pPeerTrustStore.peers()).filter(
-                    (peer) => peer.connections.iroh !== undefined,
-                ).length,
-                ...(loadedConfig.config.p2p.iroh.relayUrl === undefined
-                    ? {}
-                    : { relayUrl: loadedConfig.config.p2p.iroh.relayUrl }),
-            });
-        }
+        });
         shutdown.register("p2p", async () => {
+            await p2pStartup;
             await p2pPairingService?.close();
-            await p2pProfileReplicator?.close();
-            await p2pCredentialReplicator?.close();
+            await withWorkerContext("p2p-profile-replicator-shutdown", (ctx) =>
+                p2pProfileReplicator?.close(ctx),
+            );
+            await withWorkerContext("p2p-credential-replicator-shutdown", async (ctx) => {
+                await p2pCredentialReplicator?.close(ctx);
+            });
             await p2pNetwork?.close();
         });
         const startedPluginManager = (pluginManager = new PluginManager({
@@ -1010,23 +1167,28 @@ async function runOwnedLocalProtocolServer(
             mcpRegistry: pluginMcpRegistry,
             store,
         }));
-        const pluginsStarted = startedPluginManager.start().catch((error: unknown) => {
-            daemonLog.record(
-                "error",
-                "plugins_unavailable",
-                "Rig could not load the plugins folder.",
-                {
-                    error: errorToMessage(error),
-                    pluginsDirectory: startedPluginManager.directory,
-                },
-            );
+        let pluginsStarted: Promise<void> | undefined;
+        postReadyTasks.push(() => {
+            pluginsStarted = withWorkerContext("plugins-startup", (ctx) =>
+                ctx.span("rig.daemon.plugins.start", () => startedPluginManager.start(ctx)),
+            ).catch((error: unknown) => {
+                daemonLog.record(
+                    "error",
+                    "plugins_unavailable",
+                    "Rig could not load the plugins folder.",
+                    {
+                        error: errorToMessage(error),
+                        pluginsDirectory: startedPluginManager.directory,
+                    },
+                );
+            });
         });
         shutdown.register("plugins", async () => {
-            await startedPluginManager.close();
+            await withWorkerContext("plugins-shutdown", (ctx) => startedPluginManager.close(ctx));
             await pluginsStarted;
         });
         const workletManager = new WorkletManager({
-            publish: (event) => {
+            publish: (_ctx, event) => {
                 activeStore.globalEventQueue.publishLive(event);
                 activeStore.liveEvents.publish(event);
             },
@@ -1034,62 +1196,114 @@ async function runOwnedLocalProtocolServer(
             store: store.worklets,
         });
         worklets = workletManager;
-        const workletsStarted = workletManager.start().catch((error: unknown) => {
-            daemonLog.record(
-                "error",
-                "worklets_unavailable",
-                "Rig could not start the worklets folder.",
-                { error: errorToMessage(error), workletsDirectory: workletManager.directory },
-            );
+        let workletsStarted: Promise<void> | undefined;
+        postReadyTasks.push(() => {
+            workletsStarted = withWorkerContext("worklets-startup", (ctx) =>
+                ctx.span("rig.daemon.worklets.start", () => workletManager.start(ctx)),
+            ).catch((error: unknown) => {
+                daemonLog.record(
+                    "error",
+                    "worklets_unavailable",
+                    "Rig could not start the worklets folder.",
+                    {
+                        error: errorToMessage(error),
+                        workletsDirectory: workletManager.directory,
+                    },
+                );
+            });
         });
         shutdown.register("worklets", async () => {
-            await workletManager.close();
+            await withWorkerContext("worklets-shutdown", (ctx) => workletManager.close(ctx));
             await workletsStarted;
         });
-        await Promise.all([pluginsStarted, workletsStarted]);
         if (stopping) return;
+        let happyStartup: Promise<void> | undefined;
         if (happyModule !== undefined && happyConfiguration !== undefined) {
-            try {
-                const service = await happyModule.HappySyncService.open({
-                    configuration: happyConfiguration,
-                    createSession: async (id, request) =>
-                        store!.createWithId(
-                            id,
-                            await configureSessionRequest(request, loadedConfig.config.docker, () =>
-                                store!.queryProjectSettings(request.cwd),
-                            ),
-                        ),
-                    databasePath: paths.databasePath,
-                    getSubagents: async (sessionId) =>
-                        (await store?.listSubagents(sessionId)) ?? [],
-                    getProjectContext: async (session) => {
-                        const identity = session.projectIdentity();
-                        if (identity === undefined) return undefined;
-                        const project = await store?.getProject(identity.projectId);
-                        if (project === undefined) return undefined;
-                        const workspace =
-                            identity.workspaceId === undefined
-                                ? undefined
-                                : await store?.getWorkspace(project.id, identity.workspaceId);
-                        return {
-                            project,
-                            ...(workspace === undefined ? {} : { workspace }),
-                        };
-                    },
-                    loadSession: async (sessionId) => await store?.get(sessionId),
-                    modelCatalog,
-                });
-                await service.start();
-                happySyncService = service;
-            } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
-                daemonLog.record(
-                    "warning",
-                    "daemon_happy_unavailable",
-                    "Happy sync is unavailable.",
-                    { error: errorToMessage(error) },
-                );
-            }
+            postReadyTasks.push(() => {
+                happyStartup = Promise.allSettled([p2pStartup, pluginsStarted, workletsStarted])
+                    .then(async () => {
+                        if (stopping) return;
+                        await withWorkerContext("happy-sync-startup", (ctx) =>
+                            ctx.span("rig.daemon.happy_sync.start", async (ctx) => {
+                                let openingService: HappySyncService | undefined;
+                                try {
+                                    openingService = await ctx.span(
+                                        "rig.daemon.happy_sync.open",
+                                        () =>
+                                            happyModule.HappySyncService.open(ctx, {
+                                                configuration: happyConfiguration,
+                                                createSession: async (ctx, id, request) =>
+                                                    store!.createWithId(
+                                                        ctx,
+                                                        id,
+                                                        await configureSessionRequest(
+                                                            request,
+                                                            loadedConfig.config.docker,
+                                                            () =>
+                                                                store!.queryProjectSettings(
+                                                                    ctx,
+                                                                    request.cwd,
+                                                                ),
+                                                        ),
+                                                    ),
+                                                databasePath: paths.databasePath,
+                                                getSubagents: async (ctx, sessionId) =>
+                                                    (await store?.listSubagents(ctx, sessionId)) ??
+                                                    [],
+                                                getProjectContext: async (ctx, session) => {
+                                                    const identity = session.projectIdentity();
+                                                    if (identity === undefined) return undefined;
+                                                    const project = await store?.getProject(
+                                                        ctx,
+                                                        identity.projectId,
+                                                    );
+                                                    if (project === undefined) return undefined;
+                                                    const workspace =
+                                                        identity.workspaceId === undefined
+                                                            ? undefined
+                                                            : await store?.getWorkspace(
+                                                                  ctx,
+                                                                  project.id,
+                                                                  identity.workspaceId,
+                                                              );
+                                                    return {
+                                                        project,
+                                                        ...(workspace === undefined
+                                                            ? {}
+                                                            : { workspace }),
+                                                    };
+                                                },
+                                                modelCatalog,
+                                            }),
+                                    );
+                                    if (stopping) return;
+                                    await ctx.span("rig.daemon.happy_sync.connect", () =>
+                                        openingService!.start(ctx),
+                                    );
+                                    if (stopping) return;
+                                    happySyncService = openingService;
+                                    openingService = undefined;
+                                } finally {
+                                    await openingService?.close(ctx);
+                                }
+                            }),
+                        );
+                    })
+                    .catch((error: unknown) => {
+                        if (isDatabaseFailure(error)) {
+                            fatalDatabaseFailure ??= error;
+                            stopServer("Database failure while starting Happy sync.");
+                            return;
+                        }
+                        daemonLog.record(
+                            "warning",
+                            "daemon_happy_unavailable",
+                            "Happy sync is unavailable.",
+                            { error: errorToMessage(error) },
+                        );
+                    });
+            });
+            shutdown.register("Happy startup", async () => await happyStartup);
         }
         registerRigDebugRoot({
             kind: "daemon",
@@ -1102,227 +1316,247 @@ async function runOwnedLocalProtocolServer(
             return;
         }
 
-        await createProtocolHttpServer(
-            {
-                inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
-                ...(loadedConfig.config.docker === undefined
-                    ? {}
-                    : { defaultDocker: loadedConfig.config.docker }),
-                ...(store.globalEventQueue === undefined
-                    ? {}
-                    : { globalEventQueue: store.globalEventQueue }),
-                ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
-                modelCatalog,
-                ...(onboarding === undefined ? {} : { onboarding }),
-                resolveModelCatalog: (ownerInstanceId) =>
-                    p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
-                happyCloud: store.happyCloud,
-                p2pNetwork,
-                ...(p2pPairingService === undefined ? {} : { p2pPairing: p2pPairingService }),
-                p2pNode: () => ({ ...p2pNode }),
-                p2pStatus: () => p2pNetwork?.status() ?? { name: p2pNode.name, transports: [] },
-                ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
-                ...(sharing === undefined ? {} : { sharing }),
-                replaceP2pCredentials: async (authenticatedOwnerId, envelope) => {
-                    if (
-                        store === undefined ||
-                        p2pCredentialRuntimeRegistry === undefined ||
-                        p2pCredentialStore === undefined
-                    ) {
-                        throw new Error("P2P credential provisioning is unavailable.");
-                    }
-                    const runtimeRegistry = p2pCredentialRuntimeRegistry;
-                    const peer = (await p2pPeerTrustStore.peers()).find(
-                        (candidate) => candidate.instanceId === authenticatedOwnerId,
-                    );
-                    if (peer === undefined) {
-                        throw new Error("That credential owner is not a trusted peer Rig.");
-                    }
-                    const result = await p2pCredentialStore.replaceEncrypted(
-                        authenticatedOwnerId,
-                        peer.publicKey,
-                        envelope,
-                    );
-                    const runtimeChanged = await runtimeRegistry.refresh();
-                    if (runtimeChanged) {
-                        credentialUsageRouter.clearProvisionedCaches();
-                        await Promise.all(
-                            store
-                                .loadedSessions()
-                                .map((session) =>
-                                    session.refreshInferenceScope(
-                                        runtimeRegistry.catalog(session.ownerInstanceId),
-                                    ),
-                                ),
+        await ctx.span("rig.daemon.protocol_server.ready", () =>
+            createProtocolHttpServer(
+                ctx,
+                {
+                    inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
+                    ...(loadedConfig.config.docker === undefined
+                        ? {}
+                        : { defaultDocker: loadedConfig.config.docker }),
+                    ...(activeStore.globalEventQueue === undefined
+                        ? {}
+                        : { globalEventQueue: activeStore.globalEventQueue }),
+                    ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
+                    modelCatalog,
+                    ...(onboarding === undefined ? {} : { onboarding }),
+                    resolveModelCatalog: (ownerInstanceId) =>
+                        p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
+                    happyCloud: activeStore.happyCloud,
+                    resolveP2pNetwork: () => p2pNetwork,
+                    resolveP2pPairing: () => p2pPairingService,
+                    p2pNode: () => ({ ...p2pNode }),
+                    p2pStatus: () => p2pNetwork?.status() ?? { name: p2pNode.name, transports: [] },
+                    ...(rigProfiles === undefined ? {} : { profiles: rigProfiles }),
+                    ...(sharing === undefined ? {} : { sharing }),
+                    replaceP2pCredentials: async (ctx, authenticatedOwnerId, envelope) => {
+                        if (
+                            store === undefined ||
+                            p2pCredentialRuntimeRegistry === undefined ||
+                            p2pCredentialStore === undefined
+                        ) {
+                            throw new Error("P2P credential provisioning is unavailable.");
+                        }
+                        const runtimeRegistry = p2pCredentialRuntimeRegistry;
+                        const peer = (await p2pPeerTrustStore.peers(ctx)).find(
+                            (candidate) => candidate.instanceId === authenticatedOwnerId,
                         );
-                    }
-                    return result;
-                },
-                ...(rigProfiles === undefined || p2pNetwork === undefined
-                    ? {}
-                    : {
-                          prepareP2pRequest: async ({ body, path, peerId, signal }) => {
-                              if (!isTrustedP2pPeer(peerId)) return undefined;
-                              await p2pCredentialReplicator?.ensureForRequest(peerId, signal);
-                              await replicateProfileForP2pRequest({
-                                  body,
-                                  network: p2pNetwork!,
-                                  onSynchronized: (synchronizedPeerId, profileId, version) =>
-                                      p2pProfileReplicator?.profileSynchronized(
-                                          synchronizedPeerId,
-                                          profileId,
-                                          version,
-                                      ),
-                                  path,
-                                  peerId,
-                                  profiles: rigProfiles!,
-                                  signal,
-                              });
-                              return prepareRemoteWorkGitSecret(path, body, activeStore);
-                          },
-                      }),
-                canP2pPeerConfigure,
-                canP2pPeerProvision: isTrustedP2pPeer,
-                canP2pPeerUseRemoteWork: isTrustedP2pPeer,
-                plugins,
-                ...(worklets === undefined ? {} : { worklets }),
-                getProviderQuota: (providerId, ownerInstanceId, credential) =>
-                    credentialUsageRouter.quota(ownerInstanceId, providerId, credential),
-                listProviderUsage: async (ownerInstanceId) => {
-                    const resolvedOwnerInstanceId = ownerInstanceId ?? p2pIdentity.instanceId;
-                    const providers =
-                        p2pCredentialRuntimeRegistry?.providers(resolvedOwnerInstanceId) ??
-                        availableProviders;
-                    return Promise.all(
-                        Object.keys(providers).map((providerId) =>
-                            credentialUsageRouter.entry(resolvedOwnerInstanceId, providerId),
-                        ),
-                    );
-                },
-                onDaemonConfigChange: async (config) => {
-                    await writeDaemonSettings(config.settings, {}, config.p2p.name);
-                    const globalEventQueue = await store?.setDurableGlobalEventQueue(
-                        config.settings.durableGlobalEventQueue,
-                    );
-                    if (globalEventQueue === undefined) return undefined;
-                    runtimeSettings.inferenceMaxRetries = config.settings.inferenceMaxRetries;
-                    p2pNode.name = config.p2p.name;
-                    p2pNetwork?.setName(config.p2p.name);
-                    if (p2pNetwork !== undefined) publishP2pStatus(p2pNetwork.status());
-                    return {
-                        inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
-                        globalEventQueue,
-                    };
-                },
-                ...(happyModule === undefined
-                    ? {}
-                    : {
-                          onReloadHappy: async () => {
-                              if (stopping) return false;
-                              return runHappyLifecycle(async () => {
+                        if (peer === undefined) {
+                            throw new Error("That credential owner is not a trusted peer Rig.");
+                        }
+                        const result = await p2pCredentialStore.replaceEncrypted(
+                            ctx,
+                            authenticatedOwnerId,
+                            peer.publicKey,
+                            envelope,
+                        );
+                        const runtimeChanged = await runtimeRegistry.refresh(ctx);
+                        if (runtimeChanged) {
+                            credentialUsageRouter.clearProvisionedCaches();
+                            await Promise.all(
+                                store
+                                    .loadedSessions()
+                                    .map((session) =>
+                                        session.refreshInferenceScope(
+                                            ctx,
+                                            runtimeRegistry.catalog(session.ownerInstanceId),
+                                        ),
+                                    ),
+                            );
+                        }
+                        return result;
+                    },
+                    ...(rigProfiles === undefined || p2pNetwork === undefined
+                        ? {}
+                        : {
+                              prepareP2pRequest: async (ctx, { body, path, peerId, signal }) => {
+                                  if (!isTrustedP2pPeer(peerId)) return undefined;
+                                  await p2pCredentialReplicator?.ensureForRequest(
+                                      ctx,
+                                      peerId,
+                                      signal,
+                                  );
+                                  await replicateProfileForP2pRequest(ctx, {
+                                      body,
+                                      network: p2pNetwork!,
+                                      onSynchronized: (synchronizedPeerId, profileId, version) =>
+                                          p2pProfileReplicator?.profileSynchronized(
+                                              ctx,
+                                              synchronizedPeerId,
+                                              profileId,
+                                              version,
+                                          ),
+                                      path,
+                                      peerId,
+                                      profiles: rigProfiles!,
+                                      signal,
+                                  });
+                                  return prepareRemoteWorkGitSecret(path, body, activeStore);
+                              },
+                          }),
+                    canP2pPeerConfigure,
+                    canP2pPeerProvision: isTrustedP2pPeer,
+                    canP2pPeerUseRemoteWork: isTrustedP2pPeer,
+                    plugins,
+                    ...(worklets === undefined ? {} : { worklets }),
+                    getProviderQuota: (providerId, ownerInstanceId, credential) =>
+                        credentialUsageRouter.quota(ownerInstanceId, providerId, credential),
+                    listProviderUsage: async (ownerInstanceId) => {
+                        const resolvedOwnerInstanceId = ownerInstanceId ?? p2pIdentity.instanceId;
+                        const providers =
+                            p2pCredentialRuntimeRegistry?.providers(resolvedOwnerInstanceId) ??
+                            availableProviders;
+                        return Promise.all(
+                            Object.keys(providers).map((providerId) =>
+                                credentialUsageRouter.entry(resolvedOwnerInstanceId, providerId),
+                            ),
+                        );
+                    },
+                    onDaemonConfigChange: async (ctx, config) => {
+                        await writeDaemonSettings(config.settings, {}, config.p2p.name);
+                        const globalEventQueue = await store?.setDurableGlobalEventQueue(
+                            ctx,
+                            config.settings.durableGlobalEventQueue,
+                        );
+                        if (globalEventQueue === undefined) return undefined;
+                        runtimeSettings.inferenceMaxRetries = config.settings.inferenceMaxRetries;
+                        p2pNode.name = config.p2p.name;
+                        p2pNetwork?.setName(config.p2p.name);
+                        if (p2pNetwork !== undefined) publishP2pStatus(p2pNetwork.status());
+                        return {
+                            inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
+                            globalEventQueue,
+                        };
+                    },
+                    ...(happyModule === undefined
+                        ? {}
+                        : {
+                              onReloadHappy: async (ctx) => {
                                   if (stopping) return false;
-                                  const nextConfiguration =
-                                      await happyModule.importHappyCredentials({
-                                          machineScope: socketPath,
-                                      });
-                                  if (stopping || nextConfiguration === undefined) return false;
-                                  let next: HappySyncService;
-                                  try {
-                                      next = await happyModule.HappySyncService.open({
-                                          configuration: nextConfiguration,
-                                          createSession: async (id, request) =>
-                                              store!.createWithId(
-                                                  id,
-                                                  await configureSessionRequest(
-                                                      request,
-                                                      loadedConfig.config.docker,
-                                                      () =>
-                                                          store!.queryProjectSettings(request.cwd),
+                                  return runHappyLifecycle(async () => {
+                                      if (stopping) return false;
+                                      const nextConfiguration =
+                                          await happyModule.importHappyCredentials({
+                                              machineScope: socketPath,
+                                          });
+                                      if (stopping || nextConfiguration === undefined) return false;
+                                      let next: HappySyncService;
+                                      try {
+                                          next = await happyModule.HappySyncService.open(ctx, {
+                                              configuration: nextConfiguration,
+                                              createSession: async (ctx, id, request) =>
+                                                  store!.createWithId(
+                                                      ctx,
+                                                      id,
+                                                      await configureSessionRequest(
+                                                          request,
+                                                          loadedConfig.config.docker,
+                                                          () =>
+                                                              store!.queryProjectSettings(
+                                                                  ctx,
+                                                                  request.cwd,
+                                                              ),
+                                                      ),
                                                   ),
-                                              ),
-                                          databasePath: paths.databasePath,
-                                          getSubagents: async (sessionId) =>
-                                              (await store?.listSubagents(sessionId)) ?? [],
-                                          getProjectContext: async (session) => {
-                                              const identity = session.projectIdentity();
-                                              if (identity === undefined) return undefined;
-                                              const project = await store?.getProject(
-                                                  identity.projectId,
-                                              );
-                                              if (project === undefined) return undefined;
-                                              const workspace =
-                                                  identity.workspaceId === undefined
-                                                      ? undefined
-                                                      : await store?.getWorkspace(
-                                                            project.id,
-                                                            identity.workspaceId,
-                                                        );
-                                              return {
-                                                  project,
-                                                  ...(workspace === undefined ? {} : { workspace }),
-                                              };
-                                          },
-                                          loadSession: async (sessionId) =>
-                                              await store?.get(sessionId),
-                                          modelCatalog,
-                                      });
-                                  } catch (error) {
-                                      if (isDatabaseFailure(error)) throw error;
-                                      daemonLog.record(
-                                          "error",
-                                          "daemon_happy_reload_failed",
-                                          "Happy sync could not reload.",
-                                          { error: errorToMessage(error) },
-                                      );
-                                      return false;
-                                  }
-                                  const previous = happySyncService;
-                                  happySyncService = undefined;
-                                  try {
-                                      await previous?.close();
-                                  } catch (error) {
-                                      if (isDatabaseFailure(error)) throw error;
-                                      daemonLog.record(
-                                          "warning",
-                                          "daemon_happy_previous_close_failed",
-                                          "The previous Happy sync connection could not close cleanly.",
-                                          { error: errorToMessage(error) },
-                                      );
-                                  }
-                                  await next.start();
-                                  happySyncService = next;
-                                  for (const session of store!.loadedSessions()) {
-                                      await next.attach(session);
-                                  }
-                                  return true;
-                              });
-                          },
-                      }),
-                onStartInspector: () =>
-                    inspectorSerialize(async () => {
-                        const inspectorUrl = openNodeInspector();
-                        await writeServerRegistry();
-                        return { inspectorUrl };
-                    }),
-                onStopInspector: () =>
-                    inspectorSerialize(async () => {
-                        const stopped = closeNodeInspector();
-                        // Reconcile the registry even when the inspector was already
-                        // closed through another in-process path.
-                        await writeServerRegistry();
-                        return { stopped };
-                    }),
-                onShutdown: () => stopServer("Shutdown requested through the daemon protocol."),
-                store,
-                taskDrain,
-                token,
-            },
-            server,
+                                              databasePath: paths.databasePath,
+                                              getSubagents: async (ctx, sessionId) =>
+                                                  (await store?.listSubagents(ctx, sessionId)) ??
+                                                  [],
+                                              getProjectContext: async (ctx, session) => {
+                                                  const identity = session.projectIdentity();
+                                                  if (identity === undefined) return undefined;
+                                                  const project = await store?.getProject(
+                                                      ctx,
+                                                      identity.projectId,
+                                                  );
+                                                  if (project === undefined) return undefined;
+                                                  const workspace =
+                                                      identity.workspaceId === undefined
+                                                          ? undefined
+                                                          : await store?.getWorkspace(
+                                                                ctx,
+                                                                project.id,
+                                                                identity.workspaceId,
+                                                            );
+                                                  return {
+                                                      project,
+                                                      ...(workspace === undefined
+                                                          ? {}
+                                                          : { workspace }),
+                                                  };
+                                              },
+                                              modelCatalog,
+                                          });
+                                      } catch (error) {
+                                          if (isDatabaseFailure(error)) throw error;
+                                          daemonLog.record(
+                                              "error",
+                                              "daemon_happy_reload_failed",
+                                              "Happy sync could not reload.",
+                                              { error: errorToMessage(error) },
+                                          );
+                                          return false;
+                                      }
+                                      const previous = happySyncService;
+                                      happySyncService = undefined;
+                                      try {
+                                          await previous?.close(ctx);
+                                      } catch (error) {
+                                          if (isDatabaseFailure(error)) throw error;
+                                          daemonLog.record(
+                                              "warning",
+                                              "daemon_happy_previous_close_failed",
+                                              "The previous Happy sync connection could not close cleanly.",
+                                              { error: errorToMessage(error) },
+                                          );
+                                      }
+                                      await next.start(ctx);
+                                      happySyncService = next;
+                                      return true;
+                                  });
+                              },
+                          }),
+                    onStartInspector: (_ctx) =>
+                        inspectorSerialize(async () => {
+                            const inspectorUrl = openNodeInspector();
+                            await writeServerRegistry();
+                            return { inspectorUrl };
+                        }),
+                    onStopInspector: (_ctx) =>
+                        inspectorSerialize(async () => {
+                            const stopped = closeNodeInspector();
+                            // Reconcile the registry even when the inspector was already
+                            // closed through another in-process path.
+                            await writeServerRegistry();
+                            return { stopped };
+                        }),
+                    onShutdown: () => stopServer("Shutdown requested through the daemon protocol."),
+                    store: activeStore,
+                    taskDrain: taskDrain!,
+                    token,
+                },
+                server,
+            ),
         );
         server.off("request", startupRequestListener);
         daemonLog.record("info", "daemon_ready", "Rig daemon is ready.", {
             databasePath: paths.databasePath,
             socketPath,
+        });
+        setImmediate(() => {
+            if (!stopping) {
+                for (const start of postReadyTasks) start();
+            }
         });
     }
 }

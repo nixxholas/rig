@@ -9,6 +9,16 @@ export interface SqliteTransactionHandle {
  * fails. The handle's close is always attempted exactly once.
  */
 export async function runSqliteTransaction<Result>(
+    ctx: Context,
+    handle: SqliteTransactionHandle,
+    operation: () => Promise<Result>,
+): Promise<Result> {
+    return await ctx.span("rig.sql.sharing.transaction", async () =>
+        runSqliteTransactionBody(handle, operation),
+    );
+}
+
+export async function runSqliteTransactionBody<Result>(
     handle: SqliteTransactionHandle,
     operation: () => Promise<Result>,
 ): Promise<Result> {
@@ -51,3 +61,4 @@ export async function runSqliteTransaction<Result>(
     }
     return result;
 }
+import type { Context } from "@steve.kite/stdlib";

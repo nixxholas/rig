@@ -1,7 +1,9 @@
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { TX } from "../persistence/Transaction.js";
 import { inDatabase } from "../persistence/database/inDatabase.js";
+import { withDatabase } from "../persistence/database/databaseContext.js";
 import { inTx } from "../persistence/inTx.js";
 import {
     abortP2pPeerPairing,
@@ -26,12 +28,13 @@ import {
 import type { P2pTransportKind } from "./P2pTransport.js";
 
 export interface P2pPeerTrustDatabase {
-    query<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
-    transaction<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
+    query<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
+    transaction<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
 }
 
 export interface P2pPeerTrustStoreContract {
     preparePairing(
+        ctx: Context,
         pairingId: string,
         identity: P2pPeerIdentity,
         transport: P2pTransportKind,
@@ -41,33 +44,36 @@ export interface P2pPeerTrustStoreContract {
         assignPrimary: boolean,
         expiresAt: number,
     ): Promise<P2pPreparedPairingTrust>;
-    peers(): Promise<readonly P2pTrustedPeer[]>;
+    peers(ctx: Context): Promise<readonly P2pTrustedPeer[]>;
     peerForBinding(
+        ctx: Context,
         transport: P2pTransportKind,
         address: string,
     ): Promise<P2pPeerIdentity | undefined>;
     validate(
+        ctx: Context,
         identity: P2pPeerIdentity,
         transport?: P2pTransportKind,
         address?: string,
     ): Promise<void>;
     verifyOrPin(
+        ctx: Context,
         identity: P2pPeerIdentity,
         transport?: P2pTransportKind,
         address?: string,
         connections?: P2pPeerConnections,
         name?: string,
     ): Promise<void>;
-    readyPairings(): Promise<readonly P2pPreparedPairingTrust[]>;
+    readyPairings(ctx: Context): Promise<readonly P2pPreparedPairingTrust[]>;
 }
 
 export interface P2pPreparedPairingTrust {
     pairing: P2pPeerPairingTrust;
-    activate(): Promise<P2pTrustedPeer>;
-    abort(): Promise<void>;
-    complete(): Promise<void>;
-    markConfirmed(): Promise<void>;
-    markLocallyReady(): Promise<void>;
+    activate(ctx: Context): Promise<P2pTrustedPeer>;
+    abort(ctx: Context): Promise<void>;
+    complete(ctx: Context): Promise<void>;
+    markConfirmed(ctx: Context): Promise<void>;
+    markLocallyReady(ctx: Context): Promise<void>;
 }
 
 export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
@@ -82,21 +88,32 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
     static fromDatabase(database: TX, options: { now?: () => number } = {}): P2pPeerTrustStore {
         return new P2pPeerTrustStore(
             {
-                query: (operation) => inDatabase(database, operation),
-                transaction: (operation) => inTx(database, operation),
+                query: (ctx, operation) =>
+                    inDatabase(
+                        withDatabase(ctx, database),
+                        "rig.sql.p2p.store.query",
+                        async (ctx) => operation(ctx),
+                    ),
+                transaction: (ctx, operation) =>
+                    inTx(
+                        withDatabase(ctx, database),
+                        "rig.sql.p2p.store.transaction",
+                        async (ctx) => operation(ctx),
+                    ),
             },
             options,
         );
     }
 
-    async peers(): Promise<readonly P2pTrustedPeer[]> {
-        return this.#database.transaction(async (tx) => {
-            await deleteExpiredP2pPeerPairings(tx, this.#now());
-            return queryP2pPeers(tx);
+    async peers(ctx: Context): Promise<readonly P2pTrustedPeer[]> {
+        return this.#database.transaction(ctx, async (ctx) => {
+            await deleteExpiredP2pPeerPairings(ctx, this.#now());
+            return queryP2pPeers(ctx);
         });
     }
 
     async preparePairing(
+        ctx: Context,
         pairingId: string,
         identity: P2pPeerIdentity,
         transport: P2pTransportKind,
@@ -110,9 +127,9 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
             throw new Error("The P2P pairing transaction ID is invalid.");
         }
         let pairing: P2pPeerPairingTrust | undefined;
-        await this.#database.transaction(async (tx) => {
-            await deleteExpiredP2pPeerPairings(tx, this.#now());
-            await p2pPeerValidate(tx, identity, { address, transport });
+        await this.#database.transaction(ctx, async (ctx) => {
+            await deleteExpiredP2pPeerPairings(ctx, this.#now());
+            await p2pPeerValidate(ctx, identity, { address, transport });
             const candidate: P2pPeerPairingTrust = {
                 assignPrimary,
                 expiresAt,
@@ -126,7 +143,7 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
                 },
                 state: "prepared",
             };
-            const existing = (await queryP2pPeerPairings(tx)).find(
+            const existing = (await queryP2pPeerPairings(ctx)).find(
                 (entry) => entry.pairingId === pairingId,
             );
             if (existing !== undefined) {
@@ -136,7 +153,7 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
                 pairing = existing;
                 return;
             }
-            await createP2pPeerPairing(tx, candidate);
+            await createP2pPeerPairing(ctx, candidate);
             pairing = candidate;
         });
         if (pairing === undefined) {
@@ -145,20 +162,21 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
         return this.#handle(pairing);
     }
 
-    async readyPairings(): Promise<readonly P2pPreparedPairingTrust[]> {
-        return this.#database.transaction(async (tx) => {
-            await deleteExpiredP2pPeerPairings(tx, this.#now());
-            return (await queryP2pPeerPairings(tx))
+    async readyPairings(ctx: Context): Promise<readonly P2pPreparedPairingTrust[]> {
+        return this.#database.transaction(ctx, async (ctx) => {
+            await deleteExpiredP2pPeerPairings(ctx, this.#now());
+            return (await queryP2pPeerPairings(ctx))
                 .filter((pairing) => pairing.state === "confirmed")
                 .map((pairing) => this.#handle(pairing));
         });
     }
 
     async peerForBinding(
+        ctx: Context,
         transport: P2pTransportKind,
         address: string,
     ): Promise<P2pPeerIdentity | undefined> {
-        const peer = (await this.peers()).find((candidate) =>
+        const peer = (await this.peers(ctx)).find((candidate) =>
             candidate.bindings.some(
                 (binding) => binding.transport === transport && binding.address === address,
             ),
@@ -169,15 +187,19 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
     }
 
     async validate(
+        ctx: Context,
         identity: P2pPeerIdentity,
         transport?: P2pTransportKind,
         address?: string,
     ): Promise<void> {
         const binding = toBinding(transport, address);
-        await this.#database.transaction(async (tx) => p2pPeerValidate(tx, identity, binding));
+        await this.#database.transaction(ctx, async (ctx) =>
+            p2pPeerValidate(ctx, identity, binding),
+        );
     }
 
     async verifyOrPin(
+        ctx: Context,
         identity: P2pPeerIdentity,
         transport?: P2pTransportKind,
         address?: string,
@@ -185,22 +207,22 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
         name?: string,
     ): Promise<void> {
         const binding = toBinding(transport, address);
-        await this.#database.transaction(async (tx) =>
-            p2pPeerVerifyOrPin(tx, identity, binding, connections, name, this.#now()),
+        await this.#database.transaction(ctx, async (ctx) =>
+            p2pPeerVerifyOrPin(ctx, identity, binding, connections, name, this.#now()),
         );
     }
 
     #handle(pairing: P2pPeerPairingTrust): P2pPreparedPairingTrust {
         return {
             pairing,
-            activate: async () => {
+            activate: async (ctx) => {
                 let peer: P2pTrustedPeer | undefined;
-                await this.#database.transaction(async (tx) => {
-                    const pending = (await queryP2pPeerPairings(tx)).find(
+                await this.#database.transaction(ctx, async (ctx) => {
+                    const pending = (await queryP2pPeerPairings(ctx)).find(
                         (entry) => entry.pairingId === pairing.pairingId,
                     );
                     if (pending === undefined) {
-                        peer = (await queryP2pPeers(tx)).find(
+                        peer = (await queryP2pPeers(ctx)).find(
                             (entry) =>
                                 entry.instanceId === pairing.peer.instanceId &&
                                 entry.publicKey === pairing.peer.publicKey,
@@ -215,14 +237,14 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
                         throw new Error("The P2P pairing transaction has no transport binding.");
                     }
                     await p2pPeerVerifyOrPin(
-                        tx,
+                        ctx,
                         pending.peer,
                         binding,
                         pending.peer.connections,
                         pending.peer.name,
                         this.#now(),
                     );
-                    peer = (await queryP2pPeers(tx)).find(
+                    peer = (await queryP2pPeers(ctx)).find(
                         (entry) => entry.instanceId === pending.peer.instanceId,
                     );
                 });
@@ -231,14 +253,14 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
                 }
                 return peer;
             },
-            abort: async () => {
-                await this.#database.transaction(async (tx) =>
-                    abortP2pPeerPairing(tx, pairing.pairingId),
+            abort: async (ctx) => {
+                await this.#database.transaction(ctx, async (ctx) =>
+                    abortP2pPeerPairing(ctx, pairing.pairingId),
                 );
             },
-            complete: async () => {
-                await this.#database.transaction(async (tx) => {
-                    const result = await completeP2pPeerPairing(tx, pairing.pairingId);
+            complete: async (ctx) => {
+                await this.#database.transaction(ctx, async (ctx) => {
+                    const result = await completeP2pPeerPairing(ctx, pairing.pairingId);
                     if (result === "not_confirmed") {
                         throw new Error("The P2P pairing transaction is not ready to complete.");
                     }
@@ -249,9 +271,9 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
                     }
                 });
             },
-            markConfirmed: async () => {
-                await this.#database.transaction(async (tx) => {
-                    const result = await confirmP2pPeerPairing(tx, pairing.pairingId);
+            markConfirmed: async (ctx) => {
+                await this.#database.transaction(ctx, async (ctx) => {
+                    const result = await confirmP2pPeerPairing(ctx, pairing.pairingId);
                     if (result === "missing") {
                         throw new Error("The P2P pairing transaction no longer exists.");
                     }
@@ -262,9 +284,9 @@ export class P2pPeerTrustStore implements P2pPeerTrustStoreContract {
                     }
                 });
             },
-            markLocallyReady: async () => {
-                await this.#database.transaction(async (tx) => {
-                    const result = await markP2pPeerPairingLocallyReady(tx, pairing.pairingId);
+            markLocallyReady: async (ctx) => {
+                await this.#database.transaction(ctx, async (ctx) => {
+                    const result = await markP2pPeerPairingLocallyReady(ctx, pairing.pairingId);
                     if (result === "missing") {
                         throw new Error("The P2P pairing transaction no longer exists.");
                     }

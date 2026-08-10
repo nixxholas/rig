@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runAgentLoop } from "./loop.js";
 import { defineTool } from "./types.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     defineModel,
     defineProvider,
@@ -12,6 +13,8 @@ import {
     type Context,
     type InferenceStream,
 } from "@slopus/rig-execution";
+
+const ctx = createTestRootContext();
 
 describe("provider tool call identifiers", () => {
     it("assigns unique Rig IDs while replaying a repeated provider ID", async () => {
@@ -59,7 +62,7 @@ describe("provider tool call identifiers", () => {
         let nextId = 0;
         const harness = createJustBashToolHarness();
 
-        const result = await runAgentLoop({
+        const result = await runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [tool],

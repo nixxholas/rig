@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { readOptionalString, readString } from "./impl/sqliteRow.js";
 
 export interface TerminalRunEvent {
@@ -10,11 +11,12 @@ export interface TerminalRunEvent {
 }
 
 export async function queryTerminalRunEvent(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     runId: string,
 ): Promise<TerminalRunEvent | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_terminal_run_event", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx.get<Record<string, unknown>>(sql`
         SELECT type, data_json, (
             SELECT event_id FROM session_events AS latest

@@ -1,16 +1,18 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 
 export async function querySessionPartialMessages(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
 ): Promise<PersistedSessionMessage[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_partial_messages", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             SELECT position, is_partial, run_id, message_json

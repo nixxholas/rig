@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import type {
     CreateSessionRequest,
     ProjectWorkspace,
@@ -7,6 +8,8 @@ import type {
 } from "../../protocol/index.js";
 import { AgentSessionManager } from "../AgentSessionManager.js";
 import type { InMemorySession } from "../InMemorySession.js";
+
+const ctx = createTestRootContext().named("agent-session-manager-test");
 
 describe("AgentSessionManager", () => {
     it("shares agent lookup, messaging, and scheduling across trusted peer owners", async () => {
@@ -74,7 +77,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        const peerCommunication = manager.communicationContext(peerA.id);
+        const peerCommunication = manager.communicationContext(ctx, peerA.id);
         expect(peerCommunication.info("peer-a-target-agent")).toMatchObject({
             agentId: "peer-a-target-agent",
         });
@@ -85,16 +88,16 @@ describe("AgentSessionManager", () => {
             agentId: "peer-b-agent",
         });
         expect(() => manager.assertCanScheduleMessage(peerA.id, "peer-b-agent")).not.toThrow();
-        manager.sendScheduledMessage(peerA.id, "peer-b-agent", "Later.", "message-1");
+        manager.sendScheduledMessage(ctx, peerA.id, "peer-b-agent", "Later.", "message-1");
         expect(deliveredToOtherOwner).toHaveBeenCalledOnce();
 
         expect(() => manager.assertCanScheduleMessage(peerA.id, "unknown-agent")).not.toThrow();
 
-        const localCommunication = manager.communicationContext(local.id);
+        const localCommunication = manager.communicationContext(ctx, local.id);
         expect(localCommunication.info("peer-b-agent")).toMatchObject({
             agentId: "peer-b-agent",
         });
-        manager.sendScheduledMessage(local.id, "peer-b-agent", "Local operator.", "message-2");
+        manager.sendScheduledMessage(ctx, local.id, "peer-b-agent", "Local operator.", "message-2");
         expect(deliveredToOtherOwner).toHaveBeenCalledTimes(2);
     });
 
@@ -174,7 +177,7 @@ describe("AgentSessionManager", () => {
                 listByRoot: () => [intermediate, target],
             },
         });
-        const communication = manager.communicationContext(sender.id);
+        const communication = manager.communicationContext(ctx, sender.id);
 
         expect(communication.me()).toEqual({
             agentId: "sender-agent-id",
@@ -196,10 +199,10 @@ describe("AgentSessionManager", () => {
         });
         await communication.setReadOnly?.("target-agent-id", true);
         await communication.setReadOnly?.("target-agent-id", false);
-        expect(changePermissionMode).toHaveBeenNthCalledWith(1, {
+        expect(changePermissionMode).toHaveBeenNthCalledWith(1, expect.anything(), {
             permissionMode: "read_only",
         });
-        expect(changePermissionMode).toHaveBeenNthCalledWith(2, {
+        expect(changePermissionMode).toHaveBeenNthCalledWith(2, expect.anything(), {
             permissionMode: "auto",
         });
         targetMetadata.mockReturnValue({
@@ -222,7 +225,7 @@ describe("AgentSessionManager", () => {
         );
         expect(changePermissionMode).toHaveBeenCalledTimes(2);
         expect(findByAgentId).toHaveBeenCalledWith("target-agent-id");
-        expect(deliverAgentMessage).toHaveBeenCalledWith({
+        expect(deliverAgentMessage).toHaveBeenCalledWith(expect.anything(), {
             agentSource: {
                 agentId: "sender-agent-id",
                 sessionId: "sender-session",
@@ -269,7 +272,7 @@ describe("AgentSessionManager", () => {
         expect(communication.send("target-agent-id", "No shared folder.")).toEqual({
             delivered: true,
         });
-        const messageWithoutSharedDisk = JSON.stringify(deliverAgentMessage.mock.calls.at(-1)?.[0]);
+        const messageWithoutSharedDisk = JSON.stringify(deliverAgentMessage.mock.calls.at(-1)?.[1]);
         expect(messageWithoutSharedDisk).not.toContain("Sender folder");
         expect(messageWithoutSharedDisk).toContain("The sender's disk is not shared with yours.");
 
@@ -349,11 +352,11 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.followUp(parent.id, "/root/audit", "", undefined, "opaque-task"),
+            manager.followUp(ctx, parent.id, "/root/audit", "", undefined, "opaque-task"),
         ).resolves.toMatchObject({
             agentId: "child-agent",
         });
-        expect(submit).toHaveBeenCalledWith({
+        expect(submit).toHaveBeenCalledWith(expect.anything(), {
             agentMessageTriggerTurn: true,
             displayText: "Follow-up task",
             encryptedAgentMessage: {
@@ -366,10 +369,12 @@ describe("AgentSessionManager", () => {
             text: "",
         });
 
-        expect(manager.sendMessage(parent.id, "/root/audit", "", "opaque-message")).toMatchObject({
+        expect(
+            manager.sendMessage(ctx, parent.id, "/root/audit", "", "opaque-message"),
+        ).toMatchObject({
             agentId: "child-agent",
         });
-        expect(deliverAgentMessage).toHaveBeenCalledWith({
+        expect(deliverAgentMessage).toHaveBeenCalledWith(expect.anything(), {
             blocks: [],
             encryptedAgentMessage: {
                 author: "/root",
@@ -382,12 +387,12 @@ describe("AgentSessionManager", () => {
             role: "user",
         });
 
-        expect(manager.sendMessage(child.id, "/root", "", "opaque-finding")).toMatchObject({
+        expect(manager.sendMessage(ctx, child.id, "/root", "", "opaque-finding")).toMatchObject({
             agentId: "parent-agent",
             path: "/root",
             status: "running",
         });
-        expect(deliverParentMessage).toHaveBeenCalledWith({
+        expect(deliverParentMessage).toHaveBeenCalledWith(expect.anything(), {
             blocks: [],
             encryptedAgentMessage: {
                 author: "/root/audit",
@@ -399,39 +404,43 @@ describe("AgentSessionManager", () => {
             provenance: "agent",
             role: "user",
         });
-        expect(manager.sendMessage(child.id, "parent-agent", "Plain finding.")).toMatchObject({
+        expect(manager.sendMessage(ctx, child.id, "parent-agent", "Plain finding.")).toMatchObject({
             agentId: "parent-agent",
             path: "/root",
         });
-        expect(deliverParentMessage).toHaveBeenLastCalledWith({
+        expect(deliverParentMessage).toHaveBeenLastCalledWith(expect.anything(), {
             blocks: [{ type: "text", text: "Plain finding." }],
             id: expect.any(String),
             provenance: "agent",
             role: "user",
         });
-        expect(() => manager.sendMessage(nested.id, "/root", "Skip the parent.")).toThrow(
+        expect(() => manager.sendMessage(ctx, nested.id, "/root", "Skip the parent.")).toThrow(
             "Subagent '/root' was not found.",
         );
-        expect(manager.sendMessage(nested.id, "/root/audit", "Nested finding.")).toMatchObject({
-            agentId: "child-agent",
-            path: "/root/audit",
-        });
+        expect(manager.sendMessage(ctx, nested.id, "/root/audit", "Nested finding.")).toMatchObject(
+            {
+                agentId: "child-agent",
+                path: "/root/audit",
+            },
+        );
 
         encryptedAgentTransportScope.mockReturnValue('["bedrock","us-east-1"]');
         await expect(
-            manager.followUp(parent.id, "/root/audit", "", undefined, "opaque-task"),
+            manager.followUp(ctx, parent.id, "/root/audit", "", undefined, "opaque-task"),
         ).rejects.toThrow(
             "Native encrypted collaboration only works within the same compatible provider and region. Retry with `rig.followup_task` and provide the task normally.",
         );
-        expect(() => manager.sendMessage(parent.id, "/root/audit", "", "opaque-message")).toThrow(
+        expect(() =>
+            manager.sendMessage(ctx, parent.id, "/root/audit", "", "opaque-message"),
+        ).toThrow(
             "Native encrypted collaboration only works within the same compatible provider and region.",
         );
         expect(submit).toHaveBeenCalledOnce();
 
         await expect(
-            manager.followUp(parent.id, "/root/audit", "Plain cross-provider task"),
+            manager.followUp(ctx, parent.id, "/root/audit", "Plain cross-provider task"),
         ).resolves.toMatchObject({ agentId: "child-agent" });
-        expect(submit).toHaveBeenLastCalledWith({
+        expect(submit).toHaveBeenLastCalledWith(expect.anything(), {
             agentMessageTriggerTurn: true,
             provenance: "agent",
             text: "Plain cross-provider task",
@@ -488,7 +497,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(manager.followUp(root.id, "/root/idle", "Continue.")).rejects.toThrow(
+        await expect(manager.followUp(ctx, root.id, "/root/idle", "Continue.")).rejects.toThrow(
             "No more than 3 subagents can run at once.",
         );
     });
@@ -740,7 +749,11 @@ describe("AgentSessionManager", () => {
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(
-            async (_request: CreateSessionRequest, _metadata: SessionAgentMetadata) => child,
+            async (
+                _ctx: typeof ctx,
+                _request: CreateSessionRequest,
+                _metadata: SessionAgentMetadata,
+            ) => child,
         );
         const manager = new AgentSessionManager({
             repository: {
@@ -750,7 +763,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Check another model",
             effort: "high",
@@ -761,6 +774,7 @@ describe("AgentSessionManager", () => {
         });
 
         expect(createSubagent).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({
                 cwd: "/tmp/rig-manager-test",
                 effort: "high",
@@ -771,19 +785,19 @@ describe("AgentSessionManager", () => {
             }),
             expect.objectContaining({ taskName: "model_check" }),
         );
-        const childInstructions = createSubagent.mock.calls[0]?.[0].instructions;
+        const childInstructions = createSubagent.mock.calls[0]?.[1].instructions;
         expect(childInstructions).toContain("You are a child subagent");
         expect(childInstructions).toContain("You are not the parent agent");
         expect(childInstructions).toContain(
             "Do not spawn another subagent unless the parent explicitly instructed you",
         );
-        expect(child.submit).toHaveBeenCalledWith({
+        expect(child.submit).toHaveBeenCalledWith(expect.anything(), {
             agentMessageTriggerTurn: true,
             provenance: "agent",
             text: "Inspect with the requested model.",
         });
         await expect(
-            manager.spawn(parent.id, {
+            manager.spawn(ctx, parent.id, {
                 description: "Unknown model",
                 modelId: "missing/model",
                 providerId: "claude",
@@ -793,7 +807,7 @@ describe("AgentSessionManager", () => {
         expect(createSubagent).toHaveBeenCalledOnce();
 
         await expect(
-            manager.spawn(parent.id, {
+            manager.spawn(ctx, parent.id, {
                 description: "Unsupported effort",
                 effort: "ultra",
                 modelId: "anthropic/claude-opus-4.6",
@@ -842,7 +856,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Inspect only",
             prompt: "Inspect without editing.",
@@ -851,6 +865,7 @@ describe("AgentSessionManager", () => {
         });
 
         expect(createSubagent).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({ permissionMode: "read_only" }),
             expect.objectContaining({ taskName: "inspect_only" }),
         );
@@ -890,7 +905,7 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.spawn(parent.id, {
+            manager.spawn(ctx, parent.id, {
                 encryptedPrompt: "opaque-cloud-ciphertext",
                 description: "Unsafe crossing",
                 modelId: "openai/gpt-5.6-sol",
@@ -905,7 +920,7 @@ describe("AgentSessionManager", () => {
         expect(child.submit).not.toHaveBeenCalled();
 
         await expect(
-            manager.spawn(parent.id, {
+            manager.spawn(ctx, parent.id, {
                 encryptedPrompt: "opaque-luna-ciphertext",
                 description: "Unsupported V1 model",
                 modelId: "openai/gpt-5.6-luna",
@@ -917,7 +932,7 @@ describe("AgentSessionManager", () => {
 
         parentTransportScope.mockReturnValue(undefined);
         await expect(
-            manager.spawn(parent.id, {
+            manager.spawn(ctx, parent.id, {
                 encryptedPrompt: "opaque-without-native-scope",
                 description: "Missing native scope",
                 prompt: "",
@@ -959,7 +974,7 @@ describe("AgentSessionManager", () => {
         manager.recordSuccessfulProvider("openai/gpt-5.6-terra", "codex-b");
 
         await expect(
-            manager.spawn(parent.id, {
+            manager.spawn(ctx, parent.id, {
                 encryptedPrompt: "opaque-ciphertext",
                 description: "Silent account crossing",
                 modelId: "openai/gpt-5.6-terra",
@@ -1023,58 +1038,63 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Use current provider",
             modelId: "shared/current",
             prompt: "Use the current provider when possible.",
         });
         expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.anything(),
             expect.objectContaining({ modelId: "shared/current", providerId: "codex" }),
             expect.anything(),
         );
 
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Use unique provider",
             modelId: "claude/unique",
             prompt: "Use the only matching provider.",
         });
         expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.anything(),
             expect.objectContaining({ modelId: "claude/unique", providerId: "claude" }),
             expect.anything(),
         );
 
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Use first available provider",
             modelId: "shared/ambiguous",
             prompt: "Use the best available provider.",
         });
         expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.anything(),
             expect.objectContaining({ modelId: "shared/ambiguous", providerId: "claude" }),
             expect.anything(),
         );
 
         manager.recordSuccessfulProvider("shared/ambiguous", "grok");
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Reuse successful provider",
             modelId: "shared/ambiguous",
             prompt: "Use the provider that most recently served this model successfully.",
         });
         expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.anything(),
             expect.objectContaining({ modelId: "shared/ambiguous", providerId: "grok" }),
             expect.anything(),
         );
 
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Reuse successful model",
             prompt: "Use the best model for this provider.",
             providerId: "grok",
         });
         expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.anything(),
             expect.objectContaining({ modelId: "shared/ambiguous", providerId: "grok" }),
             expect.anything(),
         );
@@ -1116,7 +1136,11 @@ describe("AgentSessionManager", () => {
         } as unknown as InMemorySession;
         let childRequest: CreateSessionRequest | undefined;
         const createSubagent = vi.fn(
-            async (request: CreateSessionRequest, _metadata: SessionAgentMetadata) => {
+            async (
+                _ctx: typeof ctx,
+                request: CreateSessionRequest,
+                _metadata: SessionAgentMetadata,
+            ) => {
                 childRequest = request;
                 return child;
             },
@@ -1133,7 +1157,7 @@ describe("AgentSessionManager", () => {
             secretIds: ["service"],
             sessionSecretIds: ["service"],
         });
-        await manager.spawn(parent.id, {
+        await manager.spawn(ctx, parent.id, {
             background: true,
             description: "Inspect without parent secrets",
             prompt: "Inspect the project.",
@@ -1167,13 +1191,15 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.changeSubagentPermissionModes(root.id, "read_only");
+        await manager.changeSubagentPermissionModes(ctx, root.id, "read_only");
 
         expect(changeFirst).toHaveBeenCalledWith(
+            expect.anything(),
             { permissionMode: "read_only" },
             { updateSubagents: false },
         );
         expect(changeSecond).toHaveBeenCalledWith(
+            expect.anything(),
             { permissionMode: "read_only" },
             { updateSubagents: false },
         );
@@ -1219,18 +1245,20 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.setSubagentReadOnly(parent.id, "/root/inspect_code", true);
-        await manager.followUp(parent.id, "/root/inspect_code", "Inspect first.");
-        await manager.setSubagentReadOnly(parent.id, "/root/inspect_code", false);
-        await manager.followUp(parent.id, "/root/inspect_code", "Now make the fix.");
+        await manager.setSubagentReadOnly(ctx, parent.id, "/root/inspect_code", true);
+        await manager.followUp(ctx, parent.id, "/root/inspect_code", "Inspect first.");
+        await manager.setSubagentReadOnly(ctx, parent.id, "/root/inspect_code", false);
+        await manager.followUp(ctx, parent.id, "/root/inspect_code", "Now make the fix.");
 
         expect(changePermissionMode).toHaveBeenNthCalledWith(
             1,
+            expect.anything(),
             { permissionMode: "read_only" },
             { updateSubagents: false },
         );
         expect(changePermissionMode).toHaveBeenNthCalledWith(
             2,
+            expect.anything(),
             { permissionMode: "auto" },
             { updateSubagents: false },
         );
@@ -1283,7 +1311,7 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.setSubagentReadOnly(root.id, "/root/direct_child/nested_child", false),
+            manager.setSubagentReadOnly(ctx, root.id, "/root/direct_child/nested_child", false),
         ).rejects.toThrow("Only an agent that started this child can change its permission mode.");
         expect(nestedChangePermissionMode).not.toHaveBeenCalled();
     });
@@ -1317,9 +1345,9 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(manager.changeSubagentPermissionModes(root.id, "read_only")).rejects.toThrow(
-            "could not persist child permission mode",
-        );
+        await expect(
+            manager.changeSubagentPermissionModes(ctx, root.id, "read_only"),
+        ).rejects.toThrow("could not persist child permission mode");
 
         expect(failedShutdown).toHaveBeenCalledOnce();
         expect(successfulChange).toHaveBeenCalledOnce();
@@ -1408,7 +1436,7 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.spawn("root-1", {
+            manager.spawn(ctx, "root-1", {
                 background: true,
                 description: "Inspect code",
                 prompt: "Inspect the codebase.",
@@ -1430,7 +1458,7 @@ describe("AgentSessionManager", () => {
         status = "completed";
         resolveCompletion?.({ status: "completed" });
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledOnce());
-        expect(deliverNotification).toHaveBeenCalledWith({
+        expect(deliverNotification).toHaveBeenCalledWith(expect.anything(), {
             displayText: 'Background work "Inspect code" completed.',
             text: expect.stringMatching(
                 /Agent ID: agent-2\nPath: \/root\/inspect_code\nStatus: completed\nResult: The inspection is complete\./u,
@@ -1455,9 +1483,9 @@ describe("AgentSessionManager", () => {
         status = "completed";
 
         await expect(
-            manager.followUp("root-1", "/root/inspect_code", "Check one more file.", "high"),
+            manager.followUp(ctx, "root-1", "/root/inspect_code", "Check one more file.", "high"),
         ).resolves.toMatchObject({ agentId: "agent-2" });
-        expect(childSubmit).toHaveBeenLastCalledWith({
+        expect(childSubmit).toHaveBeenLastCalledWith(expect.anything(), {
             agentMessageTriggerTurn: true,
             effort: "high",
             provenance: "agent",
@@ -1467,14 +1495,22 @@ describe("AgentSessionManager", () => {
             throw new Error("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
         });
         await expect(
-            manager.followUp("root-1", "/root/inspect_code", "Try unsupported effort.", "ultra"),
+            manager.followUp(
+                ctx,
+                "root-1",
+                "/root/inspect_code",
+                "Try unsupported effort.",
+                "ultra",
+            ),
         ).rejects.toThrow("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
         expect(childSubmit).toHaveBeenCalledTimes(3);
         await vi.waitFor(() => expect(waitForRun).toHaveBeenCalledTimes(2));
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledTimes(2));
-        await expect(manager.interrupt("root-1", "/root/inspect_code")).resolves.toMatchObject({
-            status: "completed",
-        });
+        await expect(manager.interrupt(ctx, "root-1", "/root/inspect_code")).resolves.toMatchObject(
+            {
+                status: "completed",
+            },
+        );
         expect(abort).toHaveBeenCalledOnce();
         await expect(manager.wait("root-1", 0)).resolves.toMatchObject({
             agents: [
@@ -1552,7 +1588,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.spawn("root-1", {
+        await manager.spawn(ctx, "root-1", {
             background: true,
             description: "Inspect code",
             prompt: "Inspect the codebase.",
@@ -1560,7 +1596,7 @@ describe("AgentSessionManager", () => {
         });
 
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledOnce());
-        expect(deliverNotification).toHaveBeenCalledWith({
+        expect(deliverNotification).toHaveBeenCalledWith(expect.anything(), {
             displayText: 'Background work "Inspect code" failed.',
             text: expect.stringMatching(
                 /Agent ID: agent-2\nPath: \/root\/inspect_code\nStatus: error\nResult: The child process disconnected\./u,
@@ -1648,13 +1684,13 @@ describe("AgentSessionManager", () => {
         });
 
         await Promise.all([
-            manager.spawn("root-1", {
+            manager.spawn(ctx, "root-1", {
                 background: true,
                 description: "First task",
                 prompt: "Do the first task.",
                 taskName: "task_1",
             }),
-            manager.spawn("root-1", {
+            manager.spawn(ctx, "root-1", {
                 background: true,
                 description: "Second task",
                 prompt: "Do the second task.",
@@ -1668,11 +1704,11 @@ describe("AgentSessionManager", () => {
         completions.get("child-2")?.({ status: "completed" });
 
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledTimes(2));
-        expect(deliverNotification).toHaveBeenNthCalledWith(1, {
+        expect(deliverNotification).toHaveBeenNthCalledWith(1, expect.anything(), {
             displayText: 'Background work "task_1" completed.',
             text: expect.stringContaining("task_1 result"),
         });
-        expect(deliverNotification).toHaveBeenNthCalledWith(2, {
+        expect(deliverNotification).toHaveBeenNthCalledWith(2, expect.anything(), {
             displayText: 'Background work "task_2" completed.',
             text: expect.stringContaining("task_2 result"),
         });
@@ -1742,6 +1778,7 @@ describe("AgentSessionManager", () => {
         const controller = new AbortController();
 
         const run = manager.spawn(
+            ctx,
             "session-1",
             { description: "Inspect the code", prompt: "Review the implementation." },
             controller.signal,
@@ -1817,9 +1854,9 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(manager.stopDescendants(root.id)).resolves.toBe(2);
+        await expect(manager.stopDescendants(ctx, root.id)).resolves.toBe(2);
 
-        expect(child.abort).toHaveBeenCalledWith({ stopDescendants: false });
+        expect(child.abort).toHaveBeenCalledWith(expect.anything(), { stopDescendants: false });
         expect(grandchild.abort).not.toHaveBeenCalled();
         expect(grandchild.clearSuspension).toHaveBeenCalledOnce();
         expect(manager.list(root.id)).toEqual([
@@ -1828,11 +1865,11 @@ describe("AgentSessionManager", () => {
         ]);
 
         await expect(
-            manager.followUp(root.id, "/root/audit_code", "Inspect one more file."),
+            manager.followUp(ctx, root.id, "/root/audit_code", "Inspect one more file."),
         ).resolves.toEqual(
             expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
         );
-        expect(child.submit).toHaveBeenCalledWith({
+        expect(child.submit).toHaveBeenCalledWith(expect.anything(), {
             agentMessageTriggerTurn: true,
             provenance: "agent",
             text: "Inspect one more file.",
@@ -1903,12 +1940,12 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(manager.stopDescendantsForContextChange(root.id)).resolves.toBe(2);
+        await expect(manager.stopDescendantsForContextChange(ctx, root.id)).resolves.toBe(2);
 
         expect(retireWorkflowChild).toHaveBeenCalledOnce();
         expect(retireCompletedChild).toHaveBeenCalledOnce();
         await expect(
-            manager.followUp(root.id, "completed-child-agent", "Resume old work."),
+            manager.followUp(ctx, root.id, "completed-child-agent", "Resume old work."),
         ).rejects.toThrow("retired");
     });
 
@@ -1991,7 +2028,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(manager.pauseDescendants(root.id)).resolves.toBe(2);
+        await expect(manager.pauseDescendants(ctx, root.id)).resolves.toBe(2);
 
         expect(child.suspendByParent).toHaveBeenCalledOnce();
         expect(grandchild.suspendByParent).toHaveBeenCalledOnce();
@@ -2001,18 +2038,18 @@ describe("AgentSessionManager", () => {
             expect.objectContaining({ agentId: "grandchild-1-agent", status: "suspended" }),
             expect.objectContaining({ agentId: "child-2-agent", status: "completed" }),
         ]);
-        expect(root.recordSubagentsSuspended).toHaveBeenCalledWith([
+        expect(root.recordSubagentsSuspended).toHaveBeenCalledWith(expect.anything(), [
             expect.objectContaining({ agentId: "child-1-agent", status: "suspended" }),
             expect.objectContaining({ agentId: "grandchild-1-agent", status: "suspended" }),
         ]);
 
         await expect(
-            manager.followUp(root.id, "/root/audit_code", "Continue the audit."),
+            manager.followUp(ctx, root.id, "/root/audit_code", "Continue the audit."),
         ).resolves.toEqual(
             expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
         );
 
-        expect(child.submit).toHaveBeenCalledWith({
+        expect(child.submit).toHaveBeenCalledWith(expect.anything(), {
             agentMessageTriggerTurn: true,
             provenance: "agent",
             text: "Continue the audit.",
@@ -2062,9 +2099,9 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await expect(manager.pauseDescendants(root.id)).resolves.toBe(0);
+        await expect(manager.pauseDescendants(ctx, root.id)).resolves.toBe(0);
         expect(suspendByParent).not.toHaveBeenCalled();
-        expect(root.recordSubagentsSuspended).toHaveBeenCalledWith([]);
+        expect(root.recordSubagentsSuspended).toHaveBeenCalledWith(expect.anything(), []);
     });
 
     it("excludes workspace-archived subagents from collaboration lists and waits", async () => {
@@ -2191,7 +2228,7 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.spawn("subagent-3", {
+            manager.spawn(ctx, "subagent-3", {
                 description: "Exceed the limit",
                 prompt: "Start another child.",
             }),
@@ -2232,7 +2269,7 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.spawn("root-1", {
+            manager.spawn(ctx, "root-1", {
                 description: "One task too many",
                 prompt: "Do more work.",
             }),
@@ -2326,7 +2363,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        const spawning = manager.spawn("root-1", {
+        const spawning = manager.spawn(ctx, "root-1", {
             description: "Queued task",
             prompt: "Run after the active task.",
             taskName: "queued_task",
@@ -2407,21 +2444,23 @@ describe("AgentSessionManager", () => {
             snapshot: projectSessionSnapshot,
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(async () => child);
-        const configureWorkspaceRequest = vi.fn(async (request: CreateSessionRequest) => ({
-            ...request,
-            docker: {
-                image: "workspace:latest",
-                name: "rig-workspace-workspace-1-1",
-                workingDirectory: "/workspace",
-            },
-        }));
+        const configureWorkspaceRequest = vi.fn(
+            async (_ctx: typeof ctx, request: CreateSessionRequest) => ({
+                ...request,
+                docker: {
+                    image: "workspace:latest",
+                    name: "rig-workspace-workspace-1-1",
+                    workingDirectory: "/workspace",
+                },
+            }),
+        );
         const manager = new AgentSessionManager({
             repository: {
                 configureWorkspaceRequest,
                 createSubagent,
                 get: (id) => (id === parent.id ? parent : undefined),
                 listByRoot: () => [],
-                ownedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
+                ownedWorkspace: async (_ctx, ownerSessionId, projectId, workspaceId) =>
                     ownerSessionId === parent.id &&
                     projectId === "project-1" &&
                     workspaceId === "workspace-1"
@@ -2436,7 +2475,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.spawnInWorkspace(parent.id, {
+        await manager.spawnInWorkspace(ctx, parent.id, {
             background: true,
             description: "Fix parser",
             effort: "high",
@@ -2450,6 +2489,7 @@ describe("AgentSessionManager", () => {
         });
 
         expect(createSubagent).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({
                 cwd: "/workspaces/parser",
                 docker: expect.objectContaining({
@@ -2469,7 +2509,7 @@ describe("AgentSessionManager", () => {
         );
         expect(configureWorkspaceRequest).toHaveBeenCalledOnce();
         await expect(
-            manager.spawnInWorkspace(parent.id, {
+            manager.spawnInWorkspace(ctx, parent.id, {
                 description: "Invade",
                 effort: "medium",
                 modelId: "openai/gpt-5.6-sol",
@@ -2509,7 +2549,7 @@ describe("AgentSessionManager", () => {
                 createSubagent: vi.fn(),
                 get: (id) => (id === delegator.id ? delegator : undefined),
                 listByRoot: () => [],
-                workspace: async (projectId, workspaceId) =>
+                workspace: async (_ctx, projectId, workspaceId) =>
                     projectId === "project-1" && workspaceId === "workspace-2"
                         ? ({
                               id: workspaceId,
@@ -2532,11 +2572,11 @@ describe("AgentSessionManager", () => {
             title: "Update the changelog",
             workspaceId: "workspace-2",
         };
-        await expect(manager.delegate(delegator.id, request)).rejects.toThrow(
+        await expect(manager.delegate(ctx, delegator.id, request)).rejects.toThrow(
             "directory is unavailable",
         );
         workspacePresence = "present";
-        await expect(manager.delegate(delegator.id, request)).resolves.toEqual({
+        await expect(manager.delegate(ctx, delegator.id, request)).resolves.toEqual({
             agentId: "delegate-agent",
             projectId: "project-1",
             sessionId: "delegate-1",
@@ -2545,6 +2585,7 @@ describe("AgentSessionManager", () => {
             workspacePath: "/workspaces/changelog",
         });
         expect(createDelegatedSession).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({
                 cwd: "/workspaces/changelog",
                 effort: "high",
@@ -2564,7 +2605,7 @@ describe("AgentSessionManager", () => {
             expect.any(String),
         );
         await expect(
-            manager.delegate(delegator.id, {
+            manager.delegate(ctx, delegator.id, {
                 effort: "medium",
                 modelId: "openai/gpt-5.6-sol",
                 prompt: "Nope.",
@@ -2618,7 +2659,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.delegate(delegator.id, {
+        await manager.delegate(ctx, delegator.id, {
             effort: "medium",
             modelId: "openai/gpt-5.6-sol",
             prompt: "Update the changelog.",
@@ -2627,7 +2668,7 @@ describe("AgentSessionManager", () => {
         });
 
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledOnce());
-        expect(deliverNotification).toHaveBeenCalledWith({
+        expect(deliverNotification).toHaveBeenCalledWith(expect.anything(), {
             displayText: 'Delegated work in "Update the changelog" failed.',
             text: expect.stringMatching(
                 /Status: error\nResult: API Error: 500 Internal server error\./u,
@@ -2648,13 +2689,14 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.listWorkspaces(delegator.id, "project-2", { crossWorkspace: false }),
+            manager.listWorkspaces(ctx, delegator.id, "project-2", { crossWorkspace: false }),
         ).rejects.toThrow("features.cross_workspace");
         await expect(
-            manager.listWorkspaces(delegator.id, "project-1", { crossWorkspace: false }),
+            manager.listWorkspaces(ctx, delegator.id, "project-1", { crossWorkspace: false }),
         ).resolves.toEqual([]);
         await expect(
             manager.listSessions(
+                ctx,
                 delegator.id,
                 { projectId: "project-2" },
                 { crossWorkspace: false },
@@ -2662,6 +2704,7 @@ describe("AgentSessionManager", () => {
         ).rejects.toThrow("features.cross_workspace");
         await expect(
             manager.listSessions(
+                ctx,
                 delegator.id,
                 { projectId: "project-2" },
                 { crossWorkspace: true },
@@ -2689,7 +2732,7 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(
-            manager.listWorkspaces(delegator.id, undefined, { crossWorkspace: false }),
+            manager.listWorkspaces(ctx, delegator.id, undefined, { crossWorkspace: false }),
         ).resolves.toEqual([
             {
                 archived: true,
@@ -2765,9 +2808,14 @@ describe("AgentSessionManager", () => {
             taskName: "wait_for_setup",
             workspaceId: "workspace-1",
         };
-        const spawned = manager.spawnInWorkspace(parent.id, request);
+        const spawned = manager.spawnInWorkspace(ctx, parent.id, request);
         await Promise.resolve();
-        expect(waitForWorkspaceReady).toHaveBeenCalledWith("project-1", "workspace-1", undefined);
+        expect(waitForWorkspaceReady).toHaveBeenCalledWith(
+            expect.anything(),
+            "project-1",
+            "workspace-1",
+            undefined,
+        );
         expect(createSubagent).not.toHaveBeenCalled();
         workspaceStatus = "ready";
         workspacePresence = "present";
@@ -2784,7 +2832,7 @@ describe("AgentSessionManager", () => {
 
         workspaceStatus = "ready";
         workspacePresence = "missing";
-        await expect(manager.spawnInWorkspace(parent.id, request)).rejects.toThrow(
+        await expect(manager.spawnInWorkspace(ctx, parent.id, request)).rejects.toThrow(
             "directory is unavailable",
         );
         expect(createSubagent).toHaveBeenCalledTimes(1);

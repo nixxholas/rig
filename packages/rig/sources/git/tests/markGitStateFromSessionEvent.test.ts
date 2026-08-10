@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SessionEvent } from "../../protocol/index.js";
 import { GitStateTracker, type GitTrackedEntity } from "../GitStateTracker.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { markGitStateFromSessionEvent } from "../markGitStateFromSessionEvent.js";
 
 const execFile = promisify(execFileCallback);
@@ -23,6 +24,7 @@ describe("markGitStateFromSessionEvent", () => {
         const fixture = await createFixture();
 
         await markGitStateFromSessionEvent(
+            fixture.ctx,
             toolExecutionEnd(fixture.sessionId),
             fixture.store,
             fixture.tracker,
@@ -35,6 +37,7 @@ describe("markGitStateFromSessionEvent", () => {
         const fixture = await createFixture();
 
         await markGitStateFromSessionEvent(
+            fixture.ctx,
             {
                 createdAt: 1,
                 data: {} as never,
@@ -46,6 +49,7 @@ describe("markGitStateFromSessionEvent", () => {
             fixture.tracker,
         );
         await markGitStateFromSessionEvent(
+            fixture.ctx,
             {
                 createdAt: 1,
                 data: {} as never,
@@ -64,6 +68,7 @@ describe("markGitStateFromSessionEvent", () => {
         const fixture = await createFixture();
 
         await markGitStateFromSessionEvent(
+            fixture.ctx,
             {
                 createdAt: 1,
                 data: { event: { iteration: 1, type: "inference_iteration_start" } } as never,
@@ -82,6 +87,7 @@ describe("markGitStateFromSessionEvent", () => {
         const fixture = await createFixture();
 
         await markGitStateFromSessionEvent(
+            fixture.ctx,
             toolExecutionEnd("missing-session"),
             fixture.store,
             fixture.tracker,
@@ -108,6 +114,7 @@ function toolExecutionEnd(sessionId: string): SessionEvent {
 }
 
 async function createFixture(): Promise<{
+    ctx: ReturnType<typeof createTestRootContext>;
     marked: string[];
     projectId: string;
     sessionId: string;
@@ -125,7 +132,8 @@ async function createFixture(): Promise<{
     await git(repository, ["commit", "--quiet", "--message", "seed"]);
 
     const marked: string[] = [];
-    const store = await InMemorySessionStore.open();
+    const ctx = createTestRootContext();
+    const store = await InMemorySessionStore.open(ctx);
     const tracker = new GitStateTracker({
         // A scan is irrelevant here; what matters is that the entity was told it may have changed.
         scan: (async () => {
@@ -133,7 +141,7 @@ async function createFixture(): Promise<{
         }) as never,
         tuning: { debounceMs: 10_000, maximumDebounceMs: 10_000, reconcileIntervalMs: 60_000 },
     });
-    const session = await store.create({ cwd: repository });
+    const session = await store.create(ctx, { cwd: repository });
     const projectId = session.snapshot().projectId!;
     const entity: GitTrackedEntity = { path: repository, projectId };
     tracker.watch(entity);
@@ -149,12 +157,12 @@ async function createFixture(): Promise<{
     cleanups.push(async () => {
         tracker.dispose();
         try {
-            await store.close();
+            await store.close(ctx);
         } finally {
             await rm(root, { force: true, recursive: true });
         }
     });
-    return { marked, projectId, sessionId: session.snapshot().id, store, tracker };
+    return { ctx, marked, projectId, sessionId: session.snapshot().id, store, tracker };
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {

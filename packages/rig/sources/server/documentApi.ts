@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import { DocumentError } from "../documents/DocumentRepository.js";
 import {
@@ -23,6 +24,7 @@ export interface DocumentRoute {
 }
 
 export async function serveDocumentRequest(
+    ctx: Context,
     store: SessionStore,
     route: DocumentRoute,
     request: Pick<IncomingMessage, "headers" | "method">,
@@ -62,6 +64,7 @@ export async function serveDocumentRequest(
             const createdBy = await resolveCreatedBy(body.identity);
             if (createdBy === undefined) return;
             const document = await store.createDocument(
+                ctx,
                 { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
                 createdBy,
             );
@@ -79,7 +82,7 @@ export async function serveDocumentRequest(
                 sendJson(response, 405, { error: "Method not allowed" });
                 return;
             }
-            const document = await store.getDocument(documentId);
+            const document = await store.getDocument(ctx, documentId);
             if (document === undefined) {
                 sendDocumentError(
                     response,
@@ -120,7 +123,7 @@ export async function serveDocumentRequest(
                 );
                 return;
             }
-            const page = await store.documentUpdates(documentId, {
+            const page = await store.documentUpdates(ctx, documentId, {
                 afterVersion,
                 ...(limit === undefined ? {} : { limit }),
             });
@@ -168,6 +171,7 @@ export async function serveDocumentRequest(
             return;
         }
         const document = await store.writeDocument(
+            ctx,
             documentId,
             { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
             expectedVersion,
@@ -180,7 +184,7 @@ export async function serveDocumentRequest(
     } catch (error) {
         if (!(error instanceof DocumentError)) throw error;
         if (error.code === "version_conflict" && route.documentId !== undefined) {
-            const current = await store.getDocument(route.documentId);
+            const current = await store.getDocument(ctx, route.documentId);
             if (current !== undefined) {
                 sendJson<DocumentResponse>(response, 409, { document: current });
                 return;

@@ -58,19 +58,24 @@ describe("runLocalProtocolServer logging", () => {
             .trim()
             .split("\n")
             .map((line) => JSON.parse(line) as Record<string, unknown>);
-        expect(records.map((record) => record.event)).toEqual([
+        const lifecycle = records.filter((record) =>
+            ["daemon_starting", "daemon_ready", "daemon_stopping", "daemon_stopped"].includes(
+                String(record.event),
+            ),
+        );
+        expect(lifecycle.map((record) => record.event)).toEqual([
             "daemon_starting",
             "daemon_ready",
             "daemon_stopping",
             "daemon_stopped",
         ]);
-        expect(records[0]).toMatchObject({
+        expect(lifecycle[0]).toMatchObject({
             databasePath: join(serverDirectory, "sessions.sqlite"),
             level: "info",
             message: "Rig daemon is starting.",
             socketPath,
         });
-        expect(records[2]).toMatchObject({
+        expect(lifecycle[2]).toMatchObject({
             message: "Rig daemon is stopping.",
             reason: "Shutdown requested through the daemon protocol.",
         });
@@ -79,6 +84,7 @@ describe("runLocalProtocolServer logging", () => {
             expect(record.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
             expect(record.version).toEqual(expect.any(String));
         }
+        expect(records).toContainEqual(expect.objectContaining({ event: "daemon_log" }));
     }, 60_000);
 });
 

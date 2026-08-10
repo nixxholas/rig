@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runAgentLoop } from "./loop.js";
 import { defineTool } from "./types.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     defineModel,
     defineProvider,
@@ -16,6 +17,8 @@ import {
     type StreamOptions,
     type Usage,
 } from "@slopus/rig-execution";
+
+const ctx = createTestRootContext();
 
 describe("agent loop live", () => {
     it("executes mock tools and feeds rendered tool answers back to the model", async () => {
@@ -131,7 +134,7 @@ describe("agent loop live", () => {
         let nextId = 0;
         let timestamp = 1_000;
         const harness = createJustBashToolHarness();
-        const result = await runAgentLoop({
+        const result = await runAgentLoop(ctx, {
             provider,
             modelId: "mock/model",
             effort: "high",
@@ -288,7 +291,7 @@ describe("agent loop live", () => {
         });
         const harness = createJustBashToolHarness();
 
-        await runAgentLoop({
+        await runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [largeResultTool],
@@ -411,7 +414,7 @@ describe("agent loop live", () => {
 
         const harness = createJustBashToolHarness();
         const executionEvents: string[] = [];
-        const result = await runAgentLoop({
+        const result = await runAgentLoop(ctx, {
             provider,
             modelId: "mock/model",
             tools: [slowTool, fastTool],
@@ -528,7 +531,7 @@ describe("agent loop live", () => {
         });
         const harness = createJustBashToolHarness();
 
-        await runAgentLoop({
+        await runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [sendTool],
@@ -607,7 +610,7 @@ describe("agent loop live", () => {
         });
 
         const harness = createJustBashToolHarness();
-        await runAgentLoop({
+        await runAgentLoop(ctx, {
             provider,
             modelId: "mock/model",
             tools: [lockedTool],
@@ -669,7 +672,7 @@ describe("agent loop live", () => {
         });
         const executionResults: Array<{ isError?: boolean }> = [];
         const harness = createJustBashToolHarness();
-        const result = await runAgentLoop({
+        const result = await runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [checkedTool],
@@ -770,7 +773,7 @@ describe("agent loop live", () => {
         });
 
         const harness = createJustBashToolHarness();
-        const resultPromise = runAgentLoop({
+        const resultPromise = runAgentLoop(ctx, {
             provider,
             modelId: "mock/model",
             tools: [waitTool],
@@ -837,7 +840,7 @@ describe("agent loop live", () => {
         });
         const controller = new AbortController();
         const harness = createJustBashToolHarness();
-        const resultPromise = runAgentLoop({
+        const resultPromise = runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [],
@@ -908,7 +911,7 @@ describe("agent loop live", () => {
         const controller = new AbortController();
         const completedToolIds: string[] = [];
         const harness = createJustBashToolHarness();
-        const resultPromise = runAgentLoop({
+        const resultPromise = runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [createWaitingTool("first"), createWaitingTool("second")],

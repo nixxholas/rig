@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { createId } from "@paralleldrive/cuid2";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     createEventIdFactory,
@@ -27,7 +28,7 @@ import { queryDocument } from "../persistence/document/queryDocument.js";
 import { queryDocumentUpdates } from "../persistence/document/queryDocumentUpdates.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import { inTx } from "../persistence/inTx.js";
-import type { TX } from "../persistence/Transaction.js";
+import { withDatabase } from "../persistence/databaseContext.js";
 import { clientChosenId } from "../utils/clientChosenId.js";
 
 export class DocumentError extends Error {
@@ -43,8 +44,8 @@ export class DocumentError extends Error {
 export interface DocumentRepositoryOptions {
     database: SessionDatabase;
     now?: () => number;
-    onEvent?: (event: DocumentEvent) => void | Promise<void>;
-    transaction?: <T>(body: (tx: TX) => Promise<T>) => Promise<T>;
+    onEvent?: (ctx: Context, event: DocumentEvent) => void | Promise<void>;
+    transaction?: <T>(ctx: Context, body: (ctx: Context) => Promise<T>) => Promise<T>;
 }
 
 /** Opaque live documents whose only post-create mutation is one atomic CAS write. */
@@ -52,22 +53,25 @@ export class DocumentRepository {
     readonly #createEventId: () => string;
     readonly #database: SessionDatabase;
     readonly #now: () => number;
-    readonly #onEvent: ((event: DocumentEvent) => void | Promise<void>) | undefined;
-    readonly #transaction: <T>(body: (tx: TX) => Promise<T>) => Promise<T>;
+    readonly #onEvent: ((ctx: Context, event: DocumentEvent) => void | Promise<void>) | undefined;
+    readonly #transaction: <T>(ctx: Context, body: (ctx: Context) => Promise<T>) => Promise<T>;
 
     constructor(options: DocumentRepositoryOptions) {
         this.#database = options.database;
         this.#now = options.now ?? Date.now;
         this.#createEventId = createEventIdFactory({ now: this.#now });
         this.#onEvent = options.onEvent;
-        this.#transaction = options.transaction ?? ((body) => inTx(this.#database, body));
+        this.#transaction =
+            options.transaction ??
+            ((ctx, body) => inTx(ctx, "rig.sql.documents.repository_transaction", body));
     }
 
-    async getDocument(documentId: string): Promise<Document | undefined> {
-        return queryDocument(this.#database.database, documentId);
+    async getDocument(ctx: Context, documentId: string): Promise<Document | undefined> {
+        return queryDocument(withDatabase(ctx, this.#database), documentId);
     }
 
     async createDocument(
+        ctx: Context,
         request: CreateDocumentRequest,
         createdBy: DocumentCreatedBy,
     ): Promise<Document> {
@@ -109,8 +113,8 @@ export class DocumentRepository {
             state: JSON.parse(stateJson) as unknown,
             unreadCursor: request.unreadCursor ?? null,
         });
-        return await this.#transaction(async (tx) => {
-            const outcome = await documentCreate(tx, {
+        return await this.#transaction(withDatabase(ctx, this.#database), async (ctx) => {
+            const outcome = await documentCreate(ctx, {
                 createdBy,
                 fingerprint,
                 id,
@@ -128,15 +132,16 @@ export class DocumentRepository {
                     "That document or mutation identity was already used differently.",
                 );
             }
-            const document = (await queryDocument(tx, id))!;
+            const document = (await queryDocument(ctx, id))!;
             if (outcome.outcome === "created") {
-                await this.#publish(document, request.mutationId);
+                await this.#publish(ctx, document, request.mutationId);
             }
             return document;
         });
     }
 
     async writeDocument(
+        ctx: Context,
         documentId: string,
         request: WriteDocumentRequest,
         expectedVersion: number,
@@ -172,8 +177,8 @@ export class DocumentRepository {
             unreadCursor: request.unreadCursor === undefined ? "omitted" : request.unreadCursor,
             update: JSON.parse(updateJson) as unknown,
         });
-        return await this.#transaction(async (tx) => {
-            const outcome = await documentWrite(tx, {
+        return await this.#transaction(withDatabase(ctx, this.#database), async (ctx) => {
+            const outcome = await documentWrite(ctx, {
                 expectedVersion,
                 fingerprint,
                 id: documentId,
@@ -201,15 +206,16 @@ export class DocumentRepository {
                     "That mutation ID was already used for a different document write.",
                 );
             }
-            const document = await queryDocument(tx, documentId);
+            const document = await queryDocument(ctx, documentId);
             if (outcome.outcome === "written" && document !== undefined) {
-                await this.#publish(document, request.mutationId);
+                await this.#publish(ctx, document, request.mutationId);
             }
             return document;
         });
     }
 
     async documentUpdates(
+        ctx: Context,
         documentId: string,
         request: ListDocumentUpdatesRequest,
     ): Promise<DocumentUpdatePage | undefined> {
@@ -217,15 +223,19 @@ export class DocumentRepository {
             throw new DocumentError("invalid_request", "The document update page is invalid.");
         }
         return queryDocumentUpdates(
-            this.#database.database,
+            withDatabase(ctx, this.#database),
             documentId,
             request.afterVersion,
             request.limit ?? 100,
         );
     }
 
-    async #publish(document: Document, mutationId: string | undefined): Promise<void> {
-        await this.#onEvent?.({
+    async #publish(
+        ctx: Context,
+        document: Document,
+        mutationId: string | undefined,
+    ): Promise<void> {
+        await this.#onEvent?.(ctx, {
             createdAt: this.#now(),
             data: {
                 documentId: document.id,

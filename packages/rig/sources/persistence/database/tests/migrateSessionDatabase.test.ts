@@ -16,6 +16,7 @@ import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
 import { projectComputeGeneration } from "../migrations/12-project-compute-generation.js";
 import { projectUserMutationVersion } from "../migrations/16-project-user-mutation-version.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import {
     dropSchemaAddedAfterIdentityMigrations,
     dropFolderItemsAndDocumentsSchema,
@@ -34,7 +35,7 @@ afterEach(() => {
 describe("migrateSessionDatabase", () => {
     it("creates the complete schema from the init migration", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
@@ -65,24 +66,24 @@ describe("migrateSessionDatabase", () => {
             ).map((column) => column.name),
         ).toContain("workspace_queue_waiting");
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("keeps an initialized database unchanged on later starts", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
+        await migrateSessionDatabase(opened.ctx);
 
         expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("normalizes folder and item keys into one space per parent", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
         await opened.client.execute("PRAGMA foreign_keys = OFF");
         await opened.database.run(
             sql.raw(`
@@ -106,7 +107,7 @@ describe("migrateSessionDatabase", () => {
         );
 
         await opened.database.run(sql.raw("PRAGMA user_version = 50"));
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         const folders = await opened.database.all<{ id: string; order_key: string }>(
             sql.raw(
@@ -123,12 +124,12 @@ describe("migrateSessionDatabase", () => {
         expect(new Set([...folders, ...items].map((row) => row.order_key)).size).toBe(4);
         expect(folders.at(-1)!.order_key < items[0]!.order_key).toBe(true);
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("rejects legacy folder and item ID collisions before enabling shared anchors", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
         await opened.client.execute("PRAGMA foreign_keys = OFF");
         await opened.database.run(
             sql.raw(`
@@ -148,7 +149,7 @@ describe("migrateSessionDatabase", () => {
         );
         await opened.database.run(sql.raw("PRAGMA user_version = 50"));
 
-        await expect(migrateSessionDatabase(opened.database)).rejects.toThrow(
+        await expect(migrateSessionDatabase(opened.ctx)).rejects.toThrow(
             "Cannot enable shared folder ordering because a folder and folder item have the same ID.",
         );
         expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
@@ -160,12 +161,12 @@ describe("migrateSessionDatabase", () => {
             ),
         ).toEqual({ order_key: "a0" });
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("seeds one singleton onboarding state row", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         expect(await opened.database.select().from(schema.onboardingState).all()).toEqual([
             {
@@ -177,19 +178,19 @@ describe("migrateSessionDatabase", () => {
             opened.database.update(schema.onboardingState).set({ completedVersion: -1 }).run(),
         ).rejects.toThrow(/CHECK constraint failed|Failed query/u);
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("attributes pre-owner sessions to the local Rig while advancing to session owner schema", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
         await opened.database.run(sql.raw("ALTER TABLE sessions DROP COLUMN owner_instance_id"));
         await opened.database.run(sql.raw("DROP TABLE sharing_settings"));
         await opened.database.run(sql.raw("DROP TABLE sharing_profile_binding"));
         await dropFolderItemsAndDocumentsSchema(opened.database);
         await opened.database.run(sql.raw("PRAGMA user_version = 38"));
 
-        await migrateSessionDatabase(opened.database, {
+        await migrateSessionDatabase(opened.ctx, {
             localInstanceId: "alocalinstance00000000001",
         });
 
@@ -200,12 +201,12 @@ describe("migrateSessionDatabase", () => {
                 )
             ).find((column) => column.name === "owner_instance_id"),
         ).toMatchObject({ dflt_value: "'alocalinstance00000000001'" });
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("removes sharing data without removing trusted P2P peers", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         await opened.database.run(
             sql.raw(`INSERT INTO p2p_peers (
@@ -268,7 +269,7 @@ describe("migrateSessionDatabase", () => {
         await dropFolderItemsAndDocumentsSchema(opened.database);
         await opened.database.run(sql.raw("PRAGMA user_version = 28"));
 
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         expect(
             await opened.database.all<{ name: string }>(
@@ -319,12 +320,12 @@ describe("migrateSessionDatabase", () => {
             ).map((column) => column.name),
         ).not.toContain("live_session_sharing_changed_at_ms");
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("does not replay the identity migration when the following migration runs", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "stable-epoch" });
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "stable-epoch" });
         await dropSchemaAddedAfterIdentityMigrations(opened.database);
         await opened.database.run(
             sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"),
@@ -333,7 +334,7 @@ describe("migrateSessionDatabase", () => {
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_SCHEMA_VERSION)}`),
         );
 
-        await migrateSessionDatabase(opened.database, {
+        await migrateSessionDatabase(opened.ctx, {
             createDataEpoch: () => {
                 throw new Error("The identity migration was replayed.");
             },
@@ -347,32 +348,32 @@ describe("migrateSessionDatabase", () => {
         expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("pins the data identity migration at index 19", async () => {
         expect(RIG_DATA_IDENTITY_MIGRATION_INDEX).toBe(19);
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded" });
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "discarded" });
         await dropSchemaAddedAfterIdentityMigrations(opened.database);
         await opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
         await opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
         );
 
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "pinned-epoch" });
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "pinned-epoch" });
 
         expect(
             await opened.database.get(
                 sql.raw("SELECT epoch, format_version FROM rig_data_identity"),
             ),
         ).toEqual({ epoch: "pinned-epoch", format_version: 1 });
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("creates and enforces the named identity constraints", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "checked-epoch" });
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "checked-epoch" });
         const tableSql = (
             await opened.database.get<{ sql: string }>(
                 sql.raw("SELECT sql FROM sqlite_master WHERE name = 'rig_data_identity'"),
@@ -396,7 +397,7 @@ describe("migrateSessionDatabase", () => {
                 sql.raw("SELECT singleton, format_version FROM rig_data_identity"),
             ),
         ).toEqual({ format_version: 1, singleton: 1 });
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("discards only pre-icon applets while preserving legacy slot entries", async () => {
@@ -511,7 +512,7 @@ describe("migrateSessionDatabase", () => {
             `),
         );
 
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         expect(await opened.database.all(sql.raw("SELECT * FROM applets"))).toEqual([]);
         expect(await opened.database.all(sql.raw("SELECT * FROM applet_versions"))).toEqual([]);
@@ -544,7 +545,7 @@ describe("migrateSessionDatabase", () => {
             ).map((column) => column.name),
         ).toContain("applet_name");
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("atomically replaces a database from the previous migration generation", async () => {
@@ -553,7 +554,7 @@ describe("migrateSessionDatabase", () => {
         await opened.database.run(sql.raw("INSERT INTO legacy_data (value) VALUES ('discard me')"));
         await opened.database.run(sql.raw("PRAGMA user_version = 13"));
 
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         expect(
             await opened.database.get(
@@ -564,7 +565,7 @@ describe("migrateSessionDatabase", () => {
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("keeps the init migration atomic", async () => {
@@ -574,7 +575,7 @@ describe("migrateSessionDatabase", () => {
             sql.raw("CREATE TABLE project_avatar_assets (hash TEXT PRIMARY KEY)"),
         );
 
-        await expect(migrateSessionDatabase(opened.database)).rejects.toThrow();
+        await expect(migrateSessionDatabase(opened.ctx)).rejects.toThrow();
         expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
             user_version: 0,
         });
@@ -588,7 +589,7 @@ describe("migrateSessionDatabase", () => {
             ).map((row) => row.name),
         ).toEqual(["project_avatar_assets"]);
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("rejects a database created by an unknown future schema", async () => {
@@ -598,16 +599,16 @@ describe("migrateSessionDatabase", () => {
             sql.raw(`PRAGMA user_version = ${String(CURRENT_SESSION_DATABASE_VERSION + 1)}`),
         );
 
-        await expect(migrateSessionDatabase(opened.database)).rejects.toThrow(
+        await expect(migrateSessionDatabase(opened.ctx)).rejects.toThrow(
             new RegExp(`supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}`, "u"),
         );
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("keeps the Drizzle schema identical to the applied migrations", async () => {
         const opened = await openTestDatabase();
-        await migrateSessionDatabase(opened.database);
+        await migrateSessionDatabase(opened.ctx);
 
         for (const table of Object.values(schema)) {
             const config = getTableConfig(table);
@@ -632,7 +633,7 @@ describe("migrateSessionDatabase", () => {
             }
         }
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("starts existing project compute settings at generation one", async () => {
@@ -667,7 +668,7 @@ describe("migrateSessionDatabase", () => {
             { default_compute_generation: 1, id: "local" },
             { default_compute_generation: 0, id: "unset" },
         ]);
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("starts existing project user mutation versions at their current versions", async () => {
@@ -698,7 +699,7 @@ describe("migrateSessionDatabase", () => {
             { id: "first", user_mutation_version: 4 },
             { id: "second", user_mutation_version: 9 },
         ]);
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("backfills exact committed lifetime usage and adds the delegated traversal index", async () => {
@@ -757,7 +758,7 @@ describe("migrateSessionDatabase", () => {
             ).some((row) => row.detail.includes("sessions_delegated_created")),
         ).toBe(true);
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 });
 
@@ -787,5 +788,5 @@ const removedSharingTables = [
 async function openTestDatabase() {
     const directory = mkdtempSync(join(tmpdir(), "rig-database-init-"));
     directories.push(directory);
-    return await openSessionDatabase(join(directory, "sessions.sqlite"));
+    return await openSessionDatabase(createTestRootContext(), join(directory, "sessions.sqlite"));
 }

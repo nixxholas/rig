@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
 /**
@@ -16,11 +17,12 @@ import { readString } from "./impl/sqliteRow.js";
  * so one sweep cannot load the whole history.
  */
 export async function queryExpiredUnsortedSessions(
-    tx: DatabaseScope,
+    ctx: Context,
     unsortedBefore: number,
     limit: number,
 ): Promise<readonly string[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_expired_unsorted_sessions", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(
                 sql`

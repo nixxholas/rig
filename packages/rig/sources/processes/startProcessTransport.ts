@@ -2,6 +2,7 @@ import { spawn as spawnChildProcess, type ChildProcess } from "node:child_proces
 import { basename } from "node:path";
 
 import { spawn as spawnPty } from "@lydell/node-pty";
+import type { Context } from "@steve.kite/stdlib";
 
 import { resolveSystemShell } from "./resolveSystemShell.js";
 import type { ProcessStartOptions } from "./types.js";
@@ -49,14 +50,24 @@ export const NON_INTERACTIVE_TERMINAL_ENVIRONMENT: NodeJS.ProcessEnv = {
     TERM: "dumb",
 };
 
-export function startProcessTransport(options: ProcessStartOptions): ProcessTransport {
-    const executable =
-        options.args === undefined ? (options.shell ?? resolveSystemShell()) : options.command;
-    const args =
-        options.args === undefined ? shellArgs(executable, options.command) : [...options.args];
-    return options.tty === true
-        ? startPtyTransport(executable, args, options)
-        : startPipeTransport(executable, args, options);
+export async function startProcessTransport<Result>(
+    ctx: Context,
+    options: ProcessStartOptions,
+    started: (ctx: Context, transport: ProcessTransport) => Result | PromiseLike<Result>,
+): Promise<Awaited<Result>> {
+    return await ctx.span("rig.process.spawn", async (ctx) => {
+        const executable =
+            options.args === undefined ? (options.shell ?? resolveSystemShell()) : options.command;
+        const args =
+            options.args === undefined ? shellArgs(executable, options.command) : [...options.args];
+        const transport =
+            options.tty === true
+                ? startPtyTransport(executable, args, options)
+                : startPipeTransport(executable, args, options);
+        // Attach lifecycle listeners before the traced callback yields. A command may exit in the
+        // first microtask after spawn, and observing it must not depend on tracing latency.
+        return await started(ctx, transport);
+    });
 }
 
 function startPipeTransport(

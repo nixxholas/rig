@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 import { createShellEnvironment } from "../agent/context/createShellEnvironment.js";
 import { NativeProcessManager, resolveSystemShell } from "../processes/index.js";
@@ -14,6 +15,7 @@ export interface RunWorkspaceSetupCommandsOptions {
 }
 
 export async function runWorkspaceSetupCommands(
+    ctx: Context,
     cwd: string,
     commands: readonly string[],
     options: RunWorkspaceSetupCommandsOptions = {},
@@ -25,7 +27,7 @@ export async function runWorkspaceSetupCommands(
 
     for (const [index, command] of commands.entries()) {
         options.signal?.throwIfAborted();
-        const result = await processManager.run({
+        const result = await processManager.run(ctx, {
             args: shellArgs(shell, command),
             command: shell,
             cwd,

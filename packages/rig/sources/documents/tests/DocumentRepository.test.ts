@@ -11,11 +11,13 @@ import {
 import { migrateSessionDatabase } from "../../persistence/database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { DocumentError, DocumentRepository } from "../DocumentRepository.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
 describe("DocumentRepository", () => {
     it("rolls a document write back when its durable event cannot be stored", async () => {
-        const opened = await openSessionDatabase(":memory:");
-        await migrateSessionDatabase(opened.database);
+        const rootCtx = createTestRootContext();
+        const opened = await openSessionDatabase(rootCtx, ":memory:");
+        await migrateSessionDatabase(opened.ctx);
         const failure = new Error("document event persistence failed");
         const repository = new DocumentRepository({
             database: opened.database,
@@ -27,18 +29,19 @@ describe("DocumentRepository", () => {
         try {
             await expect(
                 repository.createDocument(
+                    opened.ctx,
                     { id: "adocument00000000000000001", mimeType: "text/plain", state: "draft" },
                     { instanceId: "alocalinstance00000000001" },
                 ),
             ).rejects.toBe(failure);
             expect((await opened.client.execute("SELECT id FROM documents")).rows).toEqual([]);
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
     });
 
     it("stores canonical JSON and preserves immutable creation identity", async () => {
-        const { events, opened, repository } = await fixture();
+        const { ctx, events, opened, repository } = await fixture();
         const unreadCursor = createEventIdFactory({ now: () => 2 })();
 
         const request = {
@@ -52,8 +55,8 @@ describe("DocumentRepository", () => {
             instanceId: "alocalinstance00000000001",
             profileId: "aprofile000000000000000001",
         };
-        const document = await repository.createDocument(request, createdBy);
-        const retry = await repository.createDocument(request, createdBy);
+        const document = await repository.createDocument(ctx, request, createdBy);
+        const retry = await repository.createDocument(ctx, request, createdBy);
 
         expect(document).toMatchObject({
             createdBy: {
@@ -73,24 +76,27 @@ describe("DocumentRepository", () => {
         ).toEqual({ state_json: '{"a":{"x":3,"y":2},"z":1}' });
         expect(events).toHaveLength(1);
         expect(retry).toEqual(document);
-        await opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("bounds serialized state and updates", async () => {
-        const { opened, repository } = await fixture();
+        const { ctx, opened, repository } = await fixture();
         const document = await repository.createDocument(
+            ctx,
             { mimeType: "text/plain", state: "" },
             { instanceId: "alocalinstance00000000001" },
         );
 
         await expect(
             repository.createDocument(
+                ctx,
                 { mimeType: "text/plain", state: "x".repeat(DOCUMENT_STATE_MAX_BYTES) },
                 { instanceId: "alocalinstance00000000001" },
             ),
         ).rejects.toThrowError(DocumentError);
         await expect(
             repository.writeDocument(
+                ctx,
                 document.id,
                 {
                     state: "next",
@@ -99,24 +105,27 @@ describe("DocumentRepository", () => {
                 1,
             ),
         ).rejects.toThrowError(DocumentError);
-        expect((await repository.getDocument(document.id))?.version).toBe(1);
-        await opened.client.close();
+        expect((await repository.getDocument(ctx, document.id))?.version).toBe(1);
+        await opened.database.close(opened.ctx);
     });
 
     it("publishes only after a successful non-retry CAS write", async () => {
-        const { events, opened, repository } = await fixture();
+        const { ctx, events, opened, repository } = await fixture();
         const document = await repository.createDocument(
+            ctx,
             { mimeType: "text/plain", mutationId: "create", state: "a" },
             { instanceId: "alocalinstance00000000001" },
         );
         events.length = 0;
 
         const first = await repository.writeDocument(
+            ctx,
             document.id,
             { mutationId: "write", state: "b", update: { replace: "b" } },
             1,
         );
         const retry = await repository.writeDocument(
+            ctx,
             document.id,
             { mutationId: "write", state: "b", update: { replace: "b" } },
             1,
@@ -128,28 +137,31 @@ describe("DocumentRepository", () => {
         expect(
             Value.Check(
                 documentUpdatePageSchema,
-                await repository.documentUpdates(document.id, { afterVersion: 1 }),
+                await repository.documentUpdates(ctx, document.id, { afterVersion: 1 }),
             ),
         ).toBe(true);
-        await opened.client.close();
+        await opened.database.close(opened.ctx);
     });
 });
 
 async function fixture(): Promise<{
+    ctx: Awaited<ReturnType<typeof openSessionDatabase>>["ctx"];
     events: DocumentEvent[];
     opened: Awaited<ReturnType<typeof openSessionDatabase>>;
     repository: DocumentRepository;
 }> {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+    const rootCtx = createTestRootContext();
+    const opened = await openSessionDatabase(rootCtx, ":memory:");
+    await migrateSessionDatabase(opened.ctx);
     const events: DocumentEvent[] = [];
     return {
+        ctx: opened.ctx,
         events,
         opened,
         repository: new DocumentRepository({
             database: opened.database,
             now: () => 10,
-            onEvent: (event) => {
+            onEvent: (_ctx, event) => {
                 events.push(event);
             },
         }),

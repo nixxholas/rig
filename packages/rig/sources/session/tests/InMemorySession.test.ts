@@ -1,3 +1,7 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+import type { Context } from "@steve.kite/stdlib";
+
+const ctx = createTestRootContext();
 import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -18,14 +22,14 @@ import {
 describe("InMemorySession", () => {
     it("stores idempotent context without starting or queuing a run", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-context-only" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-context-only" });
 
-        const first = await session.submitContext({
+        const first = await session.submitContext(ctx, {
             clientSubmissionId: "context-note-1",
             text: "The deployment region is eu-west-1.",
         });
-        const repeated = await session.submitContext({
+        const repeated = await session.submitContext(ctx, {
             clientSubmissionId: "context-note-1",
             text: "The deployment region is eu-west-1.",
         });
@@ -57,12 +61,12 @@ describe("InMemorySession", () => {
     it("persists human profile identity on submitted, steering, and context messages", async () => {
         const profileId = "aprofile000000000000000003";
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-profile-message" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-profile-message" });
 
-        await session.submit({ identity: profileId, text: "Run this remotely." });
-        await session.steer({ identity: profileId, text: "And keep this attribution." });
-        await session.submitContext({
+        await session.submit(ctx, { identity: profileId, text: "Run this remotely." });
+        await session.steer(ctx, { identity: profileId, text: "And keep this attribution." });
+        await session.submitContext(ctx, {
             identity: profileId,
             text: "This context has the same author.",
         });
@@ -72,7 +76,7 @@ describe("InMemorySession", () => {
             ?.filter((event) => event.type === "message_submitted")
             .map((event) => event.data.message.identity);
         expect(identities).toEqual([profileId, profileId, profileId]);
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("keeps visible-only restored errors out of persisted model context", async () => {
@@ -95,7 +99,7 @@ describe("InMemorySession", () => {
             outcome: "continued",
             role: "error",
         } as const;
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog,
             request: { cwd: "/tmp/rig-visible-only-error" },
@@ -137,7 +141,7 @@ describe("InMemorySession", () => {
             thinkingLevels: ["off", "low"],
         });
         const session = await (
-            await InMemorySessionStore.open({
+            await InMemorySessionStore.open(ctx, {
                 modelCatalog: {
                     defaultModelId: model.id,
                     defaultProviderId: "codex",
@@ -145,10 +149,10 @@ describe("InMemorySession", () => {
                     providers: [{ providerId: "codex", models: [model] }],
                 },
             })
-        ).create({ cwd: "/tmp/rig-session-test" });
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
 
         await expect(
-            session.submit({ effort: "high", text: "Do not queue this." }),
+            session.submit(ctx, { effort: "high", text: "Do not queue this." }),
         ).rejects.toThrow("Model 'openai/queued-effort' does not support 'high' reasoning.");
         expect(session.state().messages).toEqual([]);
         expect(session.state().queuedRuns).toEqual([]);
@@ -192,7 +196,7 @@ describe("InMemorySession", () => {
                 return running;
             },
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             metadata: {
                 depth: 1,
@@ -211,7 +215,7 @@ describe("InMemorySession", () => {
             taskDrain,
         });
 
-        await expect(session.submit({ text: "Keep this queued." })).resolves.toMatchObject({
+        await expect(session.submit(ctx, { text: "Keep this queued." })).resolves.toMatchObject({
             runId: expect.any(String),
         });
         await vi.waitFor(() => expect(firstDrain).toBeDefined());
@@ -244,14 +248,14 @@ describe("InMemorySession", () => {
             type: "subagent",
         } as const;
 
-        const created = new InMemorySession({
+        const created = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             metadata,
             modelCatalog,
             orderKey: "a0",
             request: { cwd: "/tmp/rig-subagent-position" },
         });
-        const restored = new InMemorySession({
+        const restored = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog,
             request: { cwd: "/tmp/rig-subagent-position" },
@@ -286,14 +290,14 @@ describe("InMemorySession", () => {
 
     it("treats repeated client submission IDs as one durable message", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        const first = await session.submit({
+        const first = await session.submit(ctx, {
             clientSubmissionId: "mobile-message-1",
             text: "Continue.",
         });
-        const repeated = await session.submit({
+        const repeated = await session.submit(ctx, {
             clientSubmissionId: "mobile-message-1",
             text: "Continue.",
         });
@@ -302,18 +306,18 @@ describe("InMemorySession", () => {
         expect(
             session.events.since(undefined)?.filter((event) => event.type === "message_submitted"),
         ).toHaveLength(1);
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("persists direct shell results as pending model history without starting a run", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, {
             cwd: "/tmp/rig-session-test",
             permissionMode: "full_access",
         });
 
-        const result = await session.runShellCommand({
+        const result = await session.runShellCommand(ctx, {
             command: "printf persisted-shell-output",
             commandId: "shell-command-1",
         });
@@ -348,10 +352,10 @@ describe("InMemorySession", () => {
 
     it("queues steering as a new run when no run is active", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        const accepted = await session.steer({
+        const accepted = await session.steer(ctx, {
             clientSubmissionId: "queued-after-finish",
             expectedRunId: "finished-run",
             text: "Continue in a new turn.",
@@ -372,15 +376,15 @@ describe("InMemorySession", () => {
 
     it("keeps the original run delivery when retrying a committed submission through steering", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
-        const submitted = await session.submit({
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
+        const submitted = await session.submit(ctx, {
             clientSubmissionId: "committed-run",
             text: "Continue in a new turn.",
         });
 
         await expect(
-            session.steer({
+            session.steer(ctx, {
                 clientSubmissionId: "committed-run",
                 expectedRunId: "finished-run",
                 text: "Continue in a new turn.",
@@ -399,10 +403,10 @@ describe("InMemorySession", () => {
 
     it("wakes an idle session for a notification", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        const delivered = await session.deliverNotification({
+        const delivered = await session.deliverNotification(ctx, {
             displayText: "Background work finished.",
             text: "<subagent-notification>Done</subagent-notification>",
         });
@@ -435,15 +439,15 @@ describe("InMemorySession", () => {
             session.events.since(undefined)?.find((event) => event.type === "run_started")?.data
                 .runId,
         );
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("wakes an idle session for an agent message", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        await session.deliverAgentMessage({
+        await session.deliverAgentMessage(ctx, {
             agentSource: {
                 agentId: "sender-agent-id",
                 sessionId: "sender-session-id",
@@ -479,18 +483,18 @@ describe("InMemorySession", () => {
         expect(
             session.events.since(undefined)?.filter((event) => event.type === "run_started"),
         ).toHaveLength(1);
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("queues later notifications as steering on the run woken by the first", async () => {
         const { session, started } = createRunningNotificationSession();
 
-        const first = await session.deliverNotification({
+        const first = await session.deliverNotification(ctx, {
             displayText: "First background agent finished.",
             text: "<subagent-notification>First</subagent-notification>",
         });
         await started;
-        const second = await session.deliverNotification({
+        const second = await session.deliverNotification(ctx, {
             displayText: "Second background agent finished.",
             text: "<subagent-notification>Second</subagent-notification>",
         });
@@ -506,14 +510,14 @@ describe("InMemorySession", () => {
                 blocks: [{ text: "First background agent finished.", type: "text" }],
             }),
         ]);
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("preserves the user-facing stop reason when workflow cancellation rejects", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
-        const run = session.launchWorkflow({
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
+        const run = session.launchWorkflow(ctx, {
             code: "42",
             description: "Wait for cancellation",
             execute: ({ signal }) =>
@@ -527,7 +531,7 @@ describe("InMemorySession", () => {
             name: "cancellation-check",
         });
 
-        expect(session.stopWorkflow(run.runId)).toMatchObject({
+        expect(session.stopWorkflow(ctx, run.runId)).toMatchObject({
             error: "The workflow was stopped.",
             status: "stopped",
         });
@@ -536,14 +540,14 @@ describe("InMemorySession", () => {
             error: "The workflow was stopped.",
             status: "stopped",
         });
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("publishes live workflow phase, progress, and completion state", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
-        const run = session.launchWorkflow({
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
+        const run = session.launchWorkflow(ctx, {
             code: "42",
             description: "Inspect the workflow state",
             execute: async ({ onAgentCall, onLog }) => {
@@ -585,20 +589,20 @@ describe("InMemorySession", () => {
                 }),
             ]),
         );
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("resumes unchanged workflow code from its latest Monty checkpoint", async () => {
         const session = await (
-            await InMemorySessionStore.open()
-        ).create({ cwd: "/tmp/rig-session-test" });
+            await InMemorySessionStore.open(ctx)
+        ).create(ctx, { cwd: "/tmp/rig-session-test" });
         const checkpoint = {
             nextAgentCallIndex: 1,
             phase: "Verify",
             snapshot: new Uint8Array([1, 2, 3]),
         };
         const cachedAgent = { output: "cached", signature: "cached-signature" };
-        const interrupted = session.launchWorkflow({
+        const interrupted = session.launchWorkflow(ctx, {
             code: 'agent("check")',
             description: "Checkpoint a workflow",
             execute: async ({ onAgentResult, onCheckpoint }) => {
@@ -612,7 +616,7 @@ describe("InMemorySession", () => {
 
         let receivedResumeCheckpoint: unknown;
         let receivedResumeAgentCalls: readonly unknown[] = [];
-        session.launchWorkflow({
+        session.launchWorkflow(ctx, {
             code: 'agent("check")',
             description: "Resume a workflow",
             execute: async (options) => {
@@ -627,7 +631,7 @@ describe("InMemorySession", () => {
 
         expect(receivedResumeCheckpoint).toEqual(checkpoint);
         expect(receivedResumeAgentCalls).toEqual([cachedAgent]);
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("routes the same canonical model through the explicitly selected provider", async () => {
@@ -652,9 +656,11 @@ describe("InMemorySession", () => {
                 { providerId: "bedrock", models: [sharedModel, bedrockOnlyModel] },
             ],
         };
-        const store = await InMemorySessionStore.open({ modelCatalog: catalog });
+        const store = await InMemorySessionStore.open(ctx, {
+            modelCatalog: catalog,
+        });
 
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: sharedModel.id,
             providerId: "bedrock",
@@ -666,7 +672,7 @@ describe("InMemorySession", () => {
             providerId: "bedrock",
         });
 
-        await session.changeModel({ modelId: sharedModel.id, providerId: "codex" });
+        await session.changeModel(ctx, { modelId: sharedModel.id, providerId: "codex" });
 
         expect(session.snapshot()).toMatchObject({
             modelId: sharedModel.id,
@@ -686,7 +692,7 @@ describe("InMemorySession", () => {
             type: "session_configuration_changed",
         });
 
-        const inferredSession = await store.create({
+        const inferredSession = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: bedrockOnlyModel.id,
         });
@@ -733,15 +739,17 @@ describe("InMemorySession", () => {
                 },
             ],
         };
-        const store = await InMemorySessionStore.open({ modelCatalog: catalog });
-        const session = await store.create({
+        const store = await InMemorySessionStore.open(ctx, {
+            modelCatalog: catalog,
+        });
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: firstCodexModel.id,
             providerId: "codex",
             serviceTier: "fast",
         });
 
-        await session.changeModel({ modelId: secondCodexModel.id, providerId: "codex" });
+        await session.changeModel(ctx, { modelId: secondCodexModel.id, providerId: "codex" });
 
         expect(session.snapshot()).toMatchObject({
             modelId: secondCodexModel.id,
@@ -752,20 +760,20 @@ describe("InMemorySession", () => {
         expect(session.snapshot().snapshot.contextMessages).toBeUndefined();
         expect(session.state().serviceTier).toBe("fast");
 
-        await session.changeServiceTier({});
+        await session.changeServiceTier(ctx, {});
         expect(session.snapshot().serviceTier).toBeUndefined();
         expect(session.events.since(undefined)?.at(-1)).toMatchObject({
             data: { changed: ["serviceTier"], serviceTier: null },
             type: "session_configuration_changed",
         });
 
-        await session.changeModel({ modelId: claudeModel.id, providerId: "claude" });
+        await session.changeModel(ctx, { modelId: claudeModel.id, providerId: "claude" });
         expect(session.snapshot().snapshot.contextMessages).toBeUndefined();
-        await expect(session.changeServiceTier({ serviceTier: "fast" })).rejects.toThrow(
+        await expect(session.changeServiceTier(ctx, { serviceTier: "fast" })).rejects.toThrow(
             "does not support fast inference",
         );
 
-        const unsupportedDefault = await store.create({
+        const unsupportedDefault = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: claudeModel.id,
             providerId: "claude",
@@ -776,13 +784,13 @@ describe("InMemorySession", () => {
 
     it("carries a model, reasoning, and fast mode change on a message and reports them as one event", async () => {
         const { store, fastModel, slowModel } = await configurableCatalog();
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: slowModel.id,
             providerId: "codex",
         });
 
-        await session.submit({
+        await session.submit(ctx, {
             effort: "high",
             modelId: fastModel.id,
             serviceTier: "fast",
@@ -819,13 +827,13 @@ describe("InMemorySession", () => {
 
     it("does not report a configuration field a message left where it already was", async () => {
         const { store, fastModel } = await configurableCatalog();
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: fastModel.id,
             providerId: "codex",
         });
 
-        const submitted = await session.submit({
+        const submitted = await session.submit(ctx, {
             effort: "high",
             modelId: fastModel.id,
             text: "Same model.",
@@ -848,7 +856,7 @@ describe("InMemorySession", () => {
 
     it("rejects a message whose reasoning the model it also selects cannot do", async () => {
         const { store, fastModel, slowModel } = await configurableCatalog();
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: fastModel.id,
             providerId: "codex",
@@ -857,31 +865,31 @@ describe("InMemorySession", () => {
         // "high" is valid for the currently selected model, so a check against the current model
         // rather than the requested one would let this through.
         await expect(
-            session.submit({ effort: "high", modelId: slowModel.id, text: "Think hard." }),
+            session.submit(ctx, { effort: "high", modelId: slowModel.id, text: "Think hard." }),
         ).rejects.toThrow("does not support 'high' reasoning");
-        await expect(session.submit({ effort: "nonsense", text: "Think hard." })).rejects.toThrow(
-            "does not support 'nonsense' reasoning",
-        );
+        await expect(
+            session.submit(ctx, { effort: "nonsense", text: "Think hard." }),
+        ).rejects.toThrow("does not support 'nonsense' reasoning");
     });
 
     it("validates reasoning against the model an earlier message switched to", async () => {
         const { store, fastModel, slowModel } = await configurableCatalog();
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: fastModel.id,
             providerId: "codex",
         });
 
-        await session.submit({ modelId: slowModel.id, text: "Switch models." });
+        await session.submit(ctx, { modelId: slowModel.id, text: "Switch models." });
         // By the time this runs the session is on the model the queued message selected.
-        await expect(session.submit({ effort: "high", text: "Think hard." })).rejects.toThrow(
+        await expect(session.submit(ctx, { effort: "high", text: "Think hard." })).rejects.toThrow(
             "does not support 'high' reasoning",
         );
     });
 
     it("lets a steer with nothing to interrupt carry configuration, because it is queued", async () => {
         const { store, fastModel, slowModel } = await configurableCatalog();
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: slowModel.id,
             providerId: "codex",
@@ -889,7 +897,7 @@ describe("InMemorySession", () => {
 
         // With no run in flight a steer becomes an ordinary queued message, which is the only
         // delivery that may carry configuration.
-        const queued = await session.steer({ modelId: fastModel.id, text: "Change it." });
+        const queued = await session.steer(ctx, { modelId: fastModel.id, text: "Change it." });
         expect(queued.delivery).toBe("run");
         await vi.waitFor(() => expect(session.snapshot().modelId).toBe(fastModel.id));
         expect(session.snapshot().modelId).toBe(fastModel.id);
@@ -908,9 +916,11 @@ describe("InMemorySession", () => {
             models: [availableModel],
             providers: [{ providerId: "codex", models: [availableModel] }],
         };
-        const store = await InMemorySessionStore.open({ modelCatalog: catalog });
+        const store = await InMemorySessionStore.open(ctx, {
+            modelCatalog: catalog,
+        });
 
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             effort: "max",
             modelId: "removed/model",
@@ -947,9 +957,11 @@ describe("InMemorySession", () => {
                 { providerId: "openai", models: [sharedModel] },
             ],
         };
-        const store = await InMemorySessionStore.open({ modelCatalog: catalog });
+        const store = await InMemorySessionStore.open(ctx, {
+            modelCatalog: catalog,
+        });
 
-        const session = await store.create({
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             modelId: sharedModel.id,
             providerId: "bedrock",
@@ -963,8 +975,8 @@ describe("InMemorySession", () => {
     });
 
     it("changes permissions and passes them to subagents", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             permissionMode: "read_only",
         });
@@ -972,7 +984,7 @@ describe("InMemorySession", () => {
         expect(session.snapshot().permissionMode).toBe("read_only");
         expect(session.requestForSubagent().permissionMode).toBe("read_only");
 
-        await session.changePermissionMode({ permissionMode: "full_access" });
+        await session.changePermissionMode(ctx, { permissionMode: "full_access" });
 
         expect(session.snapshot().permissionMode).toBe("full_access");
         expect(session.requestForSubagent().permissionMode).toBe("full_access");
@@ -985,8 +997,8 @@ describe("InMemorySession", () => {
     });
 
     it("broadcasts a composer draft to attached clients and clears it", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
         const delivered: unknown[] = [];
         session.events.subscribe((event) => {
             if (event.type === "session_draft_changed") delivered.push(event.data);
@@ -994,7 +1006,7 @@ describe("InMemorySession", () => {
 
         expect(session.snapshot().draft).toBeUndefined();
 
-        await session.setDraft({ draft: "Fix the flaky test", origin: "terminal-a" });
+        await session.setDraft(ctx, { draft: "Fix the flaky test", origin: "terminal-a" });
         expect(session.snapshot().draft).toBe("Fix the flaky test");
         expect(session.summary().draft).toBe("Fix the flaky test");
         expect(delivered).toEqual([
@@ -1002,10 +1014,10 @@ describe("InMemorySession", () => {
         ]);
 
         // Rewriting the same draft is not a change worth broadcasting.
-        await session.setDraft({ draft: "Fix the flaky test" });
+        await session.setDraft(ctx, { draft: "Fix the flaky test" });
         expect(delivered).toHaveLength(1);
 
-        await session.setDraft({ draft: null });
+        await session.setDraft(ctx, { draft: null });
         expect(session.snapshot().draft).toBeUndefined();
         expect(delivered).toEqual([
             { draft: "Fix the flaky test", origin: "terminal-a", updatedAt: expect.any(Number) },
@@ -1015,19 +1027,23 @@ describe("InMemorySession", () => {
 
     it("keeps the draft that was typed most recently, not the one that arrived last", async () => {
         const now = Date.now();
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
         const delivered: unknown[] = [];
         session.events.subscribe((event) => {
             if (event.type === "session_draft_changed") delivered.push(event.data);
         });
 
-        await session.setDraft({ draft: "typed second", origin: "phone", updatedAt: now - 1_000 });
+        await session.setDraft(ctx, {
+            draft: "typed second",
+            origin: "phone",
+            updatedAt: now - 1_000,
+        });
         expect(session.snapshot().draft).toBe("typed second");
         expect(session.snapshot().draftUpdatedAt).toBe(now - 1_000);
 
         // A slow client delivers a message that was typed earlier. It loses.
-        await session.setDraft({
+        await session.setDraft(ctx, {
             draft: "typed first",
             origin: "terminal-a",
             updatedAt: now - 5_000,
@@ -1036,7 +1052,7 @@ describe("InMemorySession", () => {
         expect(delivered).toHaveLength(1);
 
         // A message typed after the stored one replaces it.
-        await session.setDraft({
+        await session.setDraft(ctx, {
             draft: "typed third",
             origin: "terminal-a",
             updatedAt: now - 100,
@@ -1045,36 +1061,36 @@ describe("InMemorySession", () => {
         expect(delivered).toHaveLength(2);
 
         // A stale clear cannot wipe a newer draft either.
-        await session.setDraft({ draft: null, origin: "phone", updatedAt: now - 4_000 });
+        await session.setDraft(ctx, { draft: null, origin: "phone", updatedAt: now - 4_000 });
         expect(session.snapshot().draft).toBe("typed third");
         expect(delivered).toHaveLength(2);
     });
 
     it("refuses to date a draft in the future or before the skew window", async () => {
-        const store = await InMemorySessionStore.open();
+        const store = await InMemorySessionStore.open(ctx);
 
         // A clock running fast cannot claim a draft from the future and win
         // against everything typed after it.
-        const fast = await store.create({ cwd: "/tmp/rig-session-fast" });
+        const fast = await store.create(ctx, { cwd: "/tmp/rig-session-fast" });
         const beforeFast = Date.now();
-        await fast.setDraft({ draft: "from a fast clock", updatedAt: beforeFast + 3_600_000 });
+        await fast.setDraft(ctx, { draft: "from a fast clock", updatedAt: beforeFast + 3_600_000 });
         expect(fast.snapshot().draftUpdatedAt).toBeGreaterThanOrEqual(beforeFast);
         expect(fast.snapshot().draftUpdatedAt).toBeLessThanOrEqual(Date.now());
 
         // A clock far in the past is held at the edge of the skew window, so it
         // loses to recent drafts instead of being unable to win at all.
-        const slow = await store.create({ cwd: "/tmp/rig-session-slow" });
+        const slow = await store.create(ctx, { cwd: "/tmp/rig-session-slow" });
         const beforeSlow = Date.now();
-        await slow.setDraft({ draft: "from a slow clock", updatedAt: 0 });
+        await slow.setDraft(ctx, { draft: "from a slow clock", updatedAt: 0 });
         expect(slow.snapshot().draftUpdatedAt).toBeGreaterThanOrEqual(beforeSlow - 300_000);
         expect(slow.snapshot().draftUpdatedAt).toBeLessThanOrEqual(Date.now() - 300_000);
     });
 
     it("keeps drafts out of the durable event log", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        await session.setDraft({ draft: "Typed but never sent" });
+        await session.setDraft(ctx, { draft: "Typed but never sent" });
 
         // The latest draft lives on the session itself, so a reconnecting client
         // reads it from the snapshot instead of replaying every keystroke burst.
@@ -1086,19 +1102,19 @@ describe("InMemorySession", () => {
     });
 
     it("treats an empty draft as no draft", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        await session.setDraft({ draft: "" });
+        await session.setDraft(ctx, { draft: "" });
 
         expect(session.snapshot().draft).toBeUndefined();
     });
 
     it("refuses a draft that is too long to sync", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
 
-        await expect(session.setDraft({ draft: "x".repeat(100_001) })).rejects.toThrow(
+        await expect(session.setDraft(ctx, { draft: "x".repeat(100_001) })).rejects.toThrow(
             "The draft is too long to sync.",
         );
         expect(session.snapshot().draft).toBeUndefined();
@@ -1112,7 +1128,7 @@ describe("InMemorySession", () => {
             thinkingLevels: ["off"],
         });
         const failure = new Error("draft persistence failed");
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: {
                 defaultModelId: model.id,
@@ -1120,7 +1136,7 @@ describe("InMemorySession", () => {
                 models: [model],
                 providers: [{ models: [model], providerId: "test" }],
             },
-            onAppendEvent: (event) => {
+            onAppendEvent: (_ctx, event) => {
                 if (event.type === "session_draft_changed") throw failure;
             },
             request: { cwd: "/tmp/rig-draft-persistence-rejection", modelId: model.id },
@@ -1128,7 +1144,7 @@ describe("InMemorySession", () => {
         await session.ready();
         const beforeEvents = [...session.events.all()];
 
-        await expect(session.setDraft({ draft: "never durable" })).rejects.toBe(failure);
+        await expect(session.setDraft(ctx, { draft: "never durable" })).rejects.toBe(failure);
 
         expect(session.snapshot().draft).toBeUndefined();
         expect(session.snapshot().draftUpdatedAt).toBeUndefined();
@@ -1151,7 +1167,7 @@ describe("InMemorySession", () => {
             name: "Concurrent draft persistence rejection",
             thinkingLevels: ["off"],
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             modelCatalog: {
                 defaultModelId: model.id,
@@ -1159,7 +1175,7 @@ describe("InMemorySession", () => {
                 models: [model],
                 providers: [{ models: [model], providerId: "test" }],
             },
-            onAppendEvent: async (event) => {
+            onAppendEvent: async (_ctx, event) => {
                 if (event.type !== "session_draft_changed") return;
                 if (event.data.draft === "first") {
                     markFirstStarted();
@@ -1172,9 +1188,9 @@ describe("InMemorySession", () => {
         });
         await session.ready();
 
-        const first = session.setDraft({ draft: "first" });
+        const first = session.setDraft(ctx, { draft: "first" });
         await firstStarted;
-        const second = session.setDraft({ draft: "second" });
+        const second = session.setDraft(ctx, { draft: "second" });
         releaseFirst();
 
         await expect(first).resolves.toMatchObject({ draft: "first" });
@@ -1194,7 +1210,7 @@ describe("InMemorySession", () => {
             name: "Event persistence rejection",
             thinkingLevels: ["off"],
         });
-        const session = await InMemorySession.open({
+        const session = await InMemorySession.open(ctx, {
             createEventId: createEventIdFactory(),
             emitCreatedEvent: false,
             modelCatalog: {
@@ -1210,7 +1226,7 @@ describe("InMemorySession", () => {
         const beforeTokenCount = session.snapshot().sessionTokenCount;
         rejectSave = true;
 
-        await expect(session.emitCreatedEvent()).rejects.toBe(failure);
+        await expect(session.emitCreatedEvent(ctx)).rejects.toBe(failure);
 
         expect(session.events.all()).toEqual(beforeEvents);
         expect(session.snapshot().lastEventId).toBeUndefined();
@@ -1233,7 +1249,7 @@ describe("InMemorySession", () => {
             modelId: model.id,
             trackUnread: true,
         };
-        const seed = await InMemorySession.open({
+        const seed = await InMemorySession.open(ctx, {
             createEventId: createEventIdFactory(),
             emitCreatedEvent: false,
             modelCatalog: {
@@ -1244,7 +1260,7 @@ describe("InMemorySession", () => {
             },
             request,
         });
-        const session = await InMemorySession.open({
+        const session = await InMemorySession.open(ctx, {
             createEventId: createEventIdFactory(),
             emitCreatedEvent: false,
             modelCatalog: {
@@ -1253,7 +1269,7 @@ describe("InMemorySession", () => {
                 models: [model],
                 providers: [{ models: [model], providerId: "test" }],
             },
-            onAppendEvent: (event) => {
+            onAppendEvent: (_ctx, event) => {
                 if (event.type === "session_updated") throw failure;
             },
             request,
@@ -1261,21 +1277,21 @@ describe("InMemorySession", () => {
         });
         const beforeEvents = [...session.events.all()];
 
-        await expect(session.markRead()).rejects.toBe(failure);
+        await expect(session.markRead(ctx)).rejects.toBe(failure);
 
         expect(session.snapshot().unread).toEqual(unread);
         expect(session.events.all()).toEqual(beforeEvents);
     });
 
     it("keeps a committed event after a post-commit callback rejects", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         const failure = new Error("post-commit publication failed");
         const saveSession = vi.fn(async () => undefined);
         const persistence = {
             saveSession,
-            transaction: <T>(body: () => T | Promise<T>) =>
-                runSessionTransaction(opened.database, async () => {
-                    const result = await body();
+            transaction: <T>(_ctx: Context, body: (bodyCtx: Context) => T | Promise<T>) =>
+                runSessionTransaction(opened.ctx, async (transactionCtx) => {
+                    const result = await body(transactionCtx);
                     await deferSessionTransactionCommit(() => {
                         throw failure;
                     });
@@ -1289,7 +1305,7 @@ describe("InMemorySession", () => {
             thinkingLevels: ["off"],
         });
         try {
-            const session = await InMemorySession.open({
+            const session = await InMemorySession.open(ctx, {
                 createEventId: createEventIdFactory(),
                 emitCreatedEvent: false,
                 modelCatalog: {
@@ -1302,7 +1318,7 @@ describe("InMemorySession", () => {
                 request: { cwd: "/tmp/rig-post-commit-publication-rejection", modelId: model.id },
             });
 
-            await expect(session.emitCreatedEvent()).rejects.toMatchObject({
+            await expect(session.emitCreatedEvent(ctx)).rejects.toMatchObject({
                 cause: failure,
                 name: "SessionTransactionPostCommitError",
             });
@@ -1311,13 +1327,13 @@ describe("InMemorySession", () => {
             expect(session.snapshot().lastEventId).toBe(session.events.lastEventId());
             expect(saveSession).toHaveBeenCalled();
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
     });
 
     it("holds a structured question until the user answers it", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
         const request = {
             requestId: "question-1",
             questions: [
@@ -1334,7 +1350,7 @@ describe("InMemorySession", () => {
             ],
         };
 
-        const pending = session.requestUserInput(request);
+        const pending = session.requestUserInput(ctx, request);
 
         await vi.waitFor(() => expect(session.snapshot().pendingUserInputs).toEqual([request]));
         expect(session.snapshot().pendingUserInputs).toEqual([request]);
@@ -1343,7 +1359,7 @@ describe("InMemorySession", () => {
             type: "user_input_requested",
         });
 
-        await session.answerUserInput("question-1", { answers: { database: ["PostgreSQL"] } });
+        await session.answerUserInput(ctx, "question-1", { answers: { database: ["PostgreSQL"] } });
 
         await expect(pending).resolves.toEqual({
             status: "answered",
@@ -1361,8 +1377,8 @@ describe("InMemorySession", () => {
     });
 
     it("tracks unread attention only when the root session opts in", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, {
             cwd: "/tmp/rig-session-test",
             trackUnread: true,
         });
@@ -1382,7 +1398,7 @@ describe("InMemorySession", () => {
             ],
         };
 
-        const pending = session.requestUserInput(request);
+        const pending = session.requestUserInput(ctx, request);
 
         await vi.waitFor(() =>
             expect(session.snapshot()).toMatchObject({
@@ -1394,18 +1410,20 @@ describe("InMemorySession", () => {
             trackUnread: true,
             unread: { reason: "attention_needed" },
         });
-        await expect(session.markRead()).resolves.toBe(true);
+        await expect(session.markRead(ctx)).resolves.toBe(true);
         expect(session.snapshot().unread).toBeUndefined();
-        await expect(session.markRead()).resolves.toBe(false);
+        await expect(session.markRead(ctx)).resolves.toBe(false);
 
-        await session.answerUserInput("question-unread", { answers: { database: ["SQLite"] } });
+        await session.answerUserInput(ctx, "question-unread", {
+            answers: { database: ["SQLite"] },
+        });
         await expect(pending).resolves.toEqual({
             status: "answered",
             answers: { database: ["SQLite"] },
         });
 
-        const untracked = await store.create({ cwd: "/tmp/rig-session-test" });
-        const untrackedPending = untracked.requestUserInput({
+        const untracked = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
+        const untrackedPending = untracked.requestUserInput(ctx, {
             ...request,
             requestId: "question-untracked",
         });
@@ -1416,17 +1434,18 @@ describe("InMemorySession", () => {
         );
         expect(untracked.snapshot().trackUnread).toBe(false);
         expect(untracked.snapshot().unread).toBeUndefined();
-        await untracked.answerUserInput("question-untracked", {
+        await untracked.answerUserInput(ctx, "question-untracked", {
             answers: { database: ["PostgreSQL"] },
         });
         await untrackedPending;
     });
 
     it("cancels a pending question when its run is aborted", async () => {
-        const store = await InMemorySessionStore.open();
-        const session = await store.create({ cwd: "/tmp/rig-session-test" });
+        const store = await InMemorySessionStore.open(ctx);
+        const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
         const controller = new AbortController();
         const pending = session.requestUserInput(
+            ctx,
             {
                 requestId: "question-1",
                 questions: [
@@ -1445,7 +1464,7 @@ describe("InMemorySession", () => {
             { signal: controller.signal },
         );
 
-        controller.abort();
+        controller.abort(ctx);
 
         await expect(pending).rejects.toThrow("cancelled");
         expect(session.snapshot().pendingUserInputs).toEqual([]);
@@ -1486,7 +1505,9 @@ async function configurableCatalog() {
     return {
         fastModel,
         slowModel,
-        store: await InMemorySessionStore.open({ modelCatalog: catalog }),
+        store: await InMemorySessionStore.open(ctx, {
+            modelCatalog: catalog,
+        }),
     };
 }
 
@@ -1512,7 +1533,7 @@ function createRunningNotificationSession(): {
         },
     });
     return {
-        session: new InMemorySession({
+        session: new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createTestRuntime(options, provider),
             modelCatalog: {
@@ -1536,7 +1557,10 @@ function createTestRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

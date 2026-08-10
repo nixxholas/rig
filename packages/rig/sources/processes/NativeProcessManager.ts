@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 
+import type { Context } from "@steve.kite/stdlib";
+
 import { killProcessTree } from "./killProcessTree.js";
 import { isProcessGroupAlive, killProcessGroup, ProcessGroupReaper } from "./ProcessGroupReaper.js";
 import { startProcessTransport, type ProcessTransport } from "./startProcessTransport.js";
 import { BoundedOutputBuffer } from "./BoundedOutputBuffer.js";
+import { withProcessContext } from "../observability/index.js";
 import type {
     ManagedProcessStatus,
     ProcessKillOptions,
@@ -21,8 +24,8 @@ export class NativeProcessManager {
     readonly #processes = new Map<string, ManagedProcess>();
     readonly #groups = new ProcessGroupReaper();
 
-    start(options: ProcessStartOptions): ManagedProcess {
-        const process = new ManagedProcess(options, {
+    async start(ctx: Context, options: ProcessStartOptions): Promise<ManagedProcess> {
+        const process = await ManagedProcess.start(ctx, options, {
             onGroupTerminated: (processGroupId) => {
                 this.#groups.release(processGroupId);
             },
@@ -35,47 +38,52 @@ export class NativeProcessManager {
         return process;
     }
 
-    async run(options: ProcessRunOptions): Promise<ProcessRunResult> {
-        if (options.signal?.aborted) {
-            return abortedResult(options);
-        }
+    run(ctx: Context, options: ProcessRunOptions): Promise<ProcessRunResult> {
+        return ctx.span("rig.process.run", async (ctx) => {
+            if (options.signal?.aborted) {
+                return abortedResult(options);
+            }
 
-        const process = this.start(options);
-        let timedOut = false;
-        let aborted = false;
-        let timeout: NodeJS.Timeout | undefined;
+            const process = await this.start(ctx, options);
+            let timedOut = false;
+            let aborted = false;
+            let timeout: NodeJS.Timeout | undefined;
 
-        const kill = () => {
-            void process.kill("SIGTERM", {
-                forceAfterMs: options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
-            });
-        };
-        const onAbort = () => {
-            aborted = true;
-            kill();
-        };
-
-        if (options.timeoutMs !== undefined) {
-            timeout = setTimeout(() => {
-                timedOut = true;
-                kill();
-            }, options.timeoutMs);
-            timeout.unref();
-        }
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-
-        try {
-            const result = await process.wait();
-            return {
-                ...result,
-                timedOut,
-                aborted,
-                killed: result.killed || timedOut || aborted,
+            const kill = () => {
+                void process.kill(ctx, "SIGTERM", {
+                    forceAfterMs: options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+                });
             };
-        } finally {
-            if (timeout !== undefined) clearTimeout(timeout);
-            options.signal?.removeEventListener("abort", onAbort);
-        }
+            const onAbort = () => {
+                aborted = true;
+                kill();
+            };
+
+            if (options.timeoutMs !== undefined) {
+                timeout = setTimeout(() => {
+                    timedOut = true;
+                    kill();
+                }, options.timeoutMs);
+                timeout.unref();
+            }
+            options.signal?.addEventListener("abort", onAbort, { once: true });
+            // Spawning crosses an asynchronous tracing boundary. Cancellation may arrive while
+            // that span is being opened, before the listener above can be installed.
+            if (options.signal?.aborted === true) onAbort();
+
+            try {
+                const result = await process.wait(ctx);
+                return {
+                    ...result,
+                    timedOut,
+                    aborted,
+                    killed: result.killed || timedOut || aborted,
+                };
+            } finally {
+                if (timeout !== undefined) clearTimeout(timeout);
+                options.signal?.removeEventListener("abort", onAbort);
+            }
+        });
     }
 
     get(id: string): ManagedProcess | undefined {
@@ -90,16 +98,16 @@ export class NativeProcessManager {
         return this.#processes.size;
     }
 
-    async writeStdin(id: string, data: string | Uint8Array): Promise<boolean> {
+    async writeStdin(ctx: Context, id: string, data: string | Uint8Array): Promise<boolean> {
         const process = this.get(id);
         if (!process) return false;
-        return process.writeStdin(data);
+        return process.writeStdin(ctx, data);
     }
 
-    async kill(id: string, options: ProcessKillOptions = {}): Promise<boolean> {
+    async kill(ctx: Context, id: string, options: ProcessKillOptions = {}): Promise<boolean> {
         const process = this.get(id);
         if (!process) return false;
-        await process.kill("SIGTERM", options);
+        await process.kill(ctx, "SIGTERM", options);
         return true;
     }
 
@@ -111,13 +119,13 @@ export class NativeProcessManager {
      * which case whole process groups go too, including anything that outlived
      * the shell that launched it.
      */
-    async killAll(options: ProcessKillOptions = {}): Promise<void> {
+    async killAll(ctx: Context, options: ProcessKillOptions = {}): Promise<void> {
         const targets = [...this.#processes.values()].filter(
             (process) => options.includeDetached === true || !process.detached,
         );
-        await Promise.all(targets.map((process) => process.kill("SIGTERM", options)));
+        await Promise.all(targets.map((process) => process.kill(ctx, "SIGTERM", options)));
         if (options.includeDetached === true) {
-            await this.#groups.terminateAll(options.forceAfterMs ?? DEFAULT_KILL_GRACE_MS);
+            await this.#groups.terminateAll(ctx, options.forceAfterMs ?? DEFAULT_KILL_GRACE_MS);
         }
     }
 
@@ -183,7 +191,12 @@ export class ManagedProcess {
     #killed = false;
     #postExitTimer: NodeJS.Timeout | undefined;
 
-    constructor(options: ProcessStartOptions, hooks: ManagedProcessHooks) {
+    private constructor(
+        _ctx: Context,
+        options: ProcessStartOptions,
+        hooks: ManagedProcessHooks,
+        transport: ProcessTransport,
+    ) {
         this.command = options.command;
         this.cwd = options.cwd;
         this.#maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
@@ -196,12 +209,24 @@ export class ManagedProcess {
             this.#resolveWait = resolve;
         });
 
-        this.#transport = startProcessTransport(options);
+        this.#transport = transport;
         // A terminal merges the two streams, so nothing will ever arrive on
         // stderr and waiting for it to close would hang.
         this.#stderrEnded = !this.#transport.separatesStderr;
         this.pid = this.#transport.pid;
         this.#attachListeners();
+    }
+
+    static async start(
+        ctx: Context,
+        options: ProcessStartOptions,
+        hooks: ManagedProcessHooks,
+    ): Promise<ManagedProcess> {
+        return startProcessTransport(
+            ctx,
+            options,
+            (ctx, transport) => new ManagedProcess(ctx, options, hooks, transport),
+        );
     }
 
     get status(): ManagedProcessStatus {
@@ -261,69 +286,86 @@ export class ManagedProcess {
         };
     }
 
-    writeStdin(data: string | Uint8Array): boolean {
-        if (this.#status !== "running") return false;
-        return this.#transport.write(data);
+    writeStdin(ctx: Context, data: string | Uint8Array): Promise<boolean> {
+        return ctx.span("rig.process.stdin.write", async () => {
+            if (this.#status !== "running") return false;
+            return this.#transport.write(data);
+        });
     }
 
-    endStdin(data?: string | Uint8Array): void {
-        this.#transport.endInput(data);
+    endStdin(ctx: Context, data?: string | Uint8Array): Promise<void> {
+        return ctx.span("rig.process.stdin.end", async () => this.#transport.endInput(data));
     }
 
-    interrupt(): boolean {
-        if (
-            process.platform === "win32" ||
-            this.#settled ||
-            this.#status !== "running" ||
-            this.pid === null
-        ) {
-            return false;
-        }
-        killProcessTree(this.pid, "SIGINT");
-        return true;
+    interrupt(ctx: Context): Promise<boolean> {
+        return ctx.span("rig.process.interrupt", async (ctx) => {
+            if (
+                process.platform === "win32" ||
+                this.#settled ||
+                this.#status !== "running" ||
+                this.pid === null
+            ) {
+                return false;
+            }
+            await killProcessTree(ctx, this.pid, "SIGINT");
+            return true;
+        });
     }
 
     async kill(
+        ctx: Context,
         signal: NodeJS.Signals = "SIGTERM",
         options: ProcessKillOptions = {},
     ): Promise<void> {
-        if (this.#settled) {
-            return;
-        }
-
-        this.#killed = true;
-        this.#status = "killed";
-        const startedAt = Date.now();
-        if (this.pid !== null) {
-            killProcessTree(this.pid, signal);
-        }
-
-        let force: NodeJS.Timeout | undefined;
-        const forceAfterMs = options.forceAfterMs ?? DEFAULT_KILL_GRACE_MS;
-        if (this.pid !== null && signal !== "SIGKILL" && forceAfterMs > 0) {
-            force = setTimeout(() => {
-                if (!this.#settled && this.pid !== null) {
-                    killProcessTree(this.pid, "SIGKILL");
-                }
-            }, forceAfterMs);
-            force.unref();
-        }
-
-        try {
-            await this.#waitPromise;
-        } finally {
-            if (force !== undefined) clearTimeout(force);
-            if (this.pid !== null) {
-                // The launcher is gone, but a child of it may still be shutting
-                // down and is entitled to the rest of its grace period.
-                if (signal !== "SIGKILL") await this.#forceGroupAfterGrace(forceAfterMs, startedAt);
-                this.#hooks.onGroupTerminated(this.pid);
+        await ctx.span("rig.process.kill", async (ctx) => {
+            if (this.#settled) {
+                return;
             }
-        }
+
+            this.#killed = true;
+            this.#status = "killed";
+            const startedAt = Date.now();
+            if (this.pid !== null) {
+                await killProcessTree(ctx, this.pid, signal);
+            }
+
+            let force: NodeJS.Timeout | undefined;
+            const forceAfterMs = options.forceAfterMs ?? DEFAULT_KILL_GRACE_MS;
+            if (this.pid !== null && signal !== "SIGKILL" && forceAfterMs > 0) {
+                force = setTimeout(() => {
+                    if (!this.#settled && this.pid !== null) {
+                        void withProcessContext(
+                            "force-kill",
+                            (ctx) => killProcessTree(ctx, this.pid!, "SIGKILL"),
+                            { processId: this.id },
+                        );
+                    }
+                }, forceAfterMs);
+                force.unref();
+            }
+
+            try {
+                await this.#waitPromise;
+            } finally {
+                if (force !== undefined) clearTimeout(force);
+                if (this.pid !== null) {
+                    // The launcher is gone, but a child of it may still be shutting
+                    // down and is entitled to the rest of its grace period.
+                    if (signal !== "SIGKILL") {
+                        await this.#forceGroupAfterGrace(ctx, forceAfterMs, startedAt);
+                    }
+                    this.#hooks.onGroupTerminated(this.pid);
+                }
+            }
+        });
     }
 
     /** Gives the rest of the group what remains of its grace, then ends it. */
-    async #forceGroupAfterGrace(forceAfterMs: number, startedAt: number): Promise<void> {
+    async #forceGroupAfterGrace(
+        ctx: Context,
+        forceAfterMs: number,
+        startedAt: number,
+    ): Promise<void> {
         if (this.pid === null) return;
         const remainingMs = forceAfterMs - (Date.now() - startedAt);
         if (remainingMs > 0 && isProcessGroupAlive(this.pid)) {
@@ -333,11 +375,11 @@ export class ManagedProcess {
         }
         // Group only, never the bare number: the launcher is already gone, so
         // its process id may now belong to a stranger.
-        if (isProcessGroupAlive(this.pid)) killProcessGroup(this.pid, "SIGKILL");
+        if (isProcessGroupAlive(this.pid)) await killProcessGroup(ctx, this.pid, "SIGKILL");
     }
 
-    wait(): Promise<ProcessRunResult> {
-        return this.#waitPromise;
+    wait(ctx: Context): Promise<ProcessRunResult> {
+        return ctx.span("rig.process.wait", async () => this.#waitPromise);
     }
 
     #attachListeners(): void {

@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { DurableUserInputCall } from "../../user-input/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import {
     readNumber,
     readOptionalNumber,
@@ -11,10 +12,11 @@ import {
 } from "./impl/sqliteRow.js";
 
 export async function queryDurableUserInputs(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId?: string,
 ): Promise<readonly DurableUserInputCall[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_durable_user_inputs", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             SELECT *

@@ -1,10 +1,12 @@
 import { inDatabase } from "../database/inDatabase.js";
+import type { Context } from "@steve.kite/stdlib";
 import type { SlotEntry } from "../../protocol/SlotProtocol.js";
 import { slotEntries } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 
-export async function slotEntryCreate(tx: DatabaseScope, entry: SlotEntry): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+export async function slotEntryCreate(ctx: Context, entry: SlotEntry): Promise<void> {
+    return await inDatabase(ctx, "rig.sql.slots.create_entry", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(slotEntries)
             .values({

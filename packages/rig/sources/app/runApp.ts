@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 
 import { TUI } from "@earendil-works/pi-tui";
+import type { Context } from "@steve.kite/stdlib";
 
 import { createNodeAgentContext } from "../agent/index.js";
 import {
@@ -68,7 +69,7 @@ export interface RunAppOptions {
 
 export type RunAppResult = { action: "exit" } | { action: "reload"; sessionId: string };
 
-export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult> {
+export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise<RunAppResult> {
     const cwd = options.cwd ?? process.cwd();
     const [loadedConfig, mcpConfigEntries] = await Promise.all([
         loadConfig({ cwd }),
@@ -275,7 +276,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             terminalCrashCleanup.uninstall();
             throw error;
         });
-        const context = createNodeAgentContext({
+        const context = createNodeAgentContext(ctx, {
             cwd: sessionCwd,
             permissionMode: session.session.permissionMode,
             processManager,
@@ -325,6 +326,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             .then((result) => result.presence)
             .catch(() => undefined);
         const app = new CodingAssistantApp({
+            ctx,
             ...(activeAgentLabel === undefined ? {} : { activeAgentLabel }),
             agent,
             attachSecret: (id, scope) => agent.attachSecret(id, scope),
@@ -564,7 +566,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             followController.abort();
             terminal.write("\x1b[?1004l");
             // Nothing Rig started outlives Rig, background work included.
-            await processManager.killAll({ forceAfterMs: 500, includeDetached: true });
+            await processManager.killAll(ctx, { forceAfterMs: 500, includeDetached: true });
             // A reload reopens this same session, so its instructions would only be noise.
             if (exitReason === "reload") resumeInstructions.suppress();
             else resumeInstructions.report();

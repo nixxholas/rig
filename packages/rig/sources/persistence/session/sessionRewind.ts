@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, gte, sql } from "drizzle-orm";
 
 import { pendingContextMessages, sessionMessages, sessionTurns } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function sessionRewind(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     position: number,
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.session.session_rewind", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .delete(pendingContextMessages)
             .where(

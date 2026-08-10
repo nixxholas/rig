@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { EventId } from "../../protocol/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { inTx } from "../inTx.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 import {
@@ -13,12 +14,13 @@ import {
 export type SessionTranscriptMessageRange = SessionTranscriptNoticeSlice;
 
 export async function querySessionTranscriptSince(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     turnLimit: number,
     after: EventId,
 ): Promise<SessionTranscriptMessageRange | undefined> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.session.query_session_transcript_since", async (ctx) => {
+        const tx = ctx.tx;
         const anchor = await tx.get<Record<string, unknown>>(sql`
         SELECT
             messages.position,
@@ -84,7 +86,7 @@ export async function querySessionTranscriptSince(
         const upperPosition =
             nextRun === undefined ? Number.MAX_SAFE_INTEGER : readNumber(nextRun, "first_position");
         const notices = await querySessionTranscriptNotices(
-            tx,
+            ctx,
             sessionId,
             lowerPosition,
             upperPosition,

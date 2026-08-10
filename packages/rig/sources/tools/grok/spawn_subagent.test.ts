@@ -90,7 +90,7 @@ describe("grokSpawnSubagentTool", () => {
                 subagent_type: "explore",
             },
             harness.context,
-            { toolCallId: "tool-1" },
+            { ctx: harness.ctx, toolCallId: "tool-1" },
         );
 
         expect(result).toMatchObject({
@@ -141,7 +141,7 @@ describe("grokSpawnSubagentTool", () => {
                     provider: "grok",
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("ran out of tokens before returning a response");
     });
@@ -188,7 +188,7 @@ describe("grokSpawnSubagentTool", () => {
                 provider: "grok",
             },
             harness.context,
-            { messages: [parentMessage, currentAgentMessage] },
+            { ctx: harness.ctx, messages: [parentMessage, currentAgentMessage] },
         );
 
         expect(spawn).toHaveBeenCalledWith(
@@ -221,7 +221,7 @@ describe("grokSpawnSubagentTool", () => {
             grokKillCommandOrSubagentTool.execute(
                 { task_id: "unguessable-agent-1" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toBe(databaseError);
     });
@@ -251,7 +251,7 @@ describe("grokSpawnSubagentTool", () => {
             grokKillCommandOrSubagentTool.execute(
                 { task_id: "unguessable-agent-1" },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).resolves.toMatchObject({
             agent_id: "unguessable-agent-1",
@@ -289,7 +289,7 @@ describe("grokSpawnSubagentTool", () => {
                     target: "unguessable-agent-1",
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).resolves.toMatchObject({
             agent_id: "unguessable-agent-1",

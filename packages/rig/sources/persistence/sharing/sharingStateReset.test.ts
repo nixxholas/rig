@@ -1,3 +1,5 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,42 +24,45 @@ afterEach(async () => {
 
 describe("resetting Sharing state", () => {
     it("keeps the selected profile while removing its Murmur identity and folder groups", async () => {
+        const ctx = createTestRootContext();
         const homeDirectory = await mkdtemp(join(tmpdir(), "rig-sharing-reset-"));
         directories.push(homeDirectory);
-        const database = await PersistentSessionStore.open({
+        const database = await PersistentSessionStore.open(ctx, {
             databasePath: ":memory:",
             homeDirectory,
         });
         const profiles = new RigProfileStore({
             database,
             localInstanceId: database.localInstanceId,
-            publish: () => undefined,
+            publish: (_ctx, _event) => undefined,
         });
-        const profile = await profiles.create({ email: "steve@example.test", name: "Steve" });
-        const root = await database.createFolder({ name: "Shared" });
-        await database.createFolder({ name: "Child", parentId: root.id });
-        await database.markFolderShared(root.id, GROUP_ID);
-        await database.transaction(async (tx) => {
-            await sharingProfileBind(tx, profile.id, GROUP_ID, 1);
-            await folderShareCreate(tx, {
+        const profile = await profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
+        const root = await database.createFolder(ctx, { name: "Shared" });
+        await database.createFolder(ctx, { name: "Child", parentId: root.id });
+        await database.markFolderShared(ctx, root.id, GROUP_ID);
+        await database.transaction(ctx, async (transactionCtx) => {
+            await sharingProfileBind(transactionCtx, profile.id, GROUP_ID, 1);
+            await folderShareCreate(transactionCtx, {
                 groupId: GROUP_ID,
                 now: 1,
                 rootFolderId: root.id,
                 sender: GROUP_ID,
                 shareId: "01900000-0000-7000-8000-000000000001",
-                state: await database.sharedFolderState(root.id),
+                state: await database.sharedFolderState(transactionCtx, root.id),
                 status: "synced",
             });
         });
 
-        await database.resetSharingState();
+        await database.resetSharingState(ctx);
 
-        expect(await database.getFolder(root.id)).toMatchObject({ shared: false, version: 3 });
-        expect(await database.query(queryFolderShares)).toEqual([]);
-        expect(await database.query(querySharingProfileBinding)).toEqual({
+        expect(await database.getFolder(ctx, root.id)).toMatchObject({ shared: false, version: 3 });
+        expect(await database.query(ctx, (queryCtx) => queryFolderShares(queryCtx))).toEqual([]);
+        expect(
+            await database.query(ctx, (queryCtx) => querySharingProfileBinding(queryCtx)),
+        ).toEqual({
             murmurIdentity: null,
             profileId: profile.id,
         });
-        await database.close();
+        await database.close(ctx);
     });
 });

@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, asc, eq, sql } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
@@ -8,7 +10,6 @@ import {
 } from "../../project/projectIdentity.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { reserveUniqueBranch } from "./reserveUniqueBranch.js";
 import { reserveUniqueWorkspaceName } from "./reserveUniqueWorkspaceName.js";
 import type { ProjectCreator } from "../../protocol/index.js";
@@ -32,10 +33,11 @@ export interface WorkspaceReserveInput {
 }
 
 export async function workspaceReserve(
-    tx: DatabaseScope,
+    ctx: Context,
     input: WorkspaceReserveInput,
 ): Promise<{ created: boolean; workspaceId: string }> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.project.workspaceReserve", async (ctx) => {
+        const tx = ctx.tx;
         // The identity may already name this workspace, because a create is
         // repeated until it is known to have landed. It is the same workspace
         // only if it describes the same one.
@@ -71,7 +73,7 @@ export async function workspaceReserve(
             return { created: false, workspaceId: retry.id };
         }
 
-        const name = await reserveUniqueWorkspaceName(tx, {
+        const name = await reserveUniqueWorkspaceName(ctx, {
             name: input.name,
             projectId: input.projectId,
         });
@@ -95,7 +97,7 @@ export async function workspaceReserve(
         );
         // A seed carries the workspace's own ID, so an unreadable ref store cannot hide a branch
         // this reservation would otherwise collide with when the worktree is finally created.
-        const branch = await reserveUniqueBranch(tx, {
+        const branch = await reserveUniqueBranch(ctx, {
             branch: workspaceBranchName(input.storageKeySeed ?? name),
             ...(input.isBranchUnavailable === undefined
                 ? {}

@@ -1,16 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
-
-import type { DatabaseScope } from "../Transaction.js";
 
 const MAX_SESSION_MUTATION_RECEIPTS = 10_000;
 
 /** Records one applied session mutation and keeps the receipt table explicitly bounded. */
 export async function sessionRecordMutationReceipt(
-    tx: DatabaseScope,
+    ctx: Context,
     input: { action: string; mutationId: string; now: number; sessionId: string },
 ): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.session_record_mutation_receipt", async (ctx) => {
+        const tx = ctx.tx;
         await tx.run(sql`
         INSERT INTO session_mutations (mutation_id, action, session_id, created_at_ms)
         VALUES (${input.mutationId}, ${input.action}, ${input.sessionId}, ${input.now})

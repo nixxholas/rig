@@ -9,6 +9,8 @@ import type { Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestFixtureDirectory } from "../../testing/createTestFixtureDirectory.js";
@@ -29,7 +31,9 @@ describe("Project files over HTTP", () => {
         await mkdir(join(repository, "empty"));
         await writeFile(join(repository, ".context", "notes.md"), "scratch\n");
         await writeFile(join(repository, ".gitignore"), ".context/\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         const first = await fixture.get(`/projects/${projectId}/file-tree?path=&limit=2`);
 
@@ -78,7 +82,9 @@ describe("Project files over HTTP", () => {
         const repository = await createRepository(fixture.root);
         await mkdir(join(repository, "target"));
         await symlink(join(repository, "target"), join(repository, "link"));
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         expect((await fixture.get(`/projects/${projectId}/file-tree?path=.git`)).status).toBe(403);
         expect((await fixture.get(`/projects/${projectId}/file-tree?path=.GIT`)).status).toBe(403);
@@ -100,7 +106,9 @@ describe("Project files over HTTP", () => {
         await writeFile(join(repository, "sources", "b.txt"), "b\n");
         await writeFile(join(repository, ".gitignore"), "ignored.txt\n");
         await writeFile(join(repository, "ignored.txt"), "hidden\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         const response = await fixture.get(`/projects/${projectId}/file-paths`);
 
@@ -119,7 +127,9 @@ describe("Project files over HTTP", () => {
         const folder = await mkdtemp(join(tmpdir(), "rig-plain-folder-"));
         cleanups.push(async () => await rm(folder, { force: true, recursive: true }));
         await writeFile(join(folder, "a.txt"), "a\n");
-        const projectId = (await fixture.store.create({ cwd: folder })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: folder })
+        ).snapshot().projectId!;
 
         const response = await fixture.get(`/projects/${projectId}/file-paths`);
 
@@ -132,7 +142,9 @@ describe("Project files over HTTP", () => {
         const repository = await createRepository(fixture.root);
         const worktree = join(fixture.root, "worktree");
         await git(repository, ["worktree", "add", "--quiet", "--detach", worktree, "HEAD"]);
-        const projectId = (await fixture.store.create({ cwd: worktree })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: worktree })
+        ).snapshot().projectId!;
         expect((await fixture.get(`/projects/${projectId}/file-paths`)).body.paths).toEqual([
             "seed.txt",
         ]);
@@ -154,7 +166,7 @@ describe("Project files over HTTP", () => {
         await writeFile(join(repository, "seed.txt"), "changed\n");
 
         const response = await fixture.get(
-            `/projects/${(await fixture.store.create({ cwd: repository })).snapshot().projectId!}` +
+            `/projects/${(await fixture.store.create(createTestRootContext(), { cwd: repository })).snapshot().projectId!}` +
                 `/file-revision?path=seed.txt&revision=${base}`,
         );
 
@@ -167,7 +179,9 @@ describe("Project files over HTTP", () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "added.txt"), "new\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         const added = await fixture.get(
             `/projects/${projectId}/file-revision?path=added.txt&revision=HEAD`,
@@ -185,7 +199,9 @@ describe("Project files over HTTP", () => {
     it("refuses a path outside the folder and a revision Git would read as an option", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         const outside = await fixture.get(
             `/projects/${projectId}/file-revision?path=${encodeURIComponent("../escape.txt")}&revision=HEAD`,
@@ -201,15 +217,23 @@ describe("Project files over HTTP", () => {
     it("serves both routes for a workspace as it does for a project", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
-        const workspace = await fixture.store.createWorkspace(projectId, {
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
+        const workspace = await fixture.store.createWorkspace(createTestRootContext(), projectId, {
             baseRef: "HEAD",
             name: "check",
         });
         // The worktree is materialized in the background, so its files exist a moment later.
         await waitUntil(
             async () =>
-                (await fixture.store.getWorkspace(projectId, workspace!.id))?.status === "ready",
+                (
+                    await fixture.store.getWorkspace(
+                        createTestRootContext(),
+                        projectId,
+                        workspace!.id,
+                    )
+                )?.status === "ready",
         );
         await writeFile(join(workspace!.path, "seed.txt"), "changed\n");
         const scope = `/projects/${projectId}/workspaces/${workspace!.id}`;
@@ -231,7 +255,9 @@ describe("Project files over HTTP", () => {
     it("reports an unknown project and an unknown workspace as missing", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         expect((await fixture.get("/projects/nope/file-paths")).status).toBe(404);
         expect(
@@ -260,10 +286,13 @@ async function startServer(): Promise<{
     const root = await createTestFixtureDirectory();
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(createTestRootContext(), {
         workspacesDirectory: join(root, "workspaces"),
     });
-    const server: Server = await createProtocolHttpServer({ store, token: "t" });
+    const server: Server = await createProtocolHttpServer(createTestRootContext(), {
+        store,
+        token: "t",
+    });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {
@@ -273,7 +302,7 @@ async function startServer(): Promise<{
     });
     cleanups.push(async () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        await store.close();
+        await store.close(createTestRootContext());
         await Promise.all([
             rm(root, { force: true, recursive: true }),
             rm(socketDirectory, { force: true, recursive: true }),

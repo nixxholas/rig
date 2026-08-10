@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -17,7 +20,7 @@ describe("InMemorySession rewind", () => {
         const deleteMessagesFrom = vi.fn(async () => undefined);
         const session = createRestoredSession(deleteMessagesFrom);
 
-        const result = await session.rewind("user-2");
+        const result = await session.rewind(ctx, "user-2");
 
         expect(result.message).toMatchObject({ id: "user-2", role: "user" });
         expect(session.state().totalTokens).toBe(0);
@@ -48,7 +51,7 @@ describe("InMemorySession rewind", () => {
     it("invalidates the current context when the model changes", async () => {
         const session = createRestoredSession(vi.fn());
 
-        await session.changeModel({ modelId: "test/next-model", providerId: "test" });
+        await session.changeModel(ctx, { modelId: "test/next-model", providerId: "test" });
 
         expect(session.state().totalTokens).toBe(0);
         expect(session.snapshot().sessionTokenCount).toEqual({
@@ -60,10 +63,10 @@ describe("InMemorySession rewind", () => {
     it("rejects a message that is not a visible user turn", async () => {
         const session = createRestoredSession(vi.fn());
 
-        await expect(session.rewind("agent-1")).rejects.toThrow(
+        await expect(session.rewind(ctx, "agent-1")).rejects.toThrow(
             "The selected user message is no longer available.",
         );
-        await expect(session.rewind("missing")).rejects.toThrow(
+        await expect(session.rewind(ctx, "missing")).rejects.toThrow(
             "The selected user message is no longer available.",
         );
     });
@@ -155,13 +158,13 @@ function createRestoredSession(
     };
     const persistence: InMemorySessionPersistence = {
         clearMessages: vi.fn(),
-        deleteMessagesFrom,
+        deleteMessagesFrom: (_ctx, sessionId, position) => deleteMessagesFrom(sessionId, position),
         deleteQueuedRun: vi.fn(),
         insertQueuedRun: vi.fn(),
         saveSession: vi.fn(),
         upsertMessage: vi.fn(),
     };
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         ...(events === undefined ? {} : { events }),
         modelCatalog,

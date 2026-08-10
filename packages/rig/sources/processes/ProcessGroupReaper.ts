@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { killProcessTree } from "./killProcessTree.js";
 
 /**
@@ -33,20 +35,26 @@ export class ProcessGroupReaper {
     }
 
     /** Asks every surviving group to stop, then forces the ones that did not. */
-    async terminateAll(forceAfterMs: number): Promise<void> {
-        this.#prune();
-        const groups = [...this.#groups];
-        this.#groups.clear();
-        if (groups.length === 0) return;
-        for (const processGroupId of groups) killProcessGroup(processGroupId, "SIGTERM");
-        if (forceAfterMs > 0) {
-            await new Promise((resolve) => {
-                setTimeout(resolve, forceAfterMs).unref();
-            });
-        }
-        for (const processGroupId of groups) {
-            if (isProcessGroupAlive(processGroupId)) killProcessGroup(processGroupId, "SIGKILL");
-        }
+    terminateAll(ctx: Context, forceAfterMs: number): Promise<void> {
+        return ctx.span("rig.process.groups.terminate", async (ctx) => {
+            this.#prune();
+            const groups = [...this.#groups];
+            this.#groups.clear();
+            if (groups.length === 0) return;
+            for (const processGroupId of groups) {
+                await signalProcessGroup(ctx, processGroupId, "SIGTERM");
+            }
+            if (forceAfterMs > 0) {
+                await new Promise((resolve) => {
+                    setTimeout(resolve, forceAfterMs).unref();
+                });
+            }
+            for (const processGroupId of groups) {
+                if (isProcessGroupAlive(processGroupId)) {
+                    await signalProcessGroup(ctx, processGroupId, "SIGKILL");
+                }
+            }
+        });
     }
 
     #prune(): void {
@@ -63,9 +71,23 @@ export class ProcessGroupReaper {
  * identifier: if the group is gone, the number may now belong to an unrelated
  * process, and signalling it would be someone else's problem.
  */
-export function killProcessGroup(processGroupId: number, signal: NodeJS.Signals): void {
+export function killProcessGroup(
+    ctx: Context,
+    processGroupId: number,
+    signal: NodeJS.Signals,
+): Promise<void> {
+    return ctx.span("rig.process.signal_group", async (ctx) => {
+        await signalProcessGroup(ctx, processGroupId, signal);
+    });
+}
+
+async function signalProcessGroup(
+    ctx: Context,
+    processGroupId: number,
+    signal: NodeJS.Signals,
+): Promise<void> {
     if (process.platform === "win32") {
-        killProcessTree(processGroupId, signal);
+        await killProcessTree(ctx, processGroupId, signal);
         return;
     }
     try {

@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { createNodeBashContext } from "./createNodeBashContext.js";
 import { BASH_SESSION_STOP_GRACE_MS, MAX_ACTIVE_BASH_SESSIONS } from "./bashSessionLimits.js";
 import { createPermissionContext } from "../../permissions/index.js";
@@ -25,6 +26,7 @@ afterEach(async () => {
 });
 
 describe("createNodeBashContext", () => {
+    const ctx = createTestRootContext().named("node-bash-test");
     it("reports a proxy block as sandbox policy instead of an unexplained 403", async () => {
         const cwd = await makeTempDir();
         let blockedRequest: ManagedNetworkBlockedRequest | undefined;
@@ -44,7 +46,8 @@ describe("createNodeBashContext", () => {
         };
         const run = vi.fn(
             async (
-                options: Parameters<NativeProcessManager["run"]>[0],
+                _ctx: Parameters<NativeProcessManager["run"]>[0],
+                options: Parameters<NativeProcessManager["run"]>[1],
             ): Promise<ProcessRunResult> => {
                 block({
                     host: "blocked.example",
@@ -70,6 +73,7 @@ describe("createNodeBashContext", () => {
             },
         );
         const context = createNodeBashContext({
+            ctx,
             cwd,
             loadManagedNetworkPolicy: async () => ({
                 allowedDomains: [{ domain: "allowed.example" }],
@@ -106,6 +110,7 @@ describe("createNodeBashContext", () => {
         });
         const run = vi.fn();
         const context = createNodeBashContext({
+            ctx,
             cwd,
             loadManagedNetworkPolicy: async () => {
                 markPolicyStarted();
@@ -157,6 +162,7 @@ describe("createNodeBashContext", () => {
             writeStdin: vi.fn(),
         } as unknown as ManagedProcess;
         const context = createNodeBashContext({
+            ctx,
             cwd,
             loadManagedNetworkPolicy: async () => ({
                 allowedDomains: [{ domain: "example.com", ports: [443] }],
@@ -196,7 +202,8 @@ describe("createNodeBashContext", () => {
             vi.stubEnv("NODE_USE_ENV_PROXY", "ambient");
             const run = vi.fn(
                 async (
-                    options: Parameters<NativeProcessManager["run"]>[0],
+                    _ctx: Parameters<NativeProcessManager["run"]>[0],
+                    options: Parameters<NativeProcessManager["run"]>[1],
                 ): Promise<ProcessRunResult> => ({
                     aborted: false,
                     command: options.command,
@@ -213,6 +220,7 @@ describe("createNodeBashContext", () => {
                 }),
             );
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext(permissionMode),
                 processManager: { run } as unknown as NativeProcessManager,
@@ -221,10 +229,10 @@ describe("createNodeBashContext", () => {
             await context.run({ command: "printf done" });
 
             expect(run).toHaveBeenCalledOnce();
-            expect(run.mock.calls[0]?.[0].env?.HTTP_PROXY).toBe(
+            expect(run.mock.calls[0]?.[1].env?.HTTP_PROXY).toBe(
                 "http://ambient-proxy.example:8080",
             );
-            expect(run.mock.calls[0]?.[0].env?.NODE_USE_ENV_PROXY).toBe("ambient");
+            expect(run.mock.calls[0]?.[1].env?.NODE_USE_ENV_PROXY).toBe("ambient");
         },
     );
 
@@ -257,6 +265,7 @@ describe("createNodeBashContext", () => {
         } as unknown as ManagedProcess;
         const start = vi.fn(() => process);
         const context = createNodeBashContext({
+            ctx,
             cwd,
             permissions: createPermissionContext("full_access"),
             processManager: { start } as unknown as NativeProcessManager,
@@ -271,7 +280,7 @@ describe("createNodeBashContext", () => {
 
         expect(evicting).toBe(MAX_ACTIVE_BASH_SESSIONS + 1);
         expect(start).toHaveBeenCalledTimes(MAX_ACTIVE_BASH_SESSIONS + 1);
-        expect(process.kill).toHaveBeenCalledWith("SIGTERM", {
+        expect(process.kill).toHaveBeenCalledWith(ctx, "SIGTERM", {
             forceAfterMs: BASH_SESSION_STOP_GRACE_MS,
         });
         // The evicted session stays readable: a model still holding its task id
@@ -294,6 +303,7 @@ describe("createNodeBashContext", () => {
             await chmod(shell, 0o755);
             vi.stubEnv("SHELL", shell);
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -318,6 +328,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -342,6 +353,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -368,6 +380,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -391,6 +404,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -421,6 +435,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -447,6 +462,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -473,6 +489,7 @@ describe("createNodeBashContext", () => {
         async () => {
             const cwd = await makeTempDir();
             const context = createNodeBashContext({
+                ctx,
                 cwd,
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
@@ -548,6 +565,7 @@ describe("createNodeBashContext", () => {
             },
         } as unknown as NativeProcessManager;
         const context = createNodeBashContext({
+            ctx,
             cwd,
             permissions: createPermissionContext("full_access"),
             processManager,
@@ -567,6 +585,7 @@ describe("createNodeBashContext", () => {
         const cwd = await makeTempDir();
         const processManager = new NativeProcessManager();
         const context = createNodeBashContext({
+            ctx,
             cwd,
             permissions: createPermissionContext("full_access"),
             processManager,
@@ -608,6 +627,7 @@ describe("createNodeBashContext", () => {
         const cwd = await makeTempDir();
         const processManager = new NativeProcessManager();
         const context = createNodeBashContext({
+            ctx,
             cwd,
             permissions: createPermissionContext("full_access"),
             processManager,

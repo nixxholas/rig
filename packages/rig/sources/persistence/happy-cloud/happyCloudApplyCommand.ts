@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { eq, sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     HAPPY_CLOUD_CONTRACT_VERSION,
@@ -24,11 +25,12 @@ const MAX_MUTATION_RECEIPTS = 4_096;
 export const HAPPY_CLOUD_SESSION_BLOB_LIMIT = 64;
 
 export async function happyCloudApplyCommand(
-    tx: DatabaseScope,
+    ctx: Context,
     command: HappyCloudCommand,
     now: number,
 ): Promise<HappyCloudCommandResponse> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.happy_cloud.apply_command", async (ctx) => {
+        const tx = ctx.tx;
         const requestFingerprint = commandFingerprint(command);
         const receipt = await tx
             .select({
@@ -49,21 +51,21 @@ export async function happyCloudApplyCommand(
                 happyCloudCommandResponseSchema,
                 JSON.parse(receipt.responseJson) as unknown,
             );
-            const current = await queryHappyCloudStatus(tx);
+            const current = await queryHappyCloudStatus(ctx);
             return current.version === original.status.version ? original : { status: current };
         }
 
-        const current = await queryHappyCloudStatus(tx);
+        const current = await queryHappyCloudStatus(ctx);
         if (current.version !== command.expectedVersion) {
             throw new HappyCloudPersistenceError(
                 "version_conflict",
                 "Happy Cloud settings changed before this command arrived.",
             );
         }
-        await ensureRoot(tx, now);
+        await ensureRoot(ctx, now);
         const nextVersion = current.version + 1;
-        await applyCommand(tx, command, nextVersion, now);
-        const response = { status: await queryHappyCloudStatus(tx) };
+        await applyCommand(ctx, command, nextVersion, now);
+        const response = { status: await queryHappyCloudStatus(ctx) };
         const responseJson = JSON.stringify(response);
         await tx
             .insert(happyCloudMutationReceipts)
@@ -83,7 +85,8 @@ export async function happyCloudApplyCommand(
     });
 }
 
-async function ensureRoot(tx: TX, now: number): Promise<void> {
+async function ensureRoot(ctx: Context, now: number): Promise<void> {
+    const tx = ctx.tx;
     await tx
         .insert(happyCloudEnrollment)
         .values({
@@ -110,11 +113,12 @@ async function ensureRoot(tx: TX, now: number): Promise<void> {
 }
 
 async function applyCommand(
-    tx: TX,
+    ctx: Context,
     command: HappyCloudCommand,
     nextVersion: number,
     now: number,
 ): Promise<void> {
+    const tx = ctx.tx;
     if (command.action === "set_enrollment") {
         const revoking = command.state === "not_enrolled";
         await tx
@@ -146,7 +150,7 @@ async function applyCommand(
         return;
     }
 
-    const current = await queryHappyCloudStatus(tx);
+    const current = await queryHappyCloudStatus(ctx);
     if (current.enrollment.state !== "enrolled") {
         throw new HappyCloudPersistenceError(
             "not_enrolled",

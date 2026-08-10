@@ -1,11 +1,13 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import { secretRegistrations, sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
-export async function secretUnregister(tx: DatabaseScope, secretId: string): Promise<void> {
-    await inTx(tx, async (tx) => {
+export async function secretUnregister(ctx: Context, secretId: string): Promise<void> {
+    await inTx(ctx, "rig.sql.session.secret_unregister", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx
             .select({ id: sessions.id, secretIdsJson: sessions.secretIdsJson })
             .from(sessions)

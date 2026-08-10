@@ -12,6 +12,9 @@ import type { Message } from "../agent/types.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
 import { createPermissionContext } from "./createPermissionContext.js";
 import { createPermissionReviewSideAgent } from "./createPermissionReviewSideAgent.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 
 describe("createPermissionReviewSideAgent", () => {
     it("runs a dedicated reviewer model without exposing it as a selectable model", async () => {
@@ -47,7 +50,7 @@ describe("createPermissionReviewSideAgent", () => {
                 }),
         ).toThrow(`Unknown model '${reviewerModel.id}'`);
         const reviewer = sideAgent(provider, reviewerModel as never);
-        await reviewer.review({ action: "review this", messages: [user("u1", "AUTHORIZED")] });
+        await reviewer.review(ctx, { action: "review this", messages: [user("u1", "AUTHORIZED")] });
 
         expect(requestedModels).toEqual([reviewerModel.id]);
         await reviewer.close();
@@ -76,7 +79,7 @@ describe("createPermissionReviewSideAgent", () => {
         };
         const reviewer = sideAgent(provider, parent.model);
 
-        await reviewer.review({ action: "review this", messages: [user("u1", "AUTHORIZED")] });
+        await reviewer.review(ctx, { action: "review this", messages: [user("u1", "AUTHORIZED")] });
         await reviewer.close();
 
         expect(parent.requests).toHaveLength(0);
@@ -89,8 +92,8 @@ describe("createPermissionReviewSideAgent", () => {
         const { provider, model, requests } = recordingProvider();
         const reviewer = sideAgent(provider, model);
 
-        await reviewer.review({ action: "first action", messages: [user("u1", "ALPHA")] });
-        await reviewer.review({
+        await reviewer.review(ctx, { action: "first action", messages: [user("u1", "ALPHA")] });
+        await reviewer.review(ctx, {
             action: "second action",
             messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
         });
@@ -112,12 +115,12 @@ describe("createPermissionReviewSideAgent", () => {
         });
         const reviewer = sideAgent(recorded.provider, recorded.model);
 
-        const first = reviewer.review({
+        const first = reviewer.review(ctx, {
             action: "first parallel action",
             messages: [user("u1", "Run the requested release checks.")],
         });
         await firstStarted.promise;
-        const second = reviewer.review({
+        const second = reviewer.review(ctx, {
             action: "second parallel action",
             messages: [user("u1", "Run the requested release checks.")],
         });
@@ -133,9 +136,12 @@ describe("createPermissionReviewSideAgent", () => {
         const { provider, model, requests } = recordingProvider();
         const reviewer = sideAgent(provider, model);
 
-        await reviewer.review({ action: "first action", messages: [user("u1", "AUTHORIZED")] });
+        await reviewer.review(ctx, {
+            action: "first action",
+            messages: [user("u1", "AUTHORIZED")],
+        });
         await reviewer.reset();
-        const result = await reviewer.review({
+        const result = await reviewer.review(ctx, {
             action: "second action",
             messages: [user("u2", "PROHIBITED")],
         });
@@ -150,10 +156,10 @@ describe("createPermissionReviewSideAgent", () => {
         const reviewer = sideAgent(provider, model);
 
         await reviewer
-            .review({ action: "first action", messages: [user("u1", "ALPHA")] })
+            .review(ctx, { action: "first action", messages: [user("u1", "ALPHA")] })
             .catch(() => undefined);
 
-        await reviewer.review({
+        await reviewer.review(ctx, {
             action: "second action",
             messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
         });
@@ -187,7 +193,7 @@ describe("createPermissionReviewSideAgent", () => {
             "/workspace/AGENTS.md": "When the user says `sync to main`, push directly to `main`.",
         });
 
-        await reviewer.review({
+        await reviewer.review(ctx, {
             action: "git push origin HEAD:main",
             messages: [user("u1", "Sync to main")],
         });
@@ -212,9 +218,9 @@ describe("createPermissionReviewSideAgent", () => {
             tools: [],
         });
 
-        await reviewer.review({ action: "first", messages: [user("u1", "ALPHA")] });
+        await reviewer.review(ctx, { action: "first", messages: [user("u1", "ALPHA")] });
         securityPolicy = "SECOND SECURITY POLICY";
-        await reviewer.review({
+        await reviewer.review(ctx, {
             action: "second",
             messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
         });
@@ -229,14 +235,17 @@ describe("createPermissionReviewSideAgent", () => {
         const { provider, model } = recordingProvider();
         const reviewer = sideAgent(provider, model);
 
-        const first = await reviewer.review({ action: "first", messages: [user("u1", "ALPHA")] });
+        const first = await reviewer.review(ctx, {
+            action: "first",
+            messages: [user("u1", "ALPHA")],
+        });
         expect(first.transcript?.usage.totalTokens).toBe(15);
         expect(first.transcript?.modelId).toBe("openai/gpt-test");
         expect(first.transcript?.providerId).toBe("codex");
         expect(first.transcript?.entries.map((entry) => entry.type)).toEqual(["text"]);
 
         // The reviewer keeps its history, so a second review must bill only its own inference.
-        const second = await reviewer.review({
+        const second = await reviewer.review(ctx, {
             action: "second",
             messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
         });
@@ -251,8 +260,8 @@ describe("createPermissionReviewSideAgent", () => {
             user(`u${String(index)}`, `EVIDENCE_${String(index)} ${"e".repeat(10_000)}`),
         );
 
-        await reviewer.review({ action: "first", messages: oversized });
-        const second = await reviewer.review({
+        await reviewer.review(ctx, { action: "first", messages: oversized });
+        const second = await reviewer.review(ctx, {
             action: "second",
             messages: [...oversized, user("late", "one more")],
         });

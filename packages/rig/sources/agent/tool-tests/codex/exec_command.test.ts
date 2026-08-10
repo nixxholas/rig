@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { createJustBashToolHarness } from "../../../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { codexExecCommandTool } from "../../tools/codex/exec_command.js";
+
+const ctx = createTestRootContext();
 
 describe("codex exec_command tool", () => {
     it("advertises only command options implemented by Rig", () => {
@@ -24,6 +27,7 @@ describe("codex exec_command tool", () => {
         const progress: string[] = [];
 
         const result = await codexExecCommandTool.execute({ cmd: "echo codex" }, harness.context, {
+            ctx,
             onProgress: (display) => progress.push(display),
         });
 
@@ -39,7 +43,7 @@ describe("codex exec_command tool", () => {
         const result = await codexExecCommandTool.execute(
             { cmd: "printf 'permission probe blocked\\n' >&2; exit 23" },
             harness.context,
-            {},
+            { ctx },
         );
 
         expect(result).toMatchObject({ exit_code: 23, output: "permission probe blocked\n" });

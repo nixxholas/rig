@@ -1,4 +1,5 @@
 import { createEventIdFactory, eventIdsShareScope } from "../protocol/index.js";
+import type { Context } from "@steve.kite/stdlib";
 import type {
     EventId,
     GlobalEvent,
@@ -31,7 +32,7 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         this.#trimmedThrough = this.#head;
     }
 
-    async append(event: GlobalEvent): Promise<GlobalEventQueueEntry> {
+    async append(_ctx: Context, event: GlobalEvent): Promise<GlobalEventQueueEntry> {
         const entry = { cursor: this.#createCursor(), event };
         this.#head = entry.cursor;
         this.#entries.push(entry);
@@ -42,9 +43,12 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         return entry;
     }
 
-    async appendReplaySafe(event: GlobalEvent): Promise<GlobalEventQueueEntry | undefined> {
+    async appendReplaySafe(
+        ctx: Context,
+        event: GlobalEvent,
+    ): Promise<GlobalEventQueueEntry | undefined> {
         const existing = this.#entries.find((entry) => entry.event.id === event.id);
-        if (existing === undefined) return this.append(event);
+        if (existing === undefined) return this.append(ctx, event);
         if (JSON.stringify(existing.event) !== JSON.stringify(event)) {
             throw new Error(`Global event ${event.id} was reused with different content`);
         }
@@ -62,6 +66,7 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
     }
 
     async list(
+        _ctx: Context,
         options: ListGlobalEventQueueOptions = {},
     ): Promise<readonly GlobalEventQueueEntry[] | undefined> {
         const after = options.after?.toLowerCase() ?? this.#trimmedThrough;
@@ -110,7 +115,7 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         };
     }
 
-    async trim(through: string): Promise<TrimGlobalEventsResponse | undefined> {
+    async trim(_ctx: Context, through: string): Promise<TrimGlobalEventsResponse | undefined> {
         const normalized = through.toLowerCase();
         if (!eventIdsShareScope(normalized, this.#head) || normalized > this.#head)
             return undefined;

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AgentContext, AgentTreeUsage } from "../agent/index.js";
 import { getAgentTreeUsageTool } from "./get_agent_tree_usage.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 
 describe("get_agent_tree_usage", () => {
     it("returns the managed durable breakdown without requesting permission review", async () => {
@@ -31,8 +32,9 @@ describe("get_agent_tree_usage", () => {
         };
         const read = vi.fn(() => usage);
         const context = { agentTreeUsage: { read } } as unknown as AgentContext;
+        const ctx = createTestRootContext().named("agent-tree-usage-test");
 
-        const result = await getAgentTreeUsageTool.execute({}, context, {});
+        const result = await getAgentTreeUsageTool.execute({}, context, { ctx });
         expect(result).toEqual({
             sessions: [
                 {

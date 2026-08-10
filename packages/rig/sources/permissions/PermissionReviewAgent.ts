@@ -1,4 +1,5 @@
 import type { Usage } from "@slopus/rig-execution";
+import type { Context } from "@steve.kite/stdlib";
 import type { Message } from "../agent/types.js";
 
 export interface PermissionReviewRequest {
@@ -50,7 +51,7 @@ export type PermissionReviewTranscriptEntry =
  * It owns its own conversation, so it decides how much context each review needs.
  */
 export interface PermissionReviewAgent {
-    review(request: PermissionReviewRequest): Promise<PermissionReviewResponse>;
+    review(ctx: Context, request: PermissionReviewRequest): Promise<PermissionReviewResponse>;
     /** Clears reviewer conversation state when the owning transcript is reset. */
     reset(): Promise<void>;
     close(): Promise<void>;

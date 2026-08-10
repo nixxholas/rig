@@ -4,6 +4,7 @@ import { Agent } from "./Agent.js";
 import { AGENTS_MD_REPLACEMENT_NOTICE } from "./agentsMdNotices.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
 import { isInternalMessage } from "./isInternalMessage.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     defineModel,
     defineProvider,
@@ -12,6 +13,8 @@ import {
     type InferenceStream,
     type Usage,
 } from "@slopus/rig-execution";
+
+const ctx = createTestRootContext();
 
 const model = defineModel({
     id: "openai/gpt-test",
@@ -110,7 +113,7 @@ describe("project instructions in the conversation", () => {
         const { provider, contexts, systemPrompts } = createRecordingProvider();
         const { agent } = await createWorkspace(provider, "Always run the linter.\n");
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
 
         expect(contexts).toHaveLength(1);
         const leading = textOfFirstUserContent(contexts[0]!);
@@ -127,7 +130,7 @@ describe("project instructions in the conversation", () => {
         const harness = agent.context.fs;
         await harness.move("/workspace/AGENTS.md", "/workspace/AGENTS_SECURITY.md");
 
-        await agent.send("Deploy the service.");
+        await agent.send(ctx, "Deploy the service.");
 
         const leading = textOfFirstUserContent(contexts[0]!);
         expect(leading).toContain("Always require a deployment review.");
@@ -139,7 +142,7 @@ describe("project instructions in the conversation", () => {
         const { provider } = createRecordingProvider();
         const { agent } = await createWorkspace(provider, "Always run the linter.\n");
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
 
         expect(agent.messages.some((message) => isInternalMessage(message))).toBe(false);
         const snapshot = agent.snapshot();
@@ -153,8 +156,8 @@ describe("project instructions in the conversation", () => {
         const { provider, contexts } = createRecordingProvider();
         const { agent } = await createWorkspace(provider, "Always run the linter.\n");
 
-        await agent.send("Fix the bug.");
-        await agent.send("Keep going.");
+        await agent.send(ctx, "Fix the bug.");
+        await agent.send(ctx, "Keep going.");
 
         expect(contexts).toHaveLength(2);
         expect(textOfFirstUserContent(contexts[1]!)).toBe(textOfFirstUserContent(contexts[0]!));
@@ -171,9 +174,9 @@ describe("project instructions in the conversation", () => {
             "Always run the linter.\n",
         );
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
         await writeInstructions("Always run the type checker.\n");
-        await agent.send("Keep going.");
+        await agent.send(ctx, "Keep going.");
 
         const recorded = (agent.snapshot().contextMessages ?? []).filter((message) =>
             isInternalMessage(message),
@@ -196,9 +199,9 @@ describe("project instructions in the conversation", () => {
             "Always run the linter.\n",
         );
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
         await writeInstructions("Always run the type checker.\n");
-        await agent.send("Switch to main.");
+        await agent.send(ctx, "Switch to main.");
 
         expect(textOfLastUserContent(contexts[1]!)).toBe("Switch to main.");
     });
@@ -207,7 +210,7 @@ describe("project instructions in the conversation", () => {
         const { provider, contexts } = createRecordingProvider();
         const { agent } = await createWorkspace(provider);
 
-        await agent.send("Fix the bug.");
+        await agent.send(ctx, "Fix the bug.");
 
         expect(contexts[0]!.messages).toHaveLength(1);
         expect(agent.snapshot().contextMessages).toBeUndefined();

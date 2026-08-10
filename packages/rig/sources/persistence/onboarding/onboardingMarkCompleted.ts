@@ -1,22 +1,23 @@
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
 
 import { onboardingState } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { inTx } from "../inTx.js";
 import { onboardingVersionSchema, type OnboardingVersion } from "./OnboardingState.js";
 import { queryOnboardingState } from "./queryOnboardingState.js";
 
 /** Stores completion monotonically, so an older caller cannot reopen onboarding. */
 export async function onboardingMarkCompleted(
-    tx: DatabaseScope,
+    ctx: Context,
     completedVersion: OnboardingVersion,
 ): Promise<boolean> {
     if (!Value.Check(onboardingVersionSchema, completedVersion)) {
         throw new Error("The onboarding completion version is invalid.");
     }
-    return await inTx(tx, async (transaction) => {
-        const current = await queryOnboardingState(transaction);
+    return await inTx(ctx, "rig.sql.onboarding.mark_completed", async (ctx) => {
+        const transaction = ctx.tx;
+        const current = await queryOnboardingState(ctx);
         if (current.completedVersion >= completedVersion) return false;
         const result = await transaction
             .update(onboardingState)

@@ -1,13 +1,14 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { and, eq, sql } from "drizzle-orm";
 
 import type { ProjectSettingsUpdate } from "../../protocol/index.js";
 import { projects } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export async function projectSetSettings(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     settings: ProjectSettingsUpdate,
     now: number,
@@ -18,7 +19,8 @@ export async function projectSetSettings(
     if (compute?.type === "docker" && (dockerImage === "" || /\s/u.test(compute.image))) {
         throw new Error("The default Docker image must not contain whitespace.");
     }
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.project.projectSetSettings", async (ctx) => {
+        const tx = ctx.tx;
         const current = await tx
             .select({
                 compute: projects.defaultCompute,

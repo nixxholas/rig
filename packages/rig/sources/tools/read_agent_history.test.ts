@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AgentContext, ChatHistoryPage } from "../agent/index.js";
 import { readAgentHistoryTool } from "./read_agent_history.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 
 describe("read_agent_history", () => {
     it("reads a selected subagent and lists the complete session tree", () => {
@@ -47,6 +48,7 @@ describe("read_agent_history", () => {
         };
         const read = vi.fn(() => page);
         const context = { chatHistory: { read } } as unknown as AgentContext;
+        const ctx = createTestRootContext().named("read-agent-history-test");
 
         expect(readAgentHistoryTool.name).toBe("read_agent_history");
         expect(readAgentHistoryTool.description).toContain("low-level inference history");
@@ -72,7 +74,7 @@ describe("read_agent_history", () => {
                 target: "/root/audit",
             },
             context,
-            {},
+            { ctx },
         );
 
         expect(read).toHaveBeenCalledWith({
@@ -98,19 +100,19 @@ describe("read_agent_history", () => {
             target: "/root/audit",
         });
 
-        readAgentHistoryTool.execute({ roles: ["error"] }, context, {});
+        readAgentHistoryTool.execute({ roles: ["error"] }, context, { ctx });
         expect(read).toHaveBeenLastCalledWith({ limit: 100, roles: ["error"] });
 
-        readAgentHistoryTool.execute({}, context, {});
+        readAgentHistoryTool.execute({}, context, { ctx });
         expect(read).toHaveBeenLastCalledWith({ limit: 100 });
 
-        readAgentHistoryTool.execute({ from: "beginning" } as never, context, {});
+        readAgentHistoryTool.execute({ from: "beginning" } as never, context, { ctx });
         expect(read).toHaveBeenLastCalledWith({ from: "start", limit: 100 });
 
-        readAgentHistoryTool.execute({ from: "begin" } as never, context, {});
+        readAgentHistoryTool.execute({ from: "begin" } as never, context, { ctx });
         expect(read).toHaveBeenLastCalledWith({ from: "start", limit: 100 });
 
-        readAgentHistoryTool.execute({ from: "last" } as never, context, {});
+        readAgentHistoryTool.execute({ from: "last" } as never, context, { ctx });
         expect(read).toHaveBeenLastCalledWith({ from: "end", limit: 100 });
     });
 });

@@ -2,6 +2,7 @@ import { STATUS_CODES, type IncomingMessage, type Server } from "node:http";
 import type { Duplex } from "node:stream";
 
 import type { P2pNetwork, P2pTunnelRequestHead } from "../p2p/index.js";
+import { withConnectionContext } from "../observability/index.js";
 import { selectP2pTunnelRequestHeaders } from "../p2p/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { matchHttpProxyRoute } from "./attachHttpConnectProxy.js";
@@ -10,6 +11,7 @@ import { matchRemoteTerminalAttachRoute } from "./attachRemoteTerminalWebSocketS
 
 export function attachP2pPeerTunnels(options: {
     network?: P2pNetwork;
+    resolveNetwork?: () => P2pNetwork | undefined;
     server: Server;
     token: string;
 }): void {
@@ -26,8 +28,9 @@ export function attachP2pPeerTunnels(options: {
             reject(socket, 401, "Unauthorized");
             return;
         }
+        const network = options.resolveNetwork?.() ?? options.network;
         if (
-            options.network === undefined ||
+            network === undefined ||
             (method === "GET"
                 ? matchRemoteTerminalAttachRoute(route.path) === undefined
                 : matchHttpProxyRoute(route.path) === undefined)
@@ -43,8 +46,11 @@ export function attachP2pPeerTunnels(options: {
             method,
             path: route.path,
         };
-        void options.network
-            .openTunnel(route.peerId, requestHead, controller.signal)
+        void withConnectionContext(
+            "p2p-tunnel",
+            (ctx) => network.openTunnel(ctx, route.peerId, requestHead, controller.signal),
+            { method, peerId: route.peerId },
+        )
             .then(({ connection, transport }) => {
                 if (controller.signal.aborted) {
                     connection.stream.destroy();

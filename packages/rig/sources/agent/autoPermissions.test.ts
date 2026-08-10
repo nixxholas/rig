@@ -19,6 +19,9 @@ import { claudeAskUserQuestionTool } from "./tools/claude/AskUserQuestion.js";
 import { claudeBashTool } from "./tools/claude/Bash.js";
 import { codexExecCommandTool } from "./tools/codex/exec_command.js";
 import { grokRunTerminalCommandTool } from "../tools/grok/run_terminal_command.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 
 describe("Auto permissions", () => {
     it("reviews durable history while tools receive only canonical model context", async () => {
@@ -29,7 +32,7 @@ describe("Auto permissions", () => {
         const reviewer = {
             close: vi.fn(async () => {}),
             reset: vi.fn(async () => {}),
-            review: vi.fn(async (request: { messages: readonly Message[] }) => {
+            review: vi.fn(async (_ctx, request: { messages: readonly Message[] }) => {
                 reviewedMessages = request.messages;
                 return {
                     text: JSON.stringify({
@@ -115,7 +118,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Run the context probe.");
+        await agent.send(ctx, "Run the context probe.");
 
         expect(JSON.stringify(reviewedMessages)).toContain("DURABLE_PRECOMPACTION_AUTHORIZATION");
         expect(JSON.stringify(reviewedMessages)).not.toContain("CANONICAL_COMPACTED_CHECKPOINT");
@@ -154,7 +157,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Look up the release status.");
+        await agent.send(ctx, "Look up the release status.");
 
         expect(execute).not.toHaveBeenCalled();
         expect(JSON.stringify(agent.messages)).toContain(
@@ -194,7 +197,7 @@ describe("Auto permissions", () => {
                 tools: [tool],
             });
 
-            await agent.send("Look up the release status.");
+            await agent.send(ctx, "Look up the release status.");
 
             expect(execute).not.toHaveBeenCalled();
             const resultBlock = agent.messages
@@ -234,7 +237,7 @@ describe("Auto permissions", () => {
         });
         const events: string[] = [];
 
-        const result = await agent.send("Run the deployment check.", {
+        const result = await agent.send(ctx, "Run the deployment check.", {
             onEvent: (event) => {
                 if (event.type === "permission_review") {
                     events.push(
@@ -269,7 +272,7 @@ describe("Auto permissions", () => {
         });
 
         await expect(
-            agent.send("Run the deployment check.", {
+            agent.send(ctx, "Run the deployment check.", {
                 onEvent(event) {
                     if (event.type === "permission_review") throw databaseError;
                 },
@@ -297,7 +300,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        const result = await agent.send("Run the deployment check.");
+        const result = await agent.send(ctx, "Run the deployment check.");
 
         expect(result.stopReason).toBe("stop");
         expect(observedModes).toEqual(["full_access"]);
@@ -322,12 +325,12 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        const first = await agent.send("Run the deployment check.");
+        const first = await agent.send(ctx, "Run the deployment check.");
         expect(first.stopReason).toBe("stop");
         expect(created).not.toHaveBeenCalled();
 
         harness.context.permissions.setMode("auto");
-        const second = await agent.send("Run the deployment check again.");
+        const second = await agent.send(ctx, "Run the deployment check again.");
         expect([second.stopReason, second.errorMessage]).toEqual(["stop", undefined]);
         expect(observed).toEqual(["workspace_write", "full_access"]);
         expect(created).toHaveBeenCalledOnce();
@@ -349,8 +352,8 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Run the deployment check.");
-        await agent.send("Run the deployment check again.");
+        await agent.send(ctx, "Run the deployment check.");
+        await agent.send(ctx, "Run the deployment check again.");
 
         expect(created).toHaveBeenCalledOnce();
         await agent.close();
@@ -371,7 +374,7 @@ describe("Auto permissions", () => {
             tools: [permissionProbeTool([])],
         });
 
-        await agent.send("Run the deployment check.");
+        await agent.send(ctx, "Run the deployment check.");
         await agent.reset();
 
         expect(reset).toHaveBeenCalledOnce();
@@ -393,7 +396,7 @@ describe("Auto permissions", () => {
         });
         const reviews: string[] = [];
 
-        await agent.send("Run the deployment check.", {
+        await agent.send(ctx, "Run the deployment check.", {
             onEvent: (event) => {
                 if (event.type === "permission_review") reviews.push(event.decision);
             },
@@ -445,7 +448,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Run the deployment check.");
+        await agent.send(ctx, "Run the deployment check.");
 
         expect(reviewerRequests).toHaveLength(1);
         // The reviewer reads the project instructions, because a project-defined request it cannot
@@ -500,7 +503,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        const run = agent.send("Run the deployment check.");
+        const run = agent.send(ctx, "Run the deployment check.");
         await elevationCheckStarted.promise;
         harness.context.permissions.setMode("read_only");
         releaseElevationCheck.resolve();
@@ -552,7 +555,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Run the boundary check.");
+        await agent.send(ctx, "Run the boundary check.");
 
         expect(boundaryChecks).toBe(1);
         expect(observedModes).toEqual(["full_access"]);
@@ -595,7 +598,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Run the failing boundary check.", {
+        await agent.send(ctx, "Run the failing boundary check.", {
             onEvent: (event) => {
                 if (event.type === "temporary_full_access_started") {
                     events.push(event.toolCallId);
@@ -630,7 +633,7 @@ describe("Auto permissions", () => {
         });
         const reviews: string[] = [];
 
-        const result = await agent.send("Do not send anything to the running shell.", {
+        const result = await agent.send(ctx, "Do not send anything to the running shell.", {
             onEvent: (event) => {
                 if (event.type === "permission_review") {
                     reviews.push(`${event.decision}:${event.action}:${event.reason}`);
@@ -672,7 +675,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Run the deployment check.");
+        await agent.send(ctx, "Run the deployment check.");
 
         expect(execute).not.toHaveBeenCalled();
         const resultBlock = agent.messages
@@ -710,7 +713,7 @@ describe("Auto permissions", () => {
         });
 
         const reviewLifecycle: string[] = [];
-        await agent.send("Check whether deployment is possible.", {
+        await agent.send(ctx, "Check whether deployment is possible.", {
             onEvent: (event) => {
                 if (event.type === "permission_review_started") {
                     reviewLifecycle.push(`started:${event.toolCallId}:${event.action}`);
@@ -772,7 +775,7 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        const result = await agent.send("Check whether deployment is possible.", {
+        const result = await agent.send(ctx, "Check whether deployment is possible.", {
             signal: controller.signal,
             onEvent: (event) => {
                 if (event.type === "tool_execution_start") controller.abort();
@@ -829,7 +832,7 @@ describe("Auto permissions", () => {
             tools: [claudeAskUserQuestionTool],
         });
 
-        await agent.send("Ask me which theme to use.");
+        await agent.send(ctx, "Ask me which theme to use.");
 
         const resultBlock = agent.messages
             .flatMap((message) => (message.role === "agent" ? message.blocks : []))
@@ -905,7 +908,7 @@ describe("Auto permissions", () => {
             const actions: string[] = [];
             const fullAccessGrants: boolean[] = [];
 
-            await agent.send("Run the command even if the workspace sandbox blocks it.", {
+            await agent.send(ctx, "Run the command even if the workspace sandbox blocks it.", {
                 onEvent: (event) => {
                     if (event.type === "permission_review") {
                         actions.push(event.action);

@@ -2,19 +2,21 @@ import { request, type Server } from "node:http";
 import { rm } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("P2P primary configuration authority", () => {
     it("allows local callers and the configured primary, but rejects every other peer", async () => {
-        const store = await InMemorySessionStore.open();
+        const store = await InMemorySessionStore.open(createTestRootContext());
         const rename = vi.fn(async (_name: string) => undefined);
         const primaryId = "aprimaryinstance000000001";
         const started = await startServer(
-            await createProtocolHttpServer({
+            await createProtocolHttpServer(createTestRootContext(), {
                 canP2pPeerConfigure: (peerId) => peerId === primaryId,
-                onDaemonConfigChange: async (config) => {
+                onDaemonConfigChange: async (_ctx, config) => {
                     await rename(config.p2p.name);
                     return {
                         globalEventQueue: store.globalEventQueue,

@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -46,20 +49,20 @@ describe("InMemorySession goals", () => {
             models: [model],
             providers: [{ providerId: provider.id, models: [model] }],
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createTestRuntime(options, provider),
             modelCatalog: catalog,
             request: { cwd: "/tmp/rig-goal-test", modelId: model.id, providerId: provider.id },
         });
 
-        await session.setGoal({ objective: "Finish the feature" });
+        await session.setGoal(ctx, { objective: "Finish the feature" });
         const started = session.events
             .since(undefined)
             ?.find((event) => event.type === "run_started");
         if (started?.type !== "run_started") throw new Error("Goal continuation did not start.");
 
-        await expect(session.waitForRun(started.data.runId)).resolves.toMatchObject({
+        await expect(session.waitForRun(ctx, started.data.runId)).resolves.toMatchObject({
             status: "completed",
         });
         expect(session.goal()).toMatchObject({
@@ -99,15 +102,15 @@ describe("InMemorySession goals", () => {
             models: [model],
             providers: [{ providerId: provider.id, models: [model] }],
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createTestRuntime(options, provider),
             modelCatalog: catalog,
             request: { cwd: "/tmp/rig-review-test", modelId: model.id, providerId: provider.id },
         });
 
-        const submitted = await session.submit({ text: "/review focus on concurrency" });
-        await expect(session.waitForRun(submitted.runId)).resolves.toMatchObject({
+        const submitted = await session.submit(ctx, { text: "/review focus on concurrency" });
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toMatchObject({
             status: "completed",
         });
 
@@ -139,7 +142,7 @@ describe("InMemorySession goals", () => {
             models: [model],
             stream: () => streamFor(assistantMessage([{ type: "text", text: "Done." }], "stop")),
         });
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createTestRuntime(options, provider),
             modelCatalog: {
@@ -151,15 +154,15 @@ describe("InMemorySession goals", () => {
             request: { cwd: "/tmp/rig-goal-title", modelId: model.id, providerId: provider.id },
         });
 
-        await session.setGoal({ objective: "Migrate the parser" });
+        await session.setGoal(ctx, { objective: "Migrate the parser" });
         const named = session.snapshot().title;
         expect(named).toBeDefined();
 
         // A name a chat has been given is the chat's, and clearing it does not take it back.
-        await session.reset();
+        await session.reset(ctx);
         expect(session.snapshot()).toMatchObject({ title: named, titleStatus: "ready" });
 
-        await session.setGoal({ objective: "Rewrite the scheduler" });
+        await session.setGoal(ctx, { objective: "Rewrite the scheduler" });
         expect(session.snapshot().title).toBe(named);
     });
 });
@@ -169,7 +172,7 @@ function createTestRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
         cwd: options.cwd,
         processManager,
         ...(options.goals !== undefined ? { goals: options.goals } : {}),

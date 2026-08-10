@@ -1,17 +1,19 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql } from "drizzle-orm";
 
 import { sessionMessages, sessionTurns } from "../database/schema.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function sessionSaveMessage(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     message: PersistedSessionMessage,
     updatedAt: number,
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
+    await inTx(ctx, "rig.sql.session.session_save_message", async (ctx) => {
+        const tx = ctx.tx;
         await tx
             .insert(sessionMessages)
             .values({

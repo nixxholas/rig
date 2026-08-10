@@ -1,16 +1,18 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readSessionEventRow } from "./impl/sessionEventRow.js";
 
 export async function querySessionEvents(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     limit?: number,
 ): Promise<SessionEvent[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_events", async (ctx) => {
+        const tx = ctx.tx;
         const rows =
             limit === undefined
                 ? await tx.all<Record<string, unknown>>(sql`

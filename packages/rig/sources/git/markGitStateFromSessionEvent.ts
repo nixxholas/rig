@@ -17,6 +17,7 @@ import type { SessionStore } from "../session/SessionStore.js";
  * signal costs one coalesced scan and never a wrong answer.
  */
 export async function markGitStateFromSessionEvent(
+    ctx: Context,
     event: SessionEvent,
     store: SessionStore,
     tracker: GitStateTracker,
@@ -28,14 +29,14 @@ export async function markGitStateFromSessionEvent(
     live?: { projectId: string; workspaceId?: string },
 ): Promise<void> {
     if (!isWorkSignal(event)) return;
-    const loaded = live ?? (await store.get(event.sessionId))?.projectIdentity();
+    const loaded = live ?? (await store.get(ctx, event.sessionId))?.projectIdentity();
     if (loaded === undefined) return;
-    const project = await store.getProject(loaded.projectId);
+    const project = await store.getProject(ctx, loaded.projectId);
     if (project === undefined) return;
     const workspace =
         loaded.workspaceId === undefined
             ? undefined
-            : await store.getWorkspace(loaded.projectId, loaded.workspaceId);
+            : await store.getWorkspace(ctx, loaded.projectId, loaded.workspaceId);
     const entity = resolveGitTrackedEntity(project, workspace);
     if (entity === undefined) return;
     tracker.markChanged(entity);
@@ -50,3 +51,4 @@ function isWorkSignal(event: SessionEvent): boolean {
     if (event.type === "shell_command_finished") return true;
     return event.type === "agent_event" && event.data.event.type === "tool_execution_end";
 }
+import type { Context } from "@steve.kite/stdlib";

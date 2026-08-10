@@ -1,12 +1,10 @@
 import { sql } from "drizzle-orm";
 import { createId } from "@paralleldrive/cuid2";
+import type { Context } from "@steve.kite/stdlib";
 
 import { inDatabase } from "./inDatabase.js";
-import type {
-    DrizzleSessionDatabase,
-    DrizzleSessionTx,
-    SessionDatabase,
-} from "./SessionDatabase.js";
+import { withTransaction } from "../databaseContext.js";
+import type { DrizzleSessionTx } from "./SessionDatabase.js";
 import { init } from "./migrations/01-init.js";
 import { delegatedSessions } from "./migrations/02-delegated-sessions.js";
 import { timelineIndex } from "./migrations/03-timeline-index.js";
@@ -132,12 +130,13 @@ export const RIG_DATA_IDENTITY_SCHEMA_VERSION = RIG_DATA_IDENTITY_MIGRATION_INDE
 export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;
 
 export async function migrateSessionDatabase(
-    database: SessionDatabase | DrizzleSessionDatabase,
+    ctx: Context,
     options: { createDataEpoch?: () => string; localInstanceId?: string } = {},
 ): Promise<void> {
     const createDataEpoch = options.createDataEpoch ?? createId;
     const localInstanceId = options.localInstanceId ?? createId();
-    await inDatabase(database, async (plainDatabase) => {
+    await inDatabase(ctx, "rig.sql.database.migrate", async (ctx) => {
+        const plainDatabase = ctx.tx;
         await plainDatabase.run(sql.raw("PRAGMA journal_mode = WAL"));
         await plainDatabase.run(sql.raw("PRAGMA synchronous = FULL"));
         await plainDatabase.run(sql.raw("PRAGMA busy_timeout = 5000"));
@@ -145,6 +144,7 @@ export async function migrateSessionDatabase(
         try {
             await plainDatabase.transaction(
                 async (transaction) => {
+                    const transactionCtx = withTransaction(ctx, transaction);
                     const applicationId =
                         (
                             await transaction.get<{ application_id: number }>(
@@ -158,7 +158,7 @@ export async function migrateSessionDatabase(
                             )
                         )?.user_version ?? 0;
                     if (applicationId !== SESSION_DATABASE_APPLICATION_ID) {
-                        await resetDatabase(transaction);
+                        await resetDatabase(transactionCtx);
                         currentVersion = 0;
                     } else if (currentVersion > CURRENT_SESSION_DATABASE_VERSION) {
                         throw new Error(
@@ -170,10 +170,14 @@ export async function migrateSessionDatabase(
                         version < CURRENT_SESSION_DATABASE_VERSION;
                         version += 1
                     ) {
-                        await migrations[version]!(transaction, {
-                            createDataEpoch,
-                            localInstanceId,
-                        });
+                        await transactionCtx.span(
+                            `rig.sql.database.migration.${String(version + 1)}`,
+                            async () =>
+                                migrations[version]!(transaction, {
+                                    createDataEpoch,
+                                    localInstanceId,
+                                }),
+                        );
                         await transaction.run(
                             sql.raw(`PRAGMA user_version = ${String(version + 1)}`),
                         );
@@ -192,7 +196,8 @@ export async function migrateSessionDatabase(
     });
 }
 
-async function resetDatabase(database: DrizzleSessionTx): Promise<void> {
+async function resetDatabase(ctx: Context): Promise<void> {
+    const database = ctx.tx;
     const tables = await database.all<{ name: string }>(
         sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"),
     );

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import { happyOutbox, happySessions } from "../database/schema.js";
 import type { HappyEncryptionVariant } from "../../happy/types.js";
@@ -18,7 +19,7 @@ export interface HappySessionState {
 }
 
 export async function happySessionEnsure(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         credentialFingerprint: string;
         encryptionKey?: Uint8Array;
@@ -27,7 +28,8 @@ export async function happySessionEnsure(
         sessionId: string;
     },
 ): Promise<HappySessionState> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.happy.ensure_session", async (ctx) => {
+        const tx = ctx.tx;
         const current = await tx
             .select()
             .from(happySessions)

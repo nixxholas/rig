@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import { FolderError } from "../folders/FolderRepository.js";
 import {
@@ -20,6 +21,7 @@ export interface FolderItemRoute {
 }
 
 export async function serveFolderItemRequest(
+    ctx: Context,
     store: SessionStore,
     route: FolderItemRoute,
     request: Pick<IncomingMessage, "headers" | "method">,
@@ -56,11 +58,15 @@ export async function serveFolderItemRequest(
                 );
                 return;
             }
-            const item = await store.createFolderItem(route.folderId, {
+            const item = await store.createFolderItem(ctx, route.folderId, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
-            sendJson<FolderItemResponse>(response, 201, await itemResponse(store, item.id, item));
+            sendJson<FolderItemResponse>(
+                response,
+                201,
+                await itemResponse(ctx, store, item.id, item),
+            );
             return;
         }
 
@@ -74,7 +80,7 @@ export async function serveFolderItemRequest(
                 sendJson(response, 405, { error: "Method not allowed" });
                 return;
             }
-            const item = await store.getFolderItem(itemId);
+            const item = await store.getFolderItem(ctx, itemId);
             if (item === undefined) {
                 sendFolderItemError(
                     response,
@@ -84,7 +90,11 @@ export async function serveFolderItemRequest(
                 );
                 return;
             }
-            sendJson<FolderItemResponse>(response, 200, await itemResponse(store, itemId, item));
+            sendJson<FolderItemResponse>(
+                response,
+                200,
+                await itemResponse(ctx, store, itemId, item),
+            );
             return;
         }
         if (request.method !== "POST") {
@@ -105,7 +115,7 @@ export async function serveFolderItemRequest(
         }
         const mutationId = requestMutationId(request);
         if (route.name === "folder-item-archive") {
-            const item = await store.archiveFolderItem(itemId, expectedVersion, mutationId);
+            const item = await store.archiveFolderItem(ctx, itemId, expectedVersion, mutationId);
             if (item === undefined) {
                 sendFolderItemError(
                     response,
@@ -115,7 +125,11 @@ export async function serveFolderItemRequest(
                 );
                 return;
             }
-            sendJson<FolderItemResponse>(response, 200, await itemResponse(store, itemId, item));
+            sendJson<FolderItemResponse>(
+                response,
+                200,
+                await itemResponse(ctx, store, itemId, item),
+            );
             return;
         }
         const body = await readJson(16 * 1024);
@@ -133,6 +147,7 @@ export async function serveFolderItemRequest(
             return;
         }
         const item = await store.moveFolderItem(
+            ctx,
             itemId,
             { ...body, ...(mutationId === undefined ? {} : { mutationId }) },
             expectedVersion,
@@ -141,16 +156,16 @@ export async function serveFolderItemRequest(
             sendFolderItemError(response, 404, "item_not_found", "That folder item was not found.");
             return;
         }
-        sendJson<FolderItemResponse>(response, 200, await itemResponse(store, itemId, item));
+        sendJson<FolderItemResponse>(response, 200, await itemResponse(ctx, store, itemId, item));
     } catch (error) {
         if (!(error instanceof FolderError)) throw error;
         if (error.code === "version_conflict" && route.itemId !== undefined) {
-            const current = await store.getFolderItem(route.itemId);
+            const current = await store.getFolderItem(ctx, route.itemId);
             if (current !== undefined) {
                 sendJson<FolderItemResponse>(
                     response,
                     409,
-                    await itemResponse(store, route.itemId, current),
+                    await itemResponse(ctx, store, route.itemId, current),
                 );
                 return;
             }
@@ -160,11 +175,12 @@ export async function serveFolderItemRequest(
 }
 
 async function itemResponse(
+    ctx: Context,
     store: SessionStore,
     itemId: string,
     fallback: FolderItemResponse["item"],
 ): Promise<FolderItemResponse> {
-    const catalog = await store.folderCatalog();
+    const catalog = await store.folderCatalog(ctx);
     return {
         item: catalog.items.find((item) => item.id === itemId) ?? fallback,
         revision: catalog.revision,

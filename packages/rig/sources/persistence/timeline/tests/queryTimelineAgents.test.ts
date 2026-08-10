@@ -1,18 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
-import { openSessionDatabase } from "../../database/openSessionDatabase.js";
+import {
+    openSessionDatabase,
+    type OpenSessionDatabase,
+} from "../../database/openSessionDatabase.js";
 import { projects, projectWorkspaces, sessionEvents, sessions } from "../../database/schema.js";
 import type { SessionDatabase } from "../../database/openSessionDatabase.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { queryTimelineAgents } from "../queryTimelineAgents.js";
 import { queryTimelineEvents } from "../queryTimelineEvents.js";
 
+const root = createTestRootContext();
+const openedDatabases: OpenSessionDatabase[] = [];
+
+afterEach(async () => {
+    await Promise.all(openedDatabases.splice(0).map((opened) => opened.database.close(opened.ctx)));
+});
+
 describe("timeline persistence", () => {
     it("covers every workspace and chat inside a project", async () => {
-        const database = await seed();
+        const opened = await seed();
 
         const agents = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "project", projectId: "p1" },
             false,
         );
@@ -26,9 +37,9 @@ describe("timeline persistence", () => {
     });
 
     it("covers every agent Rig knows about for a global scope", async () => {
-        const database = await seed();
+        const opened = await seed();
 
-        const agents = await queryTimelineAgents(database, { kind: "global" }, false);
+        const agents = await queryTimelineAgents(opened.ctx, { kind: "global" }, false);
 
         expect(agents.map((agent) => agent.sessionId)).toEqual([
             "root",
@@ -39,13 +50,17 @@ describe("timeline persistence", () => {
     });
 
     it("reaches across projects, which is the point of a global scope", async () => {
-        const database = await seed();
-        await insertProject(database, "p2", "/other");
-        await insertSession(database, { createdAtMs: 60, id: "elsewhere", projectId: "p2" });
+        const opened = await seed();
+        await insertProject(opened.database, "p2", "/other");
+        await insertSession(opened.database, {
+            createdAtMs: 60,
+            id: "elsewhere",
+            projectId: "p2",
+        });
 
-        const global = await queryTimelineAgents(database, { kind: "global" }, false);
+        const global = await queryTimelineAgents(opened.ctx, { kind: "global" }, false);
         const scoped = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "project", projectId: "p1" },
             false,
         );
@@ -55,20 +70,20 @@ describe("timeline persistence", () => {
     });
 
     it("still leaves archived chats out of a global scope", async () => {
-        const database = await seed();
+        const opened = await seed();
 
-        const active = await queryTimelineAgents(database, { kind: "global" }, false);
-        const all = await queryTimelineAgents(database, { kind: "global" }, true);
+        const active = await queryTimelineAgents(opened.ctx, { kind: "global" }, false);
+        const all = await queryTimelineAgents(opened.ctx, { kind: "global" }, true);
 
         expect(active.some((agent) => agent.sessionId === "archived")).toBe(false);
         expect(all.some((agent) => agent.sessionId === "archived")).toBe(true);
     });
 
     it("stops at the worktree for a workspace scope", async () => {
-        const database = await seed();
+        const opened = await seed();
 
         const agents = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "workspace", projectId: "p1", workspaceId: "w1" },
             false,
         );
@@ -77,10 +92,10 @@ describe("timeline persistence", () => {
     });
 
     it("follows a session's subagents to any depth", async () => {
-        const database = await seed();
+        const opened = await seed();
 
         const agents = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "session", sessionId: "root" },
             false,
         );
@@ -89,10 +104,10 @@ describe("timeline persistence", () => {
     });
 
     it("starts from a subagent when that is the scope", async () => {
-        const database = await seed();
+        const opened = await seed();
 
         const agents = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "session", sessionId: "child" },
             false,
         );
@@ -101,24 +116,28 @@ describe("timeline persistence", () => {
     });
 
     it("leaves archived chats out unless they are asked for", async () => {
-        const database = await seed();
+        const opened = await seed();
 
         const active = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "project", projectId: "p1" },
             false,
         );
-        const all = await queryTimelineAgents(database, { kind: "project", projectId: "p1" }, true);
+        const all = await queryTimelineAgents(
+            opened.ctx,
+            { kind: "project", projectId: "p1" },
+            true,
+        );
 
         expect(active.some((agent) => agent.sessionId === "archived")).toBe(false);
         expect(all.some((agent) => agent.sessionId === "archived")).toBe(true);
     });
 
     it("reports whether each agent still has work in flight", async () => {
-        const database = await seed();
+        const opened = await seed();
 
         const agents = await queryTimelineAgents(
-            database,
+            opened.ctx,
             { kind: "project", projectId: "p1" },
             false,
         );
@@ -129,9 +148,9 @@ describe("timeline persistence", () => {
     });
 
     it("reads only the lifecycle events a chart is drawn from", async () => {
-        const database = await seed();
+        const opened = await seed();
 
-        const events = await queryTimelineEvents(database, ["root"]);
+        const events = await queryTimelineEvents(opened.ctx, ["root"]);
 
         expect(events.map((event) => event.type)).toEqual([
             "message_submitted",
@@ -141,9 +160,9 @@ describe("timeline persistence", () => {
     });
 
     it("keeps each session's events together and in order", async () => {
-        const database = await seed();
+        const opened = await seed();
 
-        const events = await queryTimelineEvents(database, ["root", "child"]);
+        const events = await queryTimelineEvents(opened.ctx, ["root", "child"]);
 
         expect(events.map((event) => `${event.sessionId}:${event.type}`)).toEqual([
             "child:run_started",
@@ -154,15 +173,16 @@ describe("timeline persistence", () => {
     });
 
     it("asks for nothing when the scope covers no agents", async () => {
-        const database = await seed();
+        const opened = await seed();
 
-        expect(await queryTimelineEvents(database, [])).toEqual([]);
+        expect(await queryTimelineEvents(opened.ctx, [])).toEqual([]);
     });
 });
 
-async function seed(): Promise<SessionDatabase> {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+async function seed(): Promise<OpenSessionDatabase> {
+    const opened = await openSessionDatabase(root, ":memory:");
+    openedDatabases.push(opened);
+    await migrateSessionDatabase(opened.ctx);
     await insertProject(opened.database, "p1", "/rig");
     await opened.database
         .insert(projectWorkspaces)
@@ -212,7 +232,7 @@ async function seed(): Promise<SessionDatabase> {
     await insertEvent(opened.database, "root", 4, "session_title_changed", 130);
     await insertEvent(opened.database, "root", 5, "run_finished", 200);
     await insertEvent(opened.database, "child", 6, "run_started", 150);
-    return opened.database;
+    return opened;
 }
 
 async function insertProject(database: SessionDatabase, id: string, path: string): Promise<void> {

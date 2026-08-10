@@ -1,16 +1,18 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { projects } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { projectNotUserMutatedSince } from "./projectConditions.js";
 
 export async function projectArchive(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     now: number,
     version?: number,
 ): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.projectArchive", async (ctx) => {
+        const tx = ctx.tx;
         return Number(
             (
                 await tx

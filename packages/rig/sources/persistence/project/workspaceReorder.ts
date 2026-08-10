@@ -1,18 +1,20 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 import { projectWorkspaces } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { workspaceScope } from "./workspaceScope.js";
 
 export async function workspaceReorder(
-    tx: DatabaseScope,
+    ctx: Context,
     projectId: string,
     id: string,
     orderKey: string,
     now: number,
     version?: number,
 ): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.workspaceReorder", async (ctx) => {
+        const tx = ctx.tx;
         return Number(
             (
                 await tx

@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -32,8 +35,8 @@ describe("InMemorySession durable status", () => {
             if (event.type === "session_status_changed") observed.push(event.data.status);
         });
 
-        const submitted = await session.submit({ text: "Say hello." });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+        const submitted = await session.submit(ctx, { text: "Say hello." });
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
             status: "completed",
         });
         unsubscribe();
@@ -43,7 +46,7 @@ describe("InMemorySession durable status", () => {
         expect(observed).toEqual(["queued", "running", "completed"]);
         expect(session.snapshot().status).toBe("completed");
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("reports archiving separately, because it is not a lifecycle status", async () => {
@@ -55,7 +58,7 @@ describe("InMemorySession durable status", () => {
             if (event.type === "session_status_changed") statuses.push(event.data.status);
         });
 
-        await session.setArchived(true);
+        await session.setArchived(ctx, true);
         unsubscribe();
 
         // Archiving a session is its own durable flag with its own event. Only
@@ -64,7 +67,7 @@ describe("InMemorySession durable status", () => {
         expect(archived).toEqual([true]);
         expect(statuses).toEqual([]);
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("does not repeat a status that has not changed", async () => {
@@ -74,11 +77,11 @@ describe("InMemorySession durable status", () => {
             if (event.type === "session_status_changed") observed.push(event.data.status);
         });
 
-        const first = await session.submit({ text: "One." });
-        await session.waitForRun(first.runId);
+        const first = await session.submit(ctx, { text: "One." });
+        await session.waitForRun(ctx, first.runId);
         await vi.waitFor(() => expect(observed).toHaveLength(3));
-        const second = await session.submit({ text: "Two." });
-        await session.waitForRun(second.runId);
+        const second = await session.submit(ctx, { text: "Two." });
+        await session.waitForRun(ctx, second.runId);
         await vi.waitFor(() => expect(observed).toHaveLength(6));
         unsubscribe();
 
@@ -93,13 +96,13 @@ describe("InMemorySession durable status", () => {
             "completed",
         ]);
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("keeps status transitions durable, so a session list can follow them", async () => {
         const session = createSession();
-        const submitted = await session.submit({ text: "Say hello." });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit(ctx, { text: "Say hello." });
+        await session.waitForRun(ctx, submitted.runId);
         await vi.waitFor(() =>
             expect(
                 session.events
@@ -123,17 +126,17 @@ describe("InMemorySession durable status", () => {
                 .map((event: SessionEvent) => (event.data as { status: string }).status),
         ).toEqual(["queued", "running", "completed"]);
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 });
 
 describe("reset and rewind transcripts", () => {
     it("carries the turns that survive a rewind", async () => {
         const session = createSession();
-        const first = await session.submit({ text: "One." });
-        await session.waitForRun(first.runId);
-        const second = await session.submit({ text: "Two." });
-        await session.waitForRun(second.runId);
+        const first = await session.submit(ctx, { text: "One." });
+        await session.waitForRun(ctx, first.runId);
+        const second = await session.submit(ctx, { text: "Two." });
+        await session.waitForRun(ctx, second.runId);
 
         const target = session
             .snapshot()
@@ -146,7 +149,7 @@ describe("reset and rewind transcripts", () => {
         const unsubscribe = session.events.subscribe((event) => {
             events.push(event);
         });
-        await session.rewind(session.snapshot().snapshot.messages[2]!.id);
+        await session.rewind(ctx, session.snapshot().snapshot.messages[2]!.id);
         unsubscribe();
 
         const rewound = events.find((event) => event.type === "session_rewound");
@@ -161,19 +164,19 @@ describe("reset and rewind transcripts", () => {
             session.snapshot().snapshot.messages.map((message) => message.id),
         );
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("carries an empty transcript when a reset clears the conversation", async () => {
         const session = createSession();
-        const submitted = await session.submit({ text: "One." });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit(ctx, { text: "One." });
+        await session.waitForRun(ctx, submitted.runId);
 
         const events: SessionEvent[] = [];
         const unsubscribe = session.events.subscribe((event) => {
             events.push(event);
         });
-        await session.reset();
+        await session.reset(ctx);
         unsubscribe();
 
         const reset = events.find((event) => event.type === "session_reset");
@@ -181,7 +184,7 @@ describe("reset and rewind transcripts", () => {
         const transcript = (reset!.data as { transcript?: SessionTranscriptWindow }).transcript;
         expect(transcript).toEqual({ complete: true, messages: [], turns: [] });
 
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 });
 
@@ -210,7 +213,7 @@ function createSession(): InMemorySession {
         models: [model],
         providers: [{ providerId: provider.id, models: [model] }],
     };
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         createRuntime: (options) => createRuntime(options, provider),
         modelCatalog: catalog,
@@ -227,7 +230,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

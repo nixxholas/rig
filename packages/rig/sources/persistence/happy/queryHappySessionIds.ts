@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { SessionAgentType } from "../../protocol/index.js";
 import { happySessions, sessions } from "../database/schema.js";
@@ -21,10 +22,11 @@ const PRIMARY_SESSION_KIND: SessionAgentType = "primary";
  * hydrate every session ever synchronized just to discard it.
  */
 export async function queryHappySessionIds(
-    tx: DatabaseScope,
+    ctx: Context,
     query: HappySessionIdQuery,
 ): Promise<readonly string[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.happy.query_session_ids", async (ctx) => {
+        const tx = ctx.tx;
         const lastActivityMs = sql<number>`coalesce(${sessions.lastMessageAtMs}, ${sessions.updatedAtMs})`;
         return (
             await tx

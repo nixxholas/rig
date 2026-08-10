@@ -1,10 +1,11 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { asc, eq, sql } from "drizzle-orm";
 
 import { projects } from "../database/schema.js";
 import { projectNameKey, projectStorageKey } from "../../project/projectIdentity.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import type { ProjectCreator, ProjectRemoteSource } from "../../protocol/index.js";
 
 export interface ProjectCreateInput {
@@ -18,8 +19,9 @@ export interface ProjectCreateInput {
     requiredSecretKind?: "github";
 }
 
-export async function projectCreate(tx: DatabaseScope, input: ProjectCreateInput): Promise<void> {
-    await inTx(tx, async (tx) => {
+export async function projectCreate(ctx: Context, input: ProjectCreateInput): Promise<void> {
+    await inTx(ctx, "rig.sql.project.projectCreate", async (ctx) => {
+        const tx = ctx.tx;
         const name = await reserveUnique(input.baseName, async (candidate) => {
             return (
                 (await tx

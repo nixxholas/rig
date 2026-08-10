@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AgentContext } from "../agent/context/AgentContext.js";
 import type { ToolExecutionOptions } from "../agent/types.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { createDurableSkillTool } from "./createDurableSkillTool.js";
 
 describe("createDurableSkillTool", () => {
@@ -21,6 +22,7 @@ describe("createDurableSkillTool", () => {
             ],
         });
         const context = {} as AgentContext;
+        const ctx = createTestRootContext().named("durable-skill-tool-test");
 
         expect(tool.execution).toBe("durable");
         expect(tool.requiresAutoOrFullAccess).toBe(true);
@@ -45,6 +47,7 @@ describe("createDurableSkillTool", () => {
         ) => Promise<unknown>;
         await expect(
             execute({ name: "release-check" }, context, {
+                ctx,
                 providerToolCallId: "provider-call-1",
                 toolBatchId: "batch-1",
                 toolCallId: "call-1",
@@ -72,8 +75,9 @@ describe("createDurableSkillTool", () => {
             context: AgentContext,
             options: ToolExecutionOptions,
         ) => Promise<unknown>;
+        const ctx = createTestRootContext().named("durable-skill-tool-test");
 
-        await expect(execute({ name: "missing" }, {} as AgentContext, {})).resolves.toEqual({
+        await expect(execute({ name: "missing" }, {} as AgentContext, { ctx })).resolves.toEqual({
             error: { message: "Durable skill 'missing' is not configured." },
             status: "failed",
         });

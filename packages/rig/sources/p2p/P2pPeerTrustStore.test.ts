@@ -1,6 +1,9 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import { withDatabase } from "../persistence/database/databaseContext.js";
 import {
     openSessionDatabase,
     type OpenSessionDatabase,
@@ -9,9 +12,10 @@ import { createP2pInstanceIdentity } from "./P2pIdentity.js";
 import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
 const databases: OpenSessionDatabase[] = [];
+const ctx = createTestRootContext();
 
 afterEach(async () => {
-    for (const opened of databases.splice(0)) await opened.client.close();
+    for (const opened of databases.splice(0)) await opened.database.close(opened.ctx);
 });
 
 describe("P2pPeerTrustStore", () => {
@@ -20,9 +24,10 @@ describe("P2pPeerTrustStore", () => {
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
-        await store.validate(identity, "iroh", "a".repeat(64));
-        expect(await store.peerForBinding("iroh", "a".repeat(64))).toBeUndefined();
+        await store.validate(ctx, identity, "iroh", "a".repeat(64));
+        expect(await store.peerForBinding(ctx, "iroh", "a".repeat(64))).toBeUndefined();
         await store.verifyOrPin(
+            ctx,
             identity,
             "iroh",
             "a".repeat(64),
@@ -33,11 +38,11 @@ describe("P2pPeerTrustStore", () => {
         );
         const restored = P2pPeerTrustStore.fromDatabase(opened.database);
 
-        expect(await restored.peerForBinding("iroh", "a".repeat(64))).toEqual({
+        expect(await restored.peerForBinding(ctx, "iroh", "a".repeat(64))).toEqual({
             instanceId: identity.instanceId,
             publicKey: identity.publicKey,
         });
-        expect((await restored.peers())[0]?.connections.iroh?.endpointId).toBe("a".repeat(64));
+        expect((await restored.peers(ctx))[0]?.connections.iroh?.endpointId).toBe("a".repeat(64));
     });
 
     it("refreshes an Iroh address ticket without changing the trusted identity", async () => {
@@ -47,6 +52,7 @@ describe("P2pPeerTrustStore", () => {
         const endpointId = "a".repeat(64);
 
         await store.verifyOrPin(
+            ctx,
             identity,
             "iroh",
             endpointId,
@@ -55,11 +61,11 @@ describe("P2pPeerTrustStore", () => {
             },
             "Remote Rig",
         );
-        await store.verifyOrPin(identity, "iroh", endpointId, {
+        await store.verifyOrPin(ctx, identity, "iroh", endpointId, {
             iroh: { endpointId, ticket: "second-ticket" },
         });
 
-        expect((await store.peers())[0]).toMatchObject({
+        expect((await store.peers(ctx))[0]).toMatchObject({
             connections: { iroh: { endpointId, ticket: "second-ticket" } },
             instanceId: identity.instanceId,
             publicKey: identity.publicKey,
@@ -73,16 +79,16 @@ describe("P2pPeerTrustStore", () => {
         const other = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
-        await store.verifyOrPin(trusted, "iroh", "a".repeat(64), undefined, "Remote Rig");
-        await store.verifyOrPin(trusted, "iroh", "b".repeat(64));
+        await store.verifyOrPin(ctx, trusted, "iroh", "a".repeat(64), undefined, "Remote Rig");
+        await store.verifyOrPin(ctx, trusted, "iroh", "b".repeat(64));
 
-        await expect(store.verifyOrPin(impostor, "iroh", "c".repeat(64))).rejects.toThrow(
+        await expect(store.verifyOrPin(ctx, impostor, "iroh", "c".repeat(64))).rejects.toThrow(
             "does not match",
         );
-        await expect(store.verifyOrPin(other, "iroh", "a".repeat(64))).rejects.toThrow(
+        await expect(store.verifyOrPin(ctx, other, "iroh", "a".repeat(64))).rejects.toThrow(
             "another P2P instance",
         );
-        expect((await store.peerForBinding("iroh", "b".repeat(64)))?.instanceId).toBe(
+        expect((await store.peerForBinding(ctx, "iroh", "b".repeat(64)))?.instanceId).toBe(
             trusted.instanceId,
         );
     });
@@ -92,10 +98,10 @@ describe("P2pPeerTrustStore", () => {
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
-        await expect(store.verifyOrPin(identity, "iroh", "a".repeat(64))).rejects.toThrow(
+        await expect(store.verifyOrPin(ctx, identity, "iroh", "a".repeat(64))).rejects.toThrow(
             "must have a display name",
         );
-        expect(await store.peers()).toEqual([]);
+        expect(await store.peers(ctx)).toEqual([]);
     });
 
     it("keeps prepared pairing trust inactive and removes it when pairing aborts", async () => {
@@ -104,6 +110,7 @@ describe("P2pPeerTrustStore", () => {
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
 
         const prepared = await store.preparePairing(
+            ctx,
             "A".repeat(43),
             identity,
             "iroh",
@@ -113,12 +120,12 @@ describe("P2pPeerTrustStore", () => {
             false,
             Date.now() + 60_000,
         );
-        expect(await store.peers()).toEqual([]);
-        expect(await store.readyPairings()).toEqual([]);
+        expect(await store.peers(ctx)).toEqual([]);
+        expect(await store.readyPairings(ctx)).toEqual([]);
 
-        await prepared.abort();
-        expect(await store.peers()).toEqual([]);
-        expect(await store.readyPairings()).toEqual([]);
+        await prepared.abort(ctx);
+        expect(await store.peers(ctx)).toEqual([]);
+        expect(await store.readyPairings(ctx)).toEqual([]);
     });
 
     it("recovers a durable ready pairing and promotes it into active trust", async () => {
@@ -126,6 +133,7 @@ describe("P2pPeerTrustStore", () => {
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
         const prepared = await store.preparePairing(
+            ctx,
             "A".repeat(43),
             identity,
             "iroh",
@@ -135,20 +143,20 @@ describe("P2pPeerTrustStore", () => {
             true,
             Date.now() + 60_000,
         );
-        await prepared.markLocallyReady();
-        await prepared.markConfirmed();
+        await prepared.markLocallyReady(ctx);
+        await prepared.markConfirmed(ctx);
 
         const restored = P2pPeerTrustStore.fromDatabase(opened.database);
-        expect(await restored.peers()).toEqual([]);
-        expect(await restored.readyPairings()).toHaveLength(1);
-        await (await restored.readyPairings())[0]!.activate();
-        expect(await restored.readyPairings()).toHaveLength(1);
-        await (await restored.readyPairings())[0]!.complete();
-        expect((await restored.peers())[0]).toMatchObject({
+        expect(await restored.peers(ctx)).toEqual([]);
+        expect(await restored.readyPairings(ctx)).toHaveLength(1);
+        await (await restored.readyPairings(ctx))[0]!.activate(ctx);
+        expect(await restored.readyPairings(ctx)).toHaveLength(1);
+        await (await restored.readyPairings(ctx))[0]!.complete(ctx);
+        expect((await restored.peers(ctx))[0]).toMatchObject({
             instanceId: identity.instanceId,
             name: "Remote",
         });
-        expect(await restored.readyPairings()).toEqual([]);
+        expect(await restored.readyPairings(ctx)).toEqual([]);
     });
 
     it("aborting one transaction cannot erase an identical pairing that finalized", async () => {
@@ -156,6 +164,7 @@ describe("P2pPeerTrustStore", () => {
         const identity = createP2pInstanceIdentity();
         const store = P2pPeerTrustStore.fromDatabase(opened.database);
         const first = await store.preparePairing(
+            ctx,
             "A".repeat(43),
             identity,
             "iroh",
@@ -166,6 +175,7 @@ describe("P2pPeerTrustStore", () => {
             Date.now() + 60_000,
         );
         const second = await store.preparePairing(
+            ctx,
             "B".repeat(43),
             identity,
             "iroh",
@@ -176,20 +186,20 @@ describe("P2pPeerTrustStore", () => {
             Date.now() + 60_000,
         );
 
-        await second.markLocallyReady();
-        await second.markConfirmed();
-        await second.activate();
-        await second.complete();
-        await first.abort();
+        await second.markLocallyReady(ctx);
+        await second.markConfirmed(ctx);
+        await second.activate(ctx);
+        await second.complete(ctx);
+        await first.abort(ctx);
 
-        expect(await store.peers()).toHaveLength(1);
-        expect((await store.peers())[0]?.instanceId).toBe(identity.instanceId);
+        expect(await store.peers(ctx)).toHaveLength(1);
+        expect((await store.peers(ctx))[0]?.instanceId).toBe(identity.instanceId);
     });
 });
 
 async function openTrustDatabase(): Promise<OpenSessionDatabase> {
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+    const opened = await openSessionDatabase(ctx, ":memory:");
+    await migrateSessionDatabase(opened.ctx);
     databases.push(opened);
     return opened;
 }

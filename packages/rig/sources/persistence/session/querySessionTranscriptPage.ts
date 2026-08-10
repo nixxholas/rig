@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { inTx } from "../inTx.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 import { querySessionTranscriptNotices } from "./querySessionTranscriptNotices.js";
@@ -13,12 +14,13 @@ export interface SessionTranscriptMessagePage {
 }
 
 export async function querySessionTranscriptPage(
-    tx: DatabaseScope,
+    ctx: Context,
     sessionId: string,
     turnLimit: number,
     before?: string,
 ): Promise<SessionTranscriptMessagePage | undefined> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.session.query_session_transcript_page", async (ctx) => {
+        const tx = ctx.tx;
         const beforeRow =
             before === undefined
                 ? undefined
@@ -78,7 +80,7 @@ export async function querySessionTranscriptPage(
         // first message as this bound would permanently hide notices recorded while idle.
         const lowerPosition = firstPosition === undefined || !hasEarlierTurn ? 0 : firstPosition;
         const notices = await querySessionTranscriptNotices(
-            tx,
+            ctx,
             sessionId,
             lowerPosition,
             beforePosition,

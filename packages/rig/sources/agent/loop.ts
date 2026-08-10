@@ -1,6 +1,7 @@
 import { createId } from "@paralleldrive/cuid2";
 import { Value } from "@sinclair/typebox/value";
 import { extractProviderErrorDiagnostics } from "@slopus/rig-providers";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 import { assistantMessageToAgentMessage } from "./assistantMessageToAgentMessage.js";
 import { boundToolResultBlocks } from "./boundToolResultBlocks.js";
@@ -259,7 +260,10 @@ export type AgentLoopResult =
       })
     | (AgentLoopOutcome & { errorMessage?: never; stopReason: Exclude<StopReason, "error"> });
 
-export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentLoopResult> {
+export async function runAgentLoop(
+    ctx: RuntimeContext,
+    options: RunAgentLoopOptions,
+): Promise<AgentLoopResult> {
     const model = findModel(options.provider, options.modelId, options.allowReviewerModel === true);
     const idFactory = options.idFactory ?? createId;
     const now = options.now ?? Date.now;
@@ -274,7 +278,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         now,
         providerId: options.provider.id,
     });
-    let providerPrompt = await createProviderPrompt({
+    let providerPrompt = await createProviderPrompt(ctx, {
         ...(options.appendSystemPrompt !== undefined
             ? { appendSystemPrompt: options.appendSystemPrompt }
             : {}),
@@ -291,7 +295,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
     const composedSystemPrompt =
         providerPrompt.systemPromptOverride ?? providerPrompt.systemPrompt ?? "";
     try {
-        const replacement = await options.context.plugins?.applySystemPrompt?.({
+        const replacement = await options.context.plugins?.applySystemPrompt?.(ctx, {
             systemPrompt: composedSystemPrompt,
             userPrompt: latestUserPrompt(contextTranscript),
         });
@@ -738,7 +742,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 for (const toolCall of toolCalls) {
                     entries.push([
                         toolCall.id,
-                        await prepareToolPermission(toolCall, toolsByName, toolContext, {
+                        await prepareToolPermission(ctx, toolCall, toolsByName, toolContext, {
                             messages: permissionMessages,
                             onPermissionReviewStarted: (review) =>
                                 options.signal?.aborted
@@ -857,6 +861,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                           )
                                         : options.signal;
                                     const result = await executeToolCall(
+                                        ctx,
                                         toolCall,
                                         toolsByName,
                                         toolContext,
@@ -1543,6 +1548,7 @@ function toProviderToolResultMessage(
 }
 
 async function prepareToolPermission(
+    ctx: RuntimeContext,
     toolCall: ProviderToolCall,
     toolsByName: ReadonlyMap<string, AnyDefinedTool>,
     context: AgentContext,
@@ -1597,7 +1603,7 @@ async function prepareToolPermission(
             await options.onPermissionReview?.({ action, ...review });
             return { action, kind: "review", review };
         }
-        const review = await reviewAutoPermission({
+        const review = await reviewAutoPermission(ctx, {
             action,
             args: toolCall.arguments,
             messages: options.messages,
@@ -1628,6 +1634,7 @@ async function prepareToolPermission(
 }
 
 async function executeToolCall(
+    ctx: RuntimeContext,
     toolCall: ProviderToolCall,
     toolsByName: ReadonlyMap<string, AnyDefinedTool>,
     context: AgentContext,
@@ -1718,6 +1725,7 @@ async function executeToolCall(
             args: unknown,
             context: AgentContext,
             options: {
+                ctx: RuntimeContext;
                 messages?: readonly Message[];
                 model?: Model;
                 onProgress?: (display: string) => void;
@@ -1731,6 +1739,7 @@ async function executeToolCall(
             },
         ) => Promise<unknown> | unknown;
         const executionOptions: {
+            ctx: RuntimeContext;
             messages?: readonly Message[];
             model?: Model;
             onProgress?: (display: string) => void;
@@ -1742,6 +1751,7 @@ async function executeToolCall(
             toolCallId?: string;
             toolCallIndex?: number;
         } = {
+            ctx,
             messages: options.messages,
             model: options.model,
             provider: options.provider,

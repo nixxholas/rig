@@ -1,4 +1,5 @@
 import { inDatabase } from "../database/inDatabase.js";
+import type { Context } from "@steve.kite/stdlib";
 import { sql, type SQL } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
@@ -17,10 +18,11 @@ import { readNumber, readOptionalString, readString } from "../session/impl/sqli
  * is returned. The filtering happens in SQL before any content payload is deserialized.
  */
 export async function querySlotEntries(
-    tx: DatabaseScope,
+    ctx: Context,
     filter: SlotEntryFilter = {},
 ): Promise<readonly SlotEntry[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.slots.query_entries", async (ctx) => {
+        const tx = ctx.tx;
         const conditions: SQL[] = [];
         if (filter.slot !== undefined) conditions.push(sql`slot = ${filter.slot}`);
         const scopeClauses: SQL[] = [];

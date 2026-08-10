@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, isNotNull, lte, notExists } from "drizzle-orm";
 
 import { projectAvatarAssets, projects } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function projectAvatarCollectGarbage(
-    tx: DatabaseScope,
+    ctx: Context,
     hash: string,
     cutoff: number,
 ): Promise<boolean> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.projectAvatarCollectGarbage", async (ctx) => {
+        const tx = ctx.tx;
         const result = await tx
             .delete(projectAvatarAssets)
             .where(

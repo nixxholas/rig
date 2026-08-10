@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -33,7 +36,7 @@ describe("InMemorySession quota observations", () => {
             models: [model],
             providers: [{ models: [model], providerId: provider.id }],
         };
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime: (options) => {
                 // The provider answers the run and reports the account in the
@@ -49,8 +52,10 @@ describe("InMemorySession quota observations", () => {
             },
         });
 
-        const submitted = await session.submit({ text: "Observe this run." });
-        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({ status: "completed" });
+        const submitted = await session.submit(ctx, { text: "Observe this run." });
+        await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
+            status: "completed",
+        });
 
         const observations = session.events
             .all()
@@ -95,7 +100,10 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

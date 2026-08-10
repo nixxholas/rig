@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { ConfigProvider, ConfigProviders } from "../config/types.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
@@ -19,7 +20,7 @@ export interface P2pCredentialRuntimeRegistryOptions {
     localInstanceId: string;
     localName: () => string;
     localProviders: ConfigProviders;
-    peers: () => readonly P2pTrustedPeer[] | Promise<readonly P2pTrustedPeer[]>;
+    peers: (ctx: Context) => readonly P2pTrustedPeer[] | Promise<readonly P2pTrustedPeer[]>;
     runtimeDirectory: string;
     store: P2pCredentialStore;
 }
@@ -43,15 +44,16 @@ export class P2pCredentialRuntimeRegistry {
     }
 
     static async open(
+        ctx: Context,
         options: P2pCredentialRuntimeRegistryOptions,
     ): Promise<P2pCredentialRuntimeRegistry> {
         const registry = new P2pCredentialRuntimeRegistry(options);
-        await registry.refresh();
+        await registry.refresh(ctx);
         return registry;
     }
 
-    async refresh(): Promise<boolean> {
-        const snapshots = await this.#options.store.listAll();
+    async refresh(ctx: Context): Promise<boolean> {
+        const snapshots = await this.#options.store.listAll(ctx);
         const retainedCredentialDirectories = new Set<string>();
         for (const [ownerInstanceId, snapshot] of snapshots) {
             for (const provider of snapshot) {
@@ -71,7 +73,7 @@ export class P2pCredentialRuntimeRegistry {
         }
         this.#removeStaleCredentialDirectories(retainedCredentialDirectories);
         const peers = new Map(
-            (await this.#options.peers()).map((peer) => [peer.instanceId, peer] as const),
+            (await this.#options.peers(ctx)).map((peer) => [peer.instanceId, peer] as const),
         );
         const sources: ProviderCredentialSource[] = [
             {
@@ -96,7 +98,7 @@ export class P2pCredentialRuntimeRegistry {
             if (Object.keys(providers).length === 0) continue;
             let catalog: ModelCatalog;
             try {
-                catalog = createModelCatalog({
+                catalog = createModelCatalog(ctx, {
                     cwd: this.#options.runtimeDirectory,
                     env: {},
                     providers,
@@ -118,7 +120,7 @@ export class P2pCredentialRuntimeRegistry {
         const revision = createHash("sha256")
             .update(
                 JSON.stringify({
-                    peers: (await this.#options.peers()).map((peer) => ({
+                    peers: (await this.#options.peers(ctx)).map((peer) => ({
                         instanceId: peer.instanceId,
                         name: peer.name,
                     })),

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProjectWorkspace } from "../../protocol/index.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { workspaceRunReadiness } from "../workspaceRunReadiness.js";
+
+const ctx = createTestRootContext();
 
 const workspace = {
     id: "workspace-1",
@@ -19,6 +22,7 @@ describe("workspaceRunReadiness", () => {
     it("keeps the run queued when checkout availability cannot be determined", async () => {
         expect(
             await workspaceRunReadiness(
+                ctx,
                 projects,
                 {
                     cwd: workspace.path,
@@ -39,12 +43,13 @@ describe("workspaceRunReadiness", () => {
             workspaceId: workspace.id,
         };
         expect(
-            await workspaceRunReadiness(projects, target, () => {
+            await workspaceRunReadiness(ctx, projects, target, () => {
                 throw Object.assign(new Error("Missing."), { code: "ENOENT" });
             }),
         ).toMatchObject({ state: "failed" });
         expect(
             await workspaceRunReadiness(
+                ctx,
                 {
                     getWorkspace: async () => ({ ...workspace, presence: "missing" }),
                 },

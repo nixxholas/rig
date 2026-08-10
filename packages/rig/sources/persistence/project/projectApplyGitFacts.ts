@@ -1,17 +1,19 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { GitRepositoryFacts } from "../../protocol/index.js";
 import { projects } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { projectGitChanged, type GitValues } from "./projectConditions.js";
 
 export async function projectApplyGitFacts(
-    tx: DatabaseScope,
+    ctx: Context,
     id: string,
     facts: GitRepositoryFacts,
     now: number,
 ): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.projectApplyGitFacts", async (ctx) => {
+        const tx = ctx.tx;
         const values: GitValues = {
             gitAhead: facts.ahead,
             gitBehind: facts.behind,

@@ -1,14 +1,16 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
 
 import { projectAvatarAssets } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryProjectAvatarAsset(
-    tx: DatabaseScope,
+    ctx: Context,
     hash: string,
 ): Promise<{ height: number; mediaType: string; width: number } | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.queryProjectAvatarAsset", async (ctx) => {
+        const tx = ctx.tx;
         return await tx
             .select({
                 height: projectAvatarAssets.height,

@@ -1,10 +1,11 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import type { FolderItemTarget } from "../../protocol/index.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { folderItems, folders } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderChildren } from "../folder/queryFolderChildren.js";
 
 export type FolderItemCreateResult =
@@ -13,7 +14,7 @@ export type FolderItemCreateResult =
     | { outcome: "id_conflict" };
 
 export async function folderItemCreate(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         folderId: string;
         id: string;
@@ -22,7 +23,8 @@ export async function folderItemCreate(
         target: FolderItemTarget;
     },
 ): Promise<FolderItemCreateResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.folderItem.folderItemCreate", async (ctx) => {
+        const tx = ctx.tx;
         const folder = await tx
             .select({ archivedAtMs: folders.archivedAtMs })
             .from(folders)
@@ -40,7 +42,7 @@ export async function folderItemCreate(
         ) {
             return { outcome: "id_conflict" };
         }
-        const last = (await queryFolderChildren(tx, input.folderId)).at(-1);
+        const last = (await queryFolderChildren(ctx, input.folderId)).at(-1);
         await tx
             .insert(folderItems)
             .values({

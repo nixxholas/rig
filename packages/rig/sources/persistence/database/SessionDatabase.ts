@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
@@ -72,28 +73,30 @@ class SessionDatabaseOwner {
      * Closes the underlying client. The libSQL client currently exposes a synchronous close
      * method, but keeping this lifecycle method asynchronous gives callers one awaited boundary.
      */
-    async close(): Promise<void> {
-        if (this.state === "closed") return;
-        if (this.closePromise !== undefined) return await this.closePromise;
+    async close(ctx: Context): Promise<void> {
+        return await ctx.span("rig.sql.database.close", async () => {
+            if (this.state === "closed") return;
+            if (this.closePromise !== undefined) return await this.closePromise;
 
-        this.state = "closing";
-        const closePromise = this.asyncLock.runInLock(async () => {
+            this.state = "closing";
+            const closePromise = this.asyncLock.runInLock(async () => {
+                try {
+                    await this.client.close();
+                } finally {
+                    this.state = "closed";
+                }
+            });
+            this.closePromise = closePromise;
             try {
-                await this.client.close();
-            } finally {
-                this.state = "closed";
+                await closePromise;
+            } catch (error) {
+                // The state is terminal even when the underlying close reports an error. Clearing
+                // the rejected promise makes later close calls idempotent while retaining this
+                // caller's original failure.
+                this.closePromise = undefined;
+                throw error;
             }
         });
-        this.closePromise = closePromise;
-        try {
-            await closePromise;
-        } catch (error) {
-            // The state is terminal even when the underlying close reports an error. Clearing the
-            // rejected promise makes later close calls idempotent while retaining this caller's
-            // original failure.
-            this.closePromise = undefined;
-            throw error;
-        }
     }
 
     /**
@@ -101,12 +104,13 @@ class SessionDatabaseOwner {
      * allowed to drain ahead of the close operation; callers arriving after closing starts fail.
      */
     async runInLock<T>(
-        operation: (database: DrizzleSessionDatabase) => T | Promise<T>,
+        ctx: Context,
+        operation: (ctx: Context, database: DrizzleSessionDatabase) => T | Promise<T>,
     ): Promise<T> {
         if (this.state !== "open") {
             throw new SessionDatabaseClosedError(this.state);
         }
-        return this.asyncLock.runInLock(() => Promise.resolve(operation(this.database)));
+        return this.asyncLock.runInLock(() => Promise.resolve(operation(ctx, this.database)));
     }
 }
 
@@ -135,12 +139,13 @@ export const SessionDatabase = SessionDatabaseOwner;
 
 export type DrizzleSessionTx = DrizzleSessionDatabase | DrizzleSessionTransaction;
 
-export function getSessionDatabaseOwner(
-    value: SessionDatabase | DrizzleSessionDatabase,
-): SessionDatabaseOwner | undefined {
-    return value instanceof SessionDatabaseOwner
-        ? value
-        : (owners.get(value) ?? transactionOwners.get(value));
+export function getSessionDatabaseOwner(value: unknown): SessionDatabaseOwner | undefined {
+    if (!isObject(value)) return undefined;
+    return (
+        owners.get(value) ??
+        transactionOwners.get(value) ??
+        (value instanceof SessionDatabaseOwner ? value : undefined)
+    );
 }
 
 export function isSessionDatabaseTransaction(value: unknown): value is DrizzleSessionTransaction {
@@ -182,6 +187,7 @@ export function createSessionDatabase(client: Client): SessionDatabase {
     const database = wrapDrizzleFacade(rawDatabase);
     const owner = new SessionDatabaseOwner(client, database);
     owners.set(rawDatabase, owner);
+    owners.set(database, owner);
     const wrapper = new Proxy(owner, {
         get(target, property, receiver) {
             if (property in target) return Reflect.get(target, property, receiver);

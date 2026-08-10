@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { createEventIdFactory } from "../../protocol/index.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestFixtureDirectory } from "../../testing/createTestFixtureDirectory.js";
@@ -220,11 +222,14 @@ async function startServer(): Promise<{
     const root = await createTestFixtureDirectory();
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(createTestRootContext(), {
         homeDirectory: root,
         localInstanceId: LOCAL_INSTANCE_ID,
     });
-    const server: Server = await createProtocolHttpServer({ store, token: "t" });
+    const server: Server = await createProtocolHttpServer(createTestRootContext(), {
+        store,
+        token: "t",
+    });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {

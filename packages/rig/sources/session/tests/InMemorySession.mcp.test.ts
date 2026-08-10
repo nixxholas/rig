@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 
@@ -90,7 +93,7 @@ describe("InMemorySession MCP permissions", () => {
         );
         const mcpToolProvider: McpToolProvider = { close: async () => undefined, load };
         let runtime: CodingAssistantRuntime | undefined;
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime(options) {
                 runtime = createRuntime(options, provider);
@@ -106,8 +109,8 @@ describe("InMemorySession MCP permissions", () => {
             },
         });
 
-        const restrictedRun = await session.submit({ text: "Restricted turn." });
-        await expect(session.waitForRun(restrictedRun.runId)).resolves.toEqual({
+        const restrictedRun = await session.submit(ctx, { text: "Restricted turn." });
+        await expect(session.waitForRun(ctx, restrictedRun.runId)).resolves.toEqual({
             status: "completed",
         });
         expect(toolCatalogs.at(-1)).not.toContain(mcpTool.name);
@@ -115,10 +118,10 @@ describe("InMemorySession MCP permissions", () => {
             expect.objectContaining({ name: "trusted", status: "blocked" }),
         ]);
 
-        await session.changePermissionMode({ permissionMode: "auto" });
+        await session.changePermissionMode(ctx, { permissionMode: "auto" });
         expect(runtime?.agent.tools.map((tool) => tool.name)).not.toContain(mcpTool.name);
-        const autoRun = await session.submit({ text: "Auto turn." });
-        await expect(session.waitForRun(autoRun.runId)).resolves.toEqual({
+        const autoRun = await session.submit(ctx, { text: "Auto turn." });
+        await expect(session.waitForRun(ctx, autoRun.runId)).resolves.toEqual({
             status: "completed",
         });
         expect(toolCatalogs.at(-1)).toContain(mcpTool.name);
@@ -127,22 +130,22 @@ describe("InMemorySession MCP permissions", () => {
         ]);
 
         activeMcpTools = [refreshedMcpTool];
-        const refreshedRun = await session.submit({ text: "Refresh this active session." });
-        await expect(session.waitForRun(refreshedRun.runId)).resolves.toEqual({
+        const refreshedRun = await session.submit(ctx, { text: "Refresh this active session." });
+        await expect(session.waitForRun(ctx, refreshedRun.runId)).resolves.toEqual({
             status: "completed",
         });
         expect(toolCatalogs.at(-1)).toContain(refreshedMcpTool.name);
         expect(toolCatalogs.at(-1)).not.toContain(mcpTool.name);
         expect(release).toHaveBeenCalledOnce();
 
-        await session.changePermissionMode({ permissionMode: "workspace_write" });
+        await session.changePermissionMode(ctx, { permissionMode: "workspace_write" });
         expect(release).toHaveBeenCalledTimes(2);
         expect(runtime?.agent.tools.map((tool) => tool.name)).not.toContain(mcpTool.name);
         expect(session.snapshot().mcpServers).toEqual([
             expect.objectContaining({ name: "trusted", status: "blocked" }),
         ]);
-        const downgradedRun = await session.submit({ text: "Downgraded turn." });
-        await expect(session.waitForRun(downgradedRun.runId)).resolves.toEqual({
+        const downgradedRun = await session.submit(ctx, { text: "Downgraded turn." });
+        await expect(session.waitForRun(ctx, downgradedRun.runId)).resolves.toEqual({
             status: "completed",
         });
         expect(toolCatalogs.at(-1)).not.toContain(mcpTool.name);
@@ -231,7 +234,7 @@ describe("InMemorySession MCP permissions", () => {
             ],
             tools: activeMcpTools,
         }));
-        const session = new InMemorySession({
+        const session = new InMemorySession(ctx, {
             createEventId: createEventIdFactory(),
             createRuntime(options) {
                 const runtime = createRuntime(options, provider);
@@ -251,8 +254,8 @@ describe("InMemorySession MCP permissions", () => {
             },
         });
 
-        const run = await session.submit({ text: "Install the clock and call it." });
-        await expect(session.waitForRun(run.runId)).resolves.toEqual({ status: "completed" });
+        const run = await session.submit(ctx, { text: "Install the clock and call it." });
+        await expect(session.waitForRun(ctx, run.runId)).resolves.toEqual({ status: "completed" });
 
         expect(toolCatalogs).toHaveLength(2);
         expect(toolCatalogs[0]).not.toContain(liveTool.name);
@@ -266,7 +269,7 @@ function createRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
         cwd: options.cwd,
         ...(options.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }),
         processManager,

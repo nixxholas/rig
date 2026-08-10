@@ -11,6 +11,7 @@ import {
     modelOpenaiGpt56Terra,
 } from "@slopus/rig-execution";
 import { uniqueModelsById } from "./uniqueModelsById.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface CreateModelCatalogOptions {
     cwd?: string;
@@ -22,11 +23,14 @@ export interface CreateModelCatalogOptions {
     providers?: ConfigProviders;
 }
 
-export function createModelCatalog(options: CreateModelCatalogOptions = {}): ModelCatalog {
+export function createModelCatalog(
+    ctx: Context,
+    options: CreateModelCatalogOptions = {},
+): ModelCatalog {
     const cwd = options.cwd ?? process.cwd();
     const env = options.env ?? process.env;
     const providerSettings = options.providers ?? DEFAULT_RIG_CONFIG.providers;
-    const context = createNodeAgentContext({
+    const context = createNodeAgentContext(ctx, {
         cwd,
         processManager: new NativeProcessManager(),
     });

@@ -11,31 +11,36 @@ import { happyCloudApplyCommand } from "../persistence/happy-cloud/happyCloudApp
 import { queryHappyCloudProfile } from "../persistence/happy-cloud/queryHappyCloudProfile.js";
 import { queryHappyCloudSessionBlob } from "../persistence/happy-cloud/queryHappyCloudSessionBlob.js";
 import { queryHappyCloudStatus } from "../persistence/happy-cloud/queryHappyCloudStatus.js";
-import type { TX } from "../persistence/Transaction.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface HappyCloudServiceContract {
-    apply(command: HappyCloudCommand): Promise<HappyCloudCommandResponse>;
-    getProfile(): Promise<HappyCloudProfileCiphertextResponse | undefined>;
-    getSessionBlob(sessionId: string): Promise<HappyCloudSessionBlobResponse | undefined>;
-    status(): Promise<HappyCloudStatus>;
+    apply(ctx: Context, command: HappyCloudCommand): Promise<HappyCloudCommandResponse>;
+    getProfile(ctx: Context): Promise<HappyCloudProfileCiphertextResponse | undefined>;
+    getSessionBlob(
+        ctx: Context,
+        sessionId: string,
+    ): Promise<HappyCloudSessionBlobResponse | undefined>;
+    status(ctx: Context): Promise<HappyCloudStatus>;
 }
 
 export interface HappyCloudPersistence {
-    query<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
-    transaction<T>(operation: (tx: TX) => Promise<T>): Promise<T>;
+    query<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
+    transaction<T>(ctx: Context, operation: (ctx: Context) => Promise<T>): Promise<T>;
 }
 
 export interface HappyCloudServiceOptions {
     now?: () => number;
     persistence: HappyCloudPersistence;
-    publish?: (event: HappyCloudChangedEvent) => void | Promise<void>;
+    publish?: (ctx: Context, event: HappyCloudChangedEvent) => void | Promise<void>;
 }
 
 export class HappyCloudService implements HappyCloudServiceContract {
     readonly #createEventId = createEventIdFactory();
     readonly #now: () => number;
     readonly #persistence: HappyCloudPersistence;
-    readonly #publish: ((event: HappyCloudChangedEvent) => void | Promise<void>) | undefined;
+    readonly #publish:
+        | ((ctx: Context, event: HappyCloudChangedEvent) => void | Promise<void>)
+        | undefined;
 
     constructor(options: HappyCloudServiceOptions) {
         this.#now = options.now ?? Date.now;
@@ -43,13 +48,13 @@ export class HappyCloudService implements HappyCloudServiceContract {
         this.#publish = options.publish;
     }
 
-    async apply(command: HappyCloudCommand): Promise<HappyCloudCommandResponse> {
-        return await this.#persistence.transaction(async (tx) => {
+    async apply(ctx: Context, command: HappyCloudCommand): Promise<HappyCloudCommandResponse> {
+        return await this.#persistence.transaction(ctx, async (ctx) => {
             const createdAt = this.#now();
-            const previous = await queryHappyCloudStatus(tx);
-            const response = await happyCloudApplyCommand(tx, command, createdAt);
+            const previous = await queryHappyCloudStatus(ctx);
+            const response = await happyCloudApplyCommand(ctx, command, createdAt);
             if (response.status.version > previous.version) {
-                await this.#publish?.({
+                await this.#publish?.(ctx, {
                     createdAt,
                     data: {
                         mutationId: command.mutationId,
@@ -63,15 +68,20 @@ export class HappyCloudService implements HappyCloudServiceContract {
         });
     }
 
-    async getProfile(): Promise<HappyCloudProfileCiphertextResponse | undefined> {
-        return this.#persistence.query(async (tx) => queryHappyCloudProfile(tx));
+    async getProfile(ctx: Context): Promise<HappyCloudProfileCiphertextResponse | undefined> {
+        return this.#persistence.query(ctx, queryHappyCloudProfile);
     }
 
-    async getSessionBlob(sessionId: string): Promise<HappyCloudSessionBlobResponse | undefined> {
-        return this.#persistence.query(async (tx) => queryHappyCloudSessionBlob(tx, sessionId));
+    async getSessionBlob(
+        ctx: Context,
+        sessionId: string,
+    ): Promise<HappyCloudSessionBlobResponse | undefined> {
+        return this.#persistence.query(ctx, async (ctx) =>
+            queryHappyCloudSessionBlob(ctx, sessionId),
+        );
     }
 
-    async status(): Promise<HappyCloudStatus> {
-        return this.#persistence.query(async (tx) => queryHappyCloudStatus(tx));
+    async status(ctx: Context): Promise<HappyCloudStatus> {
+        return this.#persistence.query(ctx, queryHappyCloudStatus);
     }
 }

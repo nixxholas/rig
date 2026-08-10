@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { ProjectRemoteTerminalStore } from "./ProjectRemoteTerminalStore.js";
 import { RemoteTerminalManager } from "./RemoteTerminalManager.js";
 import type {
@@ -9,6 +10,7 @@ import type {
 
 describe("ProjectRemoteTerminalStore", () => {
     it("waits for a deferred terminal creation and disposes it while closing the project", async () => {
+        const ctx = createTestRootContext();
         let releaseStart!: (process: RemoteTerminalProcess) => void;
         const startGate = new Promise<RemoteTerminalProcess>((resolve) => {
             releaseStart = resolve;
@@ -19,11 +21,11 @@ describe("ProjectRemoteTerminalStore", () => {
             resolveContext: () => ({ cwd: "/project" }),
         });
         const scope = { projectId: "project-1" };
-        const creation = store.create(scope, {});
+        const creation = store.create(ctx, scope, {});
         await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
 
-        const closure = store.closeProject(scope.projectId);
-        await expect(store.create(scope, {})).rejects.toThrow("closing");
+        const closure = store.closeProject(ctx, scope.projectId);
+        await expect(store.create(ctx, scope, {})).rejects.toThrow("closing");
         let closed = false;
         void closure.then(() => {
             closed = true;

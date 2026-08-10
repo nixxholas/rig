@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ const LIVE = process.env.RIG_LIVE_TEST === "1";
 const describeLive = LIVE ? describe : describe.skip;
 const cleanups: Array<() => Promise<void>> = [];
 const WAIT = { interval: 200, timeout: 90_000 } as const;
+const ctx = createTestRootContext().named("sharing-live-test");
 
 afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -28,35 +30,41 @@ describeLive("Sharing through the live Murmur relay", () => {
             const bob = await LiveRig.create("Bob");
             await makeContacts(alice, bob);
 
-            const root = await alice.folders.createFolder({ name: "Shared campaign" });
-            const child = await alice.folders.createFolder({
+            const root = await alice.folders.createFolder(ctx, { name: "Shared campaign" });
+            const child = await alice.folders.createFolder(ctx, {
                 name: "Drafts",
                 parentId: root.id,
             });
-            const bobIdentity = (await bob.sharing.snapshot()).identity;
-            await alice.sharing.createFolderShare(root.id, [bobIdentity]);
-            await alice.folders.updateFolder(child.id, { name: "Ready for review" }, child.version);
+            const bobIdentity = (await bob.sharing.snapshot(ctx)).identity;
+            await alice.sharing.createFolderShare(ctx, root.id, [bobIdentity]);
+            await alice.folders.updateFolder(
+                ctx,
+                child.id,
+                { name: "Ready for review" },
+                child.version,
+            );
 
             await vi.waitFor(async () => {
-                expect(await bob.folders.getFolder(root.id)).toMatchObject({
+                expect(await bob.folders.getFolder(ctx, root.id)).toMatchObject({
                     name: "Shared campaign",
                     shared: true,
                 });
-                expect(await bob.folders.getFolder(child.id)).toMatchObject({
+                expect(await bob.folders.getFolder(ctx, child.id)).toMatchObject({
                     name: "Ready for review",
                     parentId: root.id,
                 });
             }, WAIT);
 
-            const bobChild = await bob.folders.getFolder(child.id);
+            const bobChild = await bob.folders.getFolder(ctx, child.id);
             expect(bobChild).toBeDefined();
             await bob.folders.updateFolder(
+                ctx,
                 child.id,
                 { description: "Approved on Bob's Rig" },
                 bobChild!.version,
             );
             await vi.waitFor(async () => {
-                expect((await alice.folders.getFolder(child.id))?.description).toBe(
+                expect((await alice.folders.getFolder(ctx, child.id))?.description).toBe(
                     "Approved on Bob's Rig",
                 );
             }, WAIT);
@@ -71,9 +79,9 @@ describeLive("Sharing through the live Murmur relay", () => {
             const bob = await LiveRig.create("Bob");
             await waitConnected(alice, bob);
 
-            const invitation = await alice.sharing.createInvitation();
+            const invitation = await alice.sharing.createInvitation(ctx);
             await alice.stop();
-            await bob.sharing.requestContact(invitation.invitation);
+            await bob.sharing.requestContact(ctx, invitation.invitation);
             await bob.stop();
             await bob.start();
             await waitOutboundFlushed(bob);
@@ -81,7 +89,7 @@ describeLive("Sharing through the live Murmur relay", () => {
 
             await alice.start();
             const requestId = await waitForRequest(alice);
-            await alice.sharing.acceptContact(requestId);
+            await alice.sharing.acceptContact(ctx, requestId);
             await alice.stop();
             await alice.start();
             await waitOutboundFlushed(alice);
@@ -89,13 +97,13 @@ describeLive("Sharing through the live Murmur relay", () => {
 
             await bob.start();
             await vi.waitFor(async () => {
-                expect((await bob.sharing.snapshot()).contacts).toHaveLength(1);
+                expect((await bob.sharing.snapshot(ctx)).contacts).toHaveLength(1);
             }, WAIT);
             await bob.stop();
 
             await alice.start();
             await vi.waitFor(async () => {
-                expect((await alice.sharing.snapshot()).contacts).toHaveLength(1);
+                expect((await alice.sharing.snapshot(ctx)).contacts).toHaveLength(1);
             }, WAIT);
         },
     );
@@ -107,25 +115,34 @@ describeLive("Sharing through the live Murmur relay", () => {
             const alice = await LiveRig.create("Alice");
             const bob = await LiveRig.create("Bob");
             await makeContacts(alice, bob);
-            const root = await alice.folders.createFolder({ name: "Offline campaign" });
-            const child = await alice.folders.createFolder({ name: "Draft", parentId: root.id });
-            const bobIdentity = (await bob.sharing.snapshot()).identity;
+            const root = await alice.folders.createFolder(ctx, { name: "Offline campaign" });
+            const child = await alice.folders.createFolder(ctx, {
+                name: "Draft",
+                parentId: root.id,
+            });
+            const bobIdentity = (await bob.sharing.snapshot(ctx)).identity;
 
             await bob.stop();
-            await alice.sharing.createFolderShare(root.id, [bobIdentity]);
-            await alice.folders.updateFolder(child.id, { name: "Queued by Alice" }, child.version);
+            await alice.sharing.createFolderShare(ctx, root.id, [bobIdentity]);
+            await alice.folders.updateFolder(
+                ctx,
+                child.id,
+                { name: "Queued by Alice" },
+                child.version,
+            );
             await publishThenStop(alice);
 
             await bob.start();
             await vi.waitFor(async () => {
-                expect(await bob.folders.getFolder(root.id)).toMatchObject({
+                expect(await bob.folders.getFolder(ctx, root.id)).toMatchObject({
                     name: "Offline campaign",
                     shared: true,
                 });
-                expect((await bob.folders.getFolder(child.id))?.name).toBe("Queued by Alice");
+                expect((await bob.folders.getFolder(ctx, child.id))?.name).toBe("Queued by Alice");
             }, WAIT);
-            const bobChild = (await bob.folders.getFolder(child.id))!;
+            const bobChild = (await bob.folders.getFolder(ctx, child.id))!;
             await bob.folders.updateFolder(
+                ctx,
                 child.id,
                 { description: "Queued by Bob" },
                 bobChild.version,
@@ -134,7 +151,7 @@ describeLive("Sharing through the live Murmur relay", () => {
 
             await alice.start();
             await vi.waitFor(async () => {
-                expect((await alice.folders.getFolder(child.id))?.description).toBe(
+                expect((await alice.folders.getFolder(ctx, child.id))?.description).toBe(
                     "Queued by Bob",
                 );
             }, WAIT);
@@ -148,12 +165,15 @@ describeLive("Sharing through the live Murmur relay", () => {
             const alice = await LiveRig.create("Alice");
             const bob = await LiveRig.create("Bob");
             await makeContacts(alice, bob);
-            const root = await alice.folders.createFolder({ name: "Chaos board" });
+            const root = await alice.folders.createFolder(ctx, { name: "Chaos board" });
             for (let index = 0; index < 8; index += 1) {
-                await alice.folders.createFolder({ name: `Lane ${index + 1}`, parentId: root.id });
+                await alice.folders.createFolder(ctx, {
+                    name: `Lane ${index + 1}`,
+                    parentId: root.id,
+                });
             }
-            const bobIdentity = (await bob.sharing.snapshot()).identity;
-            await alice.sharing.createFolderShare(root.id, [bobIdentity]);
+            const bobIdentity = (await bob.sharing.snapshot(ctx)).identity;
+            await alice.sharing.createFolderShare(ctx, root.id, [bobIdentity]);
             await vi.waitFor(async () => {
                 expect(await directChildren(bob, root.id)).toEqual(
                     await directChildren(alice, root.id),
@@ -182,19 +202,19 @@ describeLive("Sharing through the live Murmur relay", () => {
 
 async function makeContacts(inviter: LiveRig, requester: LiveRig): Promise<void> {
     await waitConnected(inviter, requester);
-    const invitation = await inviter.sharing.createInvitation();
-    await requester.sharing.requestContact(invitation.invitation);
-    await inviter.sharing.acceptContact(await waitForRequest(inviter));
+    const invitation = await inviter.sharing.createInvitation(ctx);
+    await requester.sharing.requestContact(ctx, invitation.invitation);
+    await inviter.sharing.acceptContact(ctx, await waitForRequest(inviter));
     await vi.waitFor(async () => {
-        expect((await inviter.sharing.snapshot()).contacts).toHaveLength(1);
-        expect((await requester.sharing.snapshot()).contacts).toHaveLength(1);
+        expect((await inviter.sharing.snapshot(ctx)).contacts).toHaveLength(1);
+        expect((await requester.sharing.snapshot(ctx)).contacts).toHaveLength(1);
     }, WAIT);
 }
 
 async function waitForRequest(rig: LiveRig): Promise<string> {
     let requestId = "";
     await vi.waitFor(async () => {
-        const [request] = (await rig.sharing.snapshot()).incomingRequests;
+        const [request] = (await rig.sharing.snapshot(ctx)).incomingRequests;
         expect(request).toBeDefined();
         requestId = request!.id;
     }, WAIT);
@@ -205,7 +225,7 @@ async function waitConnected(...rigs: LiveRig[]): Promise<void> {
     await vi.waitFor(async () => {
         for (const rig of rigs) {
             expect(
-                (await rig.sharing.snapshot()).connection,
+                (await rig.sharing.snapshot(ctx)).connection,
                 `${rig.name}: ${rig.errors.join("; ")}`,
             ).toBe("connected");
         }
@@ -226,7 +246,7 @@ async function publishThenStop(rig: LiveRig): Promise<void> {
 }
 
 async function directChildren(rig: LiveRig, rootFolderId: string): Promise<string[]> {
-    return (await rig.folders.listFolders())
+    return (await rig.folders.listFolders(ctx))
         .filter((folder) => folder.parentId === rootFolderId && folder.archivedAt === undefined)
         .map((folder) => folder.id);
 }
@@ -237,8 +257,8 @@ async function reorderOne(rig: LiveRig, rootFolderId: string, random: () => numb
     const remaining = children.filter((id) => id !== movedId);
     const position = Math.floor(random() * (remaining.length + 1));
     const afterId = position === 0 ? null : remaining[position - 1]!;
-    const moved = (await rig.folders.getFolder(movedId))!;
-    await rig.folders.moveFolder(movedId, { afterId, parentId: rootFolderId }, moved.version);
+    const moved = (await rig.folders.getFolder(ctx, movedId))!;
+    await rig.folders.moveFolder(ctx, movedId, { afterId, parentId: rootFolderId }, moved.version);
 }
 
 function seededRandom(seed: number): () => number {
@@ -307,7 +327,7 @@ class LiveRig {
 
     async start(): Promise<void> {
         if (this.#sharing !== undefined) return;
-        const database = await PersistentSessionStore.open({
+        const database = await PersistentSessionStore.open(ctx, {
             databasePath: join(this.#directory, "rig.sqlite"),
             localInstanceId: this.#localInstanceId,
         });
@@ -316,7 +336,7 @@ class LiveRig {
             localInstanceId: database.localInstanceId,
             publish: () => undefined,
         });
-        const sharing = await SharingService.open({
+        const sharing = await SharingService.open(ctx, {
             database,
             directory: this.#directory,
             folders: database,
@@ -329,17 +349,17 @@ class LiveRig {
         this.#database = database;
         this.#sharing = sharing;
         this.#unsubscribe = database.liveEvents.subscribe(({ event }) => {
-            if (event.type === "folders_changed") sharing.foldersChanged();
+            if (event.type === "folders_changed") sharing.foldersChanged(ctx);
         });
         if (!this.#initialized) {
-            const profile = await profiles.create({
+            const profile = await profiles.create(ctx, {
                 email: `${this.#name.toLowerCase()}@example.test`,
                 name: this.#name,
             });
-            await sharing.bindProfile(profile.id);
+            await sharing.bindProfile(ctx, profile.id);
             this.#initialized = true;
         }
-        sharing.start();
+        sharing.start(ctx);
     }
 
     async stop(): Promise<void> {
@@ -349,8 +369,8 @@ class LiveRig {
         this.#database = undefined;
         this.#unsubscribe?.();
         this.#unsubscribe = undefined;
-        await sharing?.close();
-        await database?.close();
+        await sharing?.close(ctx);
+        await database?.close(ctx);
     }
 
     async destroy(): Promise<void> {

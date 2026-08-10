@@ -1,4 +1,6 @@
 import type { DockerExecutionConfig } from "../execution/index.js";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/index.js";
 import { createRemoteTerminalManager } from "./createRemoteTerminalManager.js";
 import type { RemoteTerminal } from "./RemoteTerminal.js";
 import type { RemoteTerminalManager } from "./RemoteTerminalManager.js";
@@ -29,9 +31,11 @@ export class ProjectRemoteTerminalStore {
     #closed = false;
     readonly #projectClosures = new Map<string, Promise<void>>();
     readonly #resolveContext: (
+        ctx: Context,
         scope: RemoteTerminalScope,
     ) => ProjectRemoteTerminalContext | Promise<ProjectRemoteTerminalContext>;
     readonly #onChange: (
+        ctx: Context,
         scope: RemoteTerminalScope,
         terminals: readonly RemoteTerminalSummary[],
     ) => void;
@@ -45,10 +49,12 @@ export class ProjectRemoteTerminalStore {
             onChange: (terminals: readonly RemoteTerminalSummary[]) => void,
         ) => RemoteTerminalManager;
         onChange?: (
+            ctx: Context,
             scope: RemoteTerminalScope,
             terminals: readonly RemoteTerminalSummary[],
         ) => void;
         resolveContext: (
+            ctx: Context,
             scope: RemoteTerminalScope,
         ) => ProjectRemoteTerminalContext | Promise<ProjectRemoteTerminalContext>;
     }) {
@@ -65,15 +71,15 @@ export class ProjectRemoteTerminalStore {
         this.#resolveContext = options.resolveContext;
     }
 
-    close(): Promise<void> {
+    close(ctx: Context): Promise<void> {
         this.#closed = true;
-        return this.#closeMatching(() => true);
+        return this.#closeMatching(ctx, () => true);
     }
 
-    closeProject(projectId: string): Promise<void> {
+    closeProject(ctx: Context, projectId: string): Promise<void> {
         const existing = this.#projectClosures.get(projectId);
         if (existing !== undefined) return existing;
-        const closure = this.#closeMatching((scope) => scope.projectId === projectId).finally(
+        const closure = this.#closeMatching(ctx, (scope) => scope.projectId === projectId).finally(
             () => {
                 if (this.#projectClosures.get(projectId) === closure) {
                     this.#projectClosures.delete(projectId);
@@ -84,11 +90,12 @@ export class ProjectRemoteTerminalStore {
         return closure;
     }
 
-    closeWorkspace(projectId: string, workspaceId: string): Promise<void> {
+    closeWorkspace(ctx: Context, projectId: string, workspaceId: string): Promise<void> {
         const key = scopeKey({ projectId, workspaceId });
         const existing = this.#workspaceClosures.get(key);
         if (existing !== undefined) return existing;
         const closure = this.#closeMatching(
+            ctx,
             (scope) => scope.projectId === projectId && scope.workspaceId === workspaceId,
         ).finally(() => {
             if (this.#workspaceClosures.get(key) === closure) {
@@ -100,6 +107,7 @@ export class ProjectRemoteTerminalStore {
     }
 
     async create(
+        ctx: Context,
         scope: RemoteTerminalScope,
         request: CreateRemoteTerminalRequest,
     ): Promise<RemoteTerminal> {
@@ -111,7 +119,7 @@ export class ProjectRemoteTerminalStore {
         ) {
             throw new Error("This project or workspace is closing and cannot open a terminal.");
         }
-        const scoped = await this.#manager(scope);
+        const scoped = await this.#manager(ctx, scope);
         if (scoped.closing !== undefined) {
             throw new Error("This project or workspace is closing and cannot open a terminal.");
         }
@@ -142,7 +150,10 @@ export class ProjectRemoteTerminalStore {
         }));
     }
 
-    #closeMatching(predicate: (scope: RemoteTerminalScope) => boolean): Promise<void> {
+    #closeMatching(
+        _ctx: Context,
+        predicate: (scope: RemoteTerminalScope) => boolean,
+    ): Promise<void> {
         const closures: Promise<void>[] = [];
         for (const scoped of this.#scopes.values()) {
             if (!predicate(scoped.scope)) continue;
@@ -162,15 +173,17 @@ export class ProjectRemoteTerminalStore {
         return scoped.closing;
     }
 
-    async #manager(scope: RemoteTerminalScope): Promise<ScopedRemoteTerminalManager> {
+    async #manager(ctx: Context, scope: RemoteTerminalScope): Promise<ScopedRemoteTerminalManager> {
         const key = scopeKey(scope);
         const existing = this.#scopes.get(key);
         if (existing !== undefined) return existing;
-        const context = await this.#resolveContext(scope);
+        const context = await this.#resolveContext(ctx, scope);
         const scoped = {
-            manager: this.#createManager(context, key, (terminals) =>
-                this.#onChange(scope, terminals),
-            ),
+            manager: this.#createManager(context, key, (terminals) => {
+                void withWorkerContext("remote-terminal-change", (workerCtx) =>
+                    this.#onChange(workerCtx, scope, terminals),
+                );
+            }),
             pendingCreates: new Set<Promise<RemoteTerminal>>(),
             scope: { ...scope },
         };

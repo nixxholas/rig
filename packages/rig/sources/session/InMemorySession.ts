@@ -7,6 +7,8 @@ const REFRESH_SCOPE_RUNTIME = Symbol("refresh-scope-runtime");
 import { createId } from "@paralleldrive/cuid2";
 import { Executor } from "@slopus/rig-execution";
 import { areProviderModelsCompatible, type ProviderUsage } from "@slopus/rig-providers";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/index.js";
 
 import { errorToMessage } from "../errorToMessage.js";
 import { toLocalDate } from "../executor/toLocalDate.js";
@@ -227,7 +229,12 @@ import { getProviderIdForModel } from "../model-catalog/getProviderIdForModel.js
 import { getProviderIdsForModel } from "../model-catalog/getProviderIdsForModel.js";
 import { resolveInitialModelSelection } from "./impl/resolveInitialModelSelection.js";
 import { resolveSteeringContinuationMessageIds } from "./impl/resolveSteeringContinuationMessageIds.js";
-import { SessionEventLog, type SessionEventLogCheckpoint } from "./SessionEventLog.js";
+import {
+    SessionEventLog,
+    type SessionEventAppendHook,
+    type SessionEventLogCheckpoint,
+    type SessionEventNotificationScheduler,
+} from "./SessionEventLog.js";
 import { isSessionTransactionPostCommitError } from "./SessionTransactionContext.js";
 import { isTransientInferenceSessionEvent } from "./impl/isTransientInferenceSessionEvent.js";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
@@ -409,87 +416,114 @@ export interface PersistedWorkflowRun {
 }
 
 export interface InMemorySessionPersistence {
-    acceptQueuedRun?(input: {
-        event: Extract<SessionEvent, { type: "message_submitted" }>;
-        message: PersistedSessionMessage;
-        run: PersistedQueuedRun;
-        status: "queued" | "running";
-        submittedAt: number;
-        workspaceQueueWaiting: boolean;
-    }): Promise<void>;
+    acceptQueuedRun?(
+        ctx: Context,
+        input: {
+            event: Extract<SessionEvent, { type: "message_submitted" }>;
+            message: PersistedSessionMessage;
+            run: PersistedQueuedRun;
+            status: "queued" | "running";
+            submittedAt: number;
+            workspaceQueueWaiting: boolean;
+        },
+    ): Promise<void>;
     /**
      * Runs cleanup immediately outside a transaction, or after the enclosing transaction commits.
      * Runtime/process teardown must not happen while a session archive is still rollbackable.
      */
-    afterTransactionCommit?(callback: () => void | Promise<void>): Promise<void>;
-    clearMessages(sessionId: string): Promise<void>;
-    deleteMessagesFrom(sessionId: string, position: number): Promise<void>;
-    deleteQueuedRun(sessionId: string, runId: string): Promise<void>;
-    failQueuedRun?(input: {
-        event: Extract<SessionEvent, { type: "run_error" }>;
-        runId: string;
-    }): Promise<void>;
+    afterTransactionCommit?(
+        ctx: Context,
+        callback: (ctx: Context) => void | Promise<void>,
+    ): Promise<void>;
+    clearMessages(ctx: Context, sessionId: string): Promise<void>;
+    deleteMessagesFrom(ctx: Context, sessionId: string, position: number): Promise<void>;
+    deleteQueuedRun(ctx: Context, sessionId: string, runId: string): Promise<void>;
+    failQueuedRun?(
+        ctx: Context,
+        input: {
+            event: Extract<SessionEvent, { type: "run_error" }>;
+            runId: string;
+        },
+    ): Promise<void>;
     handoffDurablePermissionToExternalTool?(
+        ctx: Context,
         externalCall: ExternalToolCall,
         permissionCall: DurableUserInputCall,
     ): Promise<void>;
-    insertQueuedRun(sessionId: string, run: PersistedQueuedRun): Promise<void>;
+    insertQueuedRun(ctx: Context, sessionId: string, run: PersistedQueuedRun): Promise<void>;
     insertPendingContextMessage?(
+        ctx: Context,
         sessionId: string,
         pending: PersistedPendingContextMessage,
     ): Promise<void>;
     drainPendingContextMessages?(
+        ctx: Context,
         sessionId: string,
         messageIds?: readonly string[],
     ): Promise<readonly PersistedPendingContextMessage[]>;
     loadTranscriptPage?(
+        ctx: Context,
         sessionId: string,
         turnLimit: number,
         before?: string,
     ): Promise<SessionTranscriptWindow | undefined>;
     loadTranscriptSince?(
+        ctx: Context,
         sessionId: string,
         turnLimit: number,
         after: EventId,
     ): Promise<SessionTranscriptWindow | undefined>;
-    pruneExternalToolCalls?(sessionId: string, retain: number): Promise<void>;
-    pruneDurableUserInputs?(sessionId: string, retain: number): Promise<void>;
-    pruneDurableWaits?(sessionId: string, retain: number): Promise<void>;
-    pruneScheduledMessages?(sessionId: string, retain: number): Promise<readonly string[]>;
-    saveSession(state: PersistedSessionState): Promise<void>;
-    startQueuedRun?(input: {
-        activeSince: number;
-        event: Extract<SessionEvent, { type: "run_started" }>;
-        regularMessageIds: readonly string[];
-        runId: string;
-    }): Promise<readonly PersistedPendingContextMessage[]>;
-    setWorkspaceTransferState?(input: {
-        contextMessages?: readonly Message[];
-        sessionId: string;
-        state: SessionWorkspaceTransferState;
-    }): Promise<void>;
-    transaction?<T>(body: () => T | Promise<T>): Promise<T>;
-    transferWorkspace?(input: {
-        contextMessages: readonly Message[];
-        cwd: string;
-        sessionId: string;
-        state: SessionWorkspaceTransferState;
-        projectId: string;
-        workspaceId: string;
-    }): Promise<string>;
-    upsertMessage(sessionId: string, message: PersistedSessionMessage): Promise<void>;
-    upsertExternalToolCall?(call: ExternalToolCall): Promise<void>;
-    upsertDurableUserInput?(call: DurableUserInputCall): Promise<void>;
-    upsertDurableWait?(wait: DurableWait): Promise<void>;
-    upsertScheduledMessage?(message: ScheduledMessage): Promise<void>;
-    scheduledMessageChanged?(): Promise<void>;
+    pruneExternalToolCalls?(ctx: Context, sessionId: string, retain: number): Promise<void>;
+    pruneDurableUserInputs?(ctx: Context, sessionId: string, retain: number): Promise<void>;
+    pruneDurableWaits?(ctx: Context, sessionId: string, retain: number): Promise<void>;
+    pruneScheduledMessages?(
+        ctx: Context,
+        sessionId: string,
+        retain: number,
+    ): Promise<readonly string[]>;
+    saveSession(ctx: Context, state: PersistedSessionState): Promise<void>;
+    startQueuedRun?(
+        ctx: Context,
+        input: {
+            activeSince: number;
+            event: Extract<SessionEvent, { type: "run_started" }>;
+            regularMessageIds: readonly string[];
+            runId: string;
+        },
+    ): Promise<readonly PersistedPendingContextMessage[]>;
+    setWorkspaceTransferState?(
+        ctx: Context,
+        input: {
+            contextMessages?: readonly Message[];
+            sessionId: string;
+            state: SessionWorkspaceTransferState;
+        },
+    ): Promise<void>;
+    transaction?<T>(ctx: Context, body: (ctx: Context) => T | Promise<T>): Promise<T>;
+    transferWorkspace?(
+        ctx: Context,
+        input: {
+            contextMessages: readonly Message[];
+            cwd: string;
+            sessionId: string;
+            state: SessionWorkspaceTransferState;
+            projectId: string;
+            workspaceId: string;
+        },
+    ): Promise<string>;
+    upsertMessage(ctx: Context, sessionId: string, message: PersistedSessionMessage): Promise<void>;
+    upsertExternalToolCall?(ctx: Context, call: ExternalToolCall): Promise<void>;
+    upsertDurableUserInput?(ctx: Context, call: DurableUserInputCall): Promise<void>;
+    upsertDurableWait?(ctx: Context, wait: DurableWait): Promise<void>;
+    upsertScheduledMessage?(ctx: Context, message: ScheduledMessage): Promise<void>;
+    scheduledMessageChanged?(ctx: Context): Promise<void>;
 }
 
 export interface InMemorySessionOptions {
     agentManager?: AgentSessionManager;
     createEventId: () => EventId;
     createRuntime?: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
-    deferEventNotification?: (notify: () => void | Promise<void>) => void | Promise<void>;
+    deferEventNotification?: SessionEventNotificationScheduler;
     emitCreatedEvent?: boolean;
     events?: readonly SessionEvent[];
     /** The folder tree this session's agent may read, rearrange, and file this chat into. */
@@ -517,7 +551,7 @@ export interface InMemorySessionOptions {
     ) => RigProfile | undefined | Promise<RigProfile | undefined>;
     metadata?: SessionAgentMetadata;
     mcpToolProvider?: McpToolProvider;
-    onAppendEvent?: (event: SessionEvent) => void | Promise<void>;
+    onAppendEvent?: SessionEventAppendHook;
     orderKey?: string;
     persistence?: InMemorySessionPersistence;
     presence?: { state(): PresenceState };
@@ -829,21 +863,21 @@ export class InMemorySession {
     #workspaceRunReadiness: InMemorySessionOptions["workspaceRunReadiness"];
     #workspaceTransfer: SessionWorkspaceTransferState = { status: "idle" };
 
-    static async open(options: InMemorySessionOptions): Promise<InMemorySession> {
-        const session = new InMemorySession(options);
+    static async open(ctx: Context, options: InMemorySessionOptions): Promise<InMemorySession> {
+        const session = new InMemorySession(ctx, options);
         await session.#ready;
         return session;
     }
 
-    static async create(options: InMemorySessionOptions): Promise<InMemorySession> {
-        return await InMemorySession.open(options);
+    static async create(ctx: Context, options: InMemorySessionOptions): Promise<InMemorySession> {
+        return await InMemorySession.open(ctx, options);
     }
 
     async ready(): Promise<void> {
         await this.#ready;
     }
 
-    constructor(options: InMemorySessionOptions) {
+    constructor(ctx: Context, options: InMemorySessionOptions) {
         this.#agentManager = options.agentManager;
         this.#workspaceFeatures = options.workspaceFeatures ?? DEFAULT_WORKSPACE_FEATURES;
         this.#workspaceRunReadiness = options.workspaceRunReadiness;
@@ -1114,7 +1148,7 @@ export class InMemorySession {
             this.#permissionReviews.set(review.toolCallId, { ...review });
         }
         this.#restoreDurableWaitTimers();
-        void this.#refreshWaitActivity(false).catch(rethrowDatabaseFailure);
+        void this.#refreshWaitActivity(ctx, false).catch(rethrowDatabaseFailure);
         for (const event of this.events.all()) {
             this.#recordRunFacts(event);
             this.#recordPermissionReview(event);
@@ -1156,33 +1190,35 @@ export class InMemorySession {
 
         this.#ensureKnownModel(this.#modelId, this.#providerId);
         this.#ready = (async () => {
-            await this.#restoreUserInputPresenceTimers();
+            await this.#restoreUserInputPresenceTimers(ctx);
             if (
                 this.#workspaceTransfer.status === "scheduled" ||
                 this.#workspaceTransfer.status === "transferring"
             ) {
                 await this.failWorkspaceTransfer(
+                    ctx,
                     this.#workspaceTransfer.targetWorkspaceId,
                     new Error(
                         "The session transfer did not happen because the local server stopped before it could finish.",
                     ),
                     "not_touched",
                 );
-            } else {
-                await this.#saveSession();
+            } else if (options.restore === undefined) {
+                await this.#saveSession(ctx);
             }
             if (options.restore === undefined) {
                 if (options.emitCreatedEvent !== false) {
-                    await this.emitCreatedEvent();
+                    await this.emitCreatedEvent(ctx);
                 }
             } else {
-                await this.#continueGoalIfIdle();
+                await this.#continueGoalIfIdle(ctx);
                 if (!this.isSubagent()) await this.#restartMetadataSettlement();
             }
         })();
     }
 
     abort(
+        ctx: Context,
         options: {
             continuePendingSteering?: boolean;
             expectedRunId?: string;
@@ -1228,7 +1264,7 @@ export class InMemorySession {
             return this.#abortInFlight.promise;
         }
         const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
-        const operation = this.#performAbort(options);
+        const operation = this.#performAbort(ctx, options);
         const tracked = operation.finally(() => {
             if (this.#abortInFlight?.promise === tracked) this.#abortInFlight = undefined;
         });
@@ -1241,13 +1277,16 @@ export class InMemorySession {
         return tracked;
     }
 
-    async #performAbort(options: {
-        continuePendingSteering?: boolean;
-        expectedRunId?: string;
-        mutationId?: string;
-        stopDescendants?: boolean;
-        steeringMessageIds?: readonly string[];
-    }): Promise<AbortRunResponse> {
+    async #performAbort(
+        ctx: Context,
+        options: {
+            continuePendingSteering?: boolean;
+            expectedRunId?: string;
+            mutationId?: string;
+            stopDescendants?: boolean;
+            steeringMessageIds?: readonly string[];
+        },
+    ): Promise<AbortRunResponse> {
         const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
         if (options.expectedRunId !== undefined && runId !== options.expectedRunId) {
             return { aborted: false };
@@ -1304,16 +1343,16 @@ export class InMemorySession {
         const stopDescendants =
             options.stopDescendants === false
                 ? Promise.resolve(0)
-                : (this.#agentManager?.stopDescendants(this.id) ?? Promise.resolve(0));
+                : (this.#agentManager?.stopDescendants(ctx, this.id) ?? Promise.resolve(0));
         const runningProcesses = this.#activeProcessCount();
         if (this.#activeRun === undefined && this.#queue.length === 0 && runningProcesses === 0) {
             if (runId !== undefined && this.hasDurableToolRun()) {
-                await this.#cancelExternalToolCalls(runId);
-                await this.#cancelDurableUserInputs(runId);
-                await this.#cancelDurableWaits(runId);
+                await this.#cancelExternalToolCalls(ctx, runId);
+                await this.#cancelDurableUserInputs(ctx, runId);
+                await this.#cancelDurableWaits(ctx, runId);
                 this.#restoredActiveRunId = undefined;
                 this.#status = "aborted";
-                const event = await this.#append("abort_requested", { runId });
+                const event = await this.#append(ctx, "abort_requested", { runId });
                 await stopDescendants;
                 return { aborted: true, eventId: event.id };
             }
@@ -1324,7 +1363,7 @@ export class InMemorySession {
             const [, stoppedDescendants] = await Promise.all([
                 // Nothing is running to interrupt, so this is the user asking
                 // for the background work itself to stop.
-                this.#killRuntimeProcesses({ includeBackground: true }),
+                this.#killRuntimeProcesses(ctx, { includeBackground: true }),
                 stopDescendants,
             ]);
             return {
@@ -1334,7 +1373,7 @@ export class InMemorySession {
         }
 
         const interruptedMetadata = this.#metadataSettlement !== undefined;
-        await this.#clearMetadataSettlement();
+        await this.#clearMetadataSettlement(ctx);
         this.#workspaceReleaseMetadataBarrier = false;
         this.#clearWorkspaceReadinessRetry();
         this.#workspaceQueueWaiting = false;
@@ -1342,31 +1381,31 @@ export class InMemorySession {
         const queuedRunIds = discardedQueue.map((queued) => queued.runId);
         await Promise.all(
             discardedQueue.map((queued) =>
-                this.#persistence?.deleteQueuedRun(this.id, queued.runId),
+                this.#persistence?.deleteQueuedRun(ctx, this.id, queued.runId),
             ),
         );
         this.#queue = [];
-        await this.#pauseActiveGoal();
+        await this.#pauseActiveGoal(ctx);
         if (runId !== undefined) {
-            await this.#cancelExternalToolCalls(runId);
-            await this.#cancelDurableUserInputs(runId);
-            await this.#cancelDurableWaits(runId);
+            await this.#cancelExternalToolCalls(ctx, runId);
+            await this.#cancelDurableUserInputs(ctx, runId);
+            await this.#cancelDurableWaits(ctx, runId);
         }
         this.#activeRun?.controller.abort();
         this.#restoredActiveRunId = undefined;
-        const event = await this.#append("abort_requested", {
+        const event = await this.#append(ctx, "abort_requested", {
             ...(shouldContinuePendingSteering ? { continuePendingSteering: true as const } : {}),
             ...(runId === undefined ? {} : { runId }),
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
         await Promise.all([
-            this.#killRuntimeProcesses({ includeBackground: true }),
+            this.#killRuntimeProcesses(ctx, { includeBackground: true }),
             stopDescendants,
             ...discardedQueue.map((queued) => this.#closeDebugLog(queued)),
         ]);
         continuation?.resolveReady();
         for (const queuedRunId of queuedRunIds) {
-            await this.#append("run_error", {
+            await this.#append(ctx, "run_error", {
                 errorMessage: "The queued run was stopped.",
                 modelLocked: this.#modelLocked(),
                 runId: queuedRunId,
@@ -1386,7 +1425,7 @@ export class InMemorySession {
         };
     }
 
-    async stopBackgroundProcesses(): Promise<number> {
+    async stopBackgroundProcesses(ctx: Context): Promise<number> {
         const runtime = this.#runtime;
         if (runtime === undefined) return 0;
         const runningProcesses = runtime.context.bash.activeSessionCount?.() ?? 0;
@@ -1395,6 +1434,7 @@ export class InMemorySession {
     }
 
     async readBackgroundProcess(
+        ctx: Context,
         sessionId: number,
         options: { waitMs?: number } = {},
     ): Promise<ReadBackgroundProcessResponse | undefined> {
@@ -1405,7 +1445,10 @@ export class InMemorySession {
         return runtime.context.bash.readSession(sessionId, { ...options, peek: true });
     }
 
-    async stopBackgroundProcess(sessionId: number): Promise<StopBackgroundProcessResponse> {
+    async stopBackgroundProcess(
+        ctx: Context,
+        sessionId: number,
+    ): Promise<StopBackgroundProcessResponse> {
         const runtime = this.#runtime;
         if (runtime === undefined) return { stopped: false };
         const process = await runtime.context.bash.killSession(sessionId);
@@ -1414,13 +1457,16 @@ export class InMemorySession {
         return { process, stopped: true };
     }
 
-    async runShellCommand(request: RunShellCommandRequest): Promise<RunShellCommandResponse> {
+    async runShellCommand(
+        ctx: Context,
+        request: RunShellCommandRequest,
+    ): Promise<RunShellCommandResponse> {
         this.#assertAcceptingWork();
         const command = request.command.trim();
         if (command.length === 0) throw new Error("Enter a shell command after !.");
 
         const historyRevision = this.#shellHistoryRevision;
-        const bash = (await this.#ensureRuntime()).context.bash;
+        const bash = (await this.#ensureRuntime(ctx)).context.bash;
         let sessionId: number;
         try {
             sessionId = await bash.startSession({
@@ -1437,35 +1483,50 @@ export class InMemorySession {
                 output: errorToMessage(error),
                 timedOut: false,
             };
-            const event = await this.#recordShellCommandResult(result, historyRevision);
+            const event = await this.#recordShellCommandResult(ctx, result, historyRevision);
             return { ...result, eventId: event.id, status: "finished" };
         }
 
         // The user ran this, not a turn. Interrupting the agent must not reach
         // in and kill a command the user is watching.
         bash.detachSession?.(sessionId);
-        const event = await this.#append("shell_command_started", {
+        const event = await this.#append(ctx, "shell_command_started", {
             command,
             commandId: request.commandId,
             sessionId,
         });
         const watch = () =>
-            this.#watchShellCommand(bash, command, request.commandId, sessionId, historyRevision);
+            withWorkerContext(
+                "shell-command-watch",
+                (workerCtx) =>
+                    this.#watchShellCommand(
+                        workerCtx,
+                        bash,
+                        command,
+                        request.commandId,
+                        sessionId,
+                        historyRevision,
+                    ),
+                { sessionId: this.id },
+            );
         const watching = this.#taskDrain?.run(watch) ?? watch();
         const completion = watching
             .catch(async (error: unknown) => {
                 if (isDatabaseFailure(error)) throw error;
-                await this.#recordShellCommandResult(
-                    {
-                        command,
-                        commandId: request.commandId,
-                        errorMessage: errorToMessage(error),
-                        exitCode: null,
-                        output: errorToMessage(error),
-                        sessionId,
-                        timedOut: false,
-                    },
-                    historyRevision,
+                await withWorkerContext("shell-command-failure", (workerCtx) =>
+                    this.#recordShellCommandResult(
+                        workerCtx,
+                        {
+                            command,
+                            commandId: request.commandId,
+                            errorMessage: errorToMessage(error),
+                            exitCode: null,
+                            output: errorToMessage(error),
+                            sessionId,
+                            timedOut: false,
+                        },
+                        historyRevision,
+                    ),
                 );
             })
             .finally(() => {
@@ -1485,6 +1546,7 @@ export class InMemorySession {
     }
 
     async #watchShellCommand(
+        ctx: Context,
         bash: BashContext,
         command: string,
         commandId: string,
@@ -1501,6 +1563,7 @@ export class InMemorySession {
             if (snapshot.status === "running") continue;
 
             await this.#recordShellCommandResult(
+                ctx,
                 {
                     command,
                     commandId,
@@ -1516,11 +1579,12 @@ export class InMemorySession {
     }
 
     async #recordShellCommandResult(
+        ctx: Context,
         result: RunShellCommandResult,
         historyRevision: number,
     ): Promise<ShellCommandFinishedEvent> {
         if (historyRevision !== this.#shellHistoryRevision) {
-            return await this.#append("shell_command_finished", result);
+            return await this.#append(ctx, "shell_command_finished", result);
         }
         const contextMessage: UserMessage = {
             blocks: [{ type: "text", text: formatShellCommandContext(result) }],
@@ -1536,6 +1600,7 @@ export class InMemorySession {
             runtime.agent.enqueueMessage(contextMessage);
         }
         await this.#storeMessage(
+            ctx,
             this.#nextMessagePosition(),
             contextMessage,
             false,
@@ -1543,7 +1608,7 @@ export class InMemorySession {
         );
         this.#lastMessageAt = this.#now();
 
-        return await this.#append("shell_command_finished", result);
+        return await this.#append(ctx, "shell_command_finished", result);
     }
 
     /**
@@ -1553,7 +1618,7 @@ export class InMemorySession {
      * still there to be read through the usual background-task tools, and
      * pushing it here would drop it into the conversation uninvited.
      */
-    async #notifyBackgroundProcessExit(exit: BashSessionExit): Promise<void> {
+    async #notifyBackgroundProcessExit(ctx: Context, exit: BashSessionExit): Promise<void> {
         const runtime = this.#runtime;
         if (runtime === undefined) return;
         const message: SystemMessage = {
@@ -1562,7 +1627,7 @@ export class InMemorySession {
             internal: true,
             role: "system",
         };
-        await this.#append("agent_event", {
+        await this.#append(ctx, "agent_event", {
             event: {
                 command: exit.command,
                 exitCode: exit.exitCode,
@@ -1579,21 +1644,21 @@ export class InMemorySession {
         }
     }
 
-    async suspendByParent(): Promise<void> {
+    async suspendByParent(ctx: Context): Promise<void> {
         if (!this.isSubagent()) return;
         if (this.#activeRun !== undefined) this.#suspendedRunIds.add(this.#activeRun.runId);
         this.#suspendOnAbort = true;
-        await this.abort({ stopDescendants: false });
+        await this.abort(ctx, { stopDescendants: false });
         this.#status = "suspended";
         if (this.#activeRun === undefined) this.#suspendOnAbort = false;
-        await this.#saveSession();
+        await this.#saveSession(ctx);
     }
 
-    async clearSuspension(): Promise<void> {
+    async clearSuspension(ctx: Context): Promise<void> {
         this.#suspendOnAbort = false;
         if (this.#status !== "suspended") return;
         this.#status = "aborted";
-        await this.#saveSession();
+        await this.#saveSession(ctx);
     }
 
     consumeSuspendedRun(runId: string): boolean {
@@ -1601,6 +1666,7 @@ export class InMemorySession {
     }
 
     async recordSubagentsSuspended(
+        ctx: Context,
         subagents: readonly { description: string; path: string }[],
     ): Promise<void> {
         if (subagents.length === 0) return;
@@ -1627,7 +1693,7 @@ export class InMemorySession {
             id: createId(),
             role: "user",
         });
-        await this.#append("subagents_suspended", { displayText });
+        await this.#append(ctx, "subagents_suspended", { displayText });
     }
 
     /**
@@ -1637,6 +1703,7 @@ export class InMemorySession {
      * lifecycle, so they cannot disturb activity, unread state, or an in-flight agent group.
      */
     async recordSystemNotice(
+        ctx: Context,
         payload: SystemNoticePayload,
         options: { settleArchived?: true } = {},
     ): Promise<void> {
@@ -1650,17 +1717,21 @@ export class InMemorySession {
             role: "system",
             ...(payload.structured === undefined ? {} : { structured: payload.structured }),
         };
-        const commit = async () => {
-            await this.#storeMessage(this.#nextMessagePosition(), message, false);
-            await this.#append("system_notice", { message });
+        const commit = async (ctx: Context) => {
+            await this.#storeMessage(ctx, this.#nextMessagePosition(), message, false);
+            await this.#append(ctx, "system_notice", { message });
         };
         return this.#persistence?.transaction === undefined
-            ? await commit()
-            : await this.#persistence.transaction(commit).then(() => undefined);
+            ? await commit(ctx)
+            : await this.#persistence.transaction(ctx, commit).then(() => undefined);
     }
 
     agentMetadata(): SessionAgentMetadata {
         return { ...this.#agentMetadata };
+    }
+
+    isArchived(): boolean {
+        return this.#archived;
     }
 
     lifetimeTotalTokens(): number {
@@ -1811,7 +1882,10 @@ export class InMemorySession {
         );
     }
 
-    async scheduleWorkspaceTransfer(targetWorkspaceId: string): Promise<{
+    async scheduleWorkspaceTransfer(
+        ctx: Context,
+        targetWorkspaceId: string,
+    ): Promise<{
         projectId: string;
         sourceWorkspaceId: string;
     }> {
@@ -1828,11 +1902,12 @@ export class InMemorySession {
                 "Wait for compaction and workflow runs to finish before transferring this session.",
             );
         }
-        await this.#setWorkspaceTransferState({ status: "scheduled", targetWorkspaceId });
+        await this.#setWorkspaceTransferState(ctx, { status: "scheduled", targetWorkspaceId });
         return { projectId: this.#projectScope().projectId, sourceWorkspaceId };
     }
 
     async beginWorkspaceTransfer(
+        ctx: Context,
         targetWorkspaceId: string,
         options: { scheduled?: boolean } = {},
     ): Promise<{ projectId: string; sourceWorkspaceId: string }> {
@@ -1865,15 +1940,18 @@ export class InMemorySession {
                 "Wait for the active response to finish before transferring this session.",
             );
         }
-        await this.#setWorkspaceTransferState({ status: "transferring", targetWorkspaceId });
+        await this.#setWorkspaceTransferState(ctx, { status: "transferring", targetWorkspaceId });
         return { projectId: this.#projectScope().projectId, sourceWorkspaceId };
     }
 
-    async completeWorkspaceTransfer(input: {
-        commit: string;
-        targetWorkspaceId: string;
-        workspacePath: string;
-    }): Promise<ProtocolSession> {
+    async completeWorkspaceTransfer(
+        ctx: Context,
+        input: {
+            commit: string;
+            targetWorkspaceId: string;
+            workspacePath: string;
+        },
+    ): Promise<ProtocolSession> {
         if (
             this.#workspaceTransfer.status !== "transferring" ||
             this.#workspaceTransfer.targetWorkspaceId !== input.targetWorkspaceId
@@ -1908,14 +1986,14 @@ export class InMemorySession {
             role: "system",
         };
         const nextContextMessages = [...contextMessages, notice];
-        await this.#teardownRuntimeForWorkspaceTransfer();
+        await this.#teardownRuntimeForWorkspaceTransfer(ctx);
         const succeeded: SessionWorkspaceTransferState = {
             status: "succeeded",
             targetWorkspaceId: input.targetWorkspaceId,
         };
 
         const projectId = this.#projectScope().projectId;
-        const orderKey = await this.#persistence?.transferWorkspace?.({
+        const orderKey = await this.#persistence?.transferWorkspace?.(ctx, {
             contextMessages: nextContextMessages,
             cwd: input.workspacePath,
             projectId,
@@ -1938,11 +2016,12 @@ export class InMemorySession {
         this.#git = undefined;
         this.#contextMessages = nextContextMessages;
         this.#workspaceTransfer = succeeded;
-        await this.#append("session_updated", { session: this.snapshot() });
+        await this.#append(ctx, "session_updated", { session: this.snapshot() });
         return this.snapshot();
     }
 
     async failWorkspaceTransfer(
+        ctx: Context,
         targetWorkspaceId: string,
         error: unknown,
         target: Extract<
@@ -1956,7 +2035,7 @@ export class InMemorySession {
             this.#workspaceTransfer.targetWorkspaceId === targetWorkspaceId
         ) {
             if (runId !== undefined) {
-                await this.#append("run_error", {
+                await this.#append(ctx, "run_error", {
                     errorMessage: `Session transfer failed: ${this.#workspaceTransfer.errorMessage}`,
                     modelLocked: this.#modelLocked(),
                     runId,
@@ -1986,6 +2065,7 @@ export class InMemorySession {
             };
             const contextMessages = [...this.#workspaceTransferContextMessages(), notice];
             await this.#setWorkspaceTransferState(
+                ctx,
                 {
                     errorMessage,
                     status: "failed",
@@ -1998,13 +2078,13 @@ export class InMemorySession {
                 this.#runtime.agent.recordMessage(notice);
             }
             if (runId !== undefined) {
-                await this.#append("run_error", {
+                await this.#append(ctx, "run_error", {
                     errorMessage: `Session transfer failed: ${errorMessage}`,
                     modelLocked: this.#modelLocked(),
                     runId,
                 });
             } else {
-                await this.#append("session_updated", { session: this.snapshot() });
+                await this.#append(ctx, "session_updated", { session: this.snapshot() });
             }
         }
     }
@@ -2013,7 +2093,7 @@ export class InMemorySession {
         return this.#workspaceTransfer;
     }
 
-    async changeModel(request: ChangeModelRequest): Promise<ProtocolSession> {
+    async changeModel(ctx: Context, request: ChangeModelRequest): Promise<ProtocolSession> {
         // Resolving the provider before the idle guard keeps an unknown model reported as an
         // unknown model rather than as a busy session.
         this.#resolveProviderForModel(request.modelId, request.providerId);
@@ -2021,6 +2101,7 @@ export class InMemorySession {
             throw new Error("Wait for the active response to finish before changing models.");
         }
         return await this.#applyConfiguration(
+            ctx,
             {
                 ...(request.effort === undefined ? {} : { effort: request.effort }),
                 modelId: request.modelId,
@@ -2030,8 +2111,9 @@ export class InMemorySession {
         );
     }
 
-    async changeEffort(request: ChangeEffortRequest): Promise<ProtocolSession> {
+    async changeEffort(ctx: Context, request: ChangeEffortRequest): Promise<ProtocolSession> {
         return await this.#applyConfiguration(
+            ctx,
             {
                 effort: request.effort ?? this.#selectedModel().defaultThinkingLevel,
             },
@@ -2039,8 +2121,12 @@ export class InMemorySession {
         );
     }
 
-    async changeServiceTier(request: ChangeServiceTierRequest): Promise<ProtocolSession> {
+    async changeServiceTier(
+        ctx: Context,
+        request: ChangeServiceTierRequest,
+    ): Promise<ProtocolSession> {
         return await this.#applyConfiguration(
+            ctx,
             { serviceTier: request.serviceTier ?? null },
             request.mutationId === undefined ? {} : { mutationId: request.mutationId },
         );
@@ -2058,6 +2144,7 @@ export class InMemorySession {
      * not also be folded into the summary of what the old model saw.
      */
     async #applyConfiguration(
+        ctx: Context,
         change: {
             effort?: string;
             modelId?: string;
@@ -2096,7 +2183,7 @@ export class InMemorySession {
             change.modelId !== undefined &&
             (targetModel.id !== this.#modelId || targetProviderId !== this.#providerId)
         ) {
-            await this.#switchModel(targetModel, targetProviderId, options);
+            await this.#switchModel(ctx, targetModel, targetProviderId, options);
             changed.push("model");
         }
 
@@ -2128,7 +2215,7 @@ export class InMemorySession {
         if (changed.includes("model")) this.#totalTokens = 0;
 
         this.#interruption = undefined;
-        await this.#append("session_configuration_changed", {
+        await this.#append(ctx, "session_configuration_changed", {
             changed,
             ...(this.#effort === undefined ? {} : { effort: this.#effort }),
             modelId: this.#modelId,
@@ -2157,6 +2244,7 @@ export class InMemorySession {
     }
 
     async #switchModel(
+        ctx: Context,
         model: Model,
         providerId: string,
         options: { excludeRunId?: string },
@@ -2187,7 +2275,7 @@ export class InMemorySession {
             // here; the agent falls back to the new model's default until then.
             runtime!.agent.setModel(model.id, undefined);
         } else {
-            void this.#killRuntimeProcesses({ includeBackground: true });
+            void this.#killRuntimeProcesses(ctx, { includeBackground: true });
             this.#releaseMcpToolLease();
             if (reusableExecutor === undefined) {
                 void runtime?.agent.close();
@@ -2214,7 +2302,7 @@ export class InMemorySession {
      * Credential revisions are an authorization boundary. A runtime or executor created from an
      * older revision must never survive a rotation, visibility change, or revocation.
      */
-    async refreshInferenceScope(modelCatalog: ModelCatalog): Promise<void> {
+    async refreshInferenceScope(ctx: Context, modelCatalog: ModelCatalog): Promise<void> {
         const completion = new Promise<void>((resolve, reject) => {
             this.#inferenceScopeRefreshWaiters.add({ reject, resolve });
         });
@@ -2228,11 +2316,11 @@ export class InMemorySession {
         await completion;
     }
 
-    async #applyInferenceScopeRefresh(modelCatalog: ModelCatalog): Promise<void> {
+    async #applyInferenceScopeRefresh(ctx: Context, modelCatalog: ModelCatalog): Promise<void> {
         const catalogChanged = JSON.stringify(this.#modelCatalog) !== JSON.stringify(modelCatalog);
         const credentialBindingId = this.#credentialBindingId;
         const runtime = this.#runtime;
-        const stopProcesses = this.#killRuntimeProcesses({ includeBackground: true });
+        const stopProcesses = this.#killRuntimeProcesses(ctx, { includeBackground: true });
         this.#releaseMcpToolLease();
         this.#runtime = undefined;
         this.#executor = undefined;
@@ -2248,19 +2336,19 @@ export class InMemorySession {
                 provider.models.some((model) => model.id === this.#modelId),
         );
         if (reboundProvider === undefined) {
-            await this.#applyConfiguration({
+            await this.#applyConfiguration(ctx, {
                 modelId: modelCatalog.defaultModelId,
                 providerId: modelCatalog.defaultProviderId,
             });
         } else if (reboundProvider.providerId !== this.#providerId) {
-            await this.#applyConfiguration({
+            await this.#applyConfiguration(ctx, {
                 modelId: this.#modelId,
                 providerId: reboundProvider.providerId,
             });
         } else {
             this.#models = this.#modelsForProvider(this.#providerId);
             if (catalogChanged) {
-                await this.#append("session_updated", { session: this.snapshot() });
+                await this.#append(ctx, "session_updated", { session: this.snapshot() });
             }
         }
         return Promise.all([stopProcesses, runtime?.agent.close() ?? Promise.resolve()]).then(
@@ -2363,12 +2451,12 @@ export class InMemorySession {
         };
     }
 
-    async update(request: UpdateSessionRequest): Promise<ProtocolSession> {
-        return await this.#runSessionMutation(async () => {
+    async update(ctx: Context, request: UpdateSessionRequest): Promise<ProtocolSession> {
+        return await this.#runSessionMutation(ctx, async (ctx) => {
             this.#appendSystemPrompt = request.appendSystemPrompt ?? undefined;
             this.#runtime?.agent.setAppendSystemPrompt(this.#appendSystemPrompt);
             this.#interruption = undefined;
-            await this.#append("session_updated", {
+            await this.#append(ctx, "session_updated", {
                 ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
                 session: this.snapshot(),
             });
@@ -2388,18 +2476,18 @@ export class InMemorySession {
      * This is what keeps the "somebody is watching" disclosure honest while a
      * session is running rather than only at the moment a client attaches.
      */
-    async noteShareCapabilitiesChanged(): Promise<void> {
-        await this.#append("session_updated", { session: this.snapshot() });
+    async noteShareCapabilitiesChanged(ctx: Context): Promise<void> {
+        await this.#append(ctx, "session_updated", { session: this.snapshot() });
     }
 
-    async setOrderKey(orderKey: string): Promise<ProtocolSession> {
+    async setOrderKey(ctx: Context, orderKey: string): Promise<ProtocolSession> {
         if (this.isSubagent()) {
             throw new Error("Subagent histories cannot be reordered.");
         }
-        return await this.#runSessionMutation(async () => {
+        return await this.#runSessionMutation(ctx, async (ctx) => {
             if (this.#orderKey === orderKey) return this.snapshot();
             this.#orderKey = orderKey;
-            await this.#append("session_updated", { session: this.snapshot() });
+            await this.#append(ctx, "session_updated", { session: this.snapshot() });
             return this.snapshot();
         });
     }
@@ -2410,7 +2498,7 @@ export class InMemorySession {
      * terminal or a newly attached client can pick the message back up, and does
      * not otherwise interpret it.
      */
-    async setDraft(request: SetSessionDraftRequest): Promise<ProtocolSession> {
+    async setDraft(ctx: Context, request: SetSessionDraftRequest): Promise<ProtocolSession> {
         const draft =
             request.draft === null || request.draft.length === 0 ? undefined : request.draft;
         if (draft !== undefined && draft.length > SESSION_DRAFT_MAX_LENGTH) {
@@ -2420,14 +2508,14 @@ export class InMemorySession {
         // The newest message wins, not the last one to arrive. A draft typed
         // before the one already stored is discarded even when a slow client
         // delivers it afterwards.
-        return await this.#runSessionMutation(async () => {
+        return await this.#runSessionMutation(ctx, async (ctx) => {
             if (this.#draftUpdatedAt !== undefined && updatedAt < this.#draftUpdatedAt) {
                 return this.snapshot();
             }
             if (this.#draft === draft) return this.snapshot();
             this.#draft = draft;
             this.#draftUpdatedAt = updatedAt;
-            await this.#append("session_draft_changed", {
+            await this.#append(ctx, "session_draft_changed", {
                 ...(draft === undefined ? {} : { draft }),
                 ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
                 ...(request.origin === undefined ? {} : { origin: request.origin }),
@@ -2457,6 +2545,7 @@ export class InMemorySession {
      * away on its own once it has been there long enough.
      */
     async fileIntoFolder(
+        ctx: Context,
         folderId: string | null,
         afterId?: string | null,
         mutationId?: string,
@@ -2465,7 +2554,7 @@ export class InMemorySession {
         if (afterId === undefined && folderId === null && this.#scope.kind === "unsorted") {
             return undefined;
         }
-        const filed = folderId === null ? undefined : await folders.getFolder(folderId);
+        const filed = folderId === null ? undefined : await folders.getFolder(ctx, folderId);
         if (
             folderId !== null &&
             afterId === undefined &&
@@ -2480,10 +2569,13 @@ export class InMemorySession {
             }
             const storage =
                 folderId === null
-                    ? folders.createUnsortedSessionDirectory(this.id)
-                    : { created: false, path: await folders.activeFolderStoragePath(folderId) };
+                    ? folders.createUnsortedSessionDirectory(ctx, this.id)
+                    : {
+                          created: false,
+                          path: await folders.activeFolderStoragePath(ctx, folderId),
+                      };
             try {
-                await this.applyScopeMove({
+                await this.applyScopeMove(ctx, {
                     cwd: storage.path,
                     orderKey: generateKeyBetween(null, null),
                     scope: folderId === null ? { kind: "unsorted" } : { folderId, kind: "folder" },
@@ -2493,24 +2585,24 @@ export class InMemorySession {
                 });
             } catch (error) {
                 if (storage.created) {
-                    folders.removeNewUnsortedSessionDirectory(this.id, storage.path);
+                    folders.removeNewUnsortedSessionDirectory(ctx, this.id, storage.path);
                 }
                 throw error;
             }
             return filed;
         }
-        const moved = await folders.setSessionFolder(this.id, folderId, afterId, mutationId);
-        await this.applyScopeMove(moved);
+        const moved = await folders.setSessionFolder(ctx, this.id, folderId, afterId, mutationId);
+        await this.applyScopeMove(ctx, moved);
         return filed;
     }
 
     /** Applies a scope transition already committed by the owning store. */
-    async applyScopeMove(moved: SessionScopeMove): Promise<void> {
+    async applyScopeMove(ctx: Context, moved: SessionScopeMove): Promise<void> {
         const executionContextChanged =
             this.#request.cwd !== moved.cwd || !isDeepStrictEqual(this.#scope, moved.scope);
         if (executionContextChanged && !this.isSubagent()) {
             void this.#agentManager
-                ?.stopDescendantsForContextChange(this.id)
+                ?.stopDescendantsForContextChange(ctx, this.id)
                 .catch(rethrowDatabaseFailure);
         }
         this.#scope = moved.scope;
@@ -2527,7 +2619,7 @@ export class InMemorySession {
                 this.#startScopeRuntimeRefresh();
             }
         }
-        await this.#append("session_updated", { session: this.snapshot() });
+        await this.#append(ctx, "session_updated", { session: this.snapshot() });
     }
 
     /** Retires a runtime whose trusted folder metadata or virtual ancestry changed. */
@@ -2543,10 +2635,10 @@ export class InMemorySession {
     }
 
     /** Retires this chat and its complete retained tree after its folder was archived. */
-    recordFolderArchived(): Promise<void> {
+    recordFolderArchived(ctx: Context): Promise<void> {
         const descendants =
-            this.#agentManager?.stopDescendantsForContextChange(this.id) ?? Promise.resolve(0);
-        const own = this.retireForContextChange();
+            this.#agentManager?.stopDescendantsForContextChange(ctx, this.id) ?? Promise.resolve(0);
+        const own = this.retireForContextChange(ctx);
         return Promise.all([descendants, own]).then(() => undefined);
     }
 
@@ -2556,8 +2648,8 @@ export class InMemorySession {
      * The state transition happens synchronously before cleanup yields, so another caller cannot
      * restart this session between the authority change and process teardown.
      */
-    async retireForContextChange(): Promise<void> {
-        if (this.#workspaceArchived) return this.beginShutdown();
+    async retireForContextChange(ctx: Context): Promise<void> {
+        if (this.#workspaceArchived) return this.beginShutdown(ctx);
         const activeRun = this.#activeRun;
         const runIds = new Set([
             ...(activeRun === undefined ? [] : [activeRun.runId]),
@@ -2565,17 +2657,17 @@ export class InMemorySession {
             ...this.#queue.map((run) => run.runId),
         ]);
         for (const runId of runIds) {
-            await this.#cancelExternalToolCalls(runId);
-            await this.#cancelDurableUserInputs(runId);
-            await this.#cancelDurableWaits(runId);
+            await this.#cancelExternalToolCalls(ctx, runId);
+            await this.#cancelDurableUserInputs(ctx, runId);
+            await this.#cancelDurableWaits(ctx, runId);
         }
         const queuedRuns = this.#queue;
         await Promise.all(
-            queuedRuns.map((run) => this.#persistence?.deleteQueuedRun(this.id, run.runId)),
+            queuedRuns.map((run) => this.#persistence?.deleteQueuedRun(ctx, this.id, run.runId)),
         );
         this.#queue = [];
         for (const run of queuedRuns) {
-            await this.#append("run_error", {
+            await this.#append(ctx, "run_error", {
                 errorMessage: "The queued run was stopped because its execution context changed.",
                 modelLocked: false,
                 runId: run.runId,
@@ -2589,23 +2681,27 @@ export class InMemorySession {
         this.#pendingSteeringContinuations.clear();
         this.#suspendedRunIds.clear();
         this.#suspendOnAbort = false;
-        await this.#pauseActiveGoal();
+        await this.#pauseActiveGoal(ctx);
         this.#status = "archived";
         this.#archived = true;
-        await this.#append("session_archived", { archived: true });
+        await this.#append(ctx, "session_archived", { archived: true });
         this.#workspaceArchived = true;
         activeRun?.controller.abort();
-        await this.beginShutdown();
+        await this.beginShutdown(ctx);
     }
 
-    async setArchived(archived: boolean, mutationId?: string): Promise<ProtocolSession> {
-        return await this.#runSessionMutation(async () => {
+    async setArchived(
+        ctx: Context,
+        archived: boolean,
+        mutationId?: string,
+    ): Promise<ProtocolSession> {
+        return await this.#runSessionMutation(ctx, async (ctx) => {
             if (!archived && this.#workspaceArchived) {
                 throw new Error("A session archived with its workspace cannot be restored.");
             }
             if (this.#archived === archived) return this.snapshot();
             this.#archived = archived;
-            await this.#append("session_archived", {
+            await this.#append(ctx, "session_archived", {
                 archived,
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
@@ -2615,12 +2711,12 @@ export class InMemorySession {
             if (archived) {
                 const teardown = async () => {
                     this.#activeRun?.controller.abort();
-                    await this.#killRuntimeProcesses({ includeBackground: true });
+                    await this.#killRuntimeProcesses(ctx, { includeBackground: true });
                 };
                 if (this.#persistence?.afterTransactionCommit === undefined) {
                     await teardown();
                 } else {
-                    await this.#persistence.afterTransactionCommit(teardown);
+                    await this.#persistence.afterTransactionCommit(ctx, teardown);
                 }
             }
             return this.snapshot();
@@ -2628,6 +2724,7 @@ export class InMemorySession {
     }
 
     async changePermissionMode(
+        ctx: Context,
         request: ChangePermissionModeRequest,
         options: { updateSubagents?: boolean } = {},
     ): Promise<ProtocolSession> {
@@ -2638,14 +2735,14 @@ export class InMemorySession {
         this.#permissionMode = permissionMode;
         runtime?.context.permissions?.setMode(permissionMode);
         try {
-            await this.#append("permission_mode_changed", {
+            await this.#append(ctx, "permission_mode_changed", {
                 ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
                 permissionMode,
             });
         } catch (error) {
             if (isPermissionReduction(previousPermissionMode, permissionMode)) {
                 try {
-                    await this.beginShutdown();
+                    await this.beginShutdown(ctx);
                 } catch (shutdownError) {
                     throw new AggregateError(
                         [error, shutdownError],
@@ -2663,16 +2760,19 @@ export class InMemorySession {
             !this.isSubagent() &&
             options.updateSubagents !== false &&
             isPermissionReduction(previousPermissionMode, permissionMode)
-                ? (this.#agentManager?.changeSubagentPermissionModes(this.id, permissionMode) ??
-                  Promise.resolve())
+                ? (this.#agentManager?.changeSubagentPermissionModes(
+                      ctx,
+                      this.id,
+                      permissionMode,
+                  ) ?? Promise.resolve())
                 : Promise.resolve();
         const localProcessShutdown = (async () => {
             if (running === 0 || !isPermissionReduction(previousPermissionMode, permissionMode)) {
                 return;
             }
-            await this.#killRuntimeProcesses({ includeBackground: true });
+            await this.#killRuntimeProcesses(ctx, { includeBackground: true });
             const runId = this.#activeRun?.runId ?? this.#lastSessionRunId ?? "background";
-            await this.#append("agent_event", {
+            await this.#append(ctx, "agent_event", {
                 event: { type: "background_processes_stopped", count: running },
                 runId,
             });
@@ -2686,7 +2786,7 @@ export class InMemorySession {
         );
         if (permissionChanged) {
             try {
-                await this.#removeMcpTools(runtime);
+                await this.#removeMcpTools(ctx, runtime);
             } catch (error) {
                 transitionErrors.push(error);
             }
@@ -2706,18 +2806,19 @@ export class InMemorySession {
             permissionMode !== "auto" &&
             permissionMode !== "full_access"
         ) {
-            await this.#ensureMcpTools(runtime);
+            await this.#ensureMcpTools(ctx, runtime);
         }
         return this.snapshot();
     }
 
     async attachSecret(
+        ctx: Context,
         secretId: string,
         options: { mutationId?: string; scope?: SecretAttachmentScope } = {},
     ): Promise<ProtocolSession> {
         const scope = options.scope ?? "session";
         this.#secrets.attach(secretId, scope);
-        await this.#append("secrets_changed", {
+        await this.#append(ctx, "secrets_changed", {
             ...this.#secretAttachmentData(),
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
@@ -2725,23 +2826,28 @@ export class InMemorySession {
     }
 
     async detachSecret(
+        ctx: Context,
         secretId: string,
         options: { mutationId?: string; scope?: SecretAttachmentScope } = {},
     ): Promise<ProtocolSession> {
         const scope = options.scope ?? "session";
         if (!this.#secrets.detach(secretId, scope)) return this.snapshot();
-        await this.#append("secrets_changed", {
+        await this.#append(ctx, "secrets_changed", {
             ...this.#secretAttachmentData(),
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
         return this.snapshot();
     }
 
-    async setGoal(request: CreateGoalRequest, mutationId?: string): Promise<SessionGoal> {
+    async setGoal(
+        ctx: Context,
+        request: CreateGoalRequest,
+        mutationId?: string,
+    ): Promise<SessionGoal> {
         if (this.isSubagent()) {
             throw new Error("Goals can only be managed from the primary session.");
         }
-        const goal = await this.#runSessionMutation(async () => {
+        const goal = await this.#runSessionMutation(ctx, async (ctx) => {
             if (this.#goal !== undefined && this.#goal.status !== "complete") {
                 throw new Error(
                     "This session already has an unfinished goal. Complete or clear it before starting another.",
@@ -2755,25 +2861,26 @@ export class InMemorySession {
                 updatedAt: now,
             };
             this.#lastMessageAt = now;
-            await this.#append("goal_changed", {
+            await this.#append(ctx, "goal_changed", {
                 goal: { ...this.#goal },
                 ...(mutationId === undefined ? {} : { mutationId }),
             });
             if (this.#titleStatus === "idle") {
                 this.#title = createGoalTitle(this.#goal.objective);
                 this.#titleStatus = "ready";
-                await this.#append("session_title_changed", {
+                await this.#append(ctx, "session_title_changed", {
                     status: this.#titleStatus,
                     title: this.#title,
                 });
             }
-            await this.#continueGoalIfIdle();
+            await this.#continueGoalIfIdle(ctx);
             return { ...this.#goal };
         });
         return goal;
     }
 
     async changeGoalStatus(
+        ctx: Context,
         request: ChangeGoalStatusRequest,
         options: { mutationId?: string; stopActiveGoalRun?: boolean } = {},
     ): Promise<SessionGoal> {
@@ -2788,37 +2895,37 @@ export class InMemorySession {
         }
 
         this.#goal = { ...this.#goal, status: request.status, updatedAt: this.#now() };
-        await this.#append("goal_changed", {
+        await this.#append(ctx, "goal_changed", {
             goal: { ...this.#goal },
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
         if (request.status === "active") {
-            await this.#continueGoalIfIdle();
+            await this.#continueGoalIfIdle(ctx);
         } else if (options.stopActiveGoalRun !== false) {
-            void this.#agentManager?.pauseDescendants(this.id);
-            await this.#discardQueuedGoalRuns();
+            void this.#agentManager?.pauseDescendants(ctx, this.id);
+            await this.#discardQueuedGoalRuns(ctx);
             if (this.#activeRun?.kind === "goal") {
                 this.#activeRun.controller.abort();
-                void this.#killRuntimeProcesses();
+                void this.#killRuntimeProcesses(ctx);
             }
         }
         return { ...this.#goal };
     }
 
-    async clearGoal(mutationId?: string): Promise<boolean> {
+    async clearGoal(ctx: Context, mutationId?: string): Promise<boolean> {
         if (this.isSubagent()) {
             throw new Error("Goals can only be managed from the primary session.");
         }
         if (this.#goal === undefined) return false;
 
         this.#goal = undefined;
-        void this.#agentManager?.stopDescendants(this.id);
-        await this.#discardQueuedGoalRuns();
+        void this.#agentManager?.stopDescendants(ctx, this.id);
+        await this.#discardQueuedGoalRuns(ctx);
         if (this.#activeRun?.kind === "goal") {
             this.#activeRun.controller.abort();
-            void this.#killRuntimeProcesses();
+            void this.#killRuntimeProcesses(ctx);
         }
-        await this.#append("goal_changed", {
+        await this.#append(ctx, "goal_changed", {
             goal: null,
             ...(mutationId === undefined ? {} : { mutationId }),
         });
@@ -2835,7 +2942,10 @@ export class InMemorySession {
             .map((message) => structuredClone(message));
     }
 
-    async scheduleMessage(request: ScheduleMessageRequest): Promise<ScheduledMessage> {
+    async scheduleMessage(
+        ctx: Context,
+        request: ScheduleMessageRequest,
+    ): Promise<ScheduledMessage> {
         if (this.isSubagent()) {
             throw new Error("Subagents cannot schedule messages.");
         }
@@ -2860,17 +2970,18 @@ export class InMemorySession {
             targetAgentId: request.targetAgentId,
             updatedAt: now,
         };
-        await this.#persistence?.upsertScheduledMessage?.(scheduled);
+        await this.#persistence?.upsertScheduledMessage?.(ctx, scheduled);
         this.#scheduledMessages.set(scheduled.id, scheduled);
-        await this.#append("scheduled_message_changed", {
+        await this.#append(ctx, "scheduled_message_changed", {
             message: structuredClone(scheduled),
         });
-        await this.#pruneScheduledMessages();
-        await this.#persistence?.scheduledMessageChanged?.();
+        await this.#pruneScheduledMessages(ctx);
+        await this.#persistence?.scheduledMessageChanged?.(ctx);
         return structuredClone(scheduled);
     }
 
     async cancelScheduledMessage(
+        ctx: Context,
         messageId: string,
         mutationId?: string,
     ): Promise<{ cancelled: boolean; message?: ScheduledMessage }> {
@@ -2884,18 +2995,21 @@ export class InMemorySession {
             status: "cancelled",
             updatedAt: this.#now(),
         };
-        await this.#persistence?.upsertScheduledMessage?.(next);
+        await this.#persistence?.upsertScheduledMessage?.(ctx, next);
         this.#scheduledMessages.set(next.id, next);
-        await this.#append("scheduled_message_changed", {
+        await this.#append(ctx, "scheduled_message_changed", {
             message: structuredClone(next),
             ...(mutationId === undefined ? {} : { mutationId }),
         });
-        await this.#pruneScheduledMessages();
-        await this.#persistence?.scheduledMessageChanged?.();
+        await this.#pruneScheduledMessages(ctx);
+        await this.#persistence?.scheduledMessageChanged?.(ctx);
         return { cancelled: true, message: structuredClone(next) };
     }
 
-    async deliverScheduledMessage(messageId: string): Promise<ScheduledMessage | undefined> {
+    async deliverScheduledMessage(
+        ctx: Context,
+        messageId: string,
+    ): Promise<ScheduledMessage | undefined> {
         const current = this.#scheduledMessages.get(messageId);
         if (current === undefined || current.status !== "pending") {
             return current === undefined ? undefined : structuredClone(current);
@@ -2904,6 +3018,7 @@ export class InMemorySession {
         let failure: string | undefined;
         try {
             this.#agentManager?.sendScheduledMessage(
+                ctx,
                 this.id,
                 current.targetAgentId,
                 current.message,
@@ -2921,15 +3036,16 @@ export class InMemorySession {
             status: delivered ? "delivered" : "undelivered",
             updatedAt: now,
         };
-        await this.#persistence?.upsertScheduledMessage?.(next);
+        await this.#persistence?.upsertScheduledMessage?.(ctx, next);
         this.#scheduledMessages.set(next.id, next);
-        await this.#append("scheduled_message_changed", { message: structuredClone(next) });
-        await this.#pruneScheduledMessages();
-        await this.#persistence?.scheduledMessageChanged?.();
+        await this.#append(ctx, "scheduled_message_changed", { message: structuredClone(next) });
+        await this.#pruneScheduledMessages(ctx);
+        await this.#persistence?.scheduledMessageChanged?.(ctx);
         return structuredClone(next);
     }
 
     async requestUserInput(
+        ctx: Context,
         request: UserInputRequest,
         options: { durable?: DurableUserInputOptions; signal?: AbortSignal } = {},
     ): Promise<UserInputOutcome> {
@@ -2989,7 +3105,7 @@ export class InMemorySession {
                     toolCallIndex: options.durable.toolCallIndex,
                     toolName: options.durable.toolName,
                 };
-                await this.#persistence?.upsertDurableUserInput?.(durable);
+                await this.#persistence?.upsertDurableUserInput?.(ctx, durable);
                 createdDurable = true;
             }
         }
@@ -3006,7 +3122,11 @@ export class InMemorySession {
             };
             if (options.signal !== undefined) pendingInput.signal = options.signal;
             const onAbort = () => {
-                void this.#abortPendingUserInput(pendingInput).catch((error: unknown) => {
+                void withWorkerContext(
+                    "user-input-abort",
+                    (workerCtx) => this.#abortPendingUserInput(workerCtx, pendingInput),
+                    { sessionId: this.id },
+                ).catch((error: unknown) => {
                     pendingInput.reject(
                         error instanceof Error ? error : new Error(errorToMessage(error)),
                     );
@@ -3017,7 +3137,7 @@ export class InMemorySession {
         });
         try {
             if (durable === undefined || createdDurable) {
-                await this.#append("user_input_requested", request);
+                await this.#append(ctx, "user_input_requested", request);
             }
         } catch (error) {
             options.signal?.removeEventListener("abort", pendingInput.onAbort!);
@@ -3028,28 +3148,28 @@ export class InMemorySession {
         }
         this.#pendingUserInputs.set(request.requestId, pendingInput);
         if (isSignalAborted(options.signal)) {
-            await this.#abortPendingUserInput(pendingInput).catch((error: unknown) => {
+            await this.#abortPendingUserInput(ctx, pendingInput).catch((error: unknown) => {
                 pendingInput.reject(
                     error instanceof Error ? error : new Error(errorToMessage(error)),
                 );
             });
         }
-        void this.#applyPresenceToUserInput(request.requestId, options.durable?.kind).catch(
+        void this.#applyPresenceToUserInput(ctx, request.requestId, options.durable?.kind).catch(
             rethrowDatabaseFailure,
         );
         return response;
     }
 
-    async #abortPendingUserInput(pendingInput: PendingUserInput): Promise<void> {
+    async #abortPendingUserInput(ctx: Context, pendingInput: PendingUserInput): Promise<void> {
         const requestId = pendingInput.request.requestId;
         if (this.#pendingUserInputs.get(requestId) !== pendingInput) return;
         if (pendingInput.durable === undefined) {
-            await this.#append("user_input_resolved", {
+            await this.#append(ctx, "user_input_resolved", {
                 requestId,
                 status: "cancelled",
             });
         } else if (!this.#closing && pendingInput.durable.status === "pending") {
-            await this.#cancelDurableUserInput(pendingInput.durable);
+            await this.#cancelDurableUserInput(ctx, pendingInput.durable);
         }
         if (this.#pendingUserInputs.get(requestId) !== pendingInput) return;
         this.#pendingUserInputs.delete(requestId);
@@ -3075,10 +3195,16 @@ export class InMemorySession {
             }
         }
         for (const pending of [...this.#pendingUserInputs.values()]) {
-            void this.#applyPresenceToUserInput(
-                pending.request.requestId,
-                pending.durable?.kind,
-                state,
+            void withWorkerContext(
+                "user-input-presence",
+                (workerCtx) =>
+                    this.#applyPresenceToUserInput(
+                        workerCtx,
+                        pending.request.requestId,
+                        pending.durable?.kind,
+                        state,
+                    ),
+                { sessionId: this.id },
             ).catch(rethrowDatabaseFailure);
         }
         for (const call of this.#durableUserInputs.values()) {
@@ -3090,7 +3216,11 @@ export class InMemorySession {
             ) {
                 continue;
             }
-            void this.#applyPresenceToRestoredUserInput(call, state).catch(rethrowDatabaseFailure);
+            void withWorkerContext(
+                "user-input-presence",
+                (workerCtx) => this.#applyPresenceToRestoredUserInput(workerCtx, call, state),
+                { sessionId: this.id },
+            ).catch(rethrowDatabaseFailure);
         }
     }
 
@@ -3100,6 +3230,7 @@ export class InMemorySession {
      * keeps its place in the Inbox and only stops blocking the agent.
      */
     async #applyPresenceToUserInput(
+        ctx: Context,
         requestId: string,
         kind: DurableUserInputCall["kind"] | undefined,
         currentState?: PresenceState,
@@ -3116,7 +3247,7 @@ export class InMemorySession {
                 const nextDurable = { ...durable };
                 delete nextDurable.answerDueAt;
                 delete nextDurable.answerWaitStartedAt;
-                await this.#persistence?.upsertDurableUserInput?.(nextDurable);
+                await this.#persistence?.upsertDurableUserInput?.(ctx, nextDurable);
                 Object.assign(durable, nextDurable);
             }
             return;
@@ -3129,11 +3260,11 @@ export class InMemorySession {
                 answerDueAt: dueAt,
                 answerWaitStartedAt: startedAt,
             };
-            await this.#persistence?.upsertDurableUserInput?.(nextDurable);
+            await this.#persistence?.upsertDurableUserInput?.(ctx, nextDurable);
             Object.assign(durable, nextDurable);
         }
         if (answerWaitMs <= 0) {
-            await this.#detachUserInput(requestId, "away", state);
+            await this.#detachUserInput(ctx, requestId, "away", state);
             return;
         }
         this.#armUserInputPresenceTimer(requestId, dueAt, state);
@@ -3155,13 +3286,24 @@ export class InMemorySession {
                 }
                 const currentState = this.#presence?.state() ?? state;
                 if (this.#pendingUserInputs.has(requestId)) {
-                    void this.#detachUserInput(requestId, reason, currentState).catch(
-                        rethrowDatabaseFailure,
-                    );
+                    void withWorkerContext(
+                        "user-input-presence-timeout",
+                        (workerCtx) =>
+                            this.#detachUserInput(workerCtx, requestId, reason, currentState),
+                        { sessionId: this.id },
+                    ).catch(rethrowDatabaseFailure);
                 } else {
-                    void this.#detachRestoredUserInput(requestId, reason, currentState).catch(
-                        rethrowDatabaseFailure,
-                    );
+                    void withWorkerContext(
+                        "user-input-presence-timeout",
+                        (workerCtx) =>
+                            this.#detachRestoredUserInput(
+                                workerCtx,
+                                requestId,
+                                reason,
+                                currentState,
+                            ),
+                        { sessionId: this.id },
+                    ).catch(rethrowDatabaseFailure);
                 }
             },
             Math.min(MAX_TIMER_DELAY_MS, Math.max(0, dueAt - this.#now())),
@@ -3170,7 +3312,7 @@ export class InMemorySession {
         this.#userInputPresenceTimers.set(requestId, timer);
     }
 
-    async #restoreUserInputPresenceTimers(): Promise<void> {
+    async #restoreUserInputPresenceTimers(ctx: Context): Promise<void> {
         const state = this.#presence?.state();
         if (state === undefined || state.presence.answerWaitMs === null) return;
         for (const call of this.#durableUserInputs.values()) {
@@ -3190,7 +3332,7 @@ export class InMemorySession {
                     answerDueAt: dueAt,
                     answerWaitStartedAt: startedAt,
                 };
-                await this.#persistence?.upsertDurableUserInput?.(nextCall);
+                await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
                 Object.assign(call, nextCall);
             }
             this.#armUserInputPresenceTimer(
@@ -3203,6 +3345,7 @@ export class InMemorySession {
     }
 
     async #applyPresenceToRestoredUserInput(
+        ctx: Context,
         call: DurableUserInputCall,
         state: PresenceState,
     ): Promise<void> {
@@ -3212,7 +3355,7 @@ export class InMemorySession {
             const nextCall = { ...call };
             delete nextCall.answerDueAt;
             delete nextCall.answerWaitStartedAt;
-            await this.#persistence?.upsertDurableUserInput?.(nextCall);
+            await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
             Object.assign(call, nextCall);
             return;
         }
@@ -3223,7 +3366,7 @@ export class InMemorySession {
             answerDueAt: dueAt,
             answerWaitStartedAt: startedAt,
         };
-        await this.#persistence?.upsertDurableUserInput?.(nextCall);
+        await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
         Object.assign(call, nextCall);
         this.#armUserInputPresenceTimer(
             call.request.requestId,
@@ -3234,6 +3377,7 @@ export class InMemorySession {
     }
 
     async #detachRestoredUserInput(
+        ctx: Context,
         requestId: string,
         reason: "away" | "timeout",
         state: PresenceState,
@@ -3285,17 +3429,18 @@ export class InMemorySession {
             result,
             status: "completed" as const,
         };
-        await this.#persistence?.upsertDurableUserInput?.(nextCall);
+        await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
         Object.assign(call, nextCall);
-        await this.#append("user_input_detached", {
+        await this.#append(ctx, "user_input_detached", {
             presenceId: state.presence.id,
             reason,
             requestId,
         });
-        this.resumeDurableToolRun();
+        this.#startDurableToolResume();
     }
 
     async #detachUserInput(
+        ctx: Context,
         requestId: string,
         reason: "away" | "timeout",
         state: PresenceState,
@@ -3311,10 +3456,10 @@ export class InMemorySession {
                 consumed: true,
                 detachedAt: this.#now(),
             };
-            await this.#persistence?.upsertDurableUserInput?.(nextDurable);
+            await this.#persistence?.upsertDurableUserInput?.(ctx, nextDurable);
             Object.assign(durable, nextDurable);
         }
-        await this.#append("user_input_detached", {
+        await this.#append(ctx, "user_input_detached", {
             presenceId: state.presence.id,
             reason,
             requestId,
@@ -3341,7 +3486,7 @@ export class InMemorySession {
     }
 
     /** Withdraws a question the agent no longer needs an answer to. */
-    async cancelUserInput(requestId: string): Promise<CancelAskResult> {
+    async cancelUserInput(ctx: Context, requestId: string): Promise<CancelAskResult> {
         const durable = this.#durableUserInputs.get(requestId);
         if (durable === undefined) {
             return { cancelled: false, reason: "There is no question with that id." };
@@ -3356,12 +3501,13 @@ export class InMemorySession {
             };
         }
         this.#clearUserInputPresenceTimer(requestId);
-        await this.#cancelDurableUserInput(durable);
-        await this.#pruneDurableUserInputs();
+        await this.#cancelDurableUserInput(ctx, durable);
+        await this.#pruneDurableUserInputs(ctx);
         return { cancelled: true };
     }
 
     async answerUserInput(
+        ctx: Context,
         requestId: string,
         response: AnswerUserInputRequest,
     ): Promise<ProtocolSession | undefined> {
@@ -3420,10 +3566,10 @@ export class InMemorySession {
                 resolvedAt: this.#now(),
                 status: "answered" as const,
             };
-            await this.#persistence?.upsertDurableUserInput?.(nextDurable);
+            await this.#persistence?.upsertDurableUserInput?.(ctx, nextDurable);
             Object.assign(durable, nextDurable);
         }
-        await this.#append("user_input_resolved", {
+        await this.#append(ctx, "user_input_resolved", {
             answers,
             ...(response.mutationId === undefined ? {} : { mutationId: response.mutationId }),
             requestId,
@@ -3439,7 +3585,7 @@ export class InMemorySession {
             // Nothing is waiting for this answer any more, so it arrives as a late notice instead.
             await this.#deliverDetachedAnswer(durable, answers);
         } else if (durable !== undefined) {
-            this.resumeDurableToolRun();
+            this.resumeDurableToolRun(ctx);
         }
         return this.snapshot();
     }
@@ -3482,17 +3628,17 @@ export class InMemorySession {
         }
     }
 
-    async markUserInputExecuting(requestId: string): Promise<void> {
+    async markUserInputExecuting(ctx: Context, requestId: string): Promise<void> {
         const durable = this.#durableUserInputs.get(requestId);
         if (durable === undefined || durable.status !== "answered") return;
         const nextDurable = { ...durable, status: "executing" as const };
-        await this.#persistence?.upsertDurableUserInput?.(nextDurable);
+        await this.#persistence?.upsertDurableUserInput?.(ctx, nextDurable);
         Object.assign(durable, nextDurable);
     }
 
-    createTask(request: CreateTaskRequest): SessionTask {
+    createTask(ctx: Context, request: CreateTaskRequest): SessionTask {
         const task = this.#taskList.create(request);
-        this.#recordTasksChanged();
+        this.#recordTasksChanged(ctx);
         return task;
     }
 
@@ -3504,9 +3650,9 @@ export class InMemorySession {
         return this.#taskList.list();
     }
 
-    updateTask(taskId: string, request: UpdateTaskRequest): UpdateTaskResult {
+    updateTask(ctx: Context, taskId: string, request: UpdateTaskRequest): UpdateTaskResult {
         const result = this.#taskList.update(taskId, request);
-        if (result.success && result.updatedFields.length > 0) this.#recordTasksChanged();
+        if (result.success && result.updatedFields.length > 0) this.#recordTasksChanged(ctx);
         return result;
     }
 
@@ -3521,7 +3667,11 @@ export class InMemorySession {
             .sort((left, right) => right.startedAt - left.startedAt);
     }
 
-    async waitForWorkflow(runId: string, signal?: AbortSignal): Promise<WorkflowRun | undefined> {
+    async waitForWorkflow(
+        ctx: Context,
+        runId: string,
+        signal?: AbortSignal,
+    ): Promise<WorkflowRun | undefined> {
         const internal = this.#workflowRuns.get(runId);
         if (internal === undefined) return undefined;
         if (internal.state.status !== "running") return cloneWorkflowRun(internal.state);
@@ -3545,7 +3695,7 @@ export class InMemorySession {
         });
     }
 
-    launchWorkflow(request: LaunchWorkflowRequest): WorkflowRun {
+    launchWorkflow(ctx: Context, request: LaunchWorkflowRequest): WorkflowRun {
         this.#assertAcceptingWork();
         if (!this.#workflowsEnabled) {
             throw new Error("Workflows are disabled for this session.");
@@ -3599,110 +3749,117 @@ export class InMemorySession {
             taskId: state.taskId,
         });
         const execute = () =>
-            request
-                .execute({
-                    onAgentCall: () => {
-                        state.agentCount += 1;
-                        this.#recordWorkflowUpdate({ agentCount: state.agentCount, runId });
-                    },
-                    onAgentResult: async (index, result) => {
-                        internal.agentCalls[index] = result;
-                        await this.#saveSession();
-                    },
-                    onCheckpoint: async (checkpoint) => {
-                        internal.checkpoint = checkpoint;
-                        await this.#saveSession();
-                    },
-                    onLog: (message) => {
-                        const trimmed = message.trim();
-                        if (trimmed.length === 0) return;
-                        const logs = state.logs as string[];
-                        logs.push(
-                            trimmed.length <= MAX_WORKFLOW_LOG_CHARS
-                                ? trimmed
-                                : `${trimmed.slice(0, MAX_WORKFLOW_LOG_CHARS)}…`,
-                        );
-                        if (logs.length > 200) logs.shift();
-                        const log = logs.at(-1);
-                        const phase = /^Phase:\s*(.+)$/u.exec(log ?? "")?.[1]?.trim();
-                        if (phase !== undefined && phase.length > 0) state.phase = phase;
-                        if (log !== undefined) {
-                            this.#recordWorkflowUpdate({
-                                log,
-                                ...(state.phase === undefined ? {} : { phase: state.phase }),
-                                runId,
-                            });
-                        }
-                    },
-                    resumeAgentCalls: resumed?.agentCalls ?? [],
-                    ...(resumeCheckpoint === undefined ? {} : { resumeCheckpoint }),
-                    runId,
-                    signal: controller.signal,
-                })
-                .then((result) => {
-                    if (this.#workflowRuns.get(runId) !== internal) return;
-                    internal.agentCalls = [...result.agentCalls];
-                    state.output = result.output;
-                    state.finishedAt = this.#now();
-                    state.status = "completed";
-                    this.#recordWorkflowUpdate({
-                        finishedAt: state.finishedAt,
-                        output: state.output,
-                        runId,
-                        status: state.status,
-                    });
-                })
-                .catch((error: unknown) => {
-                    if (isDatabaseFailure(error)) throw error;
-                    if (this.#workflowRuns.get(runId) !== internal) return;
-                    if (state.status !== "stopped") {
-                        state.error = errorToMessage(error);
-                        state.finishedAt = this.#now();
-                        state.status = "error";
-                        this.#recordWorkflowUpdate({
-                            error: state.error,
-                            finishedAt: state.finishedAt,
+            withWorkerContext(
+                "workflow",
+                (workflowCtx) =>
+                    request
+                        .execute({
+                            onAgentCall: () => {
+                                state.agentCount += 1;
+                                this.#recordWorkflowUpdate({ agentCount: state.agentCount, runId });
+                            },
+                            onAgentResult: async (index, result) => {
+                                internal.agentCalls[index] = result;
+                                await this.#saveSession(ctx);
+                            },
+                            onCheckpoint: async (checkpoint) => {
+                                internal.checkpoint = checkpoint;
+                                await this.#saveSession(ctx);
+                            },
+                            onLog: (message) => {
+                                const trimmed = message.trim();
+                                if (trimmed.length === 0) return;
+                                const logs = state.logs as string[];
+                                logs.push(
+                                    trimmed.length <= MAX_WORKFLOW_LOG_CHARS
+                                        ? trimmed
+                                        : `${trimmed.slice(0, MAX_WORKFLOW_LOG_CHARS)}…`,
+                                );
+                                if (logs.length > 200) logs.shift();
+                                const log = logs.at(-1);
+                                const phase = /^Phase:\s*(.+)$/u.exec(log ?? "")?.[1]?.trim();
+                                if (phase !== undefined && phase.length > 0) state.phase = phase;
+                                if (log !== undefined) {
+                                    this.#recordWorkflowUpdate({
+                                        log,
+                                        ...(state.phase === undefined
+                                            ? {}
+                                            : { phase: state.phase }),
+                                        runId,
+                                    });
+                                }
+                            },
+                            resumeAgentCalls: resumed?.agentCalls ?? [],
+                            ...(resumeCheckpoint === undefined ? {} : { resumeCheckpoint }),
                             runId,
-                            status: state.status,
-                        });
-                    }
-                })
-                .finally(() => {
-                    if (this.#workflowRuns.get(runId) !== internal) return;
-                    internal.resolveCompletion(cloneWorkflowRun(state));
-                    if (this.#closing) return;
-                    const statusText =
-                        state.status === "completed"
-                            ? "completed"
-                            : state.status === "stopped"
-                              ? "was stopped"
-                              : "failed";
-                    const resultText =
-                        state.status === "completed"
-                            ? serializeWorkflowValue(state.output)
-                            : (state.error ?? "The workflow did not return a result.");
-                    this.deliverNotification({
-                        displayText: `Workflow ${humanizeWorkflowName(state.name)} ${statusText}.`,
-                        text: [
-                            "<workflow-notification>",
-                            `Workflow: ${state.name}`,
-                            `Run ID: ${state.runId}`,
-                            `Status: ${state.status}`,
-                            `Agents: ${state.agentCount}`,
-                            `Result: ${resultText}`,
-                            ...(state.logs.length === 0
-                                ? []
-                                : ["Progress:", ...state.logs.map((log) => `- ${log}`)]),
-                            "</workflow-notification>",
-                        ].join("\n"),
-                    });
-                });
+                            signal: controller.signal,
+                        })
+                        .then((result) => {
+                            if (this.#workflowRuns.get(runId) !== internal) return;
+                            internal.agentCalls = [...result.agentCalls];
+                            state.output = result.output;
+                            state.finishedAt = this.#now();
+                            state.status = "completed";
+                            this.#recordWorkflowUpdate({
+                                finishedAt: state.finishedAt,
+                                output: state.output,
+                                runId,
+                                status: state.status,
+                            });
+                        })
+                        .catch((error: unknown) => {
+                            if (isDatabaseFailure(error)) throw error;
+                            if (this.#workflowRuns.get(runId) !== internal) return;
+                            if (state.status !== "stopped") {
+                                state.error = errorToMessage(error);
+                                state.finishedAt = this.#now();
+                                state.status = "error";
+                                this.#recordWorkflowUpdate({
+                                    error: state.error,
+                                    finishedAt: state.finishedAt,
+                                    runId,
+                                    status: state.status,
+                                });
+                            }
+                        })
+                        .finally(async () => {
+                            if (this.#workflowRuns.get(runId) !== internal) return;
+                            internal.resolveCompletion(cloneWorkflowRun(state));
+                            if (this.#closing) return;
+                            const statusText =
+                                state.status === "completed"
+                                    ? "completed"
+                                    : state.status === "stopped"
+                                      ? "was stopped"
+                                      : "failed";
+                            const resultText =
+                                state.status === "completed"
+                                    ? serializeWorkflowValue(state.output)
+                                    : (state.error ?? "The workflow did not return a result.");
+                            await this.deliverNotification(workflowCtx, {
+                                displayText: `Workflow ${humanizeWorkflowName(state.name)} ${statusText}.`,
+                                text: [
+                                    "<workflow-notification>",
+                                    `Workflow: ${state.name}`,
+                                    `Run ID: ${state.runId}`,
+                                    `Status: ${state.status}`,
+                                    `Agents: ${state.agentCount}`,
+                                    `Result: ${resultText}`,
+                                    ...(state.logs.length === 0
+                                        ? []
+                                        : ["Progress:", ...state.logs.map((log) => `- ${log}`)]),
+                                    "</workflow-notification>",
+                                ].join("\n"),
+                            });
+                        }),
+                { runId, sessionId: this.id },
+            );
         const execution = this.#taskDrain?.run(execute) ?? execute();
         void execution.catch(rethrowDatabaseFailure);
         return cloneWorkflowRun(state);
     }
 
-    stopWorkflow(runId: string): WorkflowRun | undefined {
+    stopWorkflow(ctx: Context, runId: string): WorkflowRun | undefined {
         const run = this.#workflowRuns.get(runId);
         if (run === undefined) return undefined;
         if (run.state.status === "running") {
@@ -3720,11 +3877,11 @@ export class InMemorySession {
         return cloneWorkflowRun(run.state);
     }
 
-    async emitCreatedEvent(): Promise<void> {
-        await this.#append("session_created", { session: this.snapshot() });
+    async emitCreatedEvent(ctx: Context): Promise<void> {
+        await this.#append(ctx, "session_created", { session: this.snapshot() });
     }
 
-    beginShutdown(): Promise<void> {
+    beginShutdown(ctx: Context): Promise<void> {
         if (this.#shutdownCleanup !== undefined) return this.#shutdownCleanup;
         this.#closing = true;
         this.#clearWorkspaceReadinessRetry();
@@ -3733,9 +3890,9 @@ export class InMemorySession {
         for (const timer of this.#userInputPresenceTimers.values()) clearTimeout(timer);
         this.#userInputPresenceTimers.clear();
         this.#releaseMcpToolLease();
-        const metadataCleanup = this.#clearMetadataSettlement();
+        const metadataCleanup = this.#clearMetadataSettlement(ctx);
         for (const workflow of this.#workflowRuns.values()) {
-            if (workflow.state.status === "running") this.stopWorkflow(workflow.state.runId);
+            if (workflow.state.status === "running") this.stopWorkflow(ctx, workflow.state.runId);
         }
         const activeRun = this.#activeRun;
         if (activeRun !== undefined && this.hasDurableToolRun() && !this.#workspaceArchived) {
@@ -3747,7 +3904,7 @@ export class InMemorySession {
         this.#compactionController?.abort();
         this.#shutdownCleanup = Promise.all([
             metadataCleanup,
-            this.#killRuntimeProcesses({ forceAfterMs: 5_000, includeBackground: true }),
+            this.#killRuntimeProcesses(ctx, { forceAfterMs: 5_000, includeBackground: true }),
             this.#runtime?.agent.close() ?? Promise.resolve(),
         ]).then(() => undefined);
         return this.#shutdownCleanup;
@@ -3758,11 +3915,16 @@ export class InMemorySession {
      * runtime, and killing processes are not database work, so the caller runs them once the
      * archival has committed rather than while it holds the write lock.
      */
-    async archiveForWorkspace(workspaceId: string): Promise<() => Promise<void>> {
-        return await this.#runSessionMutation(() => this.#archiveForWorkspaceMutation(workspaceId));
+    async archiveForWorkspace(ctx: Context, workspaceId: string): Promise<() => Promise<void>> {
+        return await this.#runSessionMutation(ctx, (ctx) =>
+            this.#archiveForWorkspaceMutation(ctx, workspaceId),
+        );
     }
 
-    async #archiveForWorkspaceMutation(workspaceId: string): Promise<() => Promise<void>> {
+    async #archiveForWorkspaceMutation(
+        ctx: Context,
+        workspaceId: string,
+    ): Promise<() => Promise<void>> {
         if (this.#workspaceArchived) {
             return () => this.#shutdownCleanup ?? Promise.resolve();
         }
@@ -3774,18 +3936,18 @@ export class InMemorySession {
         ]);
         for (const runId of runIds) {
             await Promise.all([
-                this.#cancelExternalToolCalls(runId),
-                this.#cancelDurableUserInputs(runId),
-                this.#cancelDurableWaits(runId),
+                this.#cancelExternalToolCalls(ctx, runId),
+                this.#cancelDurableUserInputs(ctx, runId),
+                this.#cancelDurableWaits(ctx, runId),
             ]);
         }
         const queuedRuns = this.#queue;
         await Promise.all(
-            queuedRuns.map((run) => this.#persistence?.deleteQueuedRun(this.id, run.runId)),
+            queuedRuns.map((run) => this.#persistence?.deleteQueuedRun(ctx, this.id, run.runId)),
         );
         this.#queue = [];
         for (const run of queuedRuns) {
-            await this.#append("run_error", {
+            await this.#append(ctx, "run_error", {
                 errorMessage:
                     "The queued run could not start because its managed workspace was archived.",
                 modelLocked: false,
@@ -3801,10 +3963,10 @@ export class InMemorySession {
         this.#pendingSteeringContinuations.clear();
         this.#suspendedRunIds.clear();
         this.#suspendOnAbort = false;
-        await this.#pauseActiveGoal();
+        await this.#pauseActiveGoal(ctx);
         this.#status = "archived";
         this.#archived = true;
-        await this.#append("session_workspace_archived", {
+        await this.#append(ctx, "session_workspace_archived", {
             reason: "workspace_archived",
             workspaceId,
         });
@@ -3812,7 +3974,7 @@ export class InMemorySession {
         return () => {
             this.#clearWorkspaceReadinessRetry();
             activeRun?.controller.abort();
-            return this.beginShutdown();
+            return this.beginShutdown(ctx);
         };
     }
 
@@ -3820,18 +3982,18 @@ export class InMemorySession {
         return this.#closing;
     }
 
-    async markInterrupted(interruption: SessionInterruption): Promise<void> {
+    async markInterrupted(ctx: Context, interruption: SessionInterruption): Promise<void> {
         this.#finishElapsedInterval();
         this.#interruption = interruption;
         this.#status = "error";
         this.#activeRun?.controller.abort();
-        if (!this.#closing) void this.#killRuntimeProcesses();
+        if (!this.#closing) void this.#killRuntimeProcesses(ctx);
         this.#activeRun = undefined;
         this.#restoredActiveRunId = undefined;
         this.#activePartial = undefined;
         this.#pendingSteeringMessages.clear();
         this.#suspendedRunIds.clear();
-        await this.#pauseActiveGoal();
+        await this.#pauseActiveGoal(ctx);
         const interruptedRunIds = [
             ...(interruption.runId !== undefined ? [interruption.runId] : []),
             ...this.#queue.map((queued) => queued.runId),
@@ -3839,16 +4001,16 @@ export class InMemorySession {
         const discardedQueue = this.#queue;
         this.#queue = [];
         void Promise.all(discardedQueue.map((queued) => this.#closeDebugLog(queued)));
-        const persistInterruption = async () => {
+        const persistInterruption = async (ctx: Context) => {
             await Promise.all(
                 discardedQueue.map((queued) =>
-                    this.#persistence?.deleteQueuedRun(this.id, queued.runId),
+                    this.#persistence?.deleteQueuedRun(ctx, this.id, queued.runId),
                 ),
             );
             const uniqueRunIds = new Set(interruptedRunIds);
             for (const runId of uniqueRunIds) {
-                await this.#recordInterruptedToolResults(runId, interruption.message);
-                await this.#append("run_error", {
+                await this.#recordInterruptedToolResults(ctx, runId, interruption.message);
+                await this.#append(ctx, "run_error", {
                     errorMessage: interruption.message,
                     modelLocked: this.#modelLocked(),
                     runId,
@@ -3856,13 +4018,17 @@ export class InMemorySession {
                 });
             }
             if (uniqueRunIds.size > 0) this.#restartMetadataSettlement();
-            await this.#saveSession();
+            await this.#saveSession(ctx);
         };
-        if (this.#persistence?.transaction === undefined) await persistInterruption();
-        else await this.#persistence.transaction(persistInterruption);
+        if (this.#persistence?.transaction === undefined) await persistInterruption(ctx);
+        else await this.#persistence.transaction(ctx, persistInterruption);
     }
 
-    async #recordInterruptedToolResults(runId: string, message: string): Promise<void> {
+    async #recordInterruptedToolResults(
+        ctx: Context,
+        runId: string,
+        message: string,
+    ): Promise<void> {
         const answeredToolCallIds = new Set<string>();
         for (const candidate of [
             ...this.#messages.map((entry) => entry.message),
@@ -3895,10 +4061,10 @@ export class InMemorySession {
         };
         this.#separateModelContextFromVisibleTranscript();
         this.#contextMessages?.push(resultMessage);
-        await this.#commitAgentMessage(runId, resultMessage);
+        await this.#commitAgentMessage(ctx, runId, resultMessage);
     }
 
-    async markSuspendedAfterRestart(message: string, runId?: string): Promise<void> {
+    async markSuspendedAfterRestart(ctx: Context, message: string, runId?: string): Promise<void> {
         if (!this.isSubagent() || this.#status !== "suspended") {
             throw new Error("Only a suspended subagent can be repaired as resumable.");
         }
@@ -3909,11 +4075,13 @@ export class InMemorySession {
         this.#activePartial = undefined;
         this.#suspendOnAbort = false;
         await Promise.all(
-            this.#queue.map((queued) => this.#persistence?.deleteQueuedRun(this.id, queued.runId)),
+            this.#queue.map((queued) =>
+                this.#persistence?.deleteQueuedRun(ctx, this.id, queued.runId),
+            ),
         );
         this.#queue = [];
         if (runId !== undefined) {
-            await this.#append("run_error", {
+            await this.#append(ctx, "run_error", {
                 errorMessage: message,
                 modelLocked: this.#modelLocked(),
                 runId,
@@ -3921,10 +4089,11 @@ export class InMemorySession {
             });
         }
         this.#status = "suspended";
-        await this.#saveSession();
+        await this.#saveSession(ctx);
     }
 
     async recordSubagentStoppedAfterRestart(
+        ctx: Context,
         subagent: SubagentSummary,
         path: string,
     ): Promise<void> {
@@ -3949,38 +4118,38 @@ export class InMemorySession {
             role: "user",
         };
         this.#separateModelContextFromVisibleTranscript();
-        await this.#storeMessage(this.#nextMessagePosition(), message, false, runId);
+        await this.#storeMessage(ctx, this.#nextMessagePosition(), message, false, runId);
         this.#contextMessages?.push(message);
         this.#lastMessageAt = this.#now();
-        await this.#append("message_submitted", {
+        await this.#append(ctx, "message_submitted", {
             displayText,
             message,
             runId,
             source: "notification",
         });
-        await this.#saveSession();
+        await this.#saveSession(ctx);
     }
 
-    async reset(): Promise<ProtocolSession> {
+    async reset(ctx: Context): Promise<ProtocolSession> {
         this.#shellHistoryRevision += 1;
-        await this.#clearMetadataSettlement();
-        await this.#agentManager?.stopDescendants(this.id);
+        await this.#clearMetadataSettlement(ctx);
+        await this.#agentManager?.stopDescendants(ctx, this.id);
         const activeRunId = this.#activeRun?.runId;
-        await this.abort({ stopDescendants: false });
+        await this.abort(ctx, { stopDescendants: false });
         await Promise.allSettled(this.#shellCommandCompletions.values());
-        if (activeRunId !== undefined) await this.waitForRun(activeRunId);
+        if (activeRunId !== undefined) await this.waitForRun(ctx, activeRunId);
         await this.#draining?.catch(rethrowDatabaseFailure);
         const workflowRuns = [...this.#workflowRuns.values()];
         for (const run of workflowRuns) {
-            if (run.state.status === "running") this.stopWorkflow(run.state.runId);
+            if (run.state.status === "running") this.stopWorkflow(ctx, run.state.runId);
         }
         await Promise.all(workflowRuns.map((run) => run.completion));
         this.#workflowRuns.clear();
         // A reset throws away the conversation that knew its task ids. Make
         // sure no commands remain even when there was no active run to abort.
-        await this.#killRuntimeProcesses({ includeBackground: true });
+        await this.#killRuntimeProcesses(ctx, { includeBackground: true });
         this.#runtime?.context.attachments?.discard();
-        await (await this.#ensureRuntime()).agent.reset();
+        await (await this.#ensureRuntime(ctx)).agent.reset();
         this.#status = "idle";
         this.#interruption = undefined;
         this.#restoredActiveRunId = undefined;
@@ -4001,21 +4170,21 @@ export class InMemorySession {
         const hadTasks = this.#taskList.reset();
         const hadGoal = this.#goal !== undefined;
         this.#goal = undefined;
-        const commitReset = async () => {
-            await this.#persistence?.clearMessages(this.id);
-            if (hadTasks) this.#recordTasksChanged();
-            if (hadGoal) await this.#append("goal_changed", { goal: null });
-            await this.#append("session_reset", {
+        const commitReset = async (ctx: Context) => {
+            await this.#persistence?.clearMessages(ctx, this.id);
+            if (hadTasks) this.#recordTasksChanged(ctx);
+            if (hadGoal) await this.#append(ctx, "goal_changed", { goal: null });
+            await this.#append(ctx, "session_reset", {
                 snapshot: this.#agentSnapshot(),
-                transcript: await this.transcriptWindow(),
+                transcript: await this.transcriptWindow(ctx),
             });
         };
-        if (this.#persistence?.transaction === undefined) await commitReset();
-        else await this.#persistence.transaction(commitReset);
+        if (this.#persistence?.transaction === undefined) await commitReset(ctx);
+        else await this.#persistence.transaction(ctx, commitReset);
         return this.snapshot();
     }
 
-    async rewind(messageId: string): Promise<RewindSessionResponse> {
+    async rewind(ctx: Context, messageId: string): Promise<RewindSessionResponse> {
         if (this.isSubagent()) {
             throw new Error("Subagent histories cannot be rewound.");
         }
@@ -4036,8 +4205,8 @@ export class InMemorySession {
         // Naming in flight is reading a transcript that is about to lose turns, and closing the
         // runtime below would fail its request. Cancelling first keeps that from counting against
         // the chat as a naming failure.
-        await this.#clearMetadataSettlement();
-        void this.#killRuntimeProcesses({ includeBackground: true });
+        await this.#clearMetadataSettlement(ctx);
+        void this.#killRuntimeProcesses(ctx, { includeBackground: true });
         this.#releaseMcpToolLease();
         void this.#runtime?.agent.close();
         this.#runtime = undefined;
@@ -4074,21 +4243,21 @@ export class InMemorySession {
         this.#status = "idle";
         this.#totalTokens = 0;
         this.#lastMessageAt = this.#now();
-        const commitRewind = async () => {
-            await this.#persistence?.deleteMessagesFrom(this.id, target.position);
-            await this.#append("session_rewound", {
+        const commitRewind = async (ctx: Context) => {
+            await this.#persistence?.deleteMessagesFrom(ctx, this.id, target.position);
+            await this.#append(ctx, "session_rewound", {
                 messageId,
                 snapshot: this.#agentSnapshot(),
-                transcript: await this.transcriptWindow(),
+                transcript: await this.transcriptWindow(ctx),
             });
         };
-        if (this.#persistence?.transaction === undefined) await commitRewind();
-        else await this.#persistence.transaction(commitRewind);
+        if (this.#persistence?.transaction === undefined) await commitRewind(ctx);
+        else await this.#persistence.transaction(ctx, commitRewind);
         this.#restartMetadataSettlement();
         return { message: target.message, session: this.snapshot() };
     }
 
-    async compact(signal?: AbortSignal): Promise<AgentCompactionResult> {
+    async compact(ctx: Context, signal?: AbortSignal): Promise<AgentCompactionResult> {
         this.#assertAcceptingWork();
         if (this.#activeRun !== undefined || this.#queue.length > 0) {
             throw new Error("Wait for the active response to finish before compacting.");
@@ -4103,20 +4272,21 @@ export class InMemorySession {
         this.#compactionRunId = compactionRunId;
         this.#compactionActive = true;
         this.#status = "running";
-        await this.#append("run_started", { kind: "compaction", runId: compactionRunId });
+        await this.#append(ctx, "run_started", { kind: "compaction", runId: compactionRunId });
         this.#restartMetadataSettlement();
-        await this.#saveSession();
+        await this.#saveSession(ctx);
         try {
             await this.#settleInferenceScopeRefresh();
             const result = await (
-                await this.#ensureRuntime()
+                await this.#ensureRuntime(ctx)
             ).agent.compact(
+                ctx,
                 compactSignal,
-                (event) => this.#appendCompactionAgentEvent(compactionRunId, event),
-                (message) => this.#appendAgentMessage(compactionRunId, message),
+                (event) => this.#appendCompactionAgentEvent(ctx, compactionRunId, event),
+                (message) => this.#appendAgentMessage(ctx, compactionRunId, message),
             );
             this.#syncContextMessages();
-            await this.#append("run_finished", {
+            await this.#append(ctx, "run_finished", {
                 modelLocked: this.#modelLocked(),
                 runId: compactionRunId,
                 stopReason: "stop",
@@ -4125,16 +4295,16 @@ export class InMemorySession {
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (compactSignal.aborted) {
-                await this.#append("run_finished", {
+                await this.#append(ctx, "run_finished", {
                     modelLocked: this.#modelLocked(),
                     runId: compactionRunId,
                     stopReason: "aborted",
                 });
             } else {
                 const errorMessage = errorToMessage(error);
-                await this.#appendDurableError(compactionRunId, errorMessage, this.#runtime);
+                await this.#appendDurableError(ctx, compactionRunId, errorMessage, this.#runtime);
                 this.#syncContextMessages();
-                await this.#append("run_error", {
+                await this.#append(ctx, "run_error", {
                     errorMessage,
                     modelLocked: this.#modelLocked(),
                     runId: compactionRunId,
@@ -4149,7 +4319,7 @@ export class InMemorySession {
                 this.#status = previousStatus;
                 this.#restartMetadataSettlement();
                 await this.#settleInferenceScopeRefresh();
-                await this.#saveSession();
+                await this.#saveSession(ctx);
             }
         }
     }
@@ -4158,20 +4328,26 @@ export class InMemorySession {
         return this.#agentMetadata.type === "subagent";
     }
 
-    async markRead(): Promise<boolean> {
-        return await this.#runSessionMutation(async () => {
+    async markRead(ctx: Context): Promise<boolean> {
+        if (this.isSubagent() || this.#unread === undefined) return false;
+        return await this.#runSessionMutation(ctx, async (ctx) => {
             if (this.isSubagent() || this.#unread === undefined) return false;
             this.#unread = undefined;
-            await this.#append("session_updated", { session: this.snapshot() });
+            await this.#append(ctx, "session_updated", { session: this.snapshot() });
             return true;
         });
     }
 
     recordSubagentChanged(subagent: SubagentSummary): void {
-        void this.#afterTransactionCommit(async () => {
-            await this.#append("subagent_changed", { subagent });
-            this.#restartMetadataSettlement();
-        }).catch(rethrowDatabaseFailure);
+        void withWorkerContext(
+            "subagent-changed",
+            (workerCtx) =>
+                this.#afterTransactionCommit(workerCtx, async () => {
+                    await this.#append(workerCtx, "subagent_changed", { subagent });
+                    this.#restartMetadataSettlement();
+                }),
+            { sessionId: this.id },
+        ).catch(rethrowDatabaseFailure);
     }
 
     recordDescendantActivity(): void {
@@ -4182,8 +4358,8 @@ export class InMemorySession {
         this.#restartMetadataSettlement();
     }
 
-    async recordMutationApplied(mutationId: string | undefined): Promise<void> {
-        if (mutationId !== undefined) await this.#append("mutation_applied", { mutationId });
+    async recordMutationApplied(ctx: Context, mutationId: string | undefined): Promise<void> {
+        if (mutationId !== undefined) await this.#append(ctx, "mutation_applied", { mutationId });
     }
 
     requestForSubagent(): CreateSessionRequest {
@@ -4266,8 +4442,8 @@ export class InMemorySession {
         return attachment === undefined ? undefined : structuredClone(attachment);
     }
 
-    async externalControlContext(): Promise<AgentContext> {
-        return (await this.#ensureRuntime()).context;
+    async externalControlContext(ctx: Context): Promise<AgentContext> {
+        return (await this.#ensureRuntime(ctx)).context;
     }
 
     runsInDocker(): boolean {
@@ -4287,10 +4463,11 @@ export class InMemorySession {
      * session.
      */
     async transcriptWindow(
+        ctx: Context,
         turnLimit: number = SESSION_STREAM_TURN_LIMIT,
     ): Promise<SessionTranscriptWindow> {
         // No anchor is given, so the newest turns always exist to return.
-        return (await this.transcriptPage(turnLimit)) as SessionTranscriptWindow;
+        return (await this.transcriptPage(ctx, turnLimit)) as SessionTranscriptWindow;
     }
 
     /**
@@ -4301,6 +4478,7 @@ export class InMemorySession {
      * moved under them, the other that they have reached the beginning.
      */
     async transcriptPage(
+        ctx: Context,
         turnLimit: number = SESSION_STREAM_TURN_LIMIT,
         before?: string,
     ): Promise<SessionTranscriptWindow | undefined> {
@@ -4309,7 +4487,7 @@ export class InMemorySession {
                 ? this.#transcriptRunOrder.length
                 : this.#transcriptRunIndexes.get(before);
         if (earlierCount === undefined || (earlierCount === 0 && this.#transcriptHasEarlier)) {
-            return await this.#persistence?.loadTranscriptPage?.(this.id, turnLimit, before);
+            return await this.#persistence?.loadTranscriptPage?.(ctx, this.id, turnLimit, before);
         }
         const first = Math.max(0, earlierCount - turnLimit);
         const keptRunIds = this.#transcriptRunOrder.slice(first, earlierCount);
@@ -4333,7 +4511,7 @@ export class InMemorySession {
                         this.events.messageEventId(entry.message.id) === undefined,
                 ))
         ) {
-            return await this.#persistence.loadTranscriptPage(this.id, turnLimit, before);
+            return await this.#persistence.loadTranscriptPage(ctx, this.id, turnLimit, before);
         }
         const entries = this.#transcriptEntries(keptMessages);
         const window = sessionTranscriptWindow(entries, this.#runFacts, keptRunIds.length);
@@ -4371,6 +4549,7 @@ export class InMemorySession {
      * client has to start again from a bootstrap rather than page forward.
      */
     async transcriptSince(
+        ctx: Context,
         after: EventId,
         turnLimit: number = SESSION_STREAM_TURN_LIMIT,
     ): Promise<SessionTranscriptWindow | undefined> {
@@ -4378,7 +4557,7 @@ export class InMemorySession {
         // in-memory window. Ask storage first so a months-old client position
         // cannot turn into an undetected hole between held and recent turns.
         if (this.#persistence?.loadTranscriptSince !== undefined) {
-            return await this.#persistence.loadTranscriptSince(this.id, turnLimit, after);
+            return await this.#persistence.loadTranscriptSince(ctx, this.id, turnLimit, after);
         }
         const runIds = this.#transcriptRunOrder;
         const eventIdOf = (runId: string): EventId | undefined => {
@@ -4490,7 +4669,7 @@ export class InMemorySession {
      * The snapshot is versioned by the tracker, so an older or repeated delivery
      * is dropped rather than published as news.
      */
-    async recordGitState(git: GitChangeSnapshot): Promise<void> {
+    async recordGitState(ctx: Context, git: GitChangeSnapshot): Promise<void> {
         // Versions are monotonic only within one daemon generation, so a snapshot
         // from a different generation always wins.
         if (
@@ -4501,7 +4680,7 @@ export class InMemorySession {
             return;
         }
         this.#git = git;
-        await this.#append("session_git_changed", { git });
+        await this.#append(ctx, "session_git_changed", { git });
     }
 
     /**
@@ -4537,12 +4716,36 @@ export class InMemorySession {
               };
     }
 
-    async refreshGitCommandSecret(): Promise<void> {
+    async refreshGitCommandSecret(ctx: Context): Promise<void> {
         await this.#syncGitCommandSecret();
     }
 
     snapshot(): ProtocolSession {
-        const snapshot = this.#agentSnapshot();
+        return this.#protocolSnapshot(this.#agentSnapshot());
+    }
+
+    /**
+     * Current client-visible state without model context or historical messages.
+     *
+     * Conversation history is delivered by the bounded transcript window. Keeping
+     * this projection independent from `snapshot()` prevents opening a large chat
+     * from walking the complete model transcript merely to throw it away.
+     */
+    clientSnapshot(options: { includeTools?: boolean } = {}): ProtocolSession {
+        return this.#protocolSnapshot({
+            id: this.#agentId,
+            providerId: this.#providerId,
+            modelId: this.#modelId,
+            status: this.#agentStatus(),
+            messages: [],
+            queue: [],
+            tools: options.includeTools === true ? this.#tools : [],
+            ...(this.#effort === undefined ? {} : { effort: this.#effort }),
+            ...(this.#serviceTier === undefined ? {} : { serviceTier: this.#serviceTier }),
+        });
+    }
+
+    #protocolSnapshot(snapshot: AgentSnapshot): ProtocolSession {
         const lastEventId = this.events.lastEventId();
         const activeTurn = this.#activeTurn();
         return {
@@ -4787,6 +4990,7 @@ export class InMemorySession {
     }
 
     async submitContext(
+        ctx: Context,
         request: SubmitContextMessageRequest,
     ): Promise<SubmitContextMessageResponse> {
         this.#assertAcceptingWork();
@@ -4802,8 +5006,8 @@ export class InMemorySession {
             }
         }
 
-        const apply = async (): Promise<SubmitContextMessageResponse> => {
-            await this.setArchived(false);
+        const apply = async (ctx: Context): Promise<SubmitContextMessageResponse> => {
+            await this.setArchived(ctx, false);
             const messageId = request.clientSubmissionId ?? createId();
             const anchorRunId = `context:${messageId}`;
             const createdAt = this.#now();
@@ -4822,11 +5026,11 @@ export class InMemorySession {
                 position,
             };
             this.#separateModelContextFromVisibleTranscript();
-            await this.#storeMessage(position, message, false, anchorRunId);
-            await this.#persistence?.insertPendingContextMessage?.(this.id, pending);
+            await this.#storeMessage(ctx, position, message, false, anchorRunId);
+            await this.#persistence?.insertPendingContextMessage?.(ctx, this.id, pending);
             this.#pendingContextMessages.set(messageId, pending);
             this.#lastMessageAt = createdAt;
-            const event = await this.#append("message_submitted", {
+            const event = await this.#append(ctx, "message_submitted", {
                 delivery: "context",
                 displayText: request.text,
                 message,
@@ -4841,11 +5045,12 @@ export class InMemorySession {
             };
         };
         return this.#persistence?.transaction === undefined
-            ? await apply()
-            : await this.#persistence.transaction(apply);
+            ? await apply(ctx)
+            : await this.#persistence.transaction(ctx, apply);
     }
 
     async submit(
+        ctx: Context,
         request: SessionSubmitMessageRequest,
         options: { source?: "notification" } = {},
     ): Promise<SubmitMessageResponse> {
@@ -4862,7 +5067,7 @@ export class InMemorySession {
             }
             const existingMessage = this.#submittedUserMessages.get(request.clientSubmissionId);
             if (existingMessage?.message.role === "user" && existingMessage.runId !== undefined) {
-                const recoveredEvent = await this.#append("message_submitted", {
+                const recoveredEvent = await this.#append(ctx, "message_submitted", {
                     delivery: "run",
                     displayText: request.displayText ?? request.text,
                     message: existingMessage.message,
@@ -4876,9 +5081,9 @@ export class InMemorySession {
                 };
             }
         }
-        await this.#interruptDurableWaits();
+        await this.#interruptDurableWaits(ctx);
         if (options.source === undefined && request.provenance !== "agent") {
-            await this.setArchived(false);
+            await this.setArchived(ctx, false);
         }
         const runId = createId();
         const createdAt = this.#now();
@@ -4968,7 +5173,7 @@ export class InMemorySession {
             this.#workspaceQueueWaiting ||
             (await this.#currentWorkspaceRunReadiness()).state === "waiting";
         const acceptedAtomically = this.#persistence?.acceptQueuedRun !== undefined;
-        await this.#persistence?.acceptQueuedRun?.({
+        await this.#persistence?.acceptQueuedRun?.(ctx, {
             event,
             message: messageEntry,
             run: queued,
@@ -4980,18 +5185,19 @@ export class InMemorySession {
         this.#interruption = undefined;
         this.#workspaceQueueWaiting = workspaceQueueWaiting;
         this.#queue.push(queued);
-        if (!acceptedAtomically) await this.#persistence?.insertQueuedRun(this.id, queued);
+        if (!acceptedAtomically) await this.#persistence?.insertQueuedRun(ctx, this.id, queued);
         this.#status = this.#activeRun === undefined ? "queued" : "running";
         this.#lastMessageAt = submittedAt;
         this.#separateModelContextFromVisibleTranscript();
         await this.#storeMessage(
+            ctx,
             messagePosition,
             visibleMessage,
             false,
             runId,
             !acceptedAtomically,
         );
-        await this.#commitEvent(event);
+        await this.#commitEvent(ctx, event);
         this.#startDrainQueue();
         this.#restartMetadataSettlement();
         return {
@@ -5004,7 +5210,7 @@ export class InMemorySession {
         };
     }
 
-    async steer(request: SteerMessageRequest): Promise<SteerMessageResponse> {
+    async steer(ctx: Context, request: SteerMessageRequest): Promise<SteerMessageResponse> {
         this.#assertAcceptingWork();
         if (request.clientSubmissionId !== undefined) {
             const existingEvent = this.events.messageSubmission(request.clientSubmissionId);
@@ -5022,9 +5228,9 @@ export class InMemorySession {
             activeRun === undefined ||
             (request.expectedRunId !== undefined && activeRun.runId !== request.expectedRunId)
         ) {
-            return { ...(await this.submit(request)), delivery: "run" };
+            return { ...(await this.submit(ctx, request)), delivery: "run" };
         }
-        await this.#interruptDurableWaits();
+        await this.#interruptDurableWaits(ctx);
         // Presence alone decides this, not whether the value differs from the current one, so the
         // rule does not quietly depend on what the session happens to be set to right now.
         if (
@@ -5040,7 +5246,7 @@ export class InMemorySession {
                 "The model, reasoning effort, fast mode, external functions, durable skills, and the system prompt can only be changed by submitting a message, which runs once the current response finishes.",
             );
         }
-        await this.setArchived(false);
+        await this.setArchived(ctx, false);
         const displayText = request.displayText ?? request.text;
         const blocks: readonly ContentBlock[] = request.content ?? [
             { type: "text", text: request.text },
@@ -5052,7 +5258,7 @@ export class InMemorySession {
             identity: request.identity ?? null,
         };
 
-        const agent = (await this.#ensureRuntime()).agent;
+        const agent = (await this.#ensureRuntime(ctx)).agent;
         const continuation = this.#pendingSteeringContinuations.get(activeRun.runId);
         if (continuation !== undefined && !continuation.cancelled) {
             const pendingContext = this.#reservePendingContextForSteering(activeRun.runId);
@@ -5064,6 +5270,7 @@ export class InMemorySession {
             }
             agent.enqueueMessage(userMessage);
             await this.#storeMessage(
+                ctx,
                 this.#nextMessagePosition(),
                 userMessage,
                 false,
@@ -5071,7 +5278,7 @@ export class InMemorySession {
             );
             this.#interruption = undefined;
             this.#lastMessageAt = this.#now();
-            const event = await this.#append("message_submitted", {
+            const event = await this.#append(ctx, "message_submitted", {
                 delivery: "steer",
                 displayText,
                 message: userMessage,
@@ -5099,12 +5306,13 @@ export class InMemorySession {
             });
             agent.steerMessage(userMessage);
         } else {
-            const context = await this.#drainPendingContextMessages();
+            const context = await this.#drainPendingContextMessages(ctx);
             for (const pendingContext of context) {
                 agent.enqueueMessage(pendingContext.message);
             }
             agent.enqueueMessage(userMessage);
             await this.#storeMessage(
+                ctx,
                 this.#nextMessagePosition(),
                 userMessage,
                 false,
@@ -5113,14 +5321,14 @@ export class InMemorySession {
         }
         this.#interruption = undefined;
         this.#lastMessageAt = this.#now();
-        const event = await this.#append("message_submitted", {
+        const event = await this.#append(ctx, "message_submitted", {
             delivery: "steer",
             displayText,
             message: userMessage,
             runId: activeRun.runId,
         });
         if (!pending) {
-            await this.#append("steering_applied", {
+            await this.#append(ctx, "steering_applied", {
                 messageIds: [userMessage.id],
                 runId: activeRun.runId,
             });
@@ -5135,12 +5343,13 @@ export class InMemorySession {
     }
 
     async deliverNotification(
+        ctx: Context,
         request: SubmitMessageRequest,
     ): Promise<SubmitMessageResponse | SteerMessageResponse> {
         this.#assertAcceptingWork();
-        await this.#interruptDurableWaits();
+        await this.#interruptDurableWaits(ctx);
         if (this.#activeRun === undefined) {
-            return await this.submit(request, { source: "notification" });
+            return await this.submit(ctx, request, { source: "notification" });
         }
 
         const activeRun = this.#activeRun;
@@ -5157,7 +5366,7 @@ export class InMemorySession {
             provenance: "agent",
             role: "user",
         };
-        const agent = (await this.#ensureRuntime()).agent;
+        const agent = (await this.#ensureRuntime(ctx)).agent;
 
         const pending = agent.status === "running";
         if (pending) {
@@ -5170,6 +5379,7 @@ export class InMemorySession {
         } else {
             agent.enqueueMessage(userMessage);
             await this.#storeMessage(
+                ctx,
                 this.#nextMessagePosition(),
                 visibleMessage,
                 false,
@@ -5177,7 +5387,7 @@ export class InMemorySession {
             );
         }
         this.#interruption = undefined;
-        const event = await this.#append("message_submitted", {
+        const event = await this.#append(ctx, "message_submitted", {
             delivery: "steer",
             displayText,
             message: visibleMessage,
@@ -5185,7 +5395,7 @@ export class InMemorySession {
             source: "notification",
         });
         if (!pending) {
-            await this.#append("steering_applied", {
+            await this.#append(ctx, "steering_applied", {
                 messageIds: [userMessage.id],
                 runId: activeRun.runId,
             });
@@ -5198,11 +5408,11 @@ export class InMemorySession {
         };
     }
 
-    async deliverAgentMessage(message: UserMessage): Promise<void> {
+    async deliverAgentMessage(ctx: Context, message: UserMessage): Promise<void> {
         this.#assertAcceptingWork();
         if (this.events.messageSubmission(message.id) !== undefined) return;
-        await this.#interruptDurableWaits();
-        const agent = (await this.#ensureRuntime()).agent;
+        await this.#interruptDurableWaits(ctx);
+        const agent = (await this.#ensureRuntime(ctx)).agent;
         const activeRun = this.#activeRun;
         const displayText = message.blocks
             .flatMap((block) => (block.type === "text" ? [block.text] : []))
@@ -5215,7 +5425,7 @@ export class InMemorySession {
             });
             agent.steerMessage(message);
             this.#lastMessageAt = this.#now();
-            await this.#append("message_submitted", {
+            await this.#append(ctx, "message_submitted", {
                 delivery: "steer",
                 displayText,
                 message,
@@ -5223,7 +5433,7 @@ export class InMemorySession {
             });
             return;
         }
-        await this.submit({
+        await this.submit(ctx, {
             ...(message.agentSource === undefined ? {} : { agentSource: message.agentSource }),
             agentMessageTriggerTurn: true,
             clientSubmissionId: message.id,
@@ -5283,7 +5493,7 @@ export class InMemorySession {
         return undefined;
     }
 
-    waitForRun(runId: string): Promise<SessionRunCompletion> {
+    waitForRun(ctx: Context, runId: string): Promise<SessionRunCompletion> {
         const completed = this.#completionForRun(runId);
         if (completed !== undefined) {
             return Promise.resolve(completed);
@@ -5317,7 +5527,11 @@ export class InMemorySession {
             .map(cloneExternalToolCall);
     }
 
-    async waitDurably(request: DurableWaitRequest, signal?: AbortSignal): Promise<WaitResult> {
+    async waitDurably(
+        ctx: Context,
+        request: DurableWaitRequest,
+        signal?: AbortSignal,
+    ): Promise<WaitResult> {
         const runId = this.#activeRun?.runId;
         if (runId === undefined) throw new Error("The durable wait has no active run.");
         const existing = [...this.#durableWaits.values()].find(
@@ -5346,13 +5560,13 @@ export class InMemorySession {
             toolName: request.toolName,
         };
         if (existing === undefined) {
-            await this.#persistence?.upsertDurableWait?.(wait);
+            await this.#persistence?.upsertDurableWait?.(ctx, wait);
             this.#durableWaits.set(wait.id, wait);
             this.#armDurableWait(wait);
-            await this.#refreshWaitActivity();
+            await this.#refreshWaitActivity(ctx);
         }
         if (wait.dueAt <= this.#now()) {
-            const settled = await this.#settleDurableWait(wait, false);
+            const settled = await this.#settleDurableWait(ctx, wait, false);
             if (settled !== undefined) return settled;
         }
         return new Promise<WaitResult>((resolve, reject) => {
@@ -5413,7 +5627,11 @@ export class InMemorySession {
         );
     }
 
-    resumeDurableToolRun(): void {
+    resumeDurableToolRun(ctx: Context): void {
+        this.#startDurableToolResume();
+    }
+
+    #startDurableToolResume(): void {
         if (this.#workspaceArchived) return;
         if (this.#resumingDurableToolRun) {
             this.#resumeDurableToolRunAgain = true;
@@ -5421,12 +5639,16 @@ export class InMemorySession {
         }
         this.#resumingDurableToolRun = true;
         this.#resumeDurableToolRunAgain = false;
-        void this.#resumeDurableToolRun()
+        void withWorkerContext(
+            "durable-tool-resume",
+            (workerCtx) => this.#resumeDurableToolRun(workerCtx),
+            { sessionId: this.id },
+        )
             .catch(rethrowDatabaseFailure)
             .finally(() => {
                 this.#resumingDurableToolRun = false;
                 if (this.#resumeDurableToolRunAgain) {
-                    this.resumeDurableToolRun();
+                    this.#startDurableToolResume();
                 } else if (
                     this.#queue.length > 0 &&
                     (this.#restoredActiveRunId === undefined || !this.hasDurableToolRun())
@@ -5436,13 +5658,13 @@ export class InMemorySession {
             });
     }
 
-    async #resumeDurableToolRun(): Promise<void> {
+    async #resumeDurableToolRun(ctx: Context): Promise<void> {
         if (this.#workspaceArchived || this.#closing || this.#activeRun !== undefined) return;
         const runId = this.#restoredActiveRunId;
         if (runId === undefined || !this.hasDurableToolRun()) return;
-        await this.#reconcileExternalToolConsumption(runId);
-        await this.#reconcileDurableUserInputConsumption(runId);
-        await this.#reconcileDurableWaitConsumption(runId);
+        await this.#reconcileExternalToolConsumption(ctx, runId);
+        await this.#reconcileDurableUserInputConsumption(ctx, runId);
+        await this.#reconcileDurableWaitConsumption(ctx, runId);
         while (true) {
             const call = [...this.#durableUserInputs.values()].find(
                 (candidate) =>
@@ -5463,10 +5685,10 @@ export class InMemorySession {
                     resolvedAt: this.#now(),
                     status: "completed" as const,
                 };
-                await this.#persistence?.upsertDurableUserInput?.(nextCall);
+                await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
                 Object.assign(call, nextCall);
             } else if (call.status === "answered") {
-                await this.#resumeAnsweredDurableUserInput(call);
+                await this.#resumeAnsweredDurableUserInput(ctx, call);
                 if (this.#activeRun !== undefined) return;
             }
         }
@@ -5543,35 +5765,42 @@ export class InMemorySession {
             await Promise.all(
                 persistedCalls.map(({ call, kind }) =>
                     kind === "external"
-                        ? this.#persistence?.upsertExternalToolCall?.(call as ExternalToolCall)
+                        ? this.#persistence?.upsertExternalToolCall?.(ctx, call as ExternalToolCall)
                         : kind === "user_input"
                           ? this.#persistence?.upsertDurableUserInput?.(
+                                ctx,
                                 call as DurableUserInputCall,
                             )
-                          : this.#persistence?.upsertDurableWait?.(call as DurableWait),
+                          : this.#persistence?.upsertDurableWait?.(ctx, call as DurableWait),
                 ),
             );
-            await this.#storeMessage(this.#nextMessagePosition(), resultMessage, false, runId);
+            await this.#storeMessage(ctx, this.#nextMessagePosition(), resultMessage, false, runId);
             for (const entry of batch) {
                 entry.call.consumed = true;
             }
-            await this.#pruneExternalToolCalls();
-            await this.#pruneDurableUserInputs();
-            await this.#pruneDurableWaits();
-            await this.#append("agent_message", { message: resultMessage, runId });
+            await this.#pruneExternalToolCalls(ctx);
+            await this.#pruneDurableUserInputs(ctx);
+            await this.#pruneDurableWaits(ctx);
+            await this.#append(ctx, "agent_message", { message: resultMessage, runId });
         }
         this.#contextMessages = undefined;
         // The runtime is being discarded, so nothing could ever read or stop
         // its background commands again.
-        void this.#killRuntimeProcesses({ includeBackground: true });
+        void this.#killRuntimeProcesses(ctx, { includeBackground: true });
         void this.#runtime?.agent.close();
         this.#runtime = undefined;
-        const continuation = () => this.#continueDurableToolRun(runId);
+        const continuation = () =>
+            withWorkerContext(
+                "durable-tool-continuation",
+                (workerCtx) => this.#continueDurableToolRun(workerCtx, runId),
+                { runId, sessionId: this.id },
+            );
         const running = this.#taskDrain?.run(continuation) ?? continuation();
         await running;
     }
 
     async resolveExternalToolCall(
+        ctx: Context,
         callId: string,
         resolution: ExternalToolCallResolution,
     ): Promise<ResolveExternalToolCallResponse | undefined> {
@@ -5601,20 +5830,23 @@ export class InMemorySession {
             resolvedAt: this.#now(),
             status: resolution.status,
         };
-        await this.#persistence?.upsertExternalToolCall?.(nextCall);
+        await this.#persistence?.upsertExternalToolCall?.(ctx, nextCall);
         Object.assign(call, nextCall);
-        await this.#append("external_tool_call_resolved", { call: cloneExternalToolCall(call) });
+        await this.#append(ctx, "external_tool_call_resolved", {
+            call: cloneExternalToolCall(call),
+        });
         const waiter = this.#externalToolWaiters.get(call.id);
         if (waiter !== undefined) {
             this.#externalToolWaiters.delete(call.id);
             waiter.resolve(cloneExternalResolution(resolution));
         } else {
-            this.resumeDurableToolRun();
+            this.resumeDurableToolRun(ctx);
         }
         return { accepted: true, call: cloneExternalToolCall(call) };
     }
 
     async #invokeExternalTool(
+        ctx: Context,
         definition: ExternalToolDefinition,
         request: {
             arguments: unknown;
@@ -5653,13 +5885,13 @@ export class InMemorySession {
             ...(skill === undefined ? {} : { skill: { ...skill } }),
         };
         if (existing === undefined) {
-            await this.#persistence?.upsertExternalToolCall?.(call);
+            await this.#persistence?.upsertExternalToolCall?.(ctx, call);
             this.#externalToolCalls.set(call.id, call);
-            await this.#append("external_tool_call_requested", {
+            await this.#append(ctx, "external_tool_call_requested", {
                 call: cloneExternalToolCall(call),
             });
         }
-        await this.#pruneExternalToolCalls();
+        await this.#pruneExternalToolCalls(ctx);
         return new Promise<ExternalToolCallResolution>((resolve, reject) => {
             let waiter: ExternalToolWaiter;
             const abort = () => {
@@ -5714,7 +5946,7 @@ export class InMemorySession {
         };
     }
 
-    async #reconcileExternalToolConsumption(runId: string): Promise<void> {
+    async #reconcileExternalToolConsumption(ctx: Context, runId: string): Promise<void> {
         const consumedToolCallIds = new Set(
             this.#messages.flatMap((entry) =>
                 entry.message.role !== "agent"
@@ -5733,16 +5965,16 @@ export class InMemorySession {
                 continue;
             }
             const nextCall = { ...call, consumed: true };
-            await this.#persistence?.upsertExternalToolCall?.(nextCall);
+            await this.#persistence?.upsertExternalToolCall?.(ctx, nextCall);
             Object.assign(call, nextCall);
         }
-        await this.#pruneExternalToolCalls();
+        await this.#pruneExternalToolCalls(ctx);
     }
 
-    async #resumeAnsweredDurableUserInput(call: DurableUserInputCall): Promise<void> {
+    async #resumeAnsweredDurableUserInput(ctx: Context, call: DurableUserInputCall): Promise<void> {
         const response = call.response;
         if (response === undefined || call.status !== "answered") return;
-        const runtime = await this.#ensureRuntime();
+        const runtime = await this.#ensureRuntime(ctx);
         const tool = runtime.agent.tools.find((candidate) => candidate.name === call.toolName);
         let result: ToolResultBlock;
         if (tool?.resolveUserInput === undefined) {
@@ -5769,11 +6001,11 @@ export class InMemorySession {
             );
         }
         const nextCall = { ...call, result, status: "completed" as const };
-        await this.#persistence?.upsertDurableUserInput?.(nextCall);
+        await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
         Object.assign(call, nextCall);
     }
 
-    async #reconcileDurableUserInputConsumption(runId: string): Promise<void> {
+    async #reconcileDurableUserInputConsumption(ctx: Context, runId: string): Promise<void> {
         const consumedToolCallIds = new Set(
             this.#messages.flatMap((entry) =>
                 entry.message.role !== "agent"
@@ -5792,13 +6024,13 @@ export class InMemorySession {
                 continue;
             }
             const nextCall = { ...call, consumed: true };
-            await this.#persistence?.upsertDurableUserInput?.(nextCall);
+            await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
             Object.assign(call, nextCall);
         }
-        await this.#pruneDurableUserInputs();
+        await this.#pruneDurableUserInputs(ctx);
     }
 
-    async #reconcileDurableWaitConsumption(runId: string): Promise<void> {
+    async #reconcileDurableWaitConsumption(ctx: Context, runId: string): Promise<void> {
         const consumedToolCallIds = new Set(
             this.#messages.flatMap((entry) =>
                 entry.message.role !== "agent"
@@ -5817,30 +6049,31 @@ export class InMemorySession {
                 continue;
             }
             const next = { ...current, consumed: true };
-            await this.#persistence?.upsertDurableWait?.(next);
+            await this.#persistence?.upsertDurableWait?.(ctx, next);
             this.#durableWaits.set(next.id, next);
         }
-        await this.#pruneDurableWaits();
+        await this.#pruneDurableWaits(ctx);
     }
 
-    async #cancelDurableUserInput(call: DurableUserInputCall): Promise<void> {
+    async #cancelDurableUserInput(ctx: Context, call: DurableUserInputCall): Promise<void> {
         // A detached question is consumed by its run but still open to the user, so it can be
         // withdrawn.
         if (call.status === "cancelled" || (call.consumed && !isOpenQuestion(call))) return;
         const nextCall = { ...call, resolvedAt: this.#now(), status: "cancelled" as const };
-        await this.#persistence?.upsertDurableUserInput?.(nextCall);
+        await this.#persistence?.upsertDurableUserInput?.(ctx, nextCall);
         Object.assign(call, nextCall);
-        await this.#append("user_input_resolved", {
+        await this.#append(ctx, "user_input_resolved", {
             requestId: call.request.requestId,
             status: "cancelled",
         });
     }
 
-    async #cancelDurableUserInputs(runId: string): Promise<void> {
+    async #cancelDurableUserInputs(ctx: Context, runId: string): Promise<void> {
         for (const call of this.#durableUserInputs.values()) {
-            if (call.runId === runId && !call.consumed) await this.#cancelDurableUserInput(call);
+            if (call.runId === runId && !call.consumed)
+                await this.#cancelDurableUserInput(ctx, call);
         }
-        await this.#pruneDurableUserInputs();
+        await this.#pruneDurableUserInputs(ctx);
     }
 
     #restoreDurableWaitTimers(): void {
@@ -5862,12 +6095,17 @@ export class InMemorySession {
                 this.#armDurableWait(current);
                 return;
             }
-            void this.#settleDurableWait(current, false).catch(rethrowDatabaseFailure);
+            void withWorkerContext(
+                "durable-wait-timer",
+                (workerCtx) => this.#settleDurableWait(workerCtx, current, false),
+                { sessionId: this.id },
+            ).catch(rethrowDatabaseFailure);
         }, delay);
         this.#durableWaitTimers.set(wait.id, timer);
     }
 
     async #settleDurableWait(
+        ctx: Context,
         wait: DurableWait,
         interrupted: boolean,
     ): Promise<WaitResult | undefined> {
@@ -5888,15 +6126,15 @@ export class InMemorySession {
             resultBlock: durableWaitResultBlock(current, result),
             status: interrupted ? "interrupted" : "completed",
         };
-        await this.#persistence?.upsertDurableWait?.(next);
+        await this.#persistence?.upsertDurableWait?.(ctx, next);
         this.#durableWaits.set(next.id, next);
         const timer = this.#durableWaitTimers.get(next.id);
         if (timer !== undefined) clearTimeout(timer);
         this.#durableWaitTimers.delete(next.id);
-        await this.#refreshWaitActivity();
+        await this.#refreshWaitActivity(ctx);
         const waiter = this.#durableWaitWaiters.get(next.id);
         if (waiter === undefined) {
-            this.resumeDurableToolRun();
+            this.#startDurableToolResume();
         } else {
             this.#durableWaitWaiters.delete(next.id);
             waiter.resolve(result);
@@ -5904,39 +6142,39 @@ export class InMemorySession {
         return result;
     }
 
-    async #interruptDurableWaits(): Promise<void> {
+    async #interruptDurableWaits(ctx: Context): Promise<void> {
         const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
         if (runId === undefined) return;
         for (const wait of this.#durableWaits.values()) {
             if (wait.runId === runId && wait.status === "waiting") {
-                await this.#settleDurableWait(wait, true);
+                await this.#settleDurableWait(ctx, wait, true);
             }
         }
     }
 
-    async #cancelDurableWaits(runId: string): Promise<void> {
+    async #cancelDurableWaits(ctx: Context, runId: string): Promise<void> {
         for (const current of this.#durableWaits.values()) {
             if (current.runId !== runId || current.status !== "waiting") continue;
             const next: DurableWait = { ...current, status: "cancelled" };
-            await this.#persistence?.upsertDurableWait?.(next);
+            await this.#persistence?.upsertDurableWait?.(ctx, next);
             this.#durableWaits.set(next.id, next);
             const timer = this.#durableWaitTimers.get(next.id);
             if (timer !== undefined) clearTimeout(timer);
             this.#durableWaitTimers.delete(next.id);
             const waiter = this.#durableWaitWaiters.get(next.id);
             if (waiter !== undefined) {
-                await this.#afterTransactionCommit(() => {
+                await this.#afterTransactionCommit(ctx, () => {
                     if (this.#durableWaitWaiters.get(next.id) !== waiter) return;
                     this.#durableWaitWaiters.delete(next.id);
                     waiter.reject(new Error("The durable wait was cancelled."));
                 });
             }
         }
-        await this.#refreshWaitActivity();
-        await this.#pruneDurableWaits();
+        await this.#refreshWaitActivity(ctx);
+        await this.#pruneDurableWaits(ctx);
     }
 
-    async #refreshWaitActivity(publish = true): Promise<void> {
+    async #refreshWaitActivity(ctx: Context, publish = true): Promise<void> {
         const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
         const waiting = [...this.#durableWaits.values()]
             .filter((wait) => wait.runId === runId && wait.status === "waiting")
@@ -5982,13 +6220,13 @@ export class InMemorySession {
         if (!publish) return;
         this.#reportingActivity = true;
         try {
-            await this.#append("session_activity_changed", { activity: next });
+            await this.#append(ctx, "session_activity_changed", { activity: next });
         } finally {
             this.#reportingActivity = false;
         }
     }
 
-    async #pruneDurableUserInputs(): Promise<void> {
+    async #pruneDurableUserInputs(ctx: Context): Promise<void> {
         const eligible = [...this.#durableUserInputs.values()]
             // A question presence detached is consumed but still open, so it must survive pruning.
             .filter(
@@ -6000,6 +6238,7 @@ export class InMemorySession {
                     right.toolCallIndex - left.toolCallIndex,
             );
         await this.#persistence?.pruneDurableUserInputs?.(
+            ctx,
             this.id,
             MAX_RETAINED_DURABLE_USER_INPUTS,
         );
@@ -6008,7 +6247,7 @@ export class InMemorySession {
         }
     }
 
-    async #pruneDurableWaits(): Promise<void> {
+    async #pruneDurableWaits(ctx: Context): Promise<void> {
         const eligible = [...this.#durableWaits.values()]
             .filter((wait) => wait.status === "cancelled" || wait.consumed)
             .sort(
@@ -6017,15 +6256,16 @@ export class InMemorySession {
                         (left.result?.endedAt ?? left.createdAt) ||
                     right.toolCallIndex - left.toolCallIndex,
             );
-        await this.#persistence?.pruneDurableWaits?.(this.id, MAX_RETAINED_DURABLE_WAITS);
+        await this.#persistence?.pruneDurableWaits?.(ctx, this.id, MAX_RETAINED_DURABLE_WAITS);
         for (const wait of eligible.slice(MAX_RETAINED_DURABLE_WAITS)) {
             this.#durableWaits.delete(wait.id);
         }
     }
 
-    async #pruneScheduledMessages(): Promise<void> {
-        const prune = async (): Promise<void> => {
+    async #pruneScheduledMessages(ctx: Context): Promise<void> {
+        const prune = async (ctx: Context): Promise<void> => {
             const removed = await (this.#persistence?.pruneScheduledMessages?.(
+                ctx,
                 this.id,
                 MAX_RETAINED_SETTLED_SCHEDULED_MESSAGES,
             ) ??
@@ -6044,27 +6284,27 @@ export class InMemorySession {
                     .map((message) => message.id));
             if (removed.length === 0) return;
             for (const messageId of removed) this.#scheduledMessages.delete(messageId);
-            await this.#append("scheduled_messages_pruned", { messageIds: removed });
+            await this.#append(ctx, "scheduled_messages_pruned", { messageIds: removed });
         };
         if (this.#persistence?.transaction === undefined) {
-            await prune();
+            await prune(ctx);
             return;
         }
-        await this.#persistence.transaction(prune);
+        await this.#persistence.transaction(ctx, prune);
     }
 
-    async #cancelExternalToolCalls(runId: string): Promise<void> {
+    async #cancelExternalToolCalls(ctx: Context, runId: string): Promise<void> {
         for (const call of this.#externalToolCalls.values()) {
             if (call.runId !== runId || call.status !== "pending") continue;
             const nextCall = { ...call, resolvedAt: this.#now(), status: "cancelled" as const };
-            await this.#persistence?.upsertExternalToolCall?.(nextCall);
+            await this.#persistence?.upsertExternalToolCall?.(ctx, nextCall);
             Object.assign(call, nextCall);
-            await this.#append("external_tool_call_resolved", {
+            await this.#append(ctx, "external_tool_call_resolved", {
                 call: cloneExternalToolCall(call),
             });
             const waiter = this.#externalToolWaiters.get(call.id);
             if (waiter !== undefined) {
-                await this.#afterTransactionCommit(() => {
+                await this.#afterTransactionCommit(ctx, () => {
                     if (this.#externalToolWaiters.get(call.id) !== waiter) return;
                     this.#externalToolWaiters.delete(call.id);
                     waiter.reject(
@@ -6073,10 +6313,10 @@ export class InMemorySession {
                 });
             }
         }
-        await this.#pruneExternalToolCalls();
+        await this.#pruneExternalToolCalls(ctx);
     }
 
-    async #pruneExternalToolCalls(): Promise<void> {
+    async #pruneExternalToolCalls(ctx: Context): Promise<void> {
         const eligible = [...this.#externalToolCalls.values()]
             .filter((call) => call.status === "cancelled" || call.consumed)
             .sort(
@@ -6088,12 +6328,13 @@ export class InMemorySession {
             this.#externalToolCalls.delete(call.id);
         }
         await this.#persistence?.pruneExternalToolCalls?.(
+            ctx,
             this.id,
             MAX_RETAINED_EXTERNAL_TOOL_CALLS,
         );
     }
 
-    async #continueDurableToolRun(runId: string): Promise<void> {
+    async #continueDurableToolRun(ctx: Context, runId: string): Promise<void> {
         if (this.#activeRun !== undefined || this.#closing) return;
         const controller = new AbortController();
         this.#activeRun = { controller, debug: false, kind: "user", runId };
@@ -6104,24 +6345,24 @@ export class InMemorySession {
         try {
             await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
-            runtime = await this.#ensureRuntime();
-            const result = await runtime.agent.run({
+            runtime = await this.#ensureRuntime(ctx);
+            const result = await runtime.agent.run(ctx, {
                 signal: controller.signal,
-                onEvent: (event) => this.#appendAgentEvent(runId, event),
-                onMessage: (message) => this.#appendAgentMessage(runId, message),
+                onEvent: (event) => this.#appendAgentEvent(ctx, runId, event),
+                onMessage: (message) => this.#appendAgentMessage(ctx, runId, message),
             });
             if (this.#activeRun?.runId !== runId) return;
-            await this.#appendRunFinished(runId, result);
+            await this.#appendRunFinished(ctx, runId, result);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             runtime?.context.attachments?.discard();
             if (this.#activeRun?.runId !== runId) return;
             const errorMessage = errorToMessage(error);
-            await this.#appendDurableError(runId, errorMessage, runtime);
+            await this.#appendDurableError(ctx, runId, errorMessage, runtime);
             if (!this.#workspaceArchived) this.#status = "error";
             this.#finishElapsedInterval();
             this.#activeRun = undefined;
-            await this.#append("run_error", {
+            await this.#append(ctx, "run_error", {
                 errorMessage,
                 modelLocked: this.#modelLocked(),
                 runId,
@@ -6129,10 +6370,10 @@ export class InMemorySession {
         } finally {
             if (this.#activeRun?.runId === runId) this.#activeRun = undefined;
             this.#syncContextMessages();
-            await this.#completePendingWorkspaceTransfer(runId);
+            await this.#completePendingWorkspaceTransfer(ctx, runId);
             await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
-            await this.#saveSession();
+            await this.#saveSession(ctx);
         }
     }
 
@@ -6182,13 +6423,14 @@ export class InMemorySession {
         return "idle";
     }
 
-    #recordTasksChanged(): void {
-        void this.#append("tasks_changed", { tasks: this.listTasks() }).catch(
+    #recordTasksChanged(ctx: Context): void {
+        void this.#append(ctx, "tasks_changed", { tasks: this.listTasks() }).catch(
             rethrowDatabaseFailure,
         );
     }
 
     async #ensureMcpTools(
+        ctx: Context,
         runtime: CodingAssistantRuntime,
         signal?: AbortSignal,
         interactive = true,
@@ -6212,7 +6454,7 @@ export class InMemorySession {
             (permissionMode === "auto" || permissionMode === "full_access")
                 ? {
                       requestTrust: (request: McpServerTrustRequest) =>
-                          this.#requestMcpTrust(request, signal),
+                          this.#requestMcpTrust(ctx, request, signal),
                   }
                 : {};
         const loaded = await this.#mcpToolProvider.load(
@@ -6245,7 +6487,7 @@ export class InMemorySession {
             this.#workletToolRevision = runtime.agent.context.worklets?.toolRevision?.();
             this.#mcpToolRelease = loaded.release;
             if (serversChanged && merged.servers.length > 0) {
-                await this.#append("mcp_servers_changed", { servers: merged.servers });
+                await this.#append(ctx, "mcp_servers_changed", { servers: merged.servers });
             }
         } catch (error) {
             await loaded.release?.().catch(() => undefined);
@@ -6254,8 +6496,13 @@ export class InMemorySession {
         await previousRelease?.().catch(() => undefined);
     }
 
-    async #requestMcpTrust(request: McpServerTrustRequest, signal?: AbortSignal): Promise<boolean> {
+    async #requestMcpTrust(
+        ctx: Context,
+        request: McpServerTrustRequest,
+        signal?: AbortSignal,
+    ): Promise<boolean> {
         const outcome = await this.requestUserInput(
+            ctx,
             createMcpTrustUserInputRequest(request),
             signal === undefined ? {} : { signal },
         );
@@ -6265,7 +6512,10 @@ export class InMemorySession {
         );
     }
 
-    async #removeMcpTools(runtime: CodingAssistantRuntime | undefined): Promise<void> {
+    async #removeMcpTools(
+        ctx: Context,
+        runtime: CodingAssistantRuntime | undefined,
+    ): Promise<void> {
         if (runtime !== undefined && this.#mcpToolNames.size > 0) {
             runtime.agent.setTools(
                 runtime.agent.tools.filter((tool) => !this.#mcpToolNames.has(tool.name)),
@@ -6277,7 +6527,7 @@ export class InMemorySession {
         this.#mcpToolNames.clear();
         this.#workletToolRevision = undefined;
         this.#releaseMcpToolLease();
-        await this.#append("mcp_servers_changed", { servers: [] });
+        await this.#append(ctx, "mcp_servers_changed", { servers: [] });
     }
 
     #releaseMcpToolLease(): void {
@@ -6287,10 +6537,11 @@ export class InMemorySession {
     }
 
     async #append<TType extends SessionEvent["type"]>(
+        ctx: Context,
         type: TType,
         data: Extract<SessionEvent, { type: TType }>["data"],
     ): Promise<Extract<SessionEvent, { type: TType }>> {
-        return await this.#commitEvent({
+        return await this.#commitEvent(ctx, {
             createdAt: this.#now(),
             data,
             id: this.#createEventId(),
@@ -6312,10 +6563,10 @@ export class InMemorySession {
         } as Extract<SessionEvent, { type: TType }>;
     }
 
-    async #commitEvent<TEvent extends SessionEvent>(event: TEvent): Promise<TEvent> {
+    async #commitEvent<TEvent extends SessionEvent>(ctx: Context, event: TEvent): Promise<TEvent> {
         if (this.#workspaceArchived) return event;
-        const append = async (): Promise<TEvent> => {
-            await this.#appendDurableEvent(event);
+        const append = async (ctx: Context): Promise<TEvent> => {
+            await this.#appendDurableEvent(ctx, event);
             return event;
         };
         const inTransaction = sessionCommitStorage.getStore() === this;
@@ -6323,8 +6574,8 @@ export class InMemorySession {
             const checkpoint = this.#captureEventCommitCheckpoint();
             try {
                 return await (inTransaction || this.#persistence?.transaction === undefined
-                    ? append()
-                    : this.#persistence.transaction(append));
+                    ? append(ctx)
+                    : this.#persistence.transaction(ctx, append));
             } catch (error) {
                 if (!isSessionTransactionPostCommitError(error)) {
                     this.#restoreEventCommitCheckpoint(checkpoint);
@@ -6336,14 +6587,14 @@ export class InMemorySession {
         return await this.#commitEventLock.runInLock(() => sessionCommitStorage.run(this, run));
     }
 
-    async #runSessionMutation<T>(body: () => Promise<T>): Promise<T> {
+    async #runSessionMutation<T>(ctx: Context, body: (ctx: Context) => Promise<T>): Promise<T> {
         const inTransaction = sessionCommitStorage.getStore() === this;
         const run = async (): Promise<T> => {
             const checkpoint = this.#captureEventCommitCheckpoint();
             try {
                 return await (inTransaction || this.#persistence?.transaction === undefined
-                    ? body()
-                    : this.#persistence.transaction(body));
+                    ? body(ctx)
+                    : this.#persistence.transaction(ctx, body));
             } catch (error) {
                 if (!isSessionTransactionPostCommitError(error)) {
                     this.#restoreEventCommitCheckpoint(checkpoint);
@@ -6526,12 +6777,15 @@ export class InMemorySession {
         this.#restoreDurableWaitTimers();
     }
 
-    async #afterTransactionCommit(callback: () => void | Promise<void>): Promise<void> {
+    async #afterTransactionCommit(
+        ctx: Context,
+        callback: () => void | Promise<void>,
+    ): Promise<void> {
         if (this.#persistence?.afterTransactionCommit === undefined) {
             await callback();
             return;
         }
-        await this.#persistence.afterTransactionCommit(callback);
+        await this.#persistence.afterTransactionCommit(ctx, callback);
     }
 
     /**
@@ -6540,18 +6794,23 @@ export class InMemorySession {
      * client can be shown.
      */
     #recordObservedProviderUsage(usage: ProviderUsage): void {
-        void this.#append("provider_quota_observed", {
-            providerId: usage.providerId,
-            quota: providerUsageToClaudeQuota(usage, this.#now()),
-        }).catch(rethrowDatabaseFailure);
+        void withWorkerContext(
+            "provider-usage-observed",
+            (workerCtx) =>
+                this.#append(workerCtx, "provider_quota_observed", {
+                    providerId: usage.providerId,
+                    quota: providerUsageToClaudeQuota(usage, this.#now()),
+                }),
+            { sessionId: this.id },
+        ).catch(rethrowDatabaseFailure);
     }
 
-    async #appendDurableEvent(event: SessionEvent): Promise<void> {
+    async #appendDurableEvent(ctx: Context, event: SessionEvent): Promise<void> {
         const previousSessionTokenCount = this.#sessionTokenCount;
         // Terminal-event subscribers may synchronously read the transcript. Project facts before
         // publishing so waitForRun and transcriptWindow observe one completion boundary.
         this.#recordRunFacts(event);
-        await this.events.append(event);
+        await this.events.append(ctx, event);
         if (!this.isSubagent() && this.#request.trackUnread === true) {
             this.#unread = sessionUnreadStateAfterEvent(this.#unread, event);
         }
@@ -6563,10 +6822,10 @@ export class InMemorySession {
             if (this.#persistedUsageBase !== undefined) this.#usageEventsAfterBase.push(event);
             this.#ownedUsageEventRevision = this.events.usageRevision();
         }
-        if (!isTransientInferenceSessionEvent(event)) await this.#saveSession();
+        if (!isTransientInferenceSessionEvent(event)) await this.#saveSession(ctx);
         this.#recordPermissionReview(event);
-        await this.#reportContextSize(previousSessionTokenCount);
-        await this.#reportActivity(event);
+        await this.#reportContextSize(ctx, previousSessionTokenCount);
+        await this.#reportActivity(ctx, event);
     }
 
     /**
@@ -6575,7 +6834,7 @@ export class InMemorySession {
      * Rig already recomputes both on every event, so reporting them costs
      * nothing and saves every client a polling loop.
      */
-    async #reportContextSize(previous: SessionTokenCount): Promise<void> {
+    async #reportContextSize(ctx: Context, previous: SessionTokenCount): Promise<void> {
         if (this.#reportingActivity) return;
         if (
             this.#sessionTokenCount.lastContextTokens === previous.lastContextTokens &&
@@ -6585,7 +6844,7 @@ export class InMemorySession {
         }
         this.#reportingActivity = true;
         try {
-            await this.#append("session_context_changed", {
+            await this.#append(ctx, "session_context_changed", {
                 sessionTokenCount: { ...this.#sessionTokenCount },
             });
         } finally {
@@ -6835,14 +7094,14 @@ export class InMemorySession {
         }
     }
 
-    async #reportActivity(event: SessionEvent): Promise<void> {
+    async #reportActivity(ctx: Context, event: SessionEvent): Promise<void> {
         if (this.#reportingActivity || event.type === "session_activity_changed") return;
         const previousActivity = this.#activity;
         const activity = sessionActivityAfterEvent(previousActivity, event);
         if (activity === previousActivity) return;
         this.#reportingActivity = true;
         try {
-            await this.#append("session_activity_changed", { activity });
+            await this.#append(ctx, "session_activity_changed", { activity });
             if (this.#activity === previousActivity) this.#activity = activity;
         } finally {
             this.#reportingActivity = false;
@@ -6850,8 +7109,14 @@ export class InMemorySession {
     }
 
     #recordWorkflowUpdate(update: WorkflowRunUpdate): void {
-        void this.#append("workflow_changed", { update }).catch(rethrowDatabaseFailure);
-        this.#restartMetadataSettlement();
+        void withWorkerContext(
+            "workflow-update",
+            async (workerCtx) => {
+                await this.#append(workerCtx, "workflow_changed", { update });
+                this.#restartMetadataSettlement();
+            },
+            { sessionId: this.id },
+        ).catch(rethrowDatabaseFailure);
     }
 
     #secretAttachmentData(): {
@@ -6866,7 +7131,7 @@ export class InMemorySession {
         };
     }
 
-    async #appendAgentEvent(runId: string, event: AgentLoopEvent): Promise<void> {
+    async #appendAgentEvent(ctx: Context, runId: string, event: AgentLoopEvent): Promise<void> {
         if (this.#workspaceArchived) return;
         if (this.#activeRun?.runId !== runId) {
             return;
@@ -6874,7 +7139,7 @@ export class InMemorySession {
 
         if (event.type === "steering_applied") {
             let drainedContext: readonly PersistedPendingContextMessage[] = [];
-            const persist = async () => {
+            const persist = async (ctx: Context) => {
                 const reservedContext = this.#pendingContextSteering.get(runId);
                 const contextMessageIds = event.messageIds.filter(
                     (messageId) => reservedContext?.has(messageId) === true,
@@ -6885,6 +7150,7 @@ export class InMemorySession {
                     const pending = this.#pendingSteeringMessages.get(messageId);
                     if (pending === undefined || pending.runId !== runId) continue;
                     await this.#storeMessage(
+                        ctx,
                         this.#nextMessagePosition(),
                         pending.message,
                         false,
@@ -6896,7 +7162,7 @@ export class InMemorySession {
                 if (visibleMessageIds.length > 0) {
                     const continuation = this.#pendingSteeringContinuations.get(runId);
                     if (continuation === undefined) {
-                        await this.#append("steering_applied", {
+                        await this.#append(ctx, "steering_applied", {
                             messageIds: visibleMessageIds,
                             runId,
                         });
@@ -6906,10 +7172,10 @@ export class InMemorySession {
                         }
                     }
                 }
-                drainedContext = await this.#persistPendingContextDrain(contextMessageIds);
+                drainedContext = await this.#persistPendingContextDrain(ctx, contextMessageIds);
             };
-            if (this.#persistence?.transaction === undefined) await persist();
-            else await this.#persistence.transaction(persist);
+            if (this.#persistence?.transaction === undefined) await persist(ctx);
+            else await this.#persistence.transaction(ctx, persist);
             this.#applyPendingContextDrain(drainedContext);
             const reservedContext = this.#pendingContextSteering.get(runId);
             for (const pending of drainedContext) reservedContext?.delete(pending.message.id);
@@ -6926,7 +7192,7 @@ export class InMemorySession {
         } else if (event.type === "context_compacted") {
             this.#totalTokens = event.estimatedTokensAfter;
         } else if ("partial" in event) {
-            await this.#storePartialMessage(runId, event.messageId, event.partial);
+            await this.#storePartialMessage(ctx, runId, event.messageId, event.partial);
         }
 
         const previousUsage = this.#usage;
@@ -6935,7 +7201,7 @@ export class InMemorySession {
             this.#setCommittedUsage(addUsage(this.#usage, event.transcript.usage));
         }
         try {
-            await this.#append("agent_event", { event, runId });
+            await this.#append(ctx, "agent_event", { event, runId });
         } catch (error) {
             this.#usage = previousUsage;
             this.#lifetimeTotalTokens = previousLifetimeTotalTokens;
@@ -6946,14 +7212,18 @@ export class InMemorySession {
         }
     }
 
-    async #appendCompactionAgentEvent(runId: string, event: AgentLoopEvent): Promise<void> {
+    async #appendCompactionAgentEvent(
+        ctx: Context,
+        runId: string,
+        event: AgentLoopEvent,
+    ): Promise<void> {
         if (this.#workspaceArchived) return;
         if (!this.#compactionActive) return;
         if (event.type === "context_compacted") this.#totalTokens = event.estimatedTokensAfter;
-        await this.#append("agent_event", { event, runId });
+        await this.#append(ctx, "agent_event", { event, runId });
     }
 
-    async #appendAgentMessage(runId: string, message: Message): Promise<void> {
+    async #appendAgentMessage(ctx: Context, runId: string, message: Message): Promise<void> {
         if (this.#workspaceArchived) return;
         if (
             this.#activeRun?.runId !== runId &&
@@ -6966,13 +7236,15 @@ export class InMemorySession {
             return;
         }
         if (this.#persistence?.transaction !== undefined) {
-            await this.#persistence.transaction(() => this.#commitAgentMessage(runId, message));
+            await this.#persistence.transaction(ctx, (ctx) =>
+                this.#commitAgentMessage(ctx, runId, message),
+            );
             return;
         }
-        await this.#commitAgentMessage(runId, message);
+        await this.#commitAgentMessage(ctx, runId, message);
     }
 
-    async #commitAgentMessage(runId: string, message: Message): Promise<void> {
+    async #commitAgentMessage(ctx: Context, runId: string, message: Message): Promise<void> {
         const existingMessage = this.#messages.find(
             (candidate) => !candidate.isPartial && candidate.message.id === message.id,
         );
@@ -7001,6 +7273,7 @@ export class InMemorySession {
                 ? this.#activePartial.position
                 : undefined;
         await this.#storeMessage(
+            ctx,
             existingPosition ?? partialPosition ?? this.#nextMessagePosition(),
             message,
             false,
@@ -7021,7 +7294,7 @@ export class InMemorySession {
             for (const call of this.#externalToolCalls.values()) {
                 if (call.runId !== runId || !resultIds.has(call.toolCallId)) continue;
                 call.consumed = true;
-                await this.#persistence?.upsertExternalToolCall?.(call);
+                await this.#persistence?.upsertExternalToolCall?.(ctx, call);
             }
             for (const call of this.#durableUserInputs.values()) {
                 if (call.runId !== runId || !resultIds.has(call.toolCallId)) continue;
@@ -7033,7 +7306,7 @@ export class InMemorySession {
                 call.status = "completed";
                 call.consumed = true;
                 call.resolvedAt ??= this.#now();
-                await this.#persistence?.upsertDurableUserInput?.(call);
+                await this.#persistence?.upsertDurableUserInput?.(ctx, call);
             }
             for (const current of this.#durableWaits.values()) {
                 if (current.runId !== runId || !resultIds.has(current.toolCallId)) continue;
@@ -7048,12 +7321,12 @@ export class InMemorySession {
                         ? {}
                         : { resultBlock: structuredClone(resultBlock) }),
                 };
-                await this.#persistence?.upsertDurableWait?.(next);
+                await this.#persistence?.upsertDurableWait?.(ctx, next);
                 this.#durableWaits.set(next.id, next);
             }
-            await this.#pruneExternalToolCalls();
-            await this.#pruneDurableUserInputs();
-            await this.#pruneDurableWaits();
+            await this.#pruneExternalToolCalls(ctx);
+            await this.#pruneDurableUserInputs(ctx);
+            await this.#pruneDurableWaits(ctx);
         }
         if (partialPosition !== undefined) {
             this.#activePartial = undefined;
@@ -7070,7 +7343,7 @@ export class InMemorySession {
         if (!isDeepStrictEqual(previousUsage, nextUsage)) {
             this.#setCommittedUsage(replaceUsage(this.#usage, previousUsage, nextUsage));
         }
-        await this.#append("agent_message", { message: eventMessage, runId });
+        await this.#append(ctx, "agent_message", { message: eventMessage, runId });
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
     }
 
@@ -7104,24 +7377,26 @@ export class InMemorySession {
     }
 
     async #appendRunFinished(
+        ctx: Context,
         runId: string,
         result: AgentRunResult,
     ): Promise<SessionRunCompletion["status"]> {
         if (this.#persistence?.transaction !== undefined) {
-            return await this.#persistence.transaction(() =>
-                this.#commitRunFinished(runId, result),
+            return await this.#persistence.transaction(ctx, (ctx) =>
+                this.#commitRunFinished(ctx, runId, result),
             );
         }
-        return await this.#commitRunFinished(runId, result);
+        return await this.#commitRunFinished(ctx, runId, result);
     }
 
     async #commitRunFinished(
+        ctx: Context,
         runId: string,
         result: AgentRunResult,
     ): Promise<SessionRunCompletion["status"]> {
         const stopReason: StopReason = result.stopReason;
         if (result.stopReason === "error") {
-            await this.#appendDurableError(runId, result.errorMessage, this.#runtime, {
+            await this.#appendDurableError(ctx, runId, result.errorMessage, this.#runtime, {
                 providerError: result.providerError,
                 providerId: result.providerId,
                 requestedModelId: result.requestedModelId,
@@ -7160,7 +7435,7 @@ export class InMemorySession {
                     ...target.message,
                     attachments: [...(target.message.attachments ?? []), ...attachments],
                 };
-                await this.#storeMessage(target.position, message, false, runId);
+                await this.#storeMessage(ctx, target.position, message, false, runId);
                 attachmentCompletion = {
                     attachmentMessageId: message.id,
                     attachments: message.attachments ?? [],
@@ -7186,8 +7461,8 @@ export class InMemorySession {
         }
         this.#discardPendingSteeringMessages(runId);
         if (subagentFailed) {
-            await this.#pauseActiveGoal();
-            await this.#append("run_error", {
+            await this.#pauseActiveGoal(ctx);
+            await this.#append(ctx, "run_error", {
                 errorMessage: providerFailed
                     ? (result.errorMessage ?? "The model response failed.")
                     : SUBAGENT_TOKEN_EXHAUSTED_ERROR,
@@ -7206,7 +7481,7 @@ export class InMemorySession {
             this.#trimRetainedMessages();
             return "error";
         }
-        await this.#append("run_finished", {
+        await this.#append(ctx, "run_finished", {
             agentRunId: result.runId,
             ...attachmentCompletion,
             ...(result.errorMessage === undefined ? {} : { errorMessage: result.errorMessage }),
@@ -7235,6 +7510,7 @@ export class InMemorySession {
     }
 
     async #appendDurableError(
+        ctx: Context,
         runId: string,
         reason: string,
         runtime: CodingAssistantRuntime | undefined,
@@ -7260,20 +7536,20 @@ export class InMemorySession {
         );
         if (runtime === undefined) this.#contextMessages?.push(message);
         else runtime.agent.recordMessage(message);
-        await this.#appendAgentMessage(runId, message);
+        await this.#appendAgentMessage(ctx, runId, message);
     }
 
     /** The folder tree handed to this session's tools, with this chat as the one being filed. */
-    async #folderContext(): Promise<FolderContext> {
+    async #folderContext(ctx: Context): Promise<FolderContext> {
         const folders = this.#folderRepository();
         return {
-            create: async (request) => await folders.createFolder(request),
-            list: async () => await folders.listFolders(),
+            create: async (request) => await folders.createFolder(ctx, request),
+            list: async () => await folders.listFolders(ctx),
             move: async (folderId, request) =>
-                requireFolder(await folders.moveFolder(folderId, request)),
-            setCurrentChatFolder: async (folderId) => await this.fileIntoFolder(folderId),
+                requireFolder(await folders.moveFolder(ctx, folderId, request)),
+            setCurrentChatFolder: async (folderId) => await this.fileIntoFolder(ctx, folderId),
             update: async (folderId, request) =>
-                requireFolder(await folders.updateFolder(folderId, request)),
+                requireFolder(await folders.updateFolder(ctx, folderId, request)),
         };
     }
 
@@ -7285,7 +7561,7 @@ export class InMemorySession {
         return folders;
     }
 
-    async #folderScopeInstruction(): Promise<string | undefined> {
+    async #folderScopeInstruction(ctx: Context): Promise<string | undefined> {
         if (this.#scope.kind === "unsorted") {
             return [
                 "This chat is currently in Unsorted.",
@@ -7294,11 +7570,14 @@ export class InMemorySession {
             ].join("\n");
         }
         if (this.#scope.kind !== "folder") return undefined;
-        const folders = await this.#folderRepository().listFolders();
+        const folders = await this.#folderRepository().listFolders(ctx);
         const byId = new Map(folders.map((folder) => [folder.id, folder]));
         const current = byId.get(this.#scope.folderId);
         if (current === undefined) throw new Error("This chat's folder is no longer available.");
-        const physicalPath = await this.#folderRepository().activeFolderStoragePath(current.id);
+        const physicalPath = await this.#folderRepository().activeFolderStoragePath(
+            ctx,
+            current.id,
+        );
         const ancestry: string[] = [];
         const seen = new Set<string>();
         let cursor: Folder | undefined = current;
@@ -7318,26 +7597,30 @@ export class InMemorySession {
     }
 
     /** The slot and applet surface handed to this session's tools, with this session as author. */
-    #slotContext(): SlotContext {
+    #slotContext(ctx: Context): SlotContext {
         const stores = this.#slotStores;
         if (stores === undefined) {
             throw new Error("Slots are unavailable in this session.");
         }
         return {
             createEntry: (request) =>
-                stores.entries.create({
+                stores.entries.create(ctx, {
                     ...request,
                     author: { type: "agent", sessionId: this.id },
                 }),
             createApplet: (request, sourceFileSystem) =>
-                stores.applets.create({ ...request, authorSessionId: this.id }, sourceFileSystem),
-            listEntries: (filter) => stores.entries.list(filter),
-            listApplets: () => stores.applets.list(),
-            removeEntry: (id) => stores.entries.remove(id),
-            revertApplet: (name, request) => stores.applets.revert(name, request),
-            updateEntry: (id, request) => stores.entries.update(id, request),
+                stores.applets.create(
+                    ctx,
+                    { ...request, authorSessionId: this.id },
+                    sourceFileSystem,
+                ),
+            listEntries: (filter) => stores.entries.list(ctx, filter),
+            listApplets: () => stores.applets.list(ctx),
+            removeEntry: (id) => stores.entries.remove(ctx, id),
+            revertApplet: (name, request) => stores.applets.revert(ctx, name, request),
+            updateEntry: (id, request) => stores.entries.update(ctx, id, request),
             updateApplet: (name, request, sourceFileSystem) =>
-                stores.applets.update(name, request, sourceFileSystem),
+                stores.applets.update(ctx, name, request, sourceFileSystem),
         };
     }
 
@@ -7370,7 +7653,7 @@ export class InMemorySession {
         return model;
     }
 
-    async #ensureRuntime(): Promise<CodingAssistantRuntime> {
+    async #ensureRuntime(ctx: Context): Promise<CodingAssistantRuntime> {
         if (this.#runtime !== undefined) {
             return this.#runtime;
         }
@@ -7386,7 +7669,7 @@ export class InMemorySession {
         const agentManager = this.#agentManager;
         const appendSystemPrompt = [
             this.#appendSystemPrompt,
-            await this.#folderScopeInstruction(),
+            await this.#folderScopeInstruction(ctx),
             this.#presence === undefined
                 ? undefined
                 : modelPresenceInstruction(this.#presence.state(), false),
@@ -7402,6 +7685,7 @@ export class InMemorySession {
         }
         await this.#syncGitCommandSecret();
         const options: CreateCodingAssistantAgentOptions = {
+            ctx,
             agentId: this.#agentId,
             ownerInstanceId: this.#ownerInstanceId,
             ...(profile === undefined
@@ -7417,7 +7701,7 @@ export class InMemorySession {
             ...(agentManager === undefined
                 ? {}
                 : {
-                      agentCommunication: agentManager.communicationContext(this.id),
+                      agentCommunication: agentManager.communicationContext(ctx, this.id),
                   }),
             ...(appendSystemPrompt.length === 0 ? {} : { appendSystemPrompt }),
             cwd: this.#request.cwd,
@@ -7443,17 +7727,17 @@ export class InMemorySession {
             secrets: this.#secrets,
             scheduling: {
                 now: () => this.#now(),
-                scheduleMessage: (request) => this.scheduleMessage(request),
-                wait: (request, signal) => this.waitDurably(request, signal),
+                scheduleMessage: (request) => this.scheduleMessage(ctx, request),
+                wait: (request, signal) => this.waitDurably(ctx, request, signal),
             },
             userInput: {
-                cancel: (askId) => this.cancelUserInput(askId),
-                markExecuting: (requestId) => this.markUserInputExecuting(requestId),
+                cancel: (askId) => this.cancelUserInput(ctx, askId),
+                markExecuting: (requestId) => this.markUserInputExecuting(ctx, requestId),
                 request: (request, requestOptions) =>
-                    this.requestUserInput(request, requestOptions),
+                    this.requestUserInput(ctx, request, requestOptions),
             },
-            ...(this.#folders === undefined ? {} : { folders: await this.#folderContext() }),
-            ...(this.#slotStores === undefined ? {} : { slots: this.#slotContext() }),
+            ...(this.#folders === undefined ? {} : { folders: await this.#folderContext(ctx) }),
+            ...(this.#slotStores === undefined ? {} : { slots: this.#slotContext(ctx) }),
             sessionId: this.#agentMetadata.rootSessionId,
             startDate: toLocalDate(this.events.firstMessageCreatedAt() ?? this.#createdAt),
             ...(this.#systemPrompt !== undefined ? { systemPrompt: this.#systemPrompt } : {}),
@@ -7461,28 +7745,29 @@ export class InMemorySession {
                 ? {}
                 : { durableSkills: this.#durableSkillDefinitions }),
             tasks: {
-                create: (request) => this.#taskSession().createTask(request),
+                create: (request) => this.#taskSession().createTask(ctx, request),
                 get: (taskId) => this.#taskSession().getTask(taskId),
                 list: () => this.#taskSession().listTasks(),
-                update: (taskId, request) => this.#taskSession().updateTask(taskId, request),
+                update: (taskId, request) => this.#taskSession().updateTask(ctx, taskId, request),
             },
         };
         if (this.#workflowsEnabled) {
             options.workflowsEnabled = true;
             options.workflows = {
                 get: (runId) => this.getWorkflow(runId),
-                launch: (request) => this.launchWorkflow(request),
-                stop: (runId) => this.stopWorkflow(runId),
-                wait: (runId, signal) => this.waitForWorkflow(runId, signal),
+                launch: (request) => this.launchWorkflow(ctx, request),
+                stop: (runId) => this.stopWorkflow(ctx, runId),
+                wait: (runId, signal) => this.waitForWorkflow(ctx, runId, signal),
             };
         } else {
             options.workflowsEnabled = false;
         }
         if (!this.isSubagent()) {
             options.goals = {
-                create: (request) => this.setGoal(request),
+                create: (request) => this.setGoal(ctx, request),
                 get: () => this.goal(),
-                update: (status) => this.changeGoalStatus({ status }, { stopActiveGoalRun: false }),
+                update: (status) =>
+                    this.changeGoalStatus(ctx, { status }, { stopActiveGoalRun: false }),
             };
         }
         if (this.#contextMessages !== undefined) {
@@ -7517,19 +7802,19 @@ export class InMemorySession {
                 ),
                 encryptedMessages: false,
                 followUp: (target, message, effort, encryptedMessage) =>
-                    agentManager.followUp(this.id, target, message, effort, encryptedMessage),
+                    agentManager.followUp(ctx, this.id, target, message, effort, encryptedMessage),
                 inspect: (target) => agentManager.inspect(this.id, target),
-                interrupt: (target) => agentManager.interrupt(this.id, target),
+                interrupt: (target) => agentManager.interrupt(ctx, this.id, target),
                 list: (pathPrefix) => agentManager.list(this.id, pathPrefix),
                 maxActive:
                     (agentManager.maxActiveFor?.(this.#agentMetadata.rootSessionId) ??
                         agentManager.maxActive) + 1,
                 maxDepth: agentManager.maxDepth,
                 sendMessage: (target, message, encryptedMessage) =>
-                    agentManager.sendMessage(this.id, target, message, encryptedMessage),
+                    agentManager.sendMessage(ctx, this.id, target, message, encryptedMessage),
                 setReadOnly: (target, readOnly) =>
-                    agentManager.setSubagentReadOnly(this.id, target, readOnly),
-                spawn: (request, signal) => agentManager.spawn(this.id, request, signal),
+                    agentManager.setSubagentReadOnly(ctx, this.id, target, readOnly),
+                spawn: (request, signal) => agentManager.spawn(ctx, this.id, request, signal),
                 wait: (timeoutMs, signal) => agentManager.wait(this.id, timeoutMs, signal),
             };
             if (
@@ -7554,23 +7839,25 @@ export class InMemorySession {
                     owned: true,
                 });
                 options.workspaces = {
-                    addProject: (path) => agentManager.registerProject(this.id, path),
+                    addProject: (path) => agentManager.registerProject(ctx, this.id, path),
                     archive: async (workspaceId) =>
-                        workspaceResult(await agentManager.archiveWorkspace(this.id, workspaceId)),
+                        workspaceResult(
+                            await agentManager.archiveWorkspace(ctx, this.id, workspaceId),
+                        ),
                     create: async (input) =>
-                        workspaceResult(await agentManager.createWorkspace(this.id, input)),
+                        workspaceResult(await agentManager.createWorkspace(ctx, this.id, input)),
                     crossWorkspace,
                     delegate: (request, signal) =>
-                        agentManager.delegate(this.id, request, { crossWorkspace }, signal),
-                    listProjects: () => agentManager.listProjects(this.id),
+                        agentManager.delegate(ctx, this.id, request, { crossWorkspace }, signal),
+                    listProjects: () => agentManager.listProjects(ctx, this.id),
                     listSessions: (target) =>
-                        agentManager.listSessions(this.id, target, { crossWorkspace }),
+                        agentManager.listSessions(ctx, this.id, target, { crossWorkspace }),
                     listWorkspaces: (projectId) =>
-                        agentManager.listWorkspaces(this.id, projectId, { crossWorkspace }),
+                        agentManager.listWorkspaces(ctx, this.id, projectId, { crossWorkspace }),
                     spawn: (request, signal) =>
-                        agentManager.spawnInWorkspace(this.id, request, signal),
+                        agentManager.spawnInWorkspace(ctx, this.id, request, signal),
                     transfer: (targetWorkspaceId) =>
-                        agentManager.scheduleSessionTransfer(this.id, targetWorkspaceId),
+                        agentManager.scheduleSessionTransfer(ctx, this.id, targetWorkspaceId),
                 };
             }
         }
@@ -7585,7 +7872,7 @@ export class InMemorySession {
         let previousBackgroundCount = runtime.context.bash.activeSessionCount?.() ?? 0;
         runtime.context.bash.setActiveSessionCountListener?.((running) => {
             const runId = this.#activeRun?.runId ?? this.#lastSessionRunId ?? "background";
-            void this.#append("agent_event", {
+            void this.#append(ctx, "agent_event", {
                 event: {
                     type: "background_processes_changed",
                     processes: runtime.context.bash.activeSessions?.() ?? [],
@@ -7601,7 +7888,11 @@ export class InMemorySession {
             // A replaced runtime keeps its own bash context alive long enough
             // to finish dying. Its leftovers are not this session's news.
             if (this.#runtime !== runtime) return;
-            return this.#notifyBackgroundProcessExit(exit).catch(rethrowDatabaseFailure);
+            return withWorkerContext(
+                "background-process-exit",
+                (workerCtx) => this.#notifyBackgroundProcessExit(workerCtx, exit),
+                { sessionId: this.id },
+            ).catch(rethrowDatabaseFailure);
         });
         const snapshot = runtime.agent.snapshot();
         this.#runtime = runtime;
@@ -7615,7 +7906,7 @@ export class InMemorySession {
         this.#systemPrompt = snapshot.systemPrompt;
         this.#models = this.#modelsForProvider(this.#providerId);
         this.#tools = snapshot.tools;
-        await this.#saveSession();
+        await this.#saveSession(ctx);
         return runtime;
     }
 
@@ -7634,7 +7925,7 @@ export class InMemorySession {
         }
     }
 
-    async #applyIntegrationConfiguration(queued: PersistedQueuedRun): Promise<void> {
+    async #applyIntegrationConfiguration(ctx: Context, queued: PersistedQueuedRun): Promise<void> {
         let changed = false;
         if (Object.prototype.hasOwnProperty.call(queued, "systemPrompt")) {
             this.#systemPrompt = queued.systemPrompt ?? undefined;
@@ -7654,15 +7945,21 @@ export class InMemorySession {
             if (this.#runtime !== undefined) this.#installExternalTools(this.#runtime);
             changed = true;
         }
-        if (changed) await this.#append("session_updated", { session: this.snapshot() });
-        else await this.#saveSession();
+        if (changed) await this.#append(ctx, "session_updated", { session: this.snapshot() });
+        else await this.#saveSession(ctx);
     }
 
     #installExternalTools(runtime: CodingAssistantRuntime): void {
         const externalTools = this.#externalToolDefinitions.map((definition) =>
             createExternalTool({
                 definition,
-                invoke: (request, signal) => this.#invokeExternalTool(definition, request, signal),
+                invoke: (request, signal) =>
+                    withWorkerContext(
+                        "external-tool",
+                        (workerCtx) =>
+                            this.#invokeExternalTool(workerCtx, definition, request, signal),
+                        { sessionId: this.id },
+                    ),
             }),
         );
         if (this.#durableSkillDefinitions.length > 0) {
@@ -7670,21 +7967,27 @@ export class InMemorySession {
                 createDurableSkillTool({
                     skills: this.#durableSkillDefinitions,
                     invoke: (skill, request, signal) =>
-                        this.#invokeExternalTool(
-                            {
-                                description: `Read the complete SKILL.md for ${skill.name}.`,
-                                label: "Read skill",
-                                name: "read_skill",
-                                parameters: {
-                                    additionalProperties: false,
-                                    properties: { name: { type: "string" } },
-                                    required: ["name"],
-                                    type: "object",
-                                },
-                            },
-                            request,
-                            signal,
-                            skill,
+                        withWorkerContext(
+                            "external-skill",
+                            (workerCtx) =>
+                                this.#invokeExternalTool(
+                                    workerCtx,
+                                    {
+                                        description: `Read the complete SKILL.md for ${skill.name}.`,
+                                        label: "Read skill",
+                                        name: "read_skill",
+                                        parameters: {
+                                            additionalProperties: false,
+                                            properties: { name: { type: "string" } },
+                                            required: ["name"],
+                                            type: "object",
+                                        },
+                                    },
+                                    request,
+                                    signal,
+                                    skill,
+                                ),
+                            { sessionId: this.id },
                         ),
                 }),
             );
@@ -7733,6 +8036,7 @@ export class InMemorySession {
      * unless the caller explicitly includes it.
      */
     async #killRuntimeProcesses(
+        ctx: Context,
         options: { forceAfterMs?: number; includeBackground?: boolean } = {},
     ): Promise<void> {
         const runtime = this.#runtime;
@@ -7747,7 +8051,7 @@ export class InMemorySession {
             ? (runtime.context.bash.killAllSessions?.() ?? Promise.resolve(0))
             : Promise.resolve(0);
         await Promise.all([
-            runtime.processManager.killAll({
+            runtime.processManager.killAll(ctx, {
                 forceAfterMs,
                 includeDetached: includeBackground,
             }),
@@ -7756,23 +8060,25 @@ export class InMemorySession {
     }
 
     async #drainPendingContextMessages(
+        ctx: Context,
         messageIds?: readonly string[],
     ): Promise<readonly PersistedPendingContextMessage[]> {
-        const persist = () => this.#persistPendingContextDrain(messageIds);
+        const persist = (ctx: Context) => this.#persistPendingContextDrain(ctx, messageIds);
         const selected = await (this.#persistence?.transaction === undefined
-            ? persist()
-            : this.#persistence.transaction(persist));
+            ? persist(ctx)
+            : this.#persistence.transaction(ctx, persist));
         this.#applyPendingContextDrain(selected);
         return selected;
     }
 
     async #persistPendingContextDrain(
+        ctx: Context,
         messageIds?: readonly string[],
     ): Promise<readonly PersistedPendingContextMessage[]> {
         const selectedIds =
             messageIds ??
             [...this.#pendingContextMessages.values()].map((pending) => pending.message.id);
-        return await (this.#persistence?.drainPendingContextMessages?.(this.id, selectedIds) ??
+        return await (this.#persistence?.drainPendingContextMessages?.(ctx, this.id, selectedIds) ??
             [...this.#pendingContextMessages.values()].filter((pending) =>
                 selectedIds.includes(pending.message.id),
             ));
@@ -7791,7 +8097,7 @@ export class InMemorySession {
         }
     }
 
-    async #drainQueue(): Promise<void> {
+    async #drainQueue(ctx: Context): Promise<void> {
         for (;;) {
             const queued = this.#queue[0];
             if (queued === undefined) {
@@ -7800,7 +8106,7 @@ export class InMemorySession {
                 if (this.#status === "queued" || this.#status === "running") {
                     this.#status = "idle";
                 }
-                await this.#saveSession();
+                await this.#saveSession(ctx);
                 return;
             }
 
@@ -7813,7 +8119,7 @@ export class InMemorySession {
                 if (retry !== "exhausted") {
                     this.#workspaceQueueWaiting = true;
                     this.#status = "queued";
-                    await this.#saveSession();
+                    await this.#saveSession(ctx);
                     return;
                 }
                 readiness = {
@@ -7831,16 +8137,16 @@ export class InMemorySession {
                     runId: queued.runId,
                 });
                 const failedAtomically = this.#persistence?.failQueuedRun !== undefined;
-                await this.#persistence?.failQueuedRun?.({
+                await this.#persistence?.failQueuedRun?.(ctx, {
                     event: failedEvent,
                     runId: queued.runId,
                 });
                 if (!failedAtomically) {
-                    await this.#persistence?.deleteQueuedRun(this.id, queued.runId);
+                    await this.#persistence?.deleteQueuedRun(ctx, this.id, queued.runId);
                 }
                 this.#queue.shift();
                 this.#status = "error";
-                await this.#commitEvent(failedEvent);
+                await this.#commitEvent(ctx, failedEvent);
                 await this.#closeDebugLog(queued);
                 continue;
             }
@@ -7857,29 +8163,35 @@ export class InMemorySession {
 
             const startedEvent = this.#createEvent("run_started", { runId: queued.runId });
             const activeSince = this.#activeSince ?? startedEvent.createdAt;
-            const beginLegacy = async () => {
-                await this.#persistence?.deleteQueuedRun(this.id, queued.runId);
-                return await this.#persistPendingContextDrain();
+            const beginLegacy = async (ctx: Context) => {
+                await this.#persistence?.deleteQueuedRun(ctx, this.id, queued.runId);
+                return await this.#persistPendingContextDrain(ctx);
             };
-            const drained = await (this.#persistence?.startQueuedRun?.({
+            const drained = await (this.#persistence?.startQueuedRun?.(ctx, {
                 activeSince,
                 event: startedEvent,
                 regularMessageIds: [...this.#pendingContextMessages.keys()],
                 runId: queued.runId,
             }) ??
                 (this.#persistence?.transaction === undefined
-                    ? beginLegacy()
-                    : this.#persistence.transaction(beginLegacy)));
+                    ? beginLegacy(ctx)
+                    : this.#persistence.transaction(ctx, beginLegacy)));
             this.#applyPendingContextDrain(drained);
             this.#queue.shift();
-            await this.#runQueued(queued, drained, startedEvent, activeSince);
+            await withWorkerContext(
+                "agent-run",
+                (runCtx) => this.#runQueued(runCtx, queued, drained, startedEvent, activeSince),
+                { runId: queued.runId, sessionId: this.id },
+            );
         }
     }
 
-    async #saveSession(): Promise<void> {
+    async #saveSession(ctx: Context): Promise<void> {
         if (this.#workspaceArchived) this.#status = "archived";
-        await this.#persistence?.saveSession(this.state());
-        await this.#reportStatus();
+        if (this.#persistence !== undefined) {
+            await this.#persistence.saveSession(ctx, this.state());
+        }
+        await this.#reportStatus(ctx);
     }
 
     /**
@@ -7891,12 +8203,12 @@ export class InMemorySession {
      * one point every change passes through keeps the stream self-describing
      * without threading an event through each assignment.
      */
-    async #reportStatus(): Promise<void> {
+    async #reportStatus(ctx: Context): Promise<void> {
         if (this.#reportingStatus || this.#status === this.#reportedStatus) return;
         const status = this.#status;
         this.#reportingStatus = true;
         try {
-            await this.#append("session_status_changed", { status });
+            await this.#append(ctx, "session_status_changed", { status });
             if (this.#status === status) this.#reportedStatus = status;
         } finally {
             this.#reportingStatus = false;
@@ -7963,15 +8275,15 @@ export class InMemorySession {
         );
     }
 
-    async #clearMetadataSettlement(): Promise<void> {
+    async #clearMetadataSettlement(ctx: Context): Promise<void> {
         this.#metadataRevision += 1;
         this.#metadataController?.abort();
         this.#metadataController = undefined;
         if (this.#titleStatus === "generating") {
-            await this.#runSessionMutation(async () => {
+            await this.#runSessionMutation(ctx, async (ctx) => {
                 this.#titleStatus = this.#title === undefined ? "idle" : "ready";
                 this.#titleError = undefined;
-                await this.#saveSession();
+                await this.#saveSession(ctx);
             });
         }
     }
@@ -7992,7 +8304,12 @@ export class InMemorySession {
         if (target.kind === "initial") this.#metadataInitialAttempted = true;
         else this.#metadataRefinementAttempted = true;
         const revision = this.#metadataRevision;
-        const settle = () => this.#settleMetadata(revision, target);
+        const settle = () =>
+            withWorkerContext(
+                "metadata",
+                (workerCtx) => this.#settleMetadata(workerCtx, revision, target),
+                { kind: target.kind, sessionId: this.id },
+            );
         const settlement = this.#taskDrain?.run(settle) ?? settle();
         const tracked = settlement.finally(() => {
             if (this.#metadataSettlement === tracked) this.#metadataSettlement = undefined;
@@ -8047,7 +8364,11 @@ export class InMemorySession {
         return firstResponse === undefined ? undefined : { kind: "refined", runId: first.runId };
     }
 
-    async #settleMetadata(revision: number, target: MetadataGenerationTarget): Promise<void> {
+    async #settleMetadata(
+        ctx: Context,
+        revision: number,
+        target: MetadataGenerationTarget,
+    ): Promise<void> {
         const transcript = createSessionMetadataTranscript(
             this.#messages,
             this.events.since(undefined) ?? [],
@@ -8061,7 +8382,11 @@ export class InMemorySession {
         const controller = new AbortController();
         const timeout = setTimeout(() => {
             if (this.#metadataController === controller) {
-                void this.#clearMetadataSettlement().catch(rethrowDatabaseFailure);
+                void withWorkerContext(
+                    "metadata-settlement-timeout",
+                    (workerCtx) => this.#clearMetadataSettlement(workerCtx),
+                    { sessionId: this.id },
+                ).catch(rethrowDatabaseFailure);
             }
         }, SESSION_METADATA_TIMEOUT_MS);
         timeout.unref();
@@ -8073,13 +8398,13 @@ export class InMemorySession {
         this.#titleStatus = "generating";
         this.#titleError = undefined;
         try {
-            await this.#append("session_title_changed", { status: this.#titleStatus });
+            await this.#append(ctx, "session_title_changed", { status: this.#titleStatus });
             pendingPersistenceCheckpoint = undefined;
             const metadata = await generateSessionMetadata({
                 ...(this.#title === undefined ? {} : { currentTitle: this.#title }),
                 modelId: this.#modelId,
                 now: this.#now,
-                provider: (await this.#ensureRuntime()).executor,
+                provider: (await this.#ensureRuntime(ctx)).executor,
                 sessionId: this.id,
                 signal: controller.signal,
                 startDate: toLocalDate(this.events.firstMessageCreatedAt() ?? this.#createdAt),
@@ -8096,7 +8421,7 @@ export class InMemorySession {
             this.#metadataUpdatedAt = metadataUpdatedAt;
             this.#titleStatus = "ready";
             this.#titleError = undefined;
-            await this.#append("session_title_changed", {
+            await this.#append(ctx, "session_title_changed", {
                 ...(this.#metadataRunId === undefined
                     ? {}
                     : { metadataRunId: this.#metadataRunId }),
@@ -8151,7 +8476,7 @@ export class InMemorySession {
             this.#metadataFailures += 1;
             this.#titleStatus = "error";
             this.#titleError = errorToMessage(error);
-            await this.#append("session_title_changed", {
+            await this.#append(ctx, "session_title_changed", {
                 errorMessage: this.#titleError,
                 status: this.#titleStatus,
             });
@@ -8177,6 +8502,7 @@ export class InMemorySession {
     }
 
     async #runQueued(
+        ctx: Context,
         queued: PersistedQueuedRun,
         pendingContext: readonly PersistedPendingContextMessage[] = [],
         startedEvent = this.#createEvent("run_started", { runId: queued.runId }),
@@ -8194,7 +8520,7 @@ export class InMemorySession {
         this.#restoredActiveRunId = undefined;
         this.#status = "running";
         this.#activeSince = activeSince;
-        await this.#commitEvent(startedEvent);
+        await this.#commitEvent(ctx, startedEvent);
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
 
         let runtime: CodingAssistantRuntime | undefined;
@@ -8210,6 +8536,7 @@ export class InMemorySession {
                 // The message and the configuration it carried arrive together, so the run this
                 // starts is the first one the new configuration applies to.
                 await this.#applyConfiguration(
+                    ctx,
                     {
                         ...(queued.effort === undefined ? {} : { effort: queued.effort }),
                         ...(queued.modelId === undefined ? {} : { modelId: queued.modelId }),
@@ -8223,7 +8550,7 @@ export class InMemorySession {
                     { excludeRunId: queued.runId },
                 );
             }
-            await this.#applyIntegrationConfiguration(queued);
+            await this.#applyIntegrationConfiguration(ctx, queued);
             await debugLog?.record("request", {
                 agent: this.agentMetadata(),
                 displayText: queued.displayText,
@@ -8245,8 +8572,13 @@ export class InMemorySession {
             });
             await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
-            runtime = await this.#ensureRuntime();
-            await this.#ensureMcpTools(runtime, controller.signal, queued.interactive !== false);
+            runtime = await this.#ensureRuntime(ctx);
+            await this.#ensureMcpTools(
+                ctx,
+                runtime,
+                controller.signal,
+                queued.interactive !== false,
+            );
             const runtimeSnapshot = runtime.agent.snapshot();
             const runtimeMessageIds = new Set(
                 [
@@ -8262,12 +8594,12 @@ export class InMemorySession {
             runtime.agent.enqueueMessage(queued.userMessage);
             if (this.#contextMessages !== undefined) {
                 this.#contextMessages = [...this.#contextMessages, queued.userMessage];
-                await this.#saveSession();
+                await this.#saveSession(ctx);
             }
             for (;;) {
                 let result: AgentRunResult;
                 try {
-                    result = await runtime.agent.run({
+                    result = await runtime.agent.run(ctx, {
                         ...(debugLog === undefined ? {} : { debug: debugLog }),
                         beforeInference: async () => {
                             if (this.#scopeRuntimeRefreshPending) {
@@ -8278,6 +8610,7 @@ export class InMemorySession {
                                 return;
                             }
                             await this.#ensureMcpTools(
+                                ctx,
                                 runtime!,
                                 controller.signal,
                                 queued.interactive !== false,
@@ -8285,11 +8618,11 @@ export class InMemorySession {
                         },
                         signal: controller.signal,
                         onEvent: async (event) => {
-                            await this.#appendAgentEvent(queued.runId, event);
+                            await this.#appendAgentEvent(ctx, queued.runId, event);
                             await debugLog?.record("agent-event", { event, runId: queued.runId });
                         },
                         onMessage: async (message) => {
-                            await this.#appendAgentMessage(queued.runId, message);
+                            await this.#appendAgentMessage(ctx, queued.runId, message);
                             await debugLog?.record("agent-message", {
                                 message,
                                 runId: queued.runId,
@@ -8300,8 +8633,9 @@ export class InMemorySession {
                     if (error !== REFRESH_SCOPE_RUNTIME) throw error;
                     this.#syncContextMessages();
                     await this.#settleScopeRuntimeRefresh();
-                    runtime = await this.#ensureRuntime();
+                    runtime = await this.#ensureRuntime(ctx);
                     await this.#ensureMcpTools(
+                        ctx,
                         runtime,
                         controller.signal,
                         queued.interactive !== false,
@@ -8325,19 +8659,22 @@ export class InMemorySession {
                         this.#pendingSteeringContinuations.get(queued.runId) === continuation &&
                         this.#activeRun?.runId === queued.runId
                     ) {
-                        const persistContinuation = async () => {
+                        const persistContinuation = async (ctx: Context) => {
                             if (continuation.messageIds.length > 0) {
-                                await this.#append("steering_applied", {
+                                await this.#append(ctx, "steering_applied", {
                                     messageIds: [...continuation.messageIds],
                                     runId: queued.runId,
                                 });
                             }
-                            return this.#persistPendingContextDrain(continuation.contextMessageIds);
+                            return this.#persistPendingContextDrain(
+                                ctx,
+                                continuation.contextMessageIds,
+                            );
                         };
                         const drainedContext =
                             this.#persistence?.transaction === undefined
-                                ? await persistContinuation()
-                                : this.#persistence.transaction(persistContinuation);
+                                ? await persistContinuation(ctx)
+                                : this.#persistence.transaction(ctx, persistContinuation);
                         this.#applyPendingContextDrain(await drainedContext);
                         this.#pendingSteeringContinuations.delete(queued.runId);
                         this.#pendingContextSteering.delete(queued.runId);
@@ -8354,9 +8691,9 @@ export class InMemorySession {
                     this.#pendingSteeringContinuations.delete(queued.runId);
                 }
 
-                const completionStatus = await this.#appendRunFinished(queued.runId, result);
+                const completionStatus = await this.#appendRunFinished(ctx, queued.runId, result);
                 if (completionStatus === "completed" && result.stopReason !== "error") {
-                    await this.#continueGoalIfIdle();
+                    await this.#continueGoalIfIdle(ctx);
                 }
                 break;
             }
@@ -8367,7 +8704,7 @@ export class InMemorySession {
                 return;
             }
             const errorMessage = errorToMessage(error);
-            await this.#appendDurableError(queued.runId, errorMessage, runtime);
+            await this.#appendDurableError(ctx, queued.runId, errorMessage, runtime);
             if (!this.#workspaceArchived) {
                 this.#status =
                     controller.signal.aborted && this.#suspendOnAbort ? "suspended" : "error";
@@ -8376,14 +8713,14 @@ export class InMemorySession {
             this.#suspendOnAbort = false;
             this.#activePartial = undefined;
             this.#discardPendingSteeringMessages(queued.runId);
-            await this.#pauseActiveGoal();
+            await this.#pauseActiveGoal(ctx);
             if (this.#activeRun?.runId === queued.runId) {
                 this.#activeRun = undefined;
             }
             await debugLog
                 ?.record("run-error", { error, runId: queued.runId, sessionId: this.id })
                 .catch(() => undefined);
-            await this.#append("run_error", {
+            await this.#append(ctx, "run_error", {
                 errorMessage,
                 modelLocked: this.#modelLocked(),
                 runId: queued.runId,
@@ -8400,16 +8737,16 @@ export class InMemorySession {
                 this.#contextMessages = undefined;
                 // Same here: a discarded runtime leaves its commands
                 // unreachable, so they go with it.
-                void this.#killRuntimeProcesses({ includeBackground: true });
+                void this.#killRuntimeProcesses(ctx, { includeBackground: true });
                 void this.#runtime?.agent.close();
                 this.#runtime = undefined;
             } else {
                 this.#syncContextMessages();
-                await this.#completePendingWorkspaceTransfer(queued.runId);
+                await this.#completePendingWorkspaceTransfer(ctx, queued.runId);
             }
             await this.#settleInferenceScopeRefresh();
             await this.#settleScopeRuntimeRefresh();
-            await this.#saveSession();
+            await this.#saveSession(ctx);
             await this.#closeDebugLog(queued);
         }
     }
@@ -8461,11 +8798,14 @@ export class InMemorySession {
     #startDrainQueue(): void {
         if (this.#draining !== undefined || this.#resumingDurableToolRun) return;
         if (this.#restoredActiveRunId !== undefined && this.hasDurableToolRun()) {
-            this.resumeDurableToolRun();
+            this.#startDurableToolResume();
             return;
         }
 
-        const drain = () => this.#drainQueue();
+        const drain = () =>
+            withWorkerContext("queue-drain", (workerCtx) => this.#drainQueue(workerCtx), {
+                sessionId: this.id,
+            });
         const draining = this.#taskDrain?.run(drain) ?? drain();
         this.#draining = draining.finally(() => {
             this.#draining = undefined;
@@ -8542,7 +8882,11 @@ export class InMemorySession {
     #startScopeRuntimeRefresh(): void {
         if (!this.#scopeRuntimeRefreshPending || this.#scopeRuntimeRefresh !== undefined) return;
         this.#scopeRuntimeRefreshPending = false;
-        this.#scopeRuntimeRefresh = this.#teardownRuntimeForWorkspaceTransfer().finally(() => {
+        this.#scopeRuntimeRefresh = withWorkerContext(
+            "scope-runtime-refresh",
+            (workerCtx) => this.#teardownRuntimeForWorkspaceTransfer(workerCtx),
+            { sessionId: this.id },
+        ).finally(() => {
             this.#scopeRuntimeRefresh = undefined;
         });
     }
@@ -8563,7 +8907,11 @@ export class InMemorySession {
         }
         const modelCatalog = this.#inferenceScopeRefreshCatalog;
         this.#inferenceScopeRefreshCatalog = undefined;
-        const operation = this.#applyInferenceScopeRefresh(modelCatalog);
+        const operation = withWorkerContext(
+            "inference-scope-refresh",
+            (workerCtx) => this.#applyInferenceScopeRefresh(workerCtx, modelCatalog),
+            { sessionId: this.id },
+        );
         const tracked = operation.finally(() => {
             if (this.#inferenceScopeRefresh === tracked) {
                 this.#inferenceScopeRefresh = undefined;
@@ -8618,10 +8966,11 @@ export class InMemorySession {
     }
 
     async #setWorkspaceTransferState(
+        ctx: Context,
         state: SessionWorkspaceTransferState,
         contextMessages?: readonly Message[],
     ): Promise<void> {
-        await this.#persistence?.setWorkspaceTransferState?.({
+        await this.#persistence?.setWorkspaceTransferState?.(ctx, {
             ...(contextMessages === undefined ? {} : { contextMessages }),
             sessionId: this.id,
             state,
@@ -8643,9 +8992,9 @@ export class InMemorySession {
         ];
     }
 
-    async #teardownRuntimeForWorkspaceTransfer(): Promise<void> {
+    async #teardownRuntimeForWorkspaceTransfer(ctx: Context): Promise<void> {
         const runtime = this.#runtime;
-        await this.#killRuntimeProcesses({ includeBackground: true });
+        await this.#killRuntimeProcesses(ctx, { includeBackground: true });
         const release = this.#mcpToolRelease;
         this.#mcpToolRelease = undefined;
         this.#mcpLoaded = false;
@@ -8660,7 +9009,7 @@ export class InMemorySession {
         }
     }
 
-    async #completePendingWorkspaceTransfer(runId: string): Promise<void> {
+    async #completePendingWorkspaceTransfer(ctx: Context, runId: string): Promise<void> {
         if (this.#workspaceTransfer.status !== "scheduled") return;
         const targetWorkspaceId = this.#workspaceTransfer.targetWorkspaceId;
         try {
@@ -8668,9 +9017,9 @@ export class InMemorySession {
             if (manager === undefined) {
                 throw new Error("This session cannot be transferred between workspaces.");
             }
-            await manager.completeScheduledSessionTransfer(this.id, targetWorkspaceId);
+            await manager.completeScheduledSessionTransfer(ctx, this.id, targetWorkspaceId);
         } catch (error) {
-            await this.failWorkspaceTransfer(targetWorkspaceId, error, "not_touched", runId);
+            await this.failWorkspaceTransfer(ctx, targetWorkspaceId, error, "not_touched", runId);
             if (isDatabaseFailure(error)) throw error;
         }
     }
@@ -8759,8 +9108,8 @@ export class InMemorySession {
             .map((message) => message.message);
     }
 
-    async #continueGoalIfIdle(): Promise<void> {
-        const persist = async (): Promise<boolean> => {
+    async #continueGoalIfIdle(ctx: Context): Promise<void> {
+        const persist = async (ctx: Context): Promise<boolean> => {
             if (
                 this.#closing ||
                 this.#taskDrain?.closing === true ||
@@ -8787,38 +9136,38 @@ export class InMemorySession {
                 text,
                 userMessage,
             };
-            await this.#persistence?.insertQueuedRun(this.id, queued);
+            await this.#persistence?.insertQueuedRun(ctx, this.id, queued);
             this.#queue = [...this.#queue, queued];
             this.#status = "queued";
-            await this.#saveSession();
+            await this.#saveSession(ctx);
             return true;
         };
         const started =
             sessionCommitStorage.getStore() === this
-                ? await persist()
-                : await this.#runSessionMutation(persist);
+                ? await persist(ctx)
+                : await this.#runSessionMutation(ctx, persist);
         if (started) this.#startDrainQueue();
     }
 
-    async #discardQueuedGoalRuns(): Promise<void> {
+    async #discardQueuedGoalRuns(ctx: Context): Promise<void> {
         const discardedQueue = this.#queue.filter((queued) => queued.kind === "goal");
         if (discardedQueue.length === 0) return;
 
         await Promise.all(
             discardedQueue.map((queued) =>
-                this.#persistence?.deleteQueuedRun(this.id, queued.runId),
+                this.#persistence?.deleteQueuedRun(ctx, this.id, queued.runId),
             ),
         );
         this.#queue = this.#queue.filter((queued) => queued.kind !== "goal");
         await Promise.all(discardedQueue.map((queued) => this.#closeDebugLog(queued)));
         if (this.#activeRun === undefined && this.#queue.length === 0) this.#status = "idle";
-        await this.#saveSession();
+        await this.#saveSession(ctx);
     }
 
-    async #pauseActiveGoal(): Promise<void> {
+    async #pauseActiveGoal(ctx: Context): Promise<void> {
         if (this.#goal?.status !== "active") return;
         this.#goal = { ...this.#goal, status: "paused", updatedAt: this.#now() };
-        await this.#append("goal_changed", { goal: { ...this.#goal } });
+        await this.#append(ctx, "goal_changed", { goal: { ...this.#goal } });
     }
 
     #rebuildTranscriptIndex(): void {
@@ -8982,6 +9331,7 @@ export class InMemorySession {
     }
 
     async #storeMessage(
+        ctx: Context,
         position: number,
         message: Message,
         isPartial: boolean,
@@ -8996,7 +9346,9 @@ export class InMemorySession {
             position,
             ...(runId === undefined ? {} : { runId }),
         };
-        if (persist) await this.#persistence?.upsertMessage(this.id, entry);
+        if (persist && this.#persistence !== undefined) {
+            await this.#persistence.upsertMessage(ctx, this.id, entry);
+        }
         if (replaced?.message.role === "user") {
             this.#submittedUserMessages.delete(replaced.message.id);
         }
@@ -9029,6 +9381,7 @@ export class InMemorySession {
     }
 
     async #storePartialMessage(
+        ctx: Context,
         runId: string,
         messageId: string,
         partial: Parameters<typeof assistantMessageToAgentMessage>[0],
@@ -9046,7 +9399,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             requestedModelId: this.#modelId,
         });
-        await this.#storeMessage(position, message, true, runId);
+        await this.#storeMessage(ctx, position, message, true, runId);
         this.#activePartial = {
             ...activePartial,
             position,

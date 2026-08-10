@@ -1,3 +1,5 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+import { withDatabase } from "../../persistence/databaseContext.js";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +18,7 @@ import { WorkletToolRegistry, workletToolName } from "../WorkletToolRegistry.js"
 const SEALED: WorkletPermissions = { disk: "none", network: "none" };
 
 const cleanups: (() => Promise<void> | void)[] = [];
+const ctx = createTestRootContext();
 
 afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -43,7 +46,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -58,7 +61,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         const tool = loaded.tools.find((entry) => entry.name === workletToolName("adder", "add"));
         expect(tool).toBeDefined();
 
-        const result = await tool!.execute({ left: 2, right: 3 } as never, {} as never, {});
+        const result = await tool!.execute({ left: 2, right: 3 } as never, {} as never, { ctx });
 
         expect(result).toMatchObject({ content: [{ text: "5", type: "text" }] });
     });
@@ -89,7 +92,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -107,11 +110,11 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         const tool = loaded.tools.find(
             (entry) => entry.name === workletToolName("looker", "own_files"),
         );
-        await expect(tool!.execute({} as never, {} as never, {})).resolves.toMatchObject({
+        await expect(tool!.execute({} as never, {} as never, { ctx })).resolves.toMatchObject({
             content: [{ text: "", type: "text" }],
         });
 
-        await harness.manager.uninstall("looker");
+        await harness.manager.uninstall(ctx, "looker");
         // Rig's own runtime folder goes with the worklet; the worklet's data folder does not.
         await expect(readdir(runtimeDirectory)).rejects.toThrow();
         await expect(readdir(installed.dataDirectory)).resolves.toEqual([]);
@@ -139,7 +142,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -175,7 +178,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -192,7 +195,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         await expect(readFile(hostTarget, "utf8")).rejects.toThrow();
         await expect(readFile(join(runtimeDirectory, "escaped.txt"), "utf8")).rejects.toThrow();
 
-        await harness.manager.uninstall("temporary");
+        await harness.manager.uninstall(ctx, "temporary");
         await expect(readdir(runtimeDirectory)).rejects.toThrow();
     });
 
@@ -230,7 +233,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -240,7 +243,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
             (entry) => entry.name === workletToolName("escaper", "escape"),
         );
 
-        await expect(tool!.execute({} as never, {} as never, {})).resolves.toMatchObject({
+        await expect(tool!.execute({} as never, {} as never, { ctx })).resolves.toMatchObject({
             content: [{ text: "refused", type: "text" }],
         });
         await expect(readFile(target, "utf8")).rejects.toThrow();
@@ -277,7 +280,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -287,7 +290,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
             "1",
         );
 
-        const updated = await harness.manager.update("counter", {
+        const updated = await harness.manager.update(ctx, "counter", {
             changeDescription: "Second import",
             path: source.path,
         });
@@ -316,17 +319,17 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         const harness = await createHarness();
 
         // Uninstalling while the launch is still in flight must not orphan the child process.
-        const installing = harness.manager.install({
+        const installing = harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
         });
         const installed = await installing;
-        const uninstalling = harness.manager.uninstall("slow");
+        const uninstalling = harness.manager.uninstall(ctx, "slow");
         await uninstalling;
 
         expect(installed.name).toBe("slow");
-        expect(await harness.manager.get("slow")).toBeUndefined();
+        expect(await harness.manager.get(ctx, "slow")).toBeUndefined();
         await expect(
             readdir(getWorkletRuntimeDirectory("slow", harness.environment)),
         ).rejects.toThrow();
@@ -341,7 +344,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         `,
         );
         const harness = await createHarness();
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -358,30 +361,30 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
             reportCommitted = resolve;
         });
         let removeCalled = false;
-        harness.store.update = async (name, request, sourceFileSystem, expected) => {
-            const stored = await originalUpdate(name, request, sourceFileSystem, expected);
+        harness.store.update = async (callCtx, name, request, sourceFileSystem, expected) => {
+            const stored = await originalUpdate(callCtx, name, request, sourceFileSystem, expected);
             reportCommitted();
             await updateGate;
             return stored;
         };
-        harness.store.remove = async (name) => {
+        harness.store.remove = async (callCtx, name) => {
             removeCalled = true;
-            return originalRemove(name);
+            return originalRemove(callCtx, name);
         };
 
-        const updating = harness.manager.update("serialized", {
+        const updating = harness.manager.update(ctx, "serialized", {
             changeDescription: "Second version",
             path: source.path,
         });
         await committed;
-        const uninstalling = harness.manager.uninstall("serialized");
+        const uninstalling = harness.manager.uninstall(ctx, "serialized");
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         expect(removeCalled).toBe(false);
         releaseUpdate();
         await updating;
         await uninstalling;
-        expect(await harness.manager.get("serialized")).toBeUndefined();
+        expect(await harness.manager.get(ctx, "serialized")).toBeUndefined();
         await expect(harness.registry.load(source.path, "auto")).resolves.toMatchObject({
             tools: [],
         });
@@ -405,7 +408,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         `,
         );
         const harness = await createHarness();
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -441,19 +444,19 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
             return originalUpdate(...parameters);
         };
 
-        const updating = harness.manager.update("retiring", {
+        const updating = harness.manager.update(ctx, "retiring", {
             changeDescription: "Stable replacement",
             path: source.path,
         });
         await entered;
         await vi.waitFor(async () =>
-            expect((await harness.manager.get("retiring"))?.state).toBe("stopped"),
+            expect((await harness.manager.get(ctx, "retiring"))?.state).toBe("stopped"),
         );
         releaseUpdate();
 
         await expect(updating).resolves.toMatchObject({ state: "running" });
         await new Promise<void>((resolve) => setImmediate(resolve));
-        expect(await harness.manager.get("retiring")).toMatchObject({
+        expect(await harness.manager.get(ctx, "retiring")).toMatchObject({
             state: "running",
             tools: [{ name: "replacement" }],
         });
@@ -488,7 +491,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
             );
             const harness = await createHarness();
 
-            const installed = await harness.manager.install({
+            const installed = await harness.manager.install(ctx, {
                 authorSessionId: "agent-1",
                 iconPath: source.iconPath,
                 path: source.path,
@@ -513,7 +516,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        const installed = await harness.manager.install({
+        const installed = await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -521,7 +524,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
 
         expect(installed.state).toBe("failed");
         expect(installed.failure).toBeDefined();
-        const log = await harness.manager.readLog("broken");
+        const log = await harness.manager.readLog(ctx, "broken");
         expect(log.log).toContain("this worklet is broken");
         await expect(harness.registry.load(source.path, "auto")).resolves.toMatchObject({
             tools: [],
@@ -552,7 +555,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         `,
         );
         const harness = await createHarness();
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
@@ -567,27 +570,27 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
             releasePublication = resolve;
         });
         let listCalls = 0;
-        harness.store.list = async () => {
+        harness.store.list = async (callCtx) => {
             listCalls += 1;
             if (listCalls === 1) {
                 reportPublicationStarted();
                 await publicationGate;
             }
-            return await originalList();
+            return await originalList(callCtx);
         };
 
         const loaded = await harness.registry.load(source.path, "auto");
         const report = loaded.tools.find(
             (entry) => entry.name === workletToolName("status-drain", "report"),
         );
-        const reporting = report!.execute({} as never, {} as never, {});
+        const reporting = report!.execute({} as never, {} as never, { ctx });
         await publicationStarted;
         await expect(reporting).resolves.toMatchObject({
             content: [{ text: "reported", type: "text" }],
         });
 
         let closed = false;
-        const closing = harness.manager.close().then(() => {
+        const closing = harness.manager.close(ctx).then(() => {
             closed = true;
         });
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -610,12 +613,12 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         );
         const harness = await createHarness();
 
-        await harness.manager.install({
+        await harness.manager.install(ctx, {
             authorSessionId: "agent-1",
             iconPath: source.iconPath,
             path: source.path,
         });
-        await harness.manager.uninstall("idle");
+        await harness.manager.uninstall(ctx, "idle");
 
         const names = harness.published.map((event) =>
             event.data.worklets.map((worklet) => worklet.name),
@@ -625,7 +628,7 @@ describe("WorkletManager", { timeout: 30_000 }, () => {
         const versions = harness.published.map((event) => event.data.version);
         expect([...versions].sort()).toEqual(versions);
         expect(new Set(versions).size).toBe(versions.length);
-        expect((await harness.manager.catalog()).version).toBe(versions.at(-1));
+        expect((await harness.manager.catalog(ctx)).version).toBe(versions.at(-1));
     });
 });
 
@@ -643,24 +646,26 @@ async function createHarness(): Promise<Harness> {
     const root = await temporaryDirectory("rig-worklet-root-");
     // Sockets live under RIG_HOME now, so the test gets its own rather than writing to the real one.
     const rigHome = await scratchDirectory();
-    const opened = await openSessionDatabase(":memory:");
-    await migrateSessionDatabase(opened.database);
+    const rootCtx = createTestRootContext().named("worklet-manager-test");
+    const opened = await openSessionDatabase(rootCtx, ":memory:");
+    const databaseCtx = withDatabase(rootCtx, opened.database);
+    await migrateSessionDatabase(databaseCtx);
     const registry = new WorkletToolRegistry();
     const published: WorkletsChangedEvent[] = [];
     const environment = { ...process.env, HAPPY_WORKLETS_DIRECTORY: root, RIG_HOME: rigHome };
     const workletStore = new WorkletStore({
+        database: opened.database,
         environment: { HAPPY_WORKLETS_DIRECTORY: root },
-        tx: () => opened.database,
     });
     const manager = new WorkletManager({
         environment,
-        publish: (event) => published.push(event),
+        publish: (_ctx, event) => published.push(event),
         registry,
         store: workletStore,
     });
     cleanups.push(async () => {
-        await manager.close();
-        await opened.database.close();
+        await manager.close(databaseCtx);
+        await opened.database.close(databaseCtx);
     });
     return {
         environment,

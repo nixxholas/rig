@@ -9,11 +9,13 @@ import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
 import { asyncLock, type AsyncLock } from "../concurrency/index.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export type SessionEventListener = (event: SessionEvent) => void | Promise<void>;
-export type SessionEventAppendHook = (event: SessionEvent) => void | Promise<void>;
+export type SessionEventAppendHook = (ctx: Context, event: SessionEvent) => void | Promise<void>;
 export type SessionEventNotification = () => void | Promise<void>;
 export type SessionEventNotificationScheduler = (
+    ctx: Context,
     notify: SessionEventNotification,
 ) => void | Promise<void>;
 export interface SessionEventLogCheckpoint {
@@ -90,11 +92,11 @@ export class SessionEventLog {
         this.#onAppend = options.onAppend;
     }
 
-    append(event: SessionEvent): Promise<SessionEvent> {
+    append(ctx: Context, event: SessionEvent): Promise<SessionEvent> {
         return this.#appendLock.runInLock(async () => {
             // The durable hook runs before any in-memory projection changes. A rejected
             // persistence write therefore leaves the log, cursors, and notifications untouched.
-            if (this.#onAppend !== undefined) await this.#onAppend(event);
+            if (this.#onAppend !== undefined) await this.#onAppend(ctx, event);
             if (!isLiveOnlySessionEvent(event)) {
                 this.#eventIndexes.set(event.id, this.#nextEventIndex);
                 this.#nextEventIndex += 1;
@@ -154,7 +156,7 @@ export class SessionEventLog {
                 const pending = notify();
                 if (pending !== undefined) await pending;
             } else {
-                const scheduled = this.#deferNotification(notify);
+                const scheduled = this.#deferNotification(ctx, notify);
                 if (scheduled !== undefined) await scheduled;
             }
             return event;

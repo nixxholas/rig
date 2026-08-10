@@ -8,6 +8,7 @@ import type {
     UserMessage,
 } from "../agent/index.js";
 import type { Model, Provider, ServiceTier } from "@slopus/rig-execution";
+import type { Context } from "@steve.kite/stdlib";
 import type { PermissionMode } from "../permissions/index.js";
 import type { GoalStatus, SessionGoal } from "../goals/index.js";
 import type {
@@ -57,6 +58,7 @@ export interface CodingAssistantAgentBackend {
     abort?(options?: AbortRunOptions): Promise<AbortRunResponse>;
     attachSecret?(secretId: string, scope?: SecretAttachmentScope): Promise<void>;
     compact(
+        ctx: Context,
         signal?: AbortSignal,
         onEvent?: AgentRunOptions["onEvent"],
     ): Promise<AgentCompactionResult>;
@@ -72,6 +74,7 @@ export interface CodingAssistantAgentBackend {
     stopBackgroundProcesses?(): Promise<number>;
     stopBackgroundProcess?(sessionId: number): Promise<StopBackgroundProcessResponse>;
     send(
+        ctx: Context,
         content: string | readonly ContentBlock[],
         options?: AgentRunOptions,
     ): Promise<AgentRunResult>;

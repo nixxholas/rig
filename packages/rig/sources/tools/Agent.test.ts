@@ -35,7 +35,7 @@ describe("Agent tool", () => {
                 run_in_background: false,
             },
             harness.context,
-            { toolCallId: "tool-1" },
+            { ctx: harness.ctx, toolCallId: "tool-1" },
         );
 
         expect(result).toMatchObject({
@@ -82,7 +82,7 @@ describe("Agent tool", () => {
                     prompt: "Start another agent.",
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("maximum subagent depth");
     });
@@ -118,7 +118,7 @@ describe("Agent tool", () => {
                 provider: "claude",
             },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
         expect(spawn).toHaveBeenCalledWith(
             expect.objectContaining({ providerId: "claude" }),
@@ -157,7 +157,7 @@ describe("Agent tool", () => {
                 service_tier: "priority",
             },
             harness.context,
-            {},
+            { ctx: harness.ctx },
         );
 
         expect(spawn).toHaveBeenCalledWith(
@@ -197,7 +197,7 @@ describe("Agent tool", () => {
                     prompt: "Review the test suite.",
                 },
                 harness.context,
-                { toolCallId: "tool-1" },
+                { ctx: harness.ctx, toolCallId: "tool-1" },
             ),
         ).resolves.toEqual({
             agentId: "unguessable-agent-1",
@@ -241,7 +241,7 @@ describe("Agent tool", () => {
                     run_in_background: false,
                 },
                 harness.context,
-                {},
+                { ctx: harness.ctx },
             ),
         ).rejects.toThrow("The delegated check failed");
     });

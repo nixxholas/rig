@@ -1,9 +1,11 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { request as httpRequest } from "node:http";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Server } from "node:http";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+
 import {
     defineModel,
     defineProvider,
@@ -22,6 +24,7 @@ import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 const cleanups: (() => Promise<void>)[] = [];
+const ctx = createTestRootContext().named("timeline-http-test");
 
 afterEach(async () => {
     await Promise.allSettled(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -30,13 +33,13 @@ afterEach(async () => {
 describe("timeline over HTTP", () => {
     it("charts a finished turn as waiting, working, then waiting again", async () => {
         const fixture = await startServer();
-        const session = await fixture.store.create({
+        const session = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const submitted = await session.submit({ text: "Do the thing" });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit(ctx, { text: "Do the thing" });
+        await session.waitForRun(ctx, submitted.runId);
 
         const response = await fixture.post("/timeline", {
             scope: { kind: "session", sessionId: session.id },
@@ -55,7 +58,7 @@ describe("timeline over HTTP", () => {
 
     it("states the stream position the chart reflects", async () => {
         const fixture = await startServer();
-        await fixture.store.create({
+        await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
@@ -74,12 +77,12 @@ describe("timeline over HTTP", () => {
 
     it("covers every chat in a project and names each row for a person", async () => {
         const fixture = await startServer();
-        const first = await fixture.store.create({
+        const first = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const second = await fixture.store.create({
+        const second = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
@@ -96,12 +99,12 @@ describe("timeline over HTTP", () => {
 
     it("leaves an archived chat out unless it is asked for", async () => {
         const fixture = await startServer();
-        const session = await fixture.store.create({
+        const session = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        await session.setArchived(true);
+        await session.setArchived(ctx, true);
 
         const scope = { kind: "project", projectId: await projectOf(fixture) };
         const active = await fixture.post("/timeline", { scope });
@@ -113,12 +116,12 @@ describe("timeline over HTTP", () => {
 
     it("charts every chat at once for a global scope", async () => {
         const fixture = await startServer();
-        const first = await fixture.store.create({
+        const first = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const second = await fixture.store.create({
+        const second = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline-elsewhere",
             modelId: "test/timeline",
             providerId: "test",
@@ -138,13 +141,13 @@ describe("timeline over HTTP", () => {
 
     it("bounds a global chart to recent work while keeping what is still open", async () => {
         const fixture = await startServer();
-        const session = await fixture.store.create({
+        const session = await fixture.store.create(ctx, {
             cwd: "/tmp/rig-timeline",
             modelId: "test/timeline",
             providerId: "test",
         });
-        const submitted = await session.submit({ text: "Do the thing" });
-        await session.waitForRun(submitted.runId);
+        const submitted = await session.submit(ctx, { text: "Do the thing" });
+        await session.waitForRun(ctx, submitted.runId);
 
         const response = await fixture.post("/timeline", {
             scope: { kind: "global" },
@@ -189,7 +192,7 @@ describe("timeline over HTTP", () => {
 });
 
 async function projectOf(fixture: { store: InMemorySessionStore }): Promise<string> {
-    const project = (await fixture.store.listProjects())[0];
+    const project = (await fixture.store.listProjects(ctx))[0];
     if (project === undefined) throw new Error("The store has no project yet.");
     return project.id;
 }
@@ -201,11 +204,14 @@ async function startServer(): Promise<{
     const root = await createTestSocketDirectory();
     const socketPath = join(root, "server.sock");
     const provider = testProvider();
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(ctx, {
         createRuntime: (options) => createTestRuntime(options, provider),
         modelCatalog: testCatalog(provider),
     });
-    const server: Server = await createProtocolHttpServer({ store, token: "t" });
+    const server: Server = await createProtocolHttpServer(ctx, {
+        store,
+        token: "t",
+    });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(socketPath, () => {
@@ -215,7 +221,7 @@ async function startServer(): Promise<{
     });
     cleanups.push(async () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        await store.close();
+        await store.close(ctx);
         await rm(root, { force: true, recursive: true });
     });
 
@@ -287,7 +293,10 @@ function createTestRuntime(
     provider: ReturnType<typeof defineProvider>,
 ): CodingAssistantRuntime {
     const processManager = new NativeProcessManager();
-    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+        cwd: options.cwd,
+        processManager,
+    });
     return {
         agent: new Agent({
             context,

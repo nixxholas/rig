@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ const ALICE = new Uint8Array(32).fill(1);
 const BOB = new Uint8Array(32).fill(2);
 const GROUP = new Uint8Array(32).fill(3);
 const directories: string[] = [];
+const ctx = createTestRootContext().named("folder-sharing-service-test");
 
 afterEach(() => {
     for (const directory of directories.splice(0)) {
@@ -29,17 +31,17 @@ describe("FolderSharingService", () => {
         const aliceClient = new FakeFolderMurmurClient(ALICE);
         const alice = service(aliceStore);
         alice.attach(aliceClient);
-        const root = await aliceStore.createFolder({ name: "Shared" });
-        const first = await aliceStore.createFolder({ name: "First", parentId: root.id });
+        const root = await aliceStore.createFolder(ctx, { name: "Shared" });
+        const first = await aliceStore.createFolder(ctx, { name: "First", parentId: root.id });
 
-        const status = await alice.create(root.id, [encode(BOB)]);
+        const status = await alice.create(ctx, root.id, [encode(BOB)]);
 
         expect(status).toMatchObject({
             groupId: encode(GROUP),
             rootFolderId: root.id,
             status: "syncing",
         });
-        expect((await aliceStore.getFolder(root.id))?.shared).toBe(true);
+        expect((await aliceStore.getFolder(ctx, root.id))?.shared).toBe(true);
         expect(aliceClient.created?.service).toBe(FOLDER_SHARING_MURMUR_SERVICE_ID);
         const descriptor = JSON.parse(
             new TextDecoder().decode(aliceClient.created?.descriptor),
@@ -62,7 +64,7 @@ describe("FolderSharingService", () => {
             sender: ALICE,
             sessionId: GROUP,
         });
-        await expect(alice.statuses()).resolves.toEqual([
+        await expect(alice.statuses(ctx)).resolves.toEqual([
             expect.objectContaining({ status: "synced" }),
         ]);
 
@@ -77,8 +79,8 @@ describe("FolderSharingService", () => {
                 members: [ALICE, BOB],
             }),
         ).resolves.toBe(true);
-        expect((await bobStore.getFolder(root.id))?.shared).toBe(true);
-        expect((await bobStore.getFolder(first.id))?.parentId).toBe(root.id);
+        expect((await bobStore.getFolder(ctx, root.id))?.shared).toBe(true);
+        expect((await bobStore.getFolder(ctx, first.id))?.parentId).toBe(root.id);
         await bob.onUpdate({
             bytes: aliceClient.sent[0]!.bytes,
             id: "delivery-bootstrap",
@@ -86,14 +88,15 @@ describe("FolderSharingService", () => {
             sessionId: GROUP,
         });
 
-        const second = await aliceStore.createFolder({ name: "Second" });
+        const second = await aliceStore.createFolder(ctx, { name: "Second" });
         await aliceStore.moveFolder(
+            ctx,
             second.id,
             { afterId: first.id, parentId: root.id },
             second.version,
         );
-        await alice.foldersChanged();
-        await alice.drain();
+        await alice.foldersChanged(ctx);
+        await alice.drain(ctx);
 
         expect(aliceClient.sent).toHaveLength(2);
         await bob.onUpdate({
@@ -103,19 +106,20 @@ describe("FolderSharingService", () => {
             sessionId: GROUP,
         });
         expect(
-            (await bobStore.listFolders())
+            (await bobStore.listFolders(ctx))
                 .filter((folder) => folder.parentId === root.id && folder.archivedAt === undefined)
                 .map((folder) => folder.name),
         ).toEqual(["First", "Second"]);
 
-        const currentSecond = (await aliceStore.getFolder(second.id))!;
+        const currentSecond = (await aliceStore.getFolder(ctx, second.id))!;
         await aliceStore.moveFolder(
+            ctx,
             second.id,
             { afterId: null, parentId: root.id },
             currentSecond.version,
         );
-        await alice.foldersChanged();
-        await alice.drain();
+        await alice.foldersChanged(ctx);
+        await alice.drain(ctx);
 
         expect(aliceClient.sent).toHaveLength(3);
         await bob.onUpdate({
@@ -125,19 +129,20 @@ describe("FolderSharingService", () => {
             sessionId: GROUP,
         });
         expect(
-            (await bobStore.listFolders())
+            (await bobStore.listFolders(ctx))
                 .filter((folder) => folder.parentId === root.id && folder.archivedAt === undefined)
                 .map((folder) => folder.name),
         ).toEqual(["Second", "First"]);
 
-        const currentFirst = (await aliceStore.getFolder(first.id))!;
+        const currentFirst = (await aliceStore.getFolder(ctx, first.id))!;
         await aliceStore.moveFolder(
+            ctx,
             first.id,
             { afterId: null, parentId: null },
             currentFirst.version,
         );
-        await alice.foldersChanged();
-        await alice.drain();
+        await alice.foldersChanged(ctx);
+        await alice.drain(ctx);
 
         expect(aliceClient.sent).toHaveLength(4);
         const removalUpdate = {
@@ -148,21 +153,22 @@ describe("FolderSharingService", () => {
         };
         await bob.onUpdate(removalUpdate);
         await bob.onUpdate(removalUpdate);
-        expect((await bobStore.getFolder(first.id))?.archivedAt).toBeDefined();
+        expect((await bobStore.getFolder(ctx, first.id))?.archivedAt).toBeDefined();
         expect(
-            (await bobStore.listFolders())
+            (await bobStore.listFolders(ctx))
                 .filter((folder) => folder.parentId === root.id && folder.archivedAt === undefined)
                 .map((folder) => folder.name),
         ).toEqual(["Second"]);
 
-        const detachedFirst = (await aliceStore.getFolder(first.id))!;
+        const detachedFirst = (await aliceStore.getFolder(ctx, first.id))!;
         await aliceStore.moveFolder(
+            ctx,
             first.id,
             { afterId: second.id, parentId: root.id },
             detachedFirst.version,
         );
-        await alice.foldersChanged();
-        await alice.drain();
+        await alice.foldersChanged(ctx);
+        await alice.drain(ctx);
 
         expect(aliceClient.sent).toHaveLength(5);
         await bob.onUpdate({
@@ -171,15 +177,15 @@ describe("FolderSharingService", () => {
             sender: ALICE,
             sessionId: GROUP,
         });
-        expect((await bobStore.getFolder(first.id))?.archivedAt).toBeUndefined();
+        expect((await bobStore.getFolder(ctx, first.id))?.archivedAt).toBeUndefined();
         expect(
-            (await bobStore.listFolders())
+            (await bobStore.listFolders(ctx))
                 .filter((folder) => folder.parentId === root.id && folder.archivedAt === undefined)
                 .map((folder) => folder.name),
         ).toEqual(["Second", "First"]);
 
-        await aliceStore.close();
-        await bobStore.close();
+        await aliceStore.close(ctx);
+        await bobStore.close(ctx);
     });
 
     it("merges concurrent additions from different Murmur members", async () => {
@@ -187,8 +193,8 @@ describe("FolderSharingService", () => {
         const aliceClient = new FakeFolderMurmurClient(ALICE);
         const alice = service(aliceStore);
         alice.attach(aliceClient);
-        const root = await aliceStore.createFolder({ name: "Shared" });
-        await alice.create(root.id, [encode(BOB)]);
+        const root = await aliceStore.createFolder(ctx, { name: "Shared" });
+        await alice.create(ctx, root.id, [encode(BOB)]);
 
         const bobStore = await store();
         const bobClient = new FakeFolderMurmurClient(BOB);
@@ -201,10 +207,10 @@ describe("FolderSharingService", () => {
             members: [ALICE, BOB],
         });
 
-        await aliceStore.createFolder({ name: "From Alice", parentId: root.id });
-        await bobStore.createFolder({ name: "From Bob", parentId: root.id });
-        await Promise.all([alice.foldersChanged(), bob.foldersChanged()]);
-        await Promise.all([alice.drain(), bob.drain()]);
+        await aliceStore.createFolder(ctx, { name: "From Alice", parentId: root.id });
+        await bobStore.createFolder(ctx, { name: "From Bob", parentId: root.id });
+        await Promise.all([alice.foldersChanged(ctx), bob.foldersChanged(ctx)]);
+        await Promise.all([alice.drain(ctx), bob.drain(ctx)]);
 
         await bob.onUpdate({
             bytes: aliceClient.sent[1]!.bytes,
@@ -220,15 +226,15 @@ describe("FolderSharingService", () => {
         });
 
         const names = async (target: PersistentSessionStore) =>
-            (await target.listFolders())
+            (await target.listFolders(ctx))
                 .filter((folder) => folder.parentId === root.id && folder.archivedAt === undefined)
                 .map((folder) => folder.name)
                 .sort();
         expect(await names(aliceStore)).toEqual(["From Alice", "From Bob"]);
         expect(await names(bobStore)).toEqual(["From Alice", "From Bob"]);
 
-        await aliceStore.close();
-        await bobStore.close();
+        await aliceStore.close(ctx);
+        await bobStore.close(ctx);
     });
 
     it("consumes an invalid authenticated operation without blocking later updates", async () => {
@@ -236,8 +242,8 @@ describe("FolderSharingService", () => {
         const aliceClient = new FakeFolderMurmurClient(ALICE);
         const alice = service(aliceStore);
         alice.attach(aliceClient);
-        const root = await aliceStore.createFolder({ name: "Shared" });
-        await alice.create(root.id, [encode(BOB)]);
+        const root = await aliceStore.createFolder(ctx, { name: "Shared" });
+        await alice.create(ctx, root.id, [encode(BOB)]);
 
         const bobStore = await store();
         const bob = service(bobStore);
@@ -291,9 +297,9 @@ describe("FolderSharingService", () => {
             }),
         ).resolves.toBeUndefined();
 
-        await aliceStore.createFolder({ name: "Valid", parentId: root.id });
-        await alice.foldersChanged();
-        await alice.drain();
+        await aliceStore.createFolder(ctx, { name: "Valid", parentId: root.id });
+        await alice.foldersChanged(ctx);
+        await alice.drain(ctx);
         await bob.onUpdate({
             bytes: aliceClient.sent[1]!.bytes,
             id: "valid-delivery",
@@ -301,13 +307,13 @@ describe("FolderSharingService", () => {
             sessionId: GROUP,
         });
         expect(
-            (await bobStore.listFolders()).some(
+            (await bobStore.listFolders(ctx)).some(
                 (folder) => folder.name === "Valid" && folder.archivedAt === undefined,
             ),
         ).toBe(true);
 
-        await aliceStore.close();
-        await bobStore.close();
+        await aliceStore.close(ctx);
+        await bobStore.close(ctx);
     });
 
     it("recovers a creator session persisted before the Rig mapping", async () => {
@@ -316,26 +322,26 @@ describe("FolderSharingService", () => {
         client.throwAfterCreate = true;
         const interrupted = service(targetStore);
         interrupted.attach(client);
-        const root = await targetStore.createFolder({ name: "Shared" });
+        const root = await targetStore.createFolder(ctx, { name: "Shared" });
 
-        await expect(interrupted.create(root.id, [encode(BOB)])).rejects.toThrow(
+        await expect(interrupted.create(ctx, root.id, [encode(BOB)])).rejects.toThrow(
             "simulated interruption",
         );
-        expect((await targetStore.getFolder(root.id))?.shared).toBe(false);
+        expect((await targetStore.getFolder(ctx, root.id))?.shared).toBe(false);
 
         client.throwAfterCreate = false;
         const recovered = service(targetStore);
         recovered.attach(client);
-        await recovered.recover();
+        await recovered.recover(ctx);
 
-        expect((await targetStore.getFolder(root.id))?.shared).toBe(true);
-        await expect(recovered.statuses()).resolves.toEqual([
+        expect((await targetStore.getFolder(ctx, root.id))?.shared).toBe(true);
+        await expect(recovered.statuses(ctx)).resolves.toEqual([
             expect.objectContaining({
                 groupId: encode(GROUP),
                 rootFolderId: root.id,
             }),
         ]);
-        await targetStore.close();
+        await targetStore.close(ctx);
     });
 
     it("recovers the same creation intent before an immediate retry", async () => {
@@ -344,19 +350,19 @@ describe("FolderSharingService", () => {
         client.throwAfterCreate = true;
         const target = service(targetStore);
         target.attach(client);
-        const root = await targetStore.createFolder({ name: "Shared" });
+        const root = await targetStore.createFolder(ctx, { name: "Shared" });
 
-        await expect(target.create(root.id, [encode(BOB)])).rejects.toThrow(
+        await expect(target.create(ctx, root.id, [encode(BOB)])).rejects.toThrow(
             "simulated interruption",
         );
         client.throwAfterCreate = false;
-        await expect(target.create(root.id, [encode(BOB)])).resolves.toMatchObject({
+        await expect(target.create(ctx, root.id, [encode(BOB)])).resolves.toMatchObject({
             groupId: encode(GROUP),
             rootFolderId: root.id,
         });
 
         expect(client.createCalls).toBe(1);
-        await targetStore.close();
+        await targetStore.close(ctx);
     });
 
     it("keeps concurrent parent cycles reachable with a deterministic root break", async () => {
@@ -364,10 +370,10 @@ describe("FolderSharingService", () => {
         const aliceClient = new FakeFolderMurmurClient(ALICE);
         const alice = service(aliceStore);
         alice.attach(aliceClient);
-        const root = await aliceStore.createFolder({ name: "Shared" });
-        const first = await aliceStore.createFolder({ name: "First", parentId: root.id });
-        const second = await aliceStore.createFolder({ name: "Second", parentId: root.id });
-        await alice.create(root.id, [encode(BOB)]);
+        const root = await aliceStore.createFolder(ctx, { name: "Shared" });
+        const first = await aliceStore.createFolder(ctx, { name: "First", parentId: root.id });
+        const second = await aliceStore.createFolder(ctx, { name: "Second", parentId: root.id });
+        await alice.create(ctx, root.id, [encode(BOB)]);
 
         const bobStore = await store();
         const bob = service(bobStore);
@@ -418,7 +424,7 @@ describe("FolderSharingService", () => {
             sessionId: GROUP,
         });
 
-        const active = (await bobStore.listFolders()).filter(
+        const active = (await bobStore.listFolders(ctx)).filter(
             (folder) =>
                 (folder.id === first.id || folder.id === second.id) &&
                 folder.archivedAt === undefined,
@@ -426,8 +432,8 @@ describe("FolderSharingService", () => {
         expect(active).toHaveLength(2);
         expect(active.some((folder) => folder.parentId === root.id)).toBe(true);
 
-        await aliceStore.close();
-        await bobStore.close();
+        await aliceStore.close(ctx);
+        await bobStore.close(ctx);
     });
 });
 
@@ -475,7 +481,7 @@ function service(store: PersistentSessionStore): FolderSharingService {
 async function store(): Promise<PersistentSessionStore> {
     const homeDirectory = mkdtempSync(join(tmpdir(), "rig-folder-sharing-"));
     directories.push(homeDirectory);
-    return await PersistentSessionStore.open({
+    return await PersistentSessionStore.open(ctx, {
         databasePath: ":memory:",
         homeDirectory,
     });

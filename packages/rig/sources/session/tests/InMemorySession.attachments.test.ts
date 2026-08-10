@@ -1,3 +1,6 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext();
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
@@ -26,8 +29,8 @@ describe("InMemorySession final attachments", () => {
             source: "/workspace/result.txt",
         }));
 
-        const run = await session.submit({ text: "Show the result." });
-        await session.waitForRun(run.runId);
+        const run = await session.submit(ctx, { text: "Show the result." });
+        await session.waitForRun(ctx, run.runId);
 
         const message = session
             .state()
@@ -45,7 +48,7 @@ describe("InMemorySession final attachments", () => {
             attachmentMessageId: message?.id,
             attachments: [{ kind: "file", name: "result.txt" }],
         });
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 
     it("discards pending attachments when the turn errors", async () => {
@@ -60,8 +63,8 @@ describe("InMemorySession final attachments", () => {
             source: "/workspace/result.txt",
         }));
 
-        const run = await session.submit({ text: "Fail." });
-        await session.waitForRun(run.runId);
+        const run = await session.submit(ctx, { text: "Fail." });
+        await session.waitForRun(ctx, run.runId);
 
         expect(attachmentContext.pending()).toEqual([]);
         expect(
@@ -73,7 +76,7 @@ describe("InMemorySession final attachments", () => {
                         (entry.message.attachments?.length ?? 0) > 0,
                 ),
         ).toBe(false);
-        await session.beginShutdown();
+        await session.beginShutdown(ctx);
     });
 });
 
@@ -106,11 +109,14 @@ function createSession(stopReason: "error" | "stop"): InMemorySession {
         models: [model],
         providers: [{ models: [model], providerId: provider.id }],
     };
-    return new InMemorySession({
+    return new InMemorySession(ctx, {
         createEventId: createEventIdFactory(),
         createRuntime: (options) => {
             const processManager = new NativeProcessManager();
-            const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+            const context = createNodeAgentContext(createTestRootContext().named("agent"), {
+                cwd: options.cwd,
+                processManager,
+            });
             context.attachments = new AttachmentContext({ idFactory: () => "attachment-1" });
             return {
                 agent: new Agent({
@@ -134,7 +140,7 @@ function createSession(stopReason: "error" | "stop"): InMemorySession {
 async function runtimeContext(
     session: InMemorySession,
 ): Promise<Awaited<ReturnType<InMemorySession["externalControlContext"]>>> {
-    return await session.externalControlContext();
+    return await session.externalControlContext(ctx);
 }
 
 function assistantMessage(model: string, stopReason: "error" | "stop"): AssistantMessage {

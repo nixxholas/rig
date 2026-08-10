@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
@@ -7,7 +9,6 @@ import type {
     AgentTreeUsageSession,
 } from "../../agent/context/AgentTreeUsageContext.js";
 import { MAX_AGENT_TREE_USAGE_SESSIONS } from "../../agent/context/AgentTreeUsageContext.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 
 /**
@@ -16,10 +17,11 @@ import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js"
  * The extra row makes the size bound explicit without ever returning a partial, misleading total.
  */
 export async function queryAgentTreeUsage(
-    tx: DatabaseScope,
+    ctx: Context,
     rootSessionId: string,
 ): Promise<AgentTreeUsage | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_agent_tree_usage", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx.all<Record<string, unknown>>(sql`
         WITH RECURSIVE descendants(id) AS (
             SELECT id

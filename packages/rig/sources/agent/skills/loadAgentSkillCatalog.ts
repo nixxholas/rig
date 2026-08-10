@@ -1,4 +1,5 @@
 import type { AgentContext } from "../context/AgentContext.js";
+import type { Context } from "@steve.kite/stdlib";
 import type { Skill } from "./Skill.js";
 import { loadSkills } from "./loadSkills.js";
 import { errorToMessage } from "../../errorToMessage.js";
@@ -10,12 +11,13 @@ import { errorToMessage } from "../../errorToMessage.js";
  * available and the agent turn continues.
  */
 export async function loadAgentSkillCatalog(
+    ctx: Context,
     context: Pick<AgentContext, "fs" | "plugins">,
 ): Promise<readonly Skill[]> {
     if (context.plugins === undefined) return loadSkills(context.fs);
 
     try {
-        return await context.plugins.loadSkills(context.fs);
+        return await context.plugins.loadSkills(ctx, context.fs);
     } catch (error) {
         console.error(
             `Rig could not load plugin skills; continuing without them: ${errorToMessage(error)}`,

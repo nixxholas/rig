@@ -1,3 +1,5 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
 
@@ -6,10 +8,11 @@ import { documents, projects, projectWorkspaces } from "../database/schema.js";
 import type { DatabaseScope, TX } from "../Transaction.js";
 
 export async function queryFolderItemTargetExists(
-    tx: DatabaseScope,
+    ctx: Context,
     target: FolderItemTarget,
 ): Promise<boolean> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderItem.queryFolderItemTargetExists", async (ctx) => {
+        const tx = ctx.tx;
         switch (target.kind) {
             case "project":
                 return await projectIsActive(tx, target.projectId);
@@ -45,10 +48,11 @@ export async function queryFolderItemTargetExists(
 
 /** Hides live links whose project or workspace target is no longer active. */
 export async function folderItemsWithActiveTargets(
-    tx: DatabaseScope,
+    ctx: Context,
     items: readonly FolderItem[],
 ): Promise<readonly FolderItem[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.folderItem.folderItemsWithActiveTargets", async (ctx) => {
+        const tx = ctx.tx;
         const projectIds = [
             ...new Set(
                 items.flatMap((item) =>

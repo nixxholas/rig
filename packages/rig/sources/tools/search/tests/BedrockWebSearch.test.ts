@@ -3,6 +3,7 @@ import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-executi
 import type { SessionEvent, SessionTool } from "@slopus/rig-providers";
 
 import { createBedrockWebSearchTool } from "../BedrockWebSearch.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 
 /**
  * The message item Bedrock's Responses endpoint reports when Web Search grounded an answer. Its
@@ -46,8 +47,9 @@ describe("bedrock_web_search", () => {
             { type: "done", state: "normal" },
         ]);
         const tool = createBedrockWebSearchTool({ routes: [route("bedrock", session)] });
+        const ctx = createTestRootContext().named("bedrock-web-search-test");
 
-        await tool.execute({ query: "recent AWS launches" }, {} as never, {} as never);
+        await tool.execute({ query: "recent AWS launches" }, {} as never, { ctx });
 
         expect(session.tools).toEqual([
             { name: "web_search", server: { type: "web_search", external_web_access: false } },
@@ -62,12 +64,9 @@ describe("bedrock_web_search", () => {
             { type: "done", state: "normal" },
         ]);
         const tool = createBedrockWebSearchTool({ routes: [route("bedrock", session)] });
+        const ctx = createTestRootContext().named("bedrock-web-search-test");
 
-        const result = await tool.execute(
-            { query: "recent AWS launches" },
-            {} as never,
-            {} as never,
-        );
+        const result = await tool.execute({ query: "recent AWS launches" }, {} as never, { ctx });
 
         expect(result.citations).toEqual([
             {
@@ -89,9 +88,10 @@ describe("bedrock_web_search", () => {
             { type: "done", state: "normal" },
         ]);
         const tool = createBedrockWebSearchTool({ routes: [route("bedrock", session)] });
+        const ctx = createTestRootContext().named("bedrock-web-search-test");
 
         await expect(
-            tool.execute({ query: "recent AWS launches" }, {} as never, {} as never),
+            tool.execute({ query: "recent AWS launches" }, {} as never, { ctx }),
         ).rejects.toThrow('Bedrock did not search for "recent AWS launches".');
     });
 });

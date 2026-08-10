@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { max } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import { durableGlobalEvents, durableGlobalEventState } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
@@ -9,8 +10,9 @@ export interface GlobalEventStartup {
     trimmedThrough: string | undefined;
 }
 
-export async function queryGlobalEventStartup(tx: DatabaseScope): Promise<GlobalEventStartup> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryGlobalEventStartup(ctx: Context): Promise<GlobalEventStartup> {
+    return await inDatabase(ctx, "rig.sql.global_events.query_startup", async (ctx) => {
+        const tx = ctx.tx;
         const latestCursor = (
             await tx
                 .select({ cursor: max(durableGlobalEvents.cursor) })

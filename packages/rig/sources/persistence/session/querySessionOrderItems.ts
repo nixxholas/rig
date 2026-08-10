@@ -1,15 +1,17 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import type { SessionScope } from "../../protocol/index.js";
 import { readString } from "./impl/sqliteRow.js";
 
 export async function querySessionOrderItems(
-    tx: DatabaseScope,
+    ctx: Context,
     scope: SessionScope,
 ): Promise<{ id: string; orderKey: string }[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_session_order_items", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await (async () => {
             switch (scope.kind) {
                 case "project":

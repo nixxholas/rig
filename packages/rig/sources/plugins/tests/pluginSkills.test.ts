@@ -8,6 +8,7 @@ import type { FileSystemContext } from "../../agent/context/FileSystemContext.js
 import { formatSkillsForPrompt } from "../../agent/skills/formatSkillsForPrompt.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { PluginManager } from "../PluginManager.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
 import { PluginStartupState } from "../PluginStartupState.js";
@@ -19,6 +20,7 @@ const PNG_SIGNATURE = Buffer.from(
     "base64",
 );
 const cleanup: (() => Promise<void> | void)[] = [];
+const ctx = createTestRootContext().named("plugin-skills-test");
 
 afterEach(async () => {
     for (const dispose of cleanup.splice(0).reverse()) await dispose();
@@ -45,9 +47,9 @@ describe("plugin skills", () => {
             writeFile(join(directory, "SYSTEM_PROMPT.md"), "Always name the release owner."),
         ]);
 
-        await harness.manager.start();
+        await harness.manager.start(ctx);
 
-        await expect(harness.manager.loadSystemPrompt()).resolves.toBe(
+        await expect(harness.manager.loadSystemPrompt(ctx)).resolves.toBe(
             "Always name the release owner.",
         );
         expect(harness.started).toEqual([]);
@@ -60,8 +62,8 @@ describe("plugin skills", () => {
             skillDirectory: "contributions",
         });
 
-        await harness.manager.start();
-        const skill = (await harness.manager.loadSkills(harness.fs)).find(
+        await harness.manager.start(ctx);
+        const skill = (await harness.manager.loadSkills(ctx, harness.fs)).find(
             (candidate) => candidate.name === "release-check",
         );
 
@@ -77,16 +79,16 @@ describe("plugin skills", () => {
         const sourceDirectory = join(harness.workspace, "release");
         await createPlugin(sourceDirectory);
 
-        await harness.manager.start();
-        await harness.manager.install({ fs: harness.fs, sourceDirectory });
+        await harness.manager.start(ctx);
+        await harness.manager.install(ctx, { fs: harness.fs, sourceDirectory });
 
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             failures: [],
             plugins: [{ name: "Release", status: "running" }],
         });
         expect(harness.started).toEqual([]);
         expect(
-            (await harness.manager.loadSkills(harness.fs)).some(
+            (await harness.manager.loadSkills(ctx, harness.fs)).some(
                 (skill) => skill.name === "release-check",
             ),
         ).toBe(true);
@@ -102,12 +104,12 @@ describe("plugin skills", () => {
             "---\nname: [invalid\n---\n",
         );
 
-        await harness.manager.start();
-        const skills = await harness.manager.loadSkills(harness.fs);
+        await harness.manager.start(ctx);
+        const skills = await harness.manager.loadSkills(ctx, harness.fs);
 
         expect(skills.some((skill) => skill.name === "release-check")).toBe(true);
         expect(skills.some((skill) => skill.name === "broken")).toBe(false);
-        await expect(harness.manager.list()).resolves.toMatchObject({
+        await expect(harness.manager.list(ctx)).resolves.toMatchObject({
             plugins: [{ status: "running" }],
         });
         expect(harness.logs).toContainEqual(
@@ -130,8 +132,8 @@ describe("plugin skills", () => {
             "---\nname: release-check\ndescription: User release checks.\n---\n",
         );
 
-        await harness.manager.start();
-        const skill = (await harness.manager.loadSkills(harness.fs)).find(
+        await harness.manager.start(ctx);
+        const skill = (await harness.manager.loadSkills(ctx, harness.fs)).find(
             (candidate) => candidate.name === "release-check",
         );
 
@@ -154,11 +156,11 @@ describe("plugin skills", () => {
         const harness = await createHarness();
         const directory = join(harness.pluginsDirectory, "release");
         await createPlugin(directory);
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         await unlink(join(directory, "happy.plugin.json"));
 
         expect(
-            (await harness.manager.loadSkills(harness.fs)).some(
+            (await harness.manager.loadSkills(ctx, harness.fs)).some(
                 (skill) => skill.name === "release-check",
             ),
         ).toBe(true);
@@ -175,7 +177,7 @@ describe("plugin skills", () => {
         await rm(harness.pluginsDirectory, { force: true, recursive: true });
         await writeFile(harness.pluginsDirectory, "not a directory\n");
 
-        await expect(harness.manager.loadSkills(harness.fs)).resolves.toContainEqual(
+        await expect(harness.manager.loadSkills(ctx, harness.fs)).resolves.toContainEqual(
             expect.objectContaining({ name: "review", source: { type: "file" } }),
         );
         expect(harness.logs).toContainEqual(
@@ -226,17 +228,17 @@ describe("plugin skills", () => {
     it("removes a plugin's skills from the merged catalog when it is uninstalled", async () => {
         const harness = await createHarness();
         await createPlugin(join(harness.pluginsDirectory, "release"));
-        await harness.manager.start();
+        await harness.manager.start(ctx);
         expect(
-            (await harness.manager.loadSkills(harness.fs)).some(
+            (await harness.manager.loadSkills(ctx, harness.fs)).some(
                 (skill) => skill.name === "release-check",
             ),
         ).toBe(true);
 
-        await harness.manager.uninstall({ fs: harness.fs, name: "Release" });
+        await harness.manager.uninstall(ctx, { fs: harness.fs, name: "Release" });
 
         expect(
-            (await harness.manager.loadSkills(harness.fs)).some(
+            (await harness.manager.loadSkills(ctx, harness.fs)).some(
                 (skill) => skill.name === "release-check",
             ),
         ).toBe(false);
@@ -259,10 +261,10 @@ async function createHarness(): Promise<{
         mkdir(pluginsDirectory, { recursive: true }),
         mkdir(workspace, { recursive: true }),
     ]);
-    const store = await InMemorySessionStore.open({
+    const store = await InMemorySessionStore.open(ctx, {
         modelCatalog: { defaultModelId: "", defaultProviderId: "", models: [], providers: [] },
     });
-    cleanup.push(() => store.close());
+    cleanup.push(() => store.close(ctx));
     const logs: Record<string, unknown>[] = [];
     const started: string[] = [];
     const manager = new PluginManager({
@@ -297,7 +299,7 @@ async function createHarness(): Promise<{
         },
         store,
     });
-    cleanup.push(() => manager.close());
+    cleanup.push(() => manager.close(ctx));
     return {
         fs: createNodeFileSystemContext(workspace, { permissionMode: () => "full_access" }),
         logs,

@@ -3,6 +3,8 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
 import type { P2pSshPeer, P2pTrustedPeer } from "./P2pPeer.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js";
@@ -20,6 +22,8 @@ import {
     SSH_OPERATION_TUNNEL,
     type SshBridgeChannel,
 } from "./SshTransport.js";
+
+const ctx = createTestRootContext();
 
 const HOST_KEY_HASH = new Uint8Array(createHash("sha256").update("host key").digest());
 const sshSettings: P2pSshPeer = {
@@ -72,6 +76,7 @@ describe("SSH P2P transport", () => {
         });
 
         const response = await transport.fetch(
+            ctx,
             remote.instanceId,
             { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/status" },
             new AbortController().signal,
@@ -133,6 +138,7 @@ describe("SSH P2P transport", () => {
 
         await expect(
             transport.fetch(
+                ctx,
                 configured.instanceId,
                 { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/status" },
                 new AbortController().signal,
@@ -176,6 +182,7 @@ describe("SSH P2P transport", () => {
 
         await expect(
             transport.fetch(
+                ctx,
                 remote.instanceId,
                 { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/status" },
                 controller.signal,
@@ -219,6 +226,7 @@ describe("SSH P2P transport", () => {
             peers: [peerConfig(remote)],
         });
         const request = transport.fetch(
+            ctx,
             remote.instanceId,
             { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/slow" },
             controller.signal,
@@ -272,6 +280,7 @@ describe("SSH P2P transport", () => {
         });
 
         const connection = await transport.openTunnel(
+            ctx,
             remote.instanceId,
             { headers: {}, method: "GET", path: "/terminal" },
             controller.signal,
@@ -302,6 +311,7 @@ describe("SSH P2P transport", () => {
         });
         const requests = controllers.map((controller) =>
             transport.fetch(
+                ctx,
                 remote.instanceId,
                 { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/slow" },
                 controller.signal,
@@ -336,6 +346,7 @@ describe("SSH P2P transport", () => {
 
         await expect(
             transport.fetch(
+                ctx,
                 remote.instanceId,
                 { body: Buffer.alloc(0), headers: {}, method: "GET", path: "/slow" },
                 new AbortController().signal,

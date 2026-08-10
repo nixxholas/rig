@@ -1,13 +1,20 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MurmurClient } from "@slopus/murmur";
-import { describe, expect, it } from "vitest";
+import type { Span, Tracer } from "@opentelemetry/api";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { SqliteMurmurStore } from "./SqliteMurmurStore.js";
 
 describe("SqliteMurmurStore", () => {
+    beforeEach(() => {
+        createTestRootContext();
+    });
+
     it("persists byte values, scans in order, and rolls transactions back", async () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-murmur-store-"));
         const path = join(directory, "sharing.sqlite");
@@ -45,6 +52,55 @@ describe("SqliteMurmurStore", () => {
             });
 
             expect(await store.get("murmur/test/memory")).toEqual(new Uint8Array([7, 8]));
+        } finally {
+            await store.close();
+        }
+    });
+
+    it("does not create a root trace for each raw scan", async () => {
+        const spans: string[] = [];
+        const tracer = {
+            startSpan(name: string) {
+                spans.push(name);
+                return {
+                    end() {},
+                    isRecording: () => true,
+                    recordException() {},
+                    setAttribute() {
+                        return this;
+                    },
+                    setAttributes() {
+                        return this;
+                    },
+                    setStatus() {
+                        return this;
+                    },
+                    spanContext: () => ({
+                        spanId: "1".repeat(16),
+                        traceFlags: 1,
+                        traceId: "1".repeat(32),
+                    }),
+                    updateName() {
+                        return this;
+                    },
+                } as unknown as Span;
+            },
+        } as unknown as Tracer;
+        createTestRootContext(tracer);
+        const store = new SqliteMurmurStore(":memory:");
+        try {
+            await store.set("murmur/test/a", new Uint8Array([1]));
+            const rootsAfterInitialization = spans.filter((name) =>
+                name.startsWith("rig.worker.murmur-store-"),
+            ).length;
+
+            for (let index = 0; index < 25; index += 1) {
+                await store.scan("murmur/test/", { limit: 10 });
+            }
+
+            expect(spans.filter((name) => name.startsWith("rig.worker.murmur-store-")).length).toBe(
+                rootsAfterInitialization,
+            );
         } finally {
             await store.close();
         }

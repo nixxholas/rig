@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import sharp from "sharp";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
@@ -479,10 +481,14 @@ describe("applet HTTP protocol", () => {
 
 async function startServer(): Promise<number> {
     process.env.HAPPY_APPLETS_DIRECTORY = await createTempDirectory("rig-applets-test-");
-    const store = await InMemorySessionStore.open();
-    await store.createWithId("session-1", { cwd: "/tmp/rig-applet-context-test" });
-    cleanups.push(() => store.close());
-    const server = await createProtocolHttpServer({ store, token: "secret" });
+    const ctx = createTestRootContext();
+    const store = await InMemorySessionStore.open(ctx);
+    await store.createWithId(ctx, "session-1", { cwd: "/tmp/rig-applet-context-test" });
+    cleanups.push(() => store.close(ctx));
+    const server = await createProtocolHttpServer(createTestRootContext(), {
+        store,
+        token: "secret",
+    });
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();

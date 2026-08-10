@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq, sql } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     DOCUMENT_UPDATE_RETENTION_MAX_COUNT,
@@ -16,7 +17,7 @@ export type DocumentCreateResult =
     | { outcome: "mutation_conflict" };
 
 export async function documentCreate(
-    tx: DatabaseScope,
+    ctx: Context,
     input: {
         createdBy: DocumentCreatedBy;
         fingerprint: string;
@@ -28,7 +29,8 @@ export async function documentCreate(
         unreadCursor?: string;
     },
 ): Promise<DocumentCreateResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.documents.create", async (ctx) => {
+        const tx = ctx.tx;
         if (input.mutationId !== undefined) {
             const receipt = await tx
                 .select()
@@ -76,14 +78,15 @@ export async function documentCreate(
                     resultVersion: 1,
                 })
                 .run();
-            await pruneReceipts(tx, input.id);
+            await pruneReceipts(ctx, input.id);
         }
         return { outcome: "created", version: 1 };
     });
 }
 
-export async function pruneReceipts(tx: DatabaseScope, documentId: string): Promise<void> {
-    return await inDatabase(tx, async (tx) => {
+export async function pruneReceipts(ctx: Context, documentId: string): Promise<void> {
+    return await inDatabase(ctx, "rig.sql.documents.prune_receipts", async (ctx) => {
+        const tx = ctx.tx;
         await tx.run(
             sql`
         DELETE FROM document_mutations

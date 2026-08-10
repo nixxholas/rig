@@ -1,14 +1,16 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { readString } from "./impl/sqliteRow.js";
 
 export async function queryProjectSecretIds(
-    tx: DatabaseScope,
+    ctx: Context,
     projectId: string,
 ): Promise<readonly string[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_project_secret_ids", async (ctx) => {
+        const tx = ctx.tx;
         return (
             await tx.all<Record<string, unknown>>(sql`
             SELECT secret_id FROM project_secret_attachments

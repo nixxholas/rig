@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import { runAgentLoop } from "./loop.js";
 import { claudeBashTool } from "./tools/claude/Bash.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     createInferenceStream,
     defineModel,
     defineProvider,
     type AssistantMessage,
 } from "@slopus/rig-execution";
+
+const ctx = createTestRootContext();
 
 describe("agent loop tool presentations", () => {
     it("checkpoints each durable message before publishing it", async () => {
@@ -35,7 +38,7 @@ describe("agent loop tool presentations", () => {
         let checkpoint: readonly string[] = [];
         const published: { id: string; checkpoint: readonly string[]; role: string }[] = [];
 
-        await runAgentLoop({
+        await runAgentLoop(ctx, {
             context: harness.context,
             messages: [
                 {
@@ -104,7 +107,7 @@ describe("agent loop tool presentations", () => {
             return startSession(options);
         };
 
-        await runAgentLoop({
+        await runAgentLoop(ctx, {
             provider,
             modelId: model.id,
             tools: [claudeBashTool],
@@ -172,7 +175,7 @@ describe("agent loop tool presentations", () => {
                 },
             });
             const harness = createJustBashToolHarness();
-            const first = await runAgentLoop({
+            const first = await runAgentLoop(ctx, {
                 provider,
                 modelId: model.id,
                 tools: [],
@@ -200,7 +203,7 @@ describe("agent loop tool presentations", () => {
                 ],
             });
 
-            await runAgentLoop({
+            await runAgentLoop(ctx, {
                 provider,
                 modelId: model.id,
                 tools: [],

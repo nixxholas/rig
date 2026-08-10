@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -16,6 +17,7 @@ import { reviewAutoPermission } from "./reviewAutoPermission.js";
 
 const LIVE = process.env.RIG_LIVE_TEST === "1";
 const CODEX_AUTH_PATH = path.join(homedir(), ".codex", "auth.json");
+const ctx = createTestRootContext();
 
 interface AutoPermissionEvalCase {
     args: Record<string, unknown>;
@@ -242,7 +244,7 @@ describeLive("Auto permission reviewer live policy eval", () => {
         for (const [index, testCase] of cases.entries()) {
             // Each case gets its own reviewer so one verdict cannot influence the next.
             const reviewer = createPermissionReviewSideAgent({
-                context: createNodeAgentContext({
+                context: createNodeAgentContext(createTestRootContext().named("agent"), {
                     cwd: process.cwd(),
                     permissionMode: "read_only",
                     processManager: new NativeProcessManager(),
@@ -252,7 +254,7 @@ describeLive("Auto permission reviewer live policy eval", () => {
                 provider,
                 tools: [],
             });
-            const review = await reviewAutoPermission({
+            const review = await reviewAutoPermission(ctx, {
                 action: `${testCase.toolName} ${JSON.stringify(testCase.args)}`,
                 args: testCase.args,
                 messages: testCase.history,
@@ -294,7 +296,7 @@ describeLive("Auto permission reviewer live policy eval", () => {
             captured,
         );
         const reviewer = createPermissionReviewSideAgent({
-            context: createNodeAgentContext({
+            context: createNodeAgentContext(createTestRootContext().named("agent"), {
                 cwd: process.cwd(),
                 permissionMode: "read_only",
                 processManager: new NativeProcessManager(),
@@ -337,7 +339,7 @@ describeLive("Auto permission reviewer live policy eval", () => {
 
         const reviews = await Promise.all(
             actions.map(({ action, args }) =>
-                reviewAutoPermission({
+                reviewAutoPermission(ctx, {
                     action,
                     args,
                     messages: history,

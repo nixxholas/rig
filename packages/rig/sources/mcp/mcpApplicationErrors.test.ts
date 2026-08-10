@@ -2,6 +2,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { createMcpProtocolTools } from "./createMcpProtocolTools.js";
 import { createMcpTool } from "./createMcpTool.js";
 
@@ -27,7 +28,8 @@ describe("MCP application errors", () => {
             },
         });
 
-        const directResult = await direct.execute({} as never, context, {});
+        const ctx = createTestRootContext();
+        const directResult = await direct.execute({} as never, context, { ctx });
         expect(direct.isError?.(directResult as never)).toBe(true);
         expect(direct.toLLM(directResult as never)).toEqual([
             { type: "text", text: "Error: request failed" },
@@ -42,7 +44,7 @@ describe("MCP application errors", () => {
         const dynamicResult = await dynamic.execute(
             { arguments: {}, name: "fail_request", server: "test server" } as never,
             context,
-            {},
+            { ctx },
         );
         expect(dynamic.isError?.(dynamicResult as never)).toBe(true);
         expect(dynamic.toLLM(dynamicResult as never)).toEqual([

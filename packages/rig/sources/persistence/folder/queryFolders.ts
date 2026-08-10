@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { asc } from "drizzle-orm";
 
 import type { Folder } from "../../protocol/index.js";
 import { folders } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { folderReadRow } from "./impl/folderReadRow.js";
 
 /**
@@ -12,8 +13,9 @@ import { folderReadRow } from "./impl/folderReadRow.js";
  * The rows come back in sibling order and are then arranged into tree order here. A folder whose
  * parent is missing is treated as a root, so nothing can disappear from the tree.
  */
-export async function queryFolders(tx: DatabaseScope): Promise<readonly Folder[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryFolders(ctx: Context): Promise<readonly Folder[]> {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolders", async (ctx) => {
+        const tx = ctx.tx;
         const ordered = (
             await tx.select().from(folders).orderBy(asc(folders.orderKey), asc(folders.id)).all()
         ).map((row) => folderReadRow(row));

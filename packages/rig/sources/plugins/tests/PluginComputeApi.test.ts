@@ -7,11 +7,13 @@ import { createHappyPluginClient, HappyComputeProviderError } from "happy-plugin
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { createPluginApiServer } from "../createPluginApiServer.js";
 import { PluginComputeRegistry } from "../PluginComputeRegistry.js";
 import { PluginStartupState } from "../PluginStartupState.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
+const ctx = createTestRootContext().named("plugin-compute-api-test");
 
 afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((dispose) => dispose()));
@@ -24,7 +26,7 @@ describe("plugin compute API", () => {
         const socketPath = join(directory, "api.sock");
         const source = join(directory, "source");
         await mkdir(source);
-        const store = await InMemorySessionStore.open({
+        const store = await InMemorySessionStore.open(ctx, {
             modelCatalog: {
                 defaultModelId: "",
                 defaultProviderId: "",
@@ -32,7 +34,7 @@ describe("plugin compute API", () => {
                 providers: [],
             },
         });
-        cleanup.push(() => store.close());
+        cleanup.push(() => store.close(ctx));
         const registry = new PluginComputeRegistry();
         cleanup.push(() => registry.close());
         const compute = registry.createConnection({

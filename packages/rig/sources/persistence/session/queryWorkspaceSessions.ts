@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
 import type { AgentWorkspaceSession } from "../../agent/context/WorkspaceContext.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 
 /**
@@ -12,10 +13,11 @@ import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js"
  * workspace, and they are reached through the subagent tools instead.
  */
 export async function queryWorkspaceSessions(
-    tx: DatabaseScope,
+    ctx: Context,
     target: { limit?: number; projectId: string; workspaceId?: string },
 ): Promise<readonly AgentWorkspaceSession[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.session.query_workspace_sessions", async (ctx) => {
+        const tx = ctx.tx;
         const rows = await tx.all<Record<string, unknown>>(sql`
         SELECT id, agent_id, project_id, workspace_id, title, status, archived, updated_at_ms,
             last_message_at_ms, delegated_by_session_id

@@ -1,13 +1,15 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { asc, eq } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 
 import { rigProfileSchema, type RigProfile } from "../../protocol/ProfileProtocol.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { rigProfiles } from "../database/schema.js";
 
-export async function queryRigProfiles(tx: DatabaseScope): Promise<readonly RigProfile[]> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryRigProfiles(ctx: Context): Promise<readonly RigProfile[]> {
+    return await inDatabase(ctx, "rig.sql.profile.queryRigProfiles", async (ctx) => {
+        const tx = ctx.tx;
         return (await tx.select().from(rigProfiles).orderBy(asc(rigProfiles.id)).all()).map(
             readProfile,
         );
@@ -15,10 +17,11 @@ export async function queryRigProfiles(tx: DatabaseScope): Promise<readonly RigP
 }
 
 export async function queryRigProfile(
-    tx: DatabaseScope,
+    ctx: Context,
     profileId: string,
 ): Promise<RigProfile | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.profile.queryRigProfile", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx.select().from(rigProfiles).where(eq(rigProfiles.id, profileId)).get();
         return row === undefined ? undefined : readProfile(row);
     });

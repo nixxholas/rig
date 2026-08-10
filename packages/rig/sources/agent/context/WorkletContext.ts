@@ -5,6 +5,7 @@ import type {
     Worklet,
     WorkletPermissions,
 } from "../../protocol/WorkletProtocol.js";
+import type { Context } from "@steve.kite/stdlib";
 import type { FileSystemContext } from "./FileSystemContext.js";
 
 /**
@@ -17,21 +18,24 @@ import type { FileSystemContext } from "./FileSystemContext.js";
  */
 export interface WorkletContext {
     install(
+        ctx: Context,
         request: Omit<InstallWorkletRequest, "authorSessionId">,
         sourceFileSystem?: FileSystemContext,
         expectedPermissions?: WorkletPermissions,
     ): Promise<Worklet>;
-    list(): Promise<readonly Worklet[]>;
-    readLog(name: string): Promise<{ log: string; truncated: boolean }>;
+    list(ctx: Context): Promise<readonly Worklet[]>;
+    readLog(ctx: Context, name: string): Promise<{ log: string; truncated: boolean }>;
     /** Changes whenever the daemon-wide set of callable worklet tools changes. */
     toolRevision?(): number;
     revert(
+        ctx: Context,
         name: string,
         request: RevertWorkletRequest,
         expectedPermissions?: WorkletPermissions,
     ): Promise<Worklet>;
-    uninstall(name: string): Promise<void>;
+    uninstall(ctx: Context, name: string): Promise<void>;
     update(
+        ctx: Context,
         name: string,
         request: UpdateWorkletRequest,
         sourceFileSystem?: FileSystemContext,

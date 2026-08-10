@@ -1,5 +1,6 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     HAPPY_CLOUD_CONTRACT_VERSION,
@@ -9,8 +10,9 @@ import {
 import { happyCloudEnrollment } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 
-export async function queryHappyCloudStatus(tx: DatabaseScope): Promise<HappyCloudStatus> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryHappyCloudStatus(ctx: Context): Promise<HappyCloudStatus> {
+    return await inDatabase(ctx, "rig.sql.happy_cloud.query_status", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select({
                 contractVersion: happyCloudEnrollment.contractVersion,

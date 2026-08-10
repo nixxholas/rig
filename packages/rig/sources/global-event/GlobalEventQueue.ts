@@ -5,7 +5,7 @@ import type {
     GlobalLiveEvent,
     TrimGlobalEventsResponse,
 } from "../protocol/index.js";
-import type { TX } from "../persistence/Transaction.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface ListGlobalEventQueueOptions {
     after?: string;
@@ -16,15 +16,16 @@ export type GlobalEventQueueListener = (delivery: GlobalEventDelivery) => void;
 
 export interface GlobalEventQueue {
     readonly durable: boolean;
-    append(event: GlobalEvent, tx?: TX): Promise<GlobalEventQueueEntry | undefined>;
+    append(ctx: Context, event: GlobalEvent): Promise<GlobalEventQueueEntry | undefined>;
     /**
      * Appends an event delivered from a durable outbox whose source transaction
      * may have missed the acknowledgement of an earlier successful append.
      */
-    appendReplaySafe(event: GlobalEvent, tx?: TX): Promise<GlobalEventQueueEntry | undefined>;
+    appendReplaySafe(ctx: Context, event: GlobalEvent): Promise<GlobalEventQueueEntry | undefined>;
     cursor(): string;
     deactivate(): void;
     list(
+        ctx: Context,
         options?: ListGlobalEventQueueOptions,
     ): Promise<readonly GlobalEventQueueEntry[] | undefined>;
     publish(entry: GlobalEventQueueEntry): void;
@@ -42,5 +43,5 @@ export interface GlobalEventQueue {
      */
     publishLive(event: GlobalLiveEvent): boolean;
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void;
-    trim(through: string): Promise<TrimGlobalEventsResponse | undefined>;
+    trim(ctx: Context, through: string): Promise<TrimGlobalEventsResponse | undefined>;
 }

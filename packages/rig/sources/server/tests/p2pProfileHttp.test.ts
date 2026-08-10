@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { RigProfileStore } from "../../profiles/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -25,9 +27,10 @@ describe("P2P human profiles", () => {
     });
 
     it("lets trusted peers own remote work without giving them configuration authority", async () => {
+        const ctx = createTestRootContext();
         const homeDirectory = await mkdtemp(join(tmpdir(), "rig-p2p-profile-"));
         close.push(() => rm(homeDirectory, { force: true, recursive: true }));
-        const store = await PersistentSessionStore.open({
+        const store = await PersistentSessionStore.open(ctx, {
             databasePath: ":memory:",
             homeDirectory,
             projectClone: async () => undefined,
@@ -37,12 +40,12 @@ describe("P2P human profiles", () => {
             localInstanceId: SECONDARY_ID,
             publish: () => undefined,
         });
-        const localProfile = await profiles.create({
+        const localProfile = await profiles.create(ctx, {
             email: "secondary@example.test",
             name: "Secondary operator",
         });
         const started = await startServer(
-            await createProtocolHttpServer({
+            await createProtocolHttpServer(createTestRootContext(), {
                 canP2pPeerConfigure: (peerId) => peerId === PRIMARY_ID,
                 canP2pPeerProvision: (peerId) => peerId === PRIMARY_ID || peerId === OTHER_ID,
                 canP2pPeerUseRemoteWork: (peerId) => peerId === PRIMARY_ID || peerId === OTHER_ID,
@@ -58,7 +61,7 @@ describe("P2P human profiles", () => {
         );
         close.push(async () => {
             await started.close();
-            await store.close();
+            await store.close(ctx);
         });
         const profile = {
             createdAt: 1_000,
@@ -128,11 +131,12 @@ describe("P2P human profiles", () => {
             secret: { kind: "github" as const },
             source: { kind: "github" as const, repository: "slopus/rig" },
         };
-        const managedProject = await store.createRemoteProject(remoteProjectRequest, {
+        const managedProject = await store.createRemoteProject(ctx, remoteProjectRequest, {
             createdBy: { instanceId: PRIMARY_ID, profileId: PROFILE_ID },
             githubToken: "initial-project-token",
         });
         const session = await store.create(
+            ctx,
             {
                 cwd: managedProject.path,
                 identity: PROFILE_ID,
@@ -204,6 +208,7 @@ describe("P2P human profiles", () => {
             ),
         ).toMatchObject({ status: 202 });
         expect(crossWriterCredentialRefresh).toHaveBeenLastCalledWith(
+            expect.anything(),
             session.id,
             { instanceId: OTHER_ID, profileId: OTHER_PROFILE_ID },
             "other-writer-token",
@@ -217,7 +222,7 @@ describe("P2P human profiles", () => {
         ).toMatchObject({
             data: { message: { identity: OTHER_PROFILE_ID } },
         });
-        const localSession = await store.create({ cwd: "/tmp/unowned-remote-session" });
+        const localSession = await store.create(ctx, { cwd: "/tmp/unowned-remote-session" });
         expect(
             await send(
                 started.socketPath,
@@ -276,6 +281,7 @@ describe("P2P human profiles", () => {
         expect(remoteProject.status).toBe(202);
         expect(JSON.stringify(remoteProject.body)).not.toContain("single-use-token");
         expect(createRemoteProject).toHaveBeenCalledWith(
+            expect.anything(),
             { ...remoteProjectRequest, projectId: managedProject.id },
             {
                 createdBy: { instanceId: PRIMARY_ID, profileId: PROFILE_ID },
@@ -375,6 +381,7 @@ describe("P2P human profiles", () => {
         });
         expect(JSON.stringify(remoteWorkspace.body)).not.toContain("workspace-token");
         expect(createRemoteWorkspace).toHaveBeenCalledWith(
+            expect.anything(),
             projectId,
             {
                 identity: PROFILE_ID,
@@ -477,6 +484,7 @@ describe("P2P human profiles", () => {
         expect(credentialedMessage.status).toBe(202);
         expect(JSON.stringify(credentialedMessage.body)).not.toContain("message-token");
         expect(refreshGitCredential).toHaveBeenCalledWith(
+            expect.anything(),
             session.id,
             { instanceId: PRIMARY_ID, profileId: PROFILE_ID },
             "message-token",
@@ -508,18 +516,21 @@ describe("P2P human profiles", () => {
                 JSON.stringify({ identity: PROFILE_ID, text: "Local impersonation" }),
             ),
         ).toMatchObject({ body: { code: "profile_not_owned" }, status: 403 });
-        await session.abort();
+        await session.abort(ctx);
     });
 
     it("creates named profiles only on a local primary", async () => {
-        const store = await PersistentSessionStore.open({ databasePath: ":memory:" });
+        const ctx = createTestRootContext();
+        const store = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
         const profiles = new RigProfileStore({
             database: store,
             localInstanceId: PRIMARY_ID,
             publish: () => undefined,
         });
         const started = await startServer(
-            await createProtocolHttpServer({
+            await createProtocolHttpServer(createTestRootContext(), {
                 p2pNode: () => ({ name: "Primary", role: "primary" }),
                 profiles,
                 store,
@@ -528,7 +539,7 @@ describe("P2P human profiles", () => {
         );
         close.push(async () => {
             await started.close();
-            await store.close();
+            await store.close(ctx);
         });
 
         expect(

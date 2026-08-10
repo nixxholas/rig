@@ -3,6 +3,7 @@
  */
 
 import type { Static, TSchema } from "@sinclair/typebox";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentContext } from "./context/AgentContext.js";
 import type {
@@ -237,6 +238,8 @@ export type Lock<TArgs> = LockConstant | LockForArgs<TArgs>;
 
 /** A fully typed tool with execution, LLM serialization, and concurrency control. */
 export interface ToolExecutionOptions {
+    /** Runtime context for this concrete tool invocation. */
+    ctx: Context;
     /** Canonical model context immediately before this tool invocation. */
     messages?: readonly Message[];
     /** Model selected for the active agent turn. */

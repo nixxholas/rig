@@ -8,6 +8,8 @@ import type {
     MurmurUpdate,
 } from "@slopus/murmur";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/daemonContext.js";
 
 import {
     folderShareDescriptorSchema,
@@ -17,7 +19,6 @@ import {
     type FolderShareStatus,
     type SharedFolderState,
 } from "../protocol/index.js";
-import type { TX } from "../persistence/Transaction.js";
 import { folderShareCreate } from "../persistence/folderShare/folderShareCreate.js";
 import {
     FolderShareSemanticError,
@@ -54,22 +55,30 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 const MAX_MURMUR_APPLICATION_BYTES = 1024 * 1024;
 
 interface FolderSharingDatabase {
-    query<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
-    transaction<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
+    query<Result>(ctx: Context, operation: (ctx: Context) => Promise<Result>): Promise<Result>;
+    transaction<Result>(
+        ctx: Context,
+        operation: (ctx: Context) => Promise<Result>,
+    ): Promise<Result>;
 }
 
 export interface FolderSharingStore {
-    applySharedFolderState(groupId: string, state: SharedFolderState): Promise<Folder>;
-    assertFolderShareable(folderId: string): Promise<void>;
-    getFolder(folderId: string): Promise<Folder | undefined>;
-    markFolderShared(folderId: string, groupId: string): Promise<Folder>;
+    applySharedFolderState(
+        ctx: Context,
+        groupId: string,
+        state: SharedFolderState,
+    ): Promise<Folder>;
+    assertFolderShareable(ctx: Context, folderId: string): Promise<void>;
+    getFolder(ctx: Context, folderId: string): Promise<Folder | undefined>;
+    markFolderShared(ctx: Context, folderId: string, groupId: string): Promise<Folder>;
     moveFolder(
+        ctx: Context,
         folderId: string,
         request: MoveFolderRequest,
         expectedVersion?: number,
     ): Promise<Folder | undefined>;
-    sharedFolderGroup(folderId: string): Promise<string | undefined>;
-    sharedFolderState(rootFolderId: string): Promise<SharedFolderState>;
+    sharedFolderGroup(ctx: Context, folderId: string): Promise<string | undefined>;
+    sharedFolderState(ctx: Context, rootFolderId: string): Promise<SharedFolderState>;
 }
 
 export interface FolderSharingMurmurClient {
@@ -84,7 +93,7 @@ export interface FolderSharingServiceOptions {
     database: FolderSharingDatabase;
     folders: FolderSharingStore;
     now?: () => number;
-    onChanged: () => void;
+    onChanged: (ctx: Context) => void;
     onError?: (error: unknown) => void;
 }
 
@@ -100,7 +109,7 @@ export class FolderSharingService implements MurmurService {
     readonly #folders: FolderSharingStore;
     readonly #nextOperationId: () => string;
     readonly #now: () => number;
-    readonly #onChanged: () => void;
+    readonly #onChanged: (ctx: Context) => void;
     readonly #onError: (error: unknown) => void;
     #client: FolderSharingMurmurClient | undefined;
     #drain: Promise<void> | undefined;
@@ -121,22 +130,27 @@ export class FolderSharingService implements MurmurService {
         this.#client = client;
     }
 
-    async create(rootFolderId: string, contacts: readonly string[]): Promise<FolderShareStatus> {
+    async create(
+        ctx: Context,
+        rootFolderId: string,
+        contacts: readonly string[],
+    ): Promise<FolderShareStatus> {
         const client = this.#requireClient();
-        await this.recover();
-        const recoveredGroupId = await this.#folders.sharedFolderGroup(rootFolderId);
+        await this.recover(ctx);
+        const recoveredGroupId = await this.#folders.sharedFolderGroup(ctx, rootFolderId);
         if (recoveredGroupId !== undefined) {
             return await this.#status(
+                ctx,
                 recoveredGroupId,
                 await client.session(decodeIdentity(recoveredGroupId)),
             );
         }
-        await this.#folders.assertFolderShareable(rootFolderId);
-        const existingIntent = await this.#database.query(async (tx) =>
-            queryFolderShareIntentByRoot(tx, rootFolderId),
+        await this.#folders.assertFolderShareable(ctx, rootFolderId);
+        const existingIntent = await this.#database.query(ctx, async (ctx) =>
+            queryFolderShareIntentByRoot(ctx, rootFolderId),
         );
         const state =
-            existingIntent?.state ?? (await this.#folders.sharedFolderState(rootFolderId));
+            existingIntent?.state ?? (await this.#folders.sharedFolderState(ctx, rootFolderId));
         validateSharedFolderState(state);
         const shareId = existingIntent?.shareId ?? this.#nextOperationId();
         const descriptor: FolderShareDescriptor = {
@@ -150,8 +164,8 @@ export class FolderSharingService implements MurmurService {
             throw new Error("That folder tree is too large to share through Murmur.");
         }
         if (existingIntent === undefined) {
-            await this.#database.transaction(async (tx) =>
-                folderSharePutIntent(tx, {
+            await this.#database.transaction(ctx, async (ctx) =>
+                folderSharePutIntent(ctx, {
                     now: this.#now(),
                     rootFolderId,
                     shareId,
@@ -164,12 +178,18 @@ export class FolderSharingService implements MurmurService {
             descriptor: descriptorBytes,
             service: FOLDER_SHARING_MURMUR_SERVICE_ID,
         });
-        const groupId = await this.#completeCreatedShare(group, descriptor);
-        this.#onChanged();
-        return await this.#status(groupId, group);
+        const groupId = await this.#completeCreatedShare(ctx, group, descriptor);
+        this.#onChanged(ctx);
+        return await this.#status(ctx, groupId, group);
     }
 
     async onNewSession(session: MurmurServiceSessionDescriptor): Promise<boolean> {
+        return await withWorkerContext("folder-sharing-new-session", (ctx) =>
+            this.#onNewSession(ctx, session),
+        );
+    }
+
+    async #onNewSession(ctx: Context, session: MurmurServiceSessionDescriptor): Promise<boolean> {
         const descriptor = decodeDescriptor(session.descriptor);
         if (descriptor === undefined) return false;
         const groupId = encodeBytes(session.id);
@@ -179,17 +199,17 @@ export class FolderSharingService implements MurmurService {
             return false;
         }
         if (
-            (await this.#database.query(async (tx) =>
-                queryFolderShareByShareId(tx, descriptor.shareId),
+            (await this.#database.query(ctx, async (ctx) =>
+                queryFolderShareByShareId(ctx, descriptor.shareId),
             )) !== undefined
         ) {
             return false;
         }
         this.#applying.add(groupId);
         try {
-            await this.#database.transaction(async (tx) => {
-                await this.#folders.applySharedFolderState(groupId, descriptor.state);
-                await folderShareCreate(tx, {
+            await this.#database.transaction(ctx, async (ctx) => {
+                await this.#folders.applySharedFolderState(ctx, groupId, descriptor.state);
+                await folderShareCreate(ctx, {
                     groupId,
                     now: this.#now(),
                     rootFolderId: descriptor.state.rootId,
@@ -205,32 +225,39 @@ export class FolderSharingService implements MurmurService {
         } finally {
             this.#applying.delete(groupId);
         }
-        this.#onChanged();
+        this.#onChanged(ctx);
         return true;
     }
 
     async onUpdate(update: MurmurUpdate): Promise<void> {
+        await withWorkerContext("folder-sharing-update", (ctx) => this.#onUpdate(ctx, update));
+    }
+
+    async #onUpdate(ctx: Context, update: MurmurUpdate): Promise<void> {
         const packet = decodePacket(update.bytes);
         if (packet === undefined) return;
         const groupId = encodeBytes(update.sessionId);
         const sender = encodeBytes(update.sender);
-        if ((await this.#database.query(async (tx) => queryFolderShare(tx, groupId))) === undefined)
+        if (
+            (await this.#database.query(ctx, async (ctx) => queryFolderShare(ctx, groupId))) ===
+            undefined
+        )
             return;
-        const outcome = await this.#database.query(async (tx) =>
-            folderShareShouldApplyState(tx, groupId, update.id, packet),
+        const outcome = await this.#database.query(ctx, async (ctx) =>
+            folderShareShouldApplyState(ctx, groupId, update.id, packet),
         );
         if (outcome !== "apply") return;
         this.#applying.add(groupId);
         try {
-            await this.#database.transaction(async (tx) => {
-                const state = await folderShareRecordAppliedState(tx, {
+            await this.#database.transaction(ctx, async (ctx) => {
+                const state = await folderShareRecordAppliedState(ctx, {
                     deliveryId: update.id,
                     groupId,
                     now: this.#now(),
                     packet,
                     sender,
                 });
-                await this.#folders.applySharedFolderState(groupId, state);
+                await this.#folders.applySharedFolderState(ctx, groupId, state);
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -240,8 +267,8 @@ export class FolderSharingService implements MurmurService {
             ) {
                 throw error;
             }
-            await this.#database.transaction(async (tx) =>
-                folderShareRecordRejectedState(tx, {
+            await this.#database.transaction(ctx, async (ctx) =>
+                folderShareRecordRejectedState(ctx, {
                     deliveryId: update.id,
                     error:
                         error instanceof Error
@@ -256,14 +283,14 @@ export class FolderSharingService implements MurmurService {
         } finally {
             this.#applying.delete(groupId);
         }
-        this.#onChanged();
+        this.#onChanged(ctx);
     }
 
     /** Reconciles creator-owned Murmur sessions left between durable creation steps. */
-    async recover(): Promise<void> {
+    async recover(ctx: Context): Promise<void> {
         const client = this.#requireClient();
         const intents = new Map(
-            (await this.#database.query(async (tx) => queryFolderShareIntents(tx))).map(
+            (await this.#database.query(ctx, async (ctx) => queryFolderShareIntents(ctx))).map(
                 (intent) => [intent.shareId, intent],
             ),
         );
@@ -283,28 +310,30 @@ export class FolderSharingService implements MurmurService {
                     continue;
                 }
                 validateSharedFolderState(descriptor.state);
-                await this.#completeCreatedShare(session, descriptor);
+                await this.#completeCreatedShare(ctx, session, descriptor);
                 intents.delete(descriptor.shareId);
             }
             after = page.cursor ?? undefined;
         } while (after !== undefined);
-        await this.foldersChanged();
+        await this.foldersChanged(ctx);
     }
 
     /** Observes the already-committed local folder catalog and queues changed share snapshots. */
-    async foldersChanged(): Promise<void> {
-        await this.#foldersChanged().catch(this.#onError);
+    async foldersChanged(ctx: Context): Promise<void> {
+        await this.#foldersChanged(ctx).catch(this.#onError);
     }
 
-    async #foldersChanged(): Promise<void> {
+    async #foldersChanged(ctx: Context): Promise<void> {
         const client = this.#client;
         if (client === undefined) return;
-        for (const share of await this.#database.query(async (tx) => queryFolderShares(tx))) {
+        for (const share of await this.#database.query(ctx, async (ctx) =>
+            queryFolderShares(ctx),
+        )) {
             if (this.#applying.has(share.groupId)) continue;
-            const state = await this.#folders.sharedFolderState(share.rootFolderId);
+            const state = await this.#folders.sharedFolderState(ctx, share.rootFolderId);
             validateSharedFolderState(state);
-            await this.#database.transaction(async (tx) =>
-                folderShareQueueState(tx, {
+            await this.#database.transaction(ctx, async (ctx) =>
+                folderShareQueueState(ctx, {
                     groupId: share.groupId,
                     now: this.#now(),
                     operationId: this.#nextOperationId(),
@@ -316,12 +345,15 @@ export class FolderSharingService implements MurmurService {
         this.#scheduleDrain();
     }
 
-    async statuses(): Promise<FolderShareStatus[]> {
+    async statuses(ctx: Context): Promise<FolderShareStatus[]> {
         const client = this.#requireClient();
         const results: FolderShareStatus[] = [];
-        for (const share of await this.#database.query(async (tx) => queryFolderShares(tx))) {
+        for (const share of await this.#database.query(ctx, async (ctx) =>
+            queryFolderShares(ctx),
+        )) {
             results.push(
                 await this.#status(
+                    ctx,
                     share.groupId,
                     await client.session(decodeIdentity(share.groupId)),
                 ),
@@ -330,18 +362,18 @@ export class FolderSharingService implements MurmurService {
         return results;
     }
 
-    drain(): Promise<void> {
-        this.#drain ??= this.#finishDrain().finally(() => {
+    drain(ctx: Context): Promise<void> {
+        this.#drain ??= this.#finishDrain(ctx).finally(() => {
             this.#drain = undefined;
         });
         return this.#drain;
     }
 
-    async #finishDrain(): Promise<void> {
+    async #finishDrain(ctx: Context): Promise<void> {
         const client = this.#requireClient();
         while (true) {
             const pending = (
-                await this.#database.query(async (tx) => queryPendingFolderShareOutbox(tx))
+                await this.#database.query(ctx, async (ctx) => queryPendingFolderShareOutbox(ctx))
             )[0];
             if (pending === undefined) return;
             try {
@@ -349,31 +381,39 @@ export class FolderSharingService implements MurmurService {
                     decodeIdentity(pending.groupId),
                     encoder.encode(pending.payloadJson),
                 );
-                await this.#database.transaction(async (tx) =>
-                    folderShareOutboxSent(tx, pending.operationId),
+                await this.#database.transaction(ctx, async (ctx) =>
+                    folderShareOutboxSent(ctx, pending.operationId),
                 );
-                this.#onChanged();
+                this.#onChanged(ctx);
             } catch (error) {
-                await this.#database.transaction(async (tx) =>
+                await this.#database.transaction(ctx, async (ctx) =>
                     folderShareOutboxFailed(
-                        tx,
+                        ctx,
                         pending.operationId,
                         error instanceof Error ? error.message : "Folder synchronization failed.",
                         this.#now(),
                     ),
                 );
-                this.#onChanged();
+                this.#onChanged(ctx);
                 throw error;
             }
         }
     }
 
     #scheduleDrain(): void {
-        void this.drain().catch(this.#onError);
+        void withWorkerContext("folder-sharing-drain", (ctx) => this.drain(ctx)).catch(
+            this.#onError,
+        );
     }
 
-    async #status(groupId: string, session: MurmurSession | undefined): Promise<FolderShareStatus> {
-        const share = await this.#database.query(async (tx) => queryFolderShare(tx, groupId));
+    async #status(
+        ctx: Context,
+        groupId: string,
+        session: MurmurSession | undefined,
+    ): Promise<FolderShareStatus> {
+        const share = await this.#database.query(ctx, async (ctx) =>
+            queryFolderShare(ctx, groupId),
+        );
         if (share === undefined) throw new Error("The shared folder group is unknown.");
         return {
             ...(share.error === undefined ? {} : { error: share.error }),
@@ -386,23 +426,25 @@ export class FolderSharingService implements MurmurService {
     }
 
     async #completeCreatedShare(
+        ctx: Context,
         group: MurmurSession,
         descriptor: FolderShareDescriptor,
     ): Promise<string> {
         const groupId = encodeBytes(group.id);
         const client = this.#requireClient();
-        await this.#database.transaction(async (tx) => {
-            const root = await this.#folders.getFolder(descriptor.state.rootId);
+        await this.#database.transaction(ctx, async (ctx) => {
+            const root = await this.#folders.getFolder(ctx, descriptor.state.rootId);
             if (root === undefined) throw new Error("The folder disappeared before it was shared.");
             if (root.parentId !== undefined) {
                 await this.#folders.moveFolder(
+                    ctx,
                     descriptor.state.rootId,
                     { afterId: null, parentId: null },
                     root.version,
                 );
             }
-            await this.#folders.markFolderShared(descriptor.state.rootId, groupId);
-            await folderShareCreate(tx, {
+            await this.#folders.markFolderShared(ctx, descriptor.state.rootId, groupId);
+            await folderShareCreate(ctx, {
                 groupId,
                 now: this.#now(),
                 rootFolderId: descriptor.state.rootId,
@@ -411,18 +453,23 @@ export class FolderSharingService implements MurmurService {
                 state: descriptor.state,
                 status: "syncing",
             });
-            await folderShareDeleteIntent(tx, descriptor.shareId);
+            await folderShareDeleteIntent(ctx, descriptor.shareId);
         });
-        await this.#queueCurrentState(groupId, descriptor.state.rootId, true);
+        await this.#queueCurrentState(ctx, groupId, descriptor.state.rootId, true);
         return groupId;
     }
 
-    async #queueCurrentState(groupId: string, rootFolderId: string, force: boolean): Promise<void> {
+    async #queueCurrentState(
+        ctx: Context,
+        groupId: string,
+        rootFolderId: string,
+        force: boolean,
+    ): Promise<void> {
         const client = this.#requireClient();
-        const state = await this.#folders.sharedFolderState(rootFolderId);
+        const state = await this.#folders.sharedFolderState(ctx, rootFolderId);
         validateSharedFolderState(state);
-        await this.#database.transaction(async (tx) =>
-            folderShareQueueState(tx, {
+        await this.#database.transaction(ctx, async (ctx) =>
+            folderShareQueueState(ctx, {
                 force,
                 groupId,
                 now: this.#now(),

@@ -1,4 +1,6 @@
 import type { Duplex } from "node:stream";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/index.js";
 
 import type { ConfigP2p } from "../config/types.js";
 import type { P2pStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
@@ -61,7 +63,7 @@ export class P2pNetwork {
         this.#sshBridgeResponder = sshBridgeResponder;
     }
 
-    static async create(options: CreateP2pNetworkOptions): Promise<P2pNetwork> {
+    static async create(ctx: Context, options: CreateP2pNetworkOptions): Promise<P2pNetwork> {
         const statuses = new Map<P2pTransportKind, P2pTransportStatus>();
         const transports: P2pTransport[] = [];
         let identity: P2pInstanceIdentity | undefined;
@@ -106,7 +108,7 @@ export class P2pNetwork {
         const trustStore = options.peerTrustStore;
         let peers: readonly P2pTrustedPeer[];
         try {
-            peers = await trustStore.peers();
+            peers = await trustStore.peers(ctx);
         } catch (error) {
             for (const transport of enabledTransports(options.config)) {
                 statuses.set(transport, {
@@ -140,7 +142,14 @@ export class P2pNetwork {
                         ? await DirectTlsNetwork.create({
                               apiExposed: options.config.exposeApi,
                               commitPeer: (peerIdentity, publicKey) =>
-                                  trustStore.verifyOrPin(peerIdentity, kind, publicKey),
+                                  withWorkerContext("p2p-direct-peer-commit", (workerCtx) =>
+                                      trustStore.verifyOrPin(
+                                          workerCtx,
+                                          peerIdentity,
+                                          kind,
+                                          publicKey,
+                                      ),
+                                  ),
                               config: options.config.direct,
                               identity,
                               onStatusChange: onDirectStatusChange,
@@ -152,7 +161,9 @@ export class P2pNetwork {
                                   ? { serveTunnel: options.serveTunnel }
                                   : {}),
                               validatePeer: (peerIdentity, publicKey) =>
-                                  trustStore.validate(peerIdentity, kind, publicKey),
+                                  withWorkerContext("p2p-direct-peer-validation", (workerCtx) =>
+                                      trustStore.validate(workerCtx, peerIdentity, kind, publicKey),
+                                  ),
                           })
                         : await options.createDirectTransport(onDirectStatusChange);
                 transports.push(direct);
@@ -206,7 +217,10 @@ export class P2pNetwork {
                 ): Promise<void> => {
                     // Pairing can add trust after this network starts, so the durable store—not
                     // the startup projection used to seed the transport—is authoritative here.
-                    const configured = await trustStore.peerForBinding("iroh", endpointId);
+                    const configured = await withWorkerContext(
+                        "p2p-iroh-peer-binding",
+                        (workerCtx) => trustStore.peerForBinding(workerCtx, "iroh", endpointId),
+                    );
                     if (
                         configured === undefined ||
                         configured.instanceId !== peerIdentity.instanceId ||
@@ -216,14 +230,23 @@ export class P2pNetwork {
                             "The Iroh peer identity does not match its trusted peer record.",
                         );
                     }
-                    await trustStore.validate(peerIdentity, "iroh", endpointId);
+                    await withWorkerContext("p2p-iroh-peer-validation", (workerCtx) =>
+                        trustStore.validate(workerCtx, peerIdentity, "iroh", endpointId),
+                    );
                 };
                 const iroh =
                     options.createIrohTransport === undefined
                         ? await IrohNetwork.create({
                               apiExposed: options.config.exposeApi,
                               commitPeer: (peerIdentity, endpointId) =>
-                                  trustStore.verifyOrPin(peerIdentity, "iroh", endpointId),
+                                  withWorkerContext("p2p-iroh-peer-commit", (workerCtx) =>
+                                      trustStore.verifyOrPin(
+                                          workerCtx,
+                                          peerIdentity,
+                                          "iroh",
+                                          endpointId,
+                                      ),
+                                  ),
                               config: options.config.iroh,
                               endpointIds: [...peersByEndpoint.keys()],
                               identity,
@@ -241,9 +264,17 @@ export class P2pNetwork {
                               peerTickets,
                               secretKey: await loadOrCreateIrohSecretKey(options.irohSecretKeyPath),
                               updatePeerAddress: (peerIdentity, endpointId, ticket) =>
-                                  trustStore.verifyOrPin(peerIdentity, "iroh", endpointId, {
-                                      iroh: { endpointId, ticket },
-                                  }),
+                                  withWorkerContext("p2p-iroh-peer-address", (workerCtx) =>
+                                      trustStore.verifyOrPin(
+                                          workerCtx,
+                                          peerIdentity,
+                                          "iroh",
+                                          endpointId,
+                                          {
+                                              iroh: { endpointId, ticket },
+                                          },
+                                      ),
+                                  ),
                               ...(options.serveRequest !== undefined
                                   ? { serveRequest: options.serveRequest }
                                   : {}),
@@ -280,7 +311,14 @@ export class P2pNetwork {
                     options.createSshTransport === undefined
                         ? SshTransport.create({
                               commitPeer: (peerIdentity, binding) =>
-                                  trustStore.verifyOrPin(peerIdentity, kind, binding),
+                                  withWorkerContext("p2p-ssh-peer-commit", (workerCtx) =>
+                                      trustStore.verifyOrPin(
+                                          workerCtx,
+                                          peerIdentity,
+                                          kind,
+                                          binding,
+                                      ),
+                                  ),
                               identity,
                               onStatusChange: onSshStatusChange,
                               peers,
@@ -288,7 +326,9 @@ export class P2pNetwork {
                                   ? { serveTunnel: options.serveTunnel }
                                   : {}),
                               validatePeer: (peerIdentity, binding) =>
-                                  trustStore.validate(peerIdentity, kind, binding),
+                                  withWorkerContext("p2p-ssh-peer-validation", (workerCtx) =>
+                                      trustStore.validate(workerCtx, peerIdentity, kind, binding),
+                                  ),
                           })
                         : await options.createSshTransport(onSshStatusChange);
                 transports.push(ssh);
@@ -314,7 +354,9 @@ export class P2pNetwork {
             options.config.enableSsh && options.serveRequest !== undefined && peers.length > 0
                 ? new SshBridgeResponder({
                       commitPeer: (peerIdentity, binding) =>
-                          trustStore.verifyOrPin(peerIdentity, "ssh", binding),
+                          withWorkerContext("p2p-ssh-bridge-peer-commit", (workerCtx) =>
+                              trustStore.verifyOrPin(workerCtx, peerIdentity, "ssh", binding),
+                          ),
                       identity,
                       peers,
                       serveRequest: options.serveRequest,
@@ -322,7 +364,9 @@ export class P2pNetwork {
                           ? {}
                           : { serveTunnel: options.serveTunnel }),
                       validatePeer: (peerIdentity, binding) =>
-                          trustStore.validate(peerIdentity, "ssh", binding),
+                          withWorkerContext("p2p-ssh-bridge-peer-validation", (workerCtx) =>
+                              trustStore.validate(workerCtx, peerIdentity, "ssh", binding),
+                          ),
                   })
                 : undefined;
         network = new P2pNetwork(
@@ -353,7 +397,19 @@ export class P2pNetwork {
         return this.#sshBridgeResponder !== undefined;
     }
 
+    peerApiAvailable(peerId: string): boolean {
+        return this.#transports.some((transport) => {
+            if (transport.peerApiAvailable?.(peerId) !== true) return false;
+            const status = transport.status();
+            return (
+                status.state === "ready" &&
+                status.peers.some((peer) => peer.peerId === peerId && peer.status === "connected")
+            );
+        });
+    }
+
     async fetch(
+        ctx: Context,
         peerId: string,
         request: P2pHttpRequest,
         signal: AbortSignal,
@@ -363,12 +419,13 @@ export class P2pNetwork {
             throw new Error("No active P2P transport owns that trusted peer ID.");
         }
         return {
-            response: await transport.fetch(peerId, request, signal),
+            response: await transport.fetch(ctx, peerId, request, signal),
             transport: transport.kind,
         };
     }
 
     async openTunnel(
+        ctx: Context,
         peerId: string,
         request: P2pTunnelRequestHead,
         signal: AbortSignal,
@@ -378,7 +435,7 @@ export class P2pNetwork {
             throw new Error("No active P2P transport can tunnel to that trusted peer ID.");
         }
         return {
-            connection: await transport.openTunnel(peerId, request, signal),
+            connection: await transport.openTunnel(ctx, peerId, request, signal),
             transport: transport.kind,
         };
     }

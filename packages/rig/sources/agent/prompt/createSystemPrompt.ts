@@ -13,6 +13,7 @@ import { loadAgentSkillCatalog } from "../skills/loadAgentSkillCatalog.js";
 import { loadSkillInstructions } from "../skills/loadSkillInstructions.js";
 import type { AnyDefinedTool, Message } from "../types.js";
 import type { Model, PreambleMessage, Provider } from "@slopus/rig-execution";
+import type { Context } from "@steve.kite/stdlib";
 import { createSecretInstructions } from "../../secrets/index.js";
 import type { DurableSkillDefinition } from "../../external-skills/types.js";
 
@@ -31,6 +32,7 @@ export interface CreateSystemPromptOptions {
 }
 
 export async function createSystemPrompt(
+    ctx: Context,
     options: CreateSystemPromptOptions,
 ): Promise<string | undefined> {
     const parts: string[] = [];
@@ -48,7 +50,7 @@ export async function createSystemPrompt(
     // gains or loses an AGENTS.md file mid-session.
     parts.push(AGENTS_MD_SPEC);
 
-    const loadedSkills = await loadAgentSkillCatalog(options.context);
+    const loadedSkills = await loadAgentSkillCatalog(ctx, options.context);
     const skillInstructions = await loadSkillInstructions(
         options.context.fs,
         options.durableSkills ?? [],
@@ -59,7 +61,7 @@ export async function createSystemPrompt(
     }
 
     try {
-        const pluginPrompt = await options.context.plugins?.loadSystemPrompt?.();
+        const pluginPrompt = await options.context.plugins?.loadSystemPrompt?.(ctx);
         if (pluginPrompt !== undefined && pluginPrompt.length > 0) parts.push(pluginPrompt);
     } catch {
         // Plugin prompt contributions are optional and must never fail prompt construction.
@@ -157,9 +159,10 @@ export interface ProviderPrompt {
 }
 
 export async function createProviderPrompt(
+    ctx: Context,
     options: CreateSystemPromptOptions,
 ): Promise<ProviderPrompt> {
-    const systemPrompt = await createSystemPrompt(options);
+    const systemPrompt = await createSystemPrompt(ctx, options);
     return {
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
         ...(options.systemPrompt === undefined

@@ -6,6 +6,8 @@ import { Value } from "@sinclair/typebox/value";
 import type { Connection, Endpoint, RelayMode } from "@number0/iroh/index.js";
 
 import type { ConfigIrohTransport } from "../config/types.js";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/index.js";
 import {
     p2pInvitationPayloadSchema,
     type CreateP2pInvitationResponse,
@@ -183,7 +185,9 @@ export class P2pPairingService implements P2pPairingServiceContract {
                 token,
             };
             this.#operations.set(id, operation);
-            this.#track(this.#runInviter(operation));
+            this.#track(
+                withWorkerContext("p2p-pairing-inviter", (ctx) => this.#runInviter(ctx, operation)),
+            );
             return { id, invitation: encodeInvitation(payload) };
         } catch (error) {
             await closePairingEndpoint(endpoint);
@@ -219,7 +223,11 @@ export class P2pPairingService implements P2pPairingServiceContract {
             token: payload.token,
         };
         this.#operations.set(id, operation);
-        this.#track(this.#runJoiner(operation, payload, bindings));
+        this.#track(
+            withWorkerContext("p2p-pairing-joiner", (ctx) =>
+                this.#runJoiner(ctx, operation, payload, bindings),
+            ),
+        );
         return { id };
     }
 
@@ -241,7 +249,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
         return operation.state;
     }
 
-    async #runInviter(operation: PairingOperation): Promise<void> {
+    async #runInviter(ctx: Context, operation: PairingOperation): Promise<void> {
         let connection: Connection | undefined;
         try {
             const accepted = await this.#acceptInviter(operation);
@@ -267,6 +275,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
                 "The joining Rig did not start emoji verification in time.",
             );
             await this.#verifyAndCommit(
+                ctx,
                 operation,
                 createIrohFrameDuplex(profileStream.recv, profileStream.send),
                 remoteIdentity,
@@ -335,6 +344,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
     }
 
     async #runJoiner(
+        ctx: Context,
         operation: PairingOperation,
         invitation: P2pInvitationPayload,
         bindings: Awaited<ReturnType<typeof loadIrohBindings>>,
@@ -389,6 +399,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
                 "Rig could not open the P2P verification stream.",
             );
             await this.#verifyAndCommit(
+                ctx,
                 operation,
                 createIrohFrameDuplex(profileStream.recv, profileStream.send),
                 remoteIdentity,
@@ -404,6 +415,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
     }
 
     async #verifyAndCommit(
+        ctx: Context,
         operation: PairingOperation,
         duplex: ReturnType<typeof createIrohFrameDuplex>,
         remoteIdentity: P2pPeerIdentity,
@@ -460,6 +472,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
             throw new Error("The peer's stable Iroh address identifies a different endpoint.");
         }
         await this.#options.peerTrustStore.validate(
+            ctx,
             remoteIdentity,
             "iroh",
             remoteProfile.irohEndpointId,
@@ -515,6 +528,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
             return;
         }
         const prepared = await this.#options.peerTrustStore.preparePairing(
+            ctx,
             pairingId,
             remoteIdentity,
             "iroh",
@@ -531,7 +545,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
         );
         let confirmed = false;
         try {
-            await prepared.markLocallyReady();
+            await prepared.markLocallyReady(ctx);
             await this.#options.beforeReadyWrite?.(operation.state.role);
             await withPairingDeadline(
                 operation,
@@ -546,16 +560,16 @@ export class P2pPairingService implements P2pPairingServiceContract {
             if (remoteReady.pairingId !== pairingId) {
                 throw new Error("The peer confirmed a different P2P pairing transaction.");
             }
-            await prepared.markConfirmed();
+            await prepared.markConfirmed(ctx);
             confirmed = true;
         } finally {
-            if (!confirmed) await prepared.abort();
+            if (!confirmed) await prepared.abort(ctx);
         }
-        const trustedPeer = await prepared.activate();
+        const trustedPeer = await prepared.activate(ctx);
         if (prepared.pairing.assignPrimary) {
             await this.#options.setPrimaryIfUnset(remoteIdentity.instanceId);
         }
-        await prepared.complete();
+        await prepared.complete(ctx);
         try {
             this.#options.onPeerTrusted?.(trustedPeer);
         } catch {

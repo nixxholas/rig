@@ -1,11 +1,12 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { sql } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
-
 /** The durable revision represented by a folder catalog snapshot. */
-export async function queryFolderCatalogRevision(tx: DatabaseScope): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+export async function queryFolderCatalogRevision(ctx: Context): Promise<number> {
+    return await inDatabase(ctx, "rig.sql.folder.queryFolderCatalogRevision", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx.get<{ revision: number }>(
             sql.raw("SELECT revision FROM folder_catalog WHERE id = 1"),
         );

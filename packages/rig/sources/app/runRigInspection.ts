@@ -3,6 +3,7 @@ import { RIG_PROTOCOL_VERSION } from "../protocol/index.js";
 import { queryRigInstallationData } from "../persistence/database/queryRigInstallationData.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { getEnvironmentLocalServerPaths } from "../server/index.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface RunRigInspectionOptions {
     databasePath?: string;
@@ -12,12 +13,14 @@ export interface RunRigInspectionOptions {
 }
 
 export async function runRigInspection(
+    ctx: Context,
     options: RunRigInspectionOptions = {},
 ): Promise<RigCliInstallationInspection> {
     const inspection: RigCliInstallationInspection = {
         cliProtocolVersion: RIG_PROTOCOL_VERSION,
         cliVersion: options.rigVersion ?? readPackageVersion(),
         data: await queryRigInstallationData(
+            ctx,
             options.databasePath ?? getEnvironmentLocalServerPaths().databasePath,
         ),
         formatVersion: 1,

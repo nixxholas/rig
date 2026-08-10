@@ -1,9 +1,10 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import { folderItems, folders } from "../database/schema.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { queryFolderChildren } from "./queryFolderChildren.js";
 
 export interface FolderCreateInput {
@@ -27,10 +28,11 @@ export type FolderCreateResult =
 
 /** Adds one folder, last among the siblings it is created in. */
 export async function folderCreate(
-    tx: DatabaseScope,
+    ctx: Context,
     input: FolderCreateInput,
 ): Promise<FolderCreateResult> {
-    return await inTx(tx, async (tx) => {
+    return await inTx(ctx, "rig.sql.folder.folderCreate", async (ctx) => {
+        const tx = ctx.tx;
         if (input.parentId !== undefined) {
             const parent = await tx
                 .select({ archivedAtMs: folders.archivedAtMs })
@@ -49,7 +51,7 @@ export async function folderCreate(
         ) {
             return { outcome: "id_conflict" };
         }
-        const last = (await queryFolderChildren(tx, input.parentId ?? null)).at(-1);
+        const last = (await queryFolderChildren(ctx, input.parentId ?? null)).at(-1);
         await tx
             .insert(folders)
             .values({

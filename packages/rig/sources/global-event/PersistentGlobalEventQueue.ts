@@ -7,7 +7,9 @@ import { globalEventReset } from "../persistence/global-event/globalEventReset.j
 import { globalEventTrim } from "../persistence/global-event/globalEventTrim.js";
 import { queryGlobalEvents } from "../persistence/global-event/queryGlobalEvents.js";
 import { queryGlobalEventStartup } from "../persistence/global-event/queryGlobalEventStartup.js";
-import type { TX } from "../persistence/Transaction.js";
+import { getDatabaseScope, withDatabase } from "../persistence/databaseContext.js";
+import { isSessionDatabaseTransaction } from "../persistence/database/SessionDatabase.js";
+import type { Context } from "@steve.kite/stdlib";
 
 import type {
     EventId,
@@ -50,19 +52,18 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     }
 
     static async open(
+        ctx: Context,
         database: SessionDatabase,
         options: { resetStream?: boolean } = {},
     ): Promise<PersistentGlobalEventQueue> {
-        if (options.resetStream === true) await globalEventReset(database.database);
-        const startup = await queryGlobalEventStartup(database.database);
+        const databaseCtx = withDatabase(ctx, database);
+        if (options.resetStream === true) await globalEventReset(databaseCtx);
+        const startup = await queryGlobalEventStartup(databaseCtx);
         return new PersistentGlobalEventQueue(database, startup);
     }
 
-    async append(
-        event: GlobalEvent,
-        tx: TX = this.#database.database,
-    ): Promise<GlobalEventQueueEntry | undefined> {
-        return this.#append(event, tx, false);
+    async append(ctx: Context, event: GlobalEvent): Promise<GlobalEventQueueEntry | undefined> {
+        return this.#append(ctx, event, false);
     }
 
     /**
@@ -71,17 +72,18 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
      * Replaying the exact event is success without publishing it twice.
      */
     async appendReplaySafe(
+        ctx: Context,
         event: GlobalEvent,
-        tx: TX = this.#database.database,
     ): Promise<GlobalEventQueueEntry | undefined> {
-        return this.#append(event, tx, true);
+        return this.#append(ctx, event, true);
     }
 
     async #append(
+        ctx: Context,
         event: GlobalEvent,
-        tx: TX,
         replaySafe: boolean,
     ): Promise<GlobalEventQueueEntry | undefined> {
+        ctx = this.#bind(ctx);
         if (isLiveGlobalEvent(event)) return undefined;
         if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
         let aggregate: {
@@ -103,7 +105,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         }
         const cursor = this.#createCursor();
         const append = replaySafe ? globalEventAppendReplaySafe : globalEventAppend;
-        const entry = await append(tx, {
+        const entry = await append(ctx, {
             aggregateId: aggregate.id,
             aggregateKind: aggregate.kind,
             cursor,
@@ -151,6 +153,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     }
 
     async list(
+        ctx: Context,
         options: ListGlobalEventQueueOptions = {},
     ): Promise<readonly GlobalEventQueueEntry[] | undefined> {
         const after = options.after?.toLowerCase();
@@ -162,7 +165,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         ) {
             return undefined;
         }
-        return queryGlobalEvents(this.#database.database, after, options.limit ?? -1);
+        return queryGlobalEvents(this.#bind(ctx), after, options.limit ?? -1);
     }
 
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void {
@@ -174,15 +177,21 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         };
     }
 
-    async trim(through: string): Promise<TrimGlobalEventsResponse | undefined> {
+    async trim(ctx: Context, through: string): Promise<TrimGlobalEventsResponse | undefined> {
         const normalized = through.toLowerCase();
         if (!eventIdsShareScope(normalized, this.#head) || normalized > this.#head) {
             return undefined;
         }
-        const trimmed = await globalEventTrim(this.#database.database, normalized);
+        const trimmed = await globalEventTrim(this.#bind(ctx), normalized);
         if (this.#trimmedThrough === undefined || normalized > this.#trimmedThrough) {
             this.#trimmedThrough = normalized as EventId;
         }
         return { trimmed, through: normalized };
+    }
+
+    #bind(ctx: Context): Context {
+        return isSessionDatabaseTransaction(getDatabaseScope(ctx))
+            ? ctx
+            : withDatabase(ctx, this.#database);
     }
 }

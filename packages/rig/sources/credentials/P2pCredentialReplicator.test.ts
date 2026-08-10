@@ -1,3 +1,4 @@
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { createP2pInstanceIdentity } from "../p2p/P2pIdentity.js";
@@ -5,6 +6,8 @@ import type { P2pNetwork } from "../p2p/P2pNetwork.js";
 import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { P2pCredentialStore, P2pCredentialVersionConflictError } from "./P2pCredentialStore.js";
 import { P2pCredentialReplicator } from "./P2pCredentialReplicator.js";
+
+const ctx = createTestRootContext().named("p2p-credential-replicator-test");
 
 describe("P2pCredentialReplicator", () => {
     it("reports request-time synchronization failures without rejecting the request preflight", async () => {
@@ -37,9 +40,9 @@ describe("P2pCredentialReplicator", () => {
             store,
         });
 
-        await expect(replicator.ensureForRequest(remote.instanceId)).resolves.toBeUndefined();
-        expect(onError).toHaveBeenCalledWith(remote.instanceId, failure);
-        await replicator.close();
+        await expect(replicator.ensureForRequest(ctx, remote.instanceId)).resolves.toBeUndefined();
+        expect(onError).toHaveBeenCalledWith(expect.anything(), remote.instanceId, failure);
+        await replicator.close(ctx);
     });
 
     it("proactively renews changed access leases without overlapping timers and stops on close", async () => {
@@ -71,7 +74,7 @@ describe("P2pCredentialReplicator", () => {
                 store,
             });
 
-            await replicator.ensure(remote.instanceId);
+            await replicator.ensure(ctx, remote.instanceId);
             currentSnapshot = snapshot(local, "lease-two", 2);
             await vi.advanceTimersByTimeAsync(4 * 60 * 1_000);
             expect(fetch).toHaveBeenCalledTimes(2);
@@ -79,7 +82,7 @@ describe("P2pCredentialReplicator", () => {
             await vi.advanceTimersByTimeAsync(4 * 60 * 1_000);
             expect(fetch).toHaveBeenCalledTimes(2);
 
-            await replicator.close();
+            await replicator.close(ctx);
             expect(vi.getTimerCount()).toBe(0);
             currentSnapshot = snapshot(local, "lease-three", 3);
             await vi.advanceTimersByTimeAsync(8 * 60 * 1_000);
@@ -99,7 +102,7 @@ describe("P2pCredentialReplicator", () => {
             new Uint8Array(32).fill(2),
         );
         const requests: unknown[] = [];
-        const fetch = vi.fn(async (_peerId: string, request: unknown) => {
+        const fetch = vi.fn(async (_ctx: unknown, _peerId: string, request: unknown) => {
             requests.push(request);
             return {
                 response: {
@@ -138,18 +141,18 @@ describe("P2pCredentialReplicator", () => {
             store,
         });
 
-        await replicator.ensure(remote.instanceId);
-        await replicator.ensure(remote.instanceId);
+        await replicator.ensure(ctx, remote.instanceId);
+        await replicator.ensure(ctx, remote.instanceId);
         expect(fetch).toHaveBeenCalledTimes(1);
         expect(requests[0]).toMatchObject({
             method: "PUT",
             path: "/inference-credentials",
         });
 
-        replicator.peerChanged(remote.instanceId);
-        await replicator.ensure(remote.instanceId);
+        replicator.peerChanged(ctx, remote.instanceId);
+        await replicator.ensure(ctx, remote.instanceId);
         expect(fetch).toHaveBeenCalledTimes(2);
-        await replicator.close();
+        await replicator.close(ctx);
     });
 
     it("fast-forwards after an owner database reset without accepting the stale version", async () => {
@@ -161,17 +164,24 @@ describe("P2pCredentialReplicator", () => {
             "aremoteinstance0000000001",
             new Uint8Array(32).fill(2),
         );
-        const ownerDatabase = await PersistentSessionStore.open({ databasePath: ":memory:" });
-        const receiverDatabase = await PersistentSessionStore.open({ databasePath: ":memory:" });
-        const ownerStore = new P2pCredentialStore({ database: ownerDatabase, identity: owner });
+        const ownerDatabase = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
+        const receiverDatabase = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
+        const ownerStore = new P2pCredentialStore({
+            database: ownerDatabase,
+            identity: owner,
+        });
         const receiverStore = new P2pCredentialStore({
             database: receiverDatabase,
             identity: receiver,
         });
         const oldSnapshot = snapshot(owner, "revoked-key", 7);
-        await receiverStore.replace(owner.instanceId, oldSnapshot);
+        await receiverStore.replace(ctx, owner.instanceId, oldSnapshot);
         const sentVersions: number[] = [];
-        const fetch = vi.fn(async (_peerId: string, request: unknown) => {
+        const fetch = vi.fn(async (_ctx: unknown, _peerId: string, request: unknown) => {
             const envelope = JSON.parse(
                 Buffer.from((request as { body: Uint8Array }).body).toString("utf8"),
             );
@@ -186,6 +196,7 @@ describe("P2pCredentialReplicator", () => {
             sentVersions.push(decoded.version);
             try {
                 const result = await receiverStore.replaceEncrypted(
+                    ctx,
                     owner.instanceId,
                     owner.publicKey,
                     envelope,
@@ -205,25 +216,25 @@ describe("P2pCredentialReplicator", () => {
         const replicator = new P2pCredentialReplicator({
             listPeers: () => [{ instanceId: receiver.instanceId, publicKey: receiver.publicKey }],
             network: { fetch } as unknown as P2pNetwork,
-            snapshot: () => ownerStore.prepareOwnSnapshot(resetSnapshot),
+            snapshot: () => ownerStore.prepareOwnSnapshot(ctx, resetSnapshot),
             store: ownerStore,
         });
 
         try {
-            await replicator.ensure(receiver.instanceId);
+            await replicator.ensure(ctx, receiver.instanceId);
 
             expect(sentVersions).toEqual([1, 8]);
-            expect((await ownerStore.prepareOwnSnapshot(resetSnapshot)).version).toBe(8);
-            expect(await receiverStore.list(owner.instanceId)).toMatchObject([
+            expect((await ownerStore.prepareOwnSnapshot(ctx, resetSnapshot)).version).toBe(8);
+            expect(await receiverStore.list(ctx, owner.instanceId)).toMatchObject([
                 { material: { apiKey: "current-key" } },
             ]);
-            await expect(receiverStore.replace(owner.instanceId, oldSnapshot)).rejects.toThrow(
+            await expect(receiverStore.replace(ctx, owner.instanceId, oldSnapshot)).rejects.toThrow(
                 "older than saved state",
             );
         } finally {
-            await replicator.close();
-            await ownerDatabase.close();
-            await receiverDatabase.close();
+            await replicator.close(ctx);
+            await ownerDatabase.close(ctx);
+            await receiverDatabase.close(ctx);
         }
     });
 });

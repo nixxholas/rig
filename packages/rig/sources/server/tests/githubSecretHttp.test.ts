@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -12,9 +14,13 @@ describe("GitHub secret HTTP status", () => {
     it("reports model availability without serializing the token", async () => {
         const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
-        const store = await InMemorySessionStore.open();
-        await store.registerSpecialSecret({ kind: "github", token: "never-serialize-this" });
-        const server = await createProtocolHttpServer({ store, token: "daemon-token" });
+        const ctx = createTestRootContext();
+        const store = await InMemorySessionStore.open(ctx);
+        await store.registerSpecialSecret(ctx, { kind: "github", token: "never-serialize-this" });
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            store,
+            token: "daemon-token",
+        });
         try {
             await new Promise<void>((resolve) => server.listen(socketPath, resolve));
             const client = new ProtocolHttpClient({

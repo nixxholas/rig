@@ -17,8 +17,9 @@ import {
 } from "@slopus/murmur";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+import { withWorkerContext } from "../observability/daemonContext.js";
 
-import type { TX } from "../persistence/Transaction.js";
 import {
     querySharingProfileBinding,
     querySharingProfileId,
@@ -59,16 +60,23 @@ const sharingMurmurProfileSchema = Type.Object(
 );
 
 interface SharingDatabase {
-    query<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
-    transaction<Result>(operation: (tx: TX) => Promise<Result>): Promise<Result>;
+    query<Result>(ctx: Context, operation: (ctx: Context) => Promise<Result>): Promise<Result>;
+    transaction<Result>(
+        ctx: Context,
+        operation: (ctx: Context) => Promise<Result>,
+    ): Promise<Result>;
 }
 
 interface SharingFolderService {
-    create(rootFolderId: string, contacts: readonly string[]): Promise<FolderShareStatus>;
-    drain(): Promise<void>;
-    foldersChanged(): void;
-    recover(): Promise<void>;
-    statuses(): Promise<FolderShareStatus[]>;
+    create(
+        ctx: Context,
+        rootFolderId: string,
+        contacts: readonly string[],
+    ): Promise<FolderShareStatus>;
+    drain(ctx: Context): Promise<void>;
+    foldersChanged(ctx: Context): void;
+    recover(ctx: Context): Promise<void>;
+    statuses(ctx: Context): Promise<FolderShareStatus[]>;
 }
 
 export interface SharingMurmurClient {
@@ -105,7 +113,7 @@ export interface SharingServiceOptions {
     now?: () => number;
     onError?: (error: unknown) => void;
     profiles: RigProfileStore;
-    publish: (event: SharingChangedEvent) => void;
+    publish: (ctx: Context, event: SharingChangedEvent) => void;
     store?: SqliteMurmurStore;
 }
 
@@ -119,17 +127,22 @@ export interface OpenSharingServiceOptions extends Omit<
 }
 
 export interface SharingServiceContract {
-    acceptContact(requestId: string): Promise<void>;
-    createInvitation(signal?: AbortSignal): Promise<CreateSharingInvitationResponse>;
-    createFolderShare(folderId: string, contacts: readonly string[]): Promise<FolderShareStatus>;
-    foldersChanged(): void;
-    rejectContact(requestId: string): Promise<void>;
-    removeContact(identity: string): Promise<void>;
+    acceptContact(ctx: Context, requestId: string): Promise<void>;
+    createInvitation(ctx: Context, signal?: AbortSignal): Promise<CreateSharingInvitationResponse>;
+    createFolderShare(
+        ctx: Context,
+        folderId: string,
+        contacts: readonly string[],
+    ): Promise<FolderShareStatus>;
+    foldersChanged(ctx: Context): void;
+    rejectContact(ctx: Context, requestId: string): Promise<void>;
+    removeContact(ctx: Context, identity: string): Promise<void>;
     requestContact(
+        ctx: Context,
         invitation: string,
         signal?: AbortSignal,
     ): Promise<SharingOutgoingContactRequest>;
-    snapshot(): Promise<SharingSnapshot>;
+    snapshot(ctx: Context): Promise<SharingSnapshot>;
 }
 
 export class SharingService implements SharingServiceContract {
@@ -143,7 +156,7 @@ export class SharingService implements SharingServiceContract {
     readonly #now: () => number;
     readonly #onError: (error: unknown) => void;
     readonly #profiles: RigProfileStore;
-    readonly #publish: (event: SharingChangedEvent) => void;
+    readonly #publish: (ctx: Context, event: SharingChangedEvent) => void;
     readonly #store: SqliteMurmurStore | undefined;
     #closePromise: Promise<void> | undefined;
     #closing = false;
@@ -167,7 +180,7 @@ export class SharingService implements SharingServiceContract {
         this.#version = this.#nextEventId();
     }
 
-    static async open(options: OpenSharingServiceOptions): Promise<SharingService> {
+    static async open(ctx: Context, options: OpenSharingServiceOptions): Promise<SharingService> {
         const store = new SqliteMurmurStore(join(options.directory, "sharing-murmur.sqlite"));
         let client: MurmurClient | undefined;
         let service: SharingService | undefined;
@@ -178,8 +191,8 @@ export class SharingService implements SharingServiceContract {
                       database: options.database,
                       folders: options.folders,
                       ...(options.now === undefined ? {} : { now: options.now }),
-                      onChanged: () => {
-                          if (service !== undefined) service.#changed();
+                      onChanged: (ctx) => {
+                          if (service !== undefined) service.#changed(ctx);
                       },
                       ...(options.onError === undefined ? {} : { onError: options.onError }),
                   });
@@ -205,7 +218,7 @@ export class SharingService implements SharingServiceContract {
                 ...(folderSharing === undefined ? {} : { folderSharing }),
                 store,
             });
-            await service.#initializeBinding();
+            await service.#initializeBinding(ctx);
             return service;
         } catch (error) {
             try {
@@ -217,19 +230,19 @@ export class SharingService implements SharingServiceContract {
         }
     }
 
-    start(): void {
+    start(_ctx: Context): void {
         if (this.#closing) throw new Error("Sharing is closing.");
         if (this.#started) return;
         this.#started = true;
-        this.#sync = this.#synchronize();
+        this.#sync = withWorkerContext("sharing-synchronize", (ctx) => this.#synchronize(ctx));
     }
 
-    async #synchronize(): Promise<void> {
+    async #synchronize(ctx: Context): Promise<void> {
         try {
-            await this.#folderSharing?.recover();
+            await this.#folderSharing?.recover(ctx);
         } catch (error: unknown) {
             if (this.#abort.signal.aborted) return;
-            this.#setConnection("disconnected");
+            this.#setConnection(ctx, "disconnected");
             this.#onError(error);
         }
         let retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
@@ -240,14 +253,14 @@ export class SharingService implements SharingServiceContract {
                     abort: this.#abort.signal,
                     onConnected: () => {
                         retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
-                        this.#setConnection("connected");
-                        this.#folderSharing?.foldersChanged();
+                        this.#setConnection(ctx, "connected");
+                        this.#folderSharing?.foldersChanged(ctx);
                     },
                     onContactAdded: () => this.#scheduleChanged(),
                     onContactRemoved: () => this.#scheduleChanged(),
                     onContactRequested: () => this.#scheduleChanged(),
                     onDisconnected: () => {
-                        this.#setConnection("disconnected");
+                        this.#setConnection(ctx, "disconnected");
                     },
                     onUpdates: () => undefined,
                 });
@@ -255,20 +268,20 @@ export class SharingService implements SharingServiceContract {
                 throw new Error("Murmur synchronization stopped unexpectedly.");
             } catch (error: unknown) {
                 if (this.#abort.signal.aborted) return;
-                this.#setConnection("disconnected");
+                this.#setConnection(ctx, "disconnected");
                 this.#onError(error);
             }
             await this.#waitForSyncRetry(retryMilliseconds);
             retryMilliseconds = Math.min(SYNC_RETRY_MAXIMUM_MILLISECONDS, retryMilliseconds * 2);
-            if (!this.#abort.signal.aborted) this.#setConnection("connecting");
+            if (!this.#abort.signal.aborted) this.#setConnection(ctx, "connecting");
         }
     }
 
-    async snapshot(): Promise<SharingSnapshot> {
-        return this.#run(async () => {
+    async snapshot(ctx: Context): Promise<SharingSnapshot> {
+        return this.#run(ctx, async (ctx) => {
             const [contacts, folderShares, incomingRequests, outgoingRequests] = await Promise.all([
                 this.#client.contacts(),
-                this.#folderSharing?.statuses() ?? Promise.resolve([]),
+                this.#folderSharing?.statuses(ctx) ?? Promise.resolve([]),
                 this.#client.contactRequests(),
                 this.#client.outgoingContactRequests(),
             ]);
@@ -280,28 +293,32 @@ export class SharingService implements SharingServiceContract {
                 incomingRequests: incomingRequests.map(toSharingContactRequest),
                 outgoingRequests: outgoingRequests.map(toSharingOutgoingContactRequest),
                 profileId:
-                    (await this.#database.query(async (tx) => querySharingProfileId(tx))) ?? null,
+                    (await this.#database.query(ctx, async (ctx) => querySharingProfileId(ctx))) ??
+                    null,
                 version: this.#version,
             };
         });
     }
 
-    async bindProfile(profileId: string): Promise<void> {
+    async bindProfile(ctx: Context, profileId: string): Promise<void> {
         if (this.#closing) throw new Error("Sharing is closing.");
-        const profile = await this.#profiles.get(profileId);
-        if (profile === undefined || !(await this.#profiles.isLocal(profileId))) {
+        const profile = await this.#profiles.get(ctx, profileId);
+        if (profile === undefined || !(await this.#profiles.isLocal(ctx, profileId))) {
             throw new Error("Sharing requires a profile owned by this Rig.");
         }
-        const result = await this.#database.transaction(async (tx) =>
-            sharingProfileBind(tx, profileId, this.#identity, this.#now()),
+        const result = await this.#database.transaction(ctx, async (ctx) =>
+            sharingProfileBind(ctx, profileId, this.#identity, this.#now()),
         );
-        if (result === "created") this.#changed();
+        if (result === "created") this.#changed(ctx);
     }
 
-    async createInvitation(signal?: AbortSignal): Promise<CreateSharingInvitationResponse> {
-        await this.#profile();
+    async createInvitation(
+        ctx: Context,
+        signal?: AbortSignal,
+    ): Promise<CreateSharingInvitationResponse> {
+        await this.#profile(ctx);
         const createdAt = this.#now();
-        return this.#run(async () => {
+        return this.#run(ctx, async () => {
             const invitation = await this.#client.createInvitation(this.#operationSignal(signal));
             return {
                 expiresAt: createdAt + DISCOVERY_INVITATION_TTL_MILLISECONDS,
@@ -310,24 +327,29 @@ export class SharingService implements SharingServiceContract {
         });
     }
 
-    createFolderShare(folderId: string, contacts: readonly string[]): Promise<FolderShareStatus> {
+    createFolderShare(
+        ctx: Context,
+        folderId: string,
+        contacts: readonly string[],
+    ): Promise<FolderShareStatus> {
         const folderSharing = this.#folderSharing;
         if (folderSharing === undefined) {
             return Promise.reject(new Error("Folder Sharing is unavailable."));
         }
-        return this.#run(() => folderSharing.create(folderId, contacts));
+        return this.#run(ctx, (ctx) => folderSharing.create(ctx, folderId, contacts));
     }
 
-    foldersChanged(): void {
-        void this.#folderSharing?.foldersChanged();
+    foldersChanged(ctx: Context): void {
+        void this.#folderSharing?.foldersChanged(ctx);
     }
 
     async requestContact(
+        ctx: Context,
         invitation: string,
         signal?: AbortSignal,
     ): Promise<SharingOutgoingContactRequest> {
-        const profile = encodeProfile(await this.#profile());
-        return this.#run(async () => {
+        const profile = encodeProfile(await this.#profile(ctx));
+        return this.#run(ctx, async (ctx) => {
             const decodedInvitation = decodeBytes(invitation);
             const operationSignal = this.#operationSignal(signal);
             const bundle = await this.#client.resolveInvitation(decodedInvitation, operationSignal);
@@ -337,52 +359,52 @@ export class SharingService implements SharingServiceContract {
                 profile,
                 operationSignal,
             );
-            this.#changed();
+            this.#changed(ctx);
             const sessionId = encodeBytes(session.id);
             return { id: sessionId, identity, sessionId };
         });
     }
 
-    async acceptContact(requestId: string): Promise<void> {
-        const profile = encodeProfile(await this.#profile());
-        await this.#run(async () => {
-            const request = await this.#request(requestId);
+    async acceptContact(ctx: Context, requestId: string): Promise<void> {
+        const profile = encodeProfile(await this.#profile(ctx));
+        await this.#run(ctx, async (ctx) => {
+            const request = await this.#request(ctx, requestId);
             if (decodeProfile(request.profile) === null) {
                 throw new Error("The contact request does not contain a valid Rig profile.");
             }
             await this.#client.acceptContact(request.sessionId, profile);
-            this.#changed();
+            this.#changed(ctx);
         });
     }
 
-    async rejectContact(requestId: string): Promise<void> {
-        await this.#run(async () => {
-            const request = await this.#request(requestId);
+    async rejectContact(ctx: Context, requestId: string): Promise<void> {
+        await this.#run(ctx, async (ctx) => {
+            const request = await this.#request(ctx, requestId);
             await this.#client.rejectContact(request.sessionId);
-            this.#changed();
+            this.#changed(ctx);
         });
     }
 
-    async removeContact(identity: string): Promise<void> {
-        await this.#run(async () => {
+    async removeContact(ctx: Context, identity: string): Promise<void> {
+        await this.#run(ctx, async (ctx) => {
             await this.#client.removeContact(decodeBytes(identity));
-            this.#changed();
+            this.#changed(ctx);
         });
     }
 
-    close(): Promise<void> {
-        this.#closePromise ??= this.#finishClose();
+    close(ctx: Context): Promise<void> {
+        this.#closePromise ??= this.#finishClose(ctx);
         return this.#closePromise;
     }
 
-    async #finishClose(): Promise<void> {
+    async #finishClose(ctx: Context): Promise<void> {
         this.#closing = true;
         if (this.#publishTimer !== undefined) {
             clearTimeout(this.#publishTimer);
             this.#publishTimer = undefined;
         }
         try {
-            await this.#folderSharing?.drain();
+            await this.#folderSharing?.drain(ctx);
         } catch (error: unknown) {
             this.#onError(error);
         }
@@ -398,7 +420,7 @@ export class SharingService implements SharingServiceContract {
         }
     }
 
-    async #request(requestId: string): Promise<MurmurContactRequested> {
+    async #request(_ctx: Context, requestId: string): Promise<MurmurContactRequested> {
         const request = (await this.#client.contactRequests()).find(
             (candidate) => candidate.id === requestId,
         );
@@ -406,27 +428,32 @@ export class SharingService implements SharingServiceContract {
         return request;
     }
 
-    async #profile(): Promise<RigProfile> {
-        const profileId = await this.#database.query(async (tx) => querySharingProfileId(tx));
-        const profile = profileId === undefined ? undefined : await this.#profiles.get(profileId);
-        if (profile === undefined || !(await this.#profiles.isLocal(profile.id))) {
+    async #profile(ctx: Context): Promise<RigProfile> {
+        const profileId = await this.#database.query(ctx, async (ctx) =>
+            querySharingProfileId(ctx),
+        );
+        const profile =
+            profileId === undefined ? undefined : await this.#profiles.get(ctx, profileId);
+        if (profile === undefined || !(await this.#profiles.isLocal(ctx, profile.id))) {
             throw new Error("Choose a local Rig profile before using Sharing.");
         }
         return profile;
     }
 
-    async #initializeBinding(): Promise<void> {
-        const binding = await this.#database.query(async (tx) => querySharingProfileBinding(tx));
+    async #initializeBinding(ctx: Context): Promise<void> {
+        const binding = await this.#database.query(ctx, async (ctx) =>
+            querySharingProfileBinding(ctx),
+        );
         if (binding !== undefined) {
-            await this.#database.transaction(async (tx) =>
-                sharingProfileBind(tx, binding.profileId, this.#identity, this.#now()),
+            await this.#database.transaction(ctx, async (ctx) =>
+                sharingProfileBind(ctx, binding.profileId, this.#identity, this.#now()),
             );
         }
     }
 
-    #run<Result>(operation: () => Promise<Result>): Promise<Result> {
+    #run<Result>(ctx: Context, operation: (ctx: Context) => Promise<Result>): Promise<Result> {
         if (this.#closing) return Promise.reject(new Error("Sharing is closing."));
-        const result = Promise.resolve().then(operation);
+        const result = Promise.resolve().then(() => operation(ctx));
         this.#activeOperations.add(result);
         void result.then(
             () => this.#activeOperations.delete(result),
@@ -458,25 +485,25 @@ export class SharingService implements SharingServiceContract {
         });
     }
 
-    #setConnection(connection: SharingConnection): void {
+    #setConnection(ctx: Context, connection: SharingConnection): void {
         if (this.#connection === connection) return;
         this.#connection = connection;
-        this.#changed();
+        this.#changed(ctx);
     }
 
     #scheduleChanged(): void {
         if (this.#publishTimer !== undefined) return;
         this.#publishTimer = setTimeout(() => {
             this.#publishTimer = undefined;
-            this.#changed();
+            void withWorkerContext("sharing-publish-change", (ctx) => this.#changed(ctx));
         }, 0);
         this.#publishTimer.unref?.();
     }
 
-    #changed(): void {
+    #changed(ctx: Context): void {
         const id = this.#nextEventId();
         this.#version = id;
-        this.#publish({
+        this.#publish(ctx, {
             createdAt: this.#now(),
             data: { version: id },
             id,

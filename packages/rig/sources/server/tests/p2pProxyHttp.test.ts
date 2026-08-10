@@ -4,20 +4,129 @@ import { rm } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
+import type { Context } from "@steve.kite/stdlib";
+
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
 import { P2pCredentialReplicator, P2pCredentialStore } from "../../credentials/index.js";
 import { createP2pInstanceIdentity } from "../../p2p/P2pIdentity.js";
 import type { P2pHttpRequest, P2pNetwork, P2pTunnelRequestHead } from "../../p2p/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
-import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
+import {
+    beginProtocolHttpServerShutdown,
+    createProtocolHttpServer,
+} from "../createProtocolHttpServer.js";
 import type { PrepareP2pHttpRequest } from "../proxyP2pHttpRequest.js";
 
 const peerId = "aremoteinstance0000000001";
 
 describe("P2P-prefixed daemon HTTP", () => {
+    it("aborts active proxy requests and rejects new ones when shutdown begins", async () => {
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+            markStarted = resolve;
+        });
+        const fetch = vi.fn(
+            async (_ctx: Context, _peerId: string, _request: P2pHttpRequest, signal: AbortSignal) =>
+                await new Promise<never>((_resolve, reject) => {
+                    markStarted();
+                    signal.addEventListener("abort", () => reject(new Error("proxy aborted")), {
+                        once: true,
+                    });
+                }),
+        );
+        const server = await startServer({ fetch } as unknown as P2pNetwork);
+        try {
+            const active = sendRequest(server.socketPath, `/p2p/peers/${peerId}/api/events/live`, {
+                authorization: "Bearer test-token",
+            });
+            await started;
+
+            server.beginShutdown();
+
+            await expect(active).resolves.toMatchObject({ status: 503 });
+            await expect(
+                sendRequest(server.socketPath, `/p2p/peers/${peerId}/api/health`, {
+                    authorization: "Bearer test-token",
+                }),
+            ).resolves.toMatchObject({ status: 503 });
+            expect(fetch).toHaveBeenCalledOnce();
+        } finally {
+            await server.close();
+        }
+    });
+
+    it("does not forward peer API requests when the peer does not advertise its API", async () => {
+        const fetch = vi.fn();
+        const directory = await createTestSocketDirectory();
+        const socketPath = `${directory}/server.sock`;
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            resolveP2pNetwork: () =>
+                ({ fetch, peerApiAvailable: () => false }) as unknown as P2pNetwork,
+            token: "test-token",
+        });
+        await listen(server, socketPath);
+        try {
+            await expect(
+                sendRequest(socketPath, `/p2p/peers/${peerId}/api/catalog`, {
+                    authorization: "Bearer test-token",
+                }),
+            ).resolves.toMatchObject({ status: 403 });
+            expect(fetch).not.toHaveBeenCalled();
+        } finally {
+            await close(server);
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
+    it("activates P2P forwarding after the local protocol server is already ready", async () => {
+        let network: P2pNetwork | undefined;
+        const directory = await createTestSocketDirectory();
+        const socketPath = `${directory}/server.sock`;
+        const server = await createProtocolHttpServer(createTestRootContext(), {
+            resolveP2pNetwork: () => network,
+            token: "test-token",
+        });
+        await listen(server, socketPath);
+        try {
+            await expect(
+                sendRequest(socketPath, `/p2p/peers/${peerId}/api/health`, {
+                    authorization: "Bearer test-token",
+                }),
+            ).resolves.toMatchObject({ status: 503 });
+
+            network = {
+                fetch: async () => ({
+                    response: {
+                        body: (async function* () {
+                            yield Buffer.from("ready");
+                        })(),
+                        headers: { "content-type": "text/plain" },
+                        status: 200,
+                    },
+                    transport: "iroh" as const,
+                }),
+            } as unknown as P2pNetwork;
+
+            await expect(
+                sendRequest(socketPath, `/p2p/peers/${peerId}/api/health`, {
+                    authorization: "Bearer test-token",
+                }),
+            ).resolves.toMatchObject({ body: "ready", status: 200 });
+        } finally {
+            await close(server);
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
     it("forwards a request and streams the peer response", async () => {
         const fetch = vi.fn(
-            async (_peerId: string, _request: P2pHttpRequest, _signal: AbortSignal) => ({
+            async (
+                _ctx: Context,
+                _peerId: string,
+                _request: P2pHttpRequest,
+                _signal: AbortSignal,
+            ) => ({
                 response: {
                     body: (async function* () {
                         yield Buffer.from("first");
@@ -53,7 +162,8 @@ describe("P2P-prefixed daemon HTTP", () => {
                 status: 202,
             });
             expect(fetch).toHaveBeenCalledOnce();
-            const [forwardedPeerId, forwarded, signal] = fetch.mock.calls[0]!;
+            const [forwardedCtx, forwardedPeerId, forwarded, signal] = fetch.mock.calls[0]!;
+            expect(forwardedCtx).toEqual(expect.objectContaining({ span: expect.any(Function) }));
             expect(forwardedPeerId).toBe(peerId);
             expect(forwarded).toMatchObject({
                 headers: {
@@ -71,7 +181,7 @@ describe("P2P-prefixed daemon HTTP", () => {
     });
 
     it("forwards the one-request body prepared for the authenticated peer", async () => {
-        const fetch = vi.fn(async (_peerId: string, _forwarded: P2pHttpRequest) => ({
+        const fetch = vi.fn(async (_ctx: Context, _peerId: string, _forwarded: P2pHttpRequest) => ({
             response: {
                 body: (async function* () {
                     yield Buffer.from("{}");
@@ -97,7 +207,7 @@ describe("P2P-prefixed daemon HTTP", () => {
             );
 
             expect(prepare).toHaveBeenCalledOnce();
-            expect(JSON.parse(Buffer.from(fetch.mock.calls[0]![1].body).toString("utf8"))).toEqual({
+            expect(JSON.parse(Buffer.from(fetch.mock.calls[0]![2].body).toString("utf8"))).toEqual({
                 temporaryGitSecret: { kind: "github", token: "token" },
             });
         } finally {
@@ -130,7 +240,7 @@ describe("P2P-prefixed daemon HTTP", () => {
         );
         const remote = createP2pInstanceIdentity(peerId, new Uint8Array(32).fill(2));
         const onError = vi.fn();
-        const fetch = vi.fn(async (_peerId: string, forwarded: P2pHttpRequest) => {
+        const fetch = vi.fn(async (_ctx: Context, _peerId: string, forwarded: P2pHttpRequest) => {
             if (forwarded.path === "/inference-credentials") {
                 throw new Error("credential endpoint unavailable");
             }
@@ -163,8 +273,8 @@ describe("P2P-prefixed daemon HTTP", () => {
                 identity: local,
             }),
         });
-        const started = await startServer(network, ({ peerId: target, signal }) =>
-            replicator.ensureForRequest(target, signal),
+        const started = await startServer(network, (ctx, { peerId: target, signal }) =>
+            replicator.ensureForRequest(ctx, target, signal),
         );
         try {
             const result = await sendRequest(
@@ -178,13 +288,13 @@ describe("P2P-prefixed daemon HTTP", () => {
             expect(onError).toHaveBeenCalledOnce();
         } finally {
             await started.close();
-            await replicator.close();
+            await replicator.close(createTestRootContext());
         }
     });
 
     it("forwards terminal upgrades and scoped browser CONNECT tunnels", async () => {
         const requests: P2pTunnelRequestHead[] = [];
-        const openTunnel = vi.fn(async (_peerId, tunnel: P2pTunnelRequestHead) => {
+        const openTunnel = vi.fn(async (_ctx: Context, _peerId, tunnel: P2pTunnelRequestHead) => {
             requests.push(tunnel);
             return {
                 connection: {
@@ -246,18 +356,20 @@ async function startServer(
     p2pNetwork: P2pNetwork,
     prepareP2pRequest?: PrepareP2pHttpRequest,
 ): Promise<{
+    beginShutdown: () => void;
     close: () => Promise<void>;
     socketPath: string;
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = `${directory}/server.sock`;
-    const server = await createProtocolHttpServer({
+    const server = await createProtocolHttpServer(createTestRootContext(), {
         p2pNetwork,
         ...(prepareP2pRequest === undefined ? {} : { prepareP2pRequest }),
         token: "test-token",
     });
     await listen(server, socketPath);
     return {
+        beginShutdown: () => beginProtocolHttpServerShutdown(server),
         close: async () => {
             await close(server);
             await rm(directory, { force: true, recursive: true });

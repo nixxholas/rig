@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import {
     deferSessionTransactionCommit,
     isSessionTransactionPostCommitError,
@@ -33,12 +34,12 @@ describe("SessionTransactionContext", () => {
     });
 
     it("runs deferred callbacks after commit and awaits them", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         try {
             let operationFinished = false;
             let callbackCompleted = false;
 
-            await runSessionTransaction(opened.database, async () => {
+            await runSessionTransaction(opened.ctx, async () => {
                 await deferSessionTransactionCommit(async () => {
                     expect(operationFinished).toBe(true);
                     await Promise.resolve();
@@ -49,15 +50,15 @@ describe("SessionTransactionContext", () => {
 
             expect(callbackCompleted).toBe(true);
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
     });
 
     it("propagates deferred callback failures after commit", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         const failure = new Error("deferred post-commit callback failed");
         try {
-            const transaction = runSessionTransaction(opened.database, async () => {
+            const transaction = runSessionTransaction(opened.ctx, async () => {
                 await deferSessionTransactionCommit(async () => {
                     await Promise.resolve();
                     throw failure;
@@ -70,17 +71,17 @@ describe("SessionTransactionContext", () => {
             });
             await expect(transaction).rejects.toBeInstanceOf(SessionTransactionPostCommitError);
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
     });
 
     it("runs every deferred callback before reporting their failures", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         const firstFailure = new Error("first callback failed");
         const secondFailure = Object.freeze(new Error("second callback failed"));
         const order: string[] = [];
         try {
-            const transaction = runSessionTransaction(opened.database, async () => {
+            const transaction = runSessionTransaction(opened.ctx, async () => {
                 await deferSessionTransactionCommit(() => {
                     order.push("first");
                     throw firstFailure;
@@ -104,15 +105,15 @@ describe("SessionTransactionContext", () => {
             });
             expect(order).toEqual(["first", "second", "nested-immediate", "third"]);
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
     });
 
     it("classifies frozen and primitive post-commit failures through an explicit wrapper", async () => {
-        const opened = await openSessionDatabase(":memory:");
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         const frozenFailure = Object.freeze(new Error("frozen callback failure"));
         try {
-            const transaction = runSessionTransaction(opened.database, async () => {
+            const transaction = runSessionTransaction(opened.ctx, async () => {
                 await deferSessionTransactionCommit(() => {
                     throw frozenFailure;
                 });
@@ -121,13 +122,13 @@ describe("SessionTransactionContext", () => {
             expect(isSessionTransactionPostCommitError(error)).toBe(true);
             expect(error).toMatchObject({ cause: frozenFailure, failures: [frozenFailure] });
         } finally {
-            await opened.database.close();
+            await opened.database.close(opened.ctx);
         }
 
         const primitiveFailure = "primitive callback failure";
-        const second = await openSessionDatabase(":memory:");
+        const second = await openSessionDatabase(createTestRootContext(), ":memory:");
         try {
-            const transaction = runSessionTransaction(second.database, async () => {
+            const transaction = runSessionTransaction(second.ctx, async () => {
                 await deferSessionTransactionCommit(() => {
                     throw primitiveFailure;
                 });
@@ -136,13 +137,13 @@ describe("SessionTransactionContext", () => {
             expect(isSessionTransactionPostCommitError(error)).toBe(true);
             expect(error).toMatchObject({ cause: primitiveFailure, failures: [primitiveFailure] });
         } finally {
-            await second.database.close();
+            await second.database.close(second.ctx);
         }
     });
 
     it("isolates nested transaction scopes and callbacks by database", async () => {
-        const first = await openSessionDatabase(":memory:");
-        const second = await openSessionDatabase(":memory:");
+        const first = await openSessionDatabase(createTestRootContext(), ":memory:");
+        const second = await openSessionDatabase(createTestRootContext(), ":memory:");
         try {
             let detachedScope: unknown;
             let releaseDetached!: () => void;
@@ -155,7 +156,8 @@ describe("SessionTransactionContext", () => {
             });
             let detachedTask!: Promise<void>;
 
-            await runSessionTransaction(first.database, async (firstTx) => {
+            await runSessionTransaction(first.ctx, async (firstCtx) => {
+                const firstTx = firstCtx.tx;
                 expect(sessionTransactionScope(first.database)).toBe(firstTx);
                 expect(sessionTransactionScope(second.database)).toBe(second.database);
 
@@ -173,7 +175,8 @@ describe("SessionTransactionContext", () => {
                     detachedDone();
                 })();
 
-                await runSessionTransaction(second.database, async (secondTx) => {
+                await runSessionTransaction(second.ctx, async (secondCtx) => {
+                    const secondTx = secondCtx.tx;
                     expect(secondTx).not.toBe(firstTx);
                     expect(sessionTransactionScope(second.database)).toBe(secondTx);
                     expect(sessionTransactionScope(first.database)).toBe(first.database);
@@ -188,8 +191,8 @@ describe("SessionTransactionContext", () => {
             await detachedCompletion;
             expect(detachedScope).toBe(first.database);
         } finally {
-            await first.database.close();
-            await second.database.close();
+            await first.database.close(first.ctx);
+            await second.database.close(second.ctx);
         }
     });
 });

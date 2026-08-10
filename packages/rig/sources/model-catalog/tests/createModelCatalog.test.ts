@@ -12,7 +12,14 @@ import {
     modelXaiGrokBuild,
     modelXaiGrokComposer25Fast,
 } from "@slopus/rig-execution";
-import { createModelCatalog } from "../createModelCatalog.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+import {
+    createModelCatalog as createModelCatalogWithContext,
+    type CreateModelCatalogOptions,
+} from "../createModelCatalog.js";
+
+const createModelCatalog = (options?: CreateModelCatalogOptions) =>
+    createModelCatalogWithContext(createTestRootContext().named("model-catalog"), options);
 
 describe("createModelCatalog", () => {
     it("keeps Amazon Bedrock disabled without exposing models when its token is absent", () => {

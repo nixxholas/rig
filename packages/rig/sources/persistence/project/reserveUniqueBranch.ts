@@ -1,8 +1,9 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { and, eq, ne } from "drizzle-orm";
 
 import { projectWorkspaces } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
 /**
  * Finds a branch name no other workspace in the project has taken.
@@ -17,7 +18,7 @@ import type { DatabaseScope } from "../Transaction.js";
  * nothing.
  */
 export async function reserveUniqueBranch(
-    tx: DatabaseScope,
+    ctx: Context,
     options: {
         branch: string;
         excludeWorkspaceId?: string;
@@ -25,7 +26,8 @@ export async function reserveUniqueBranch(
         projectId: string;
     },
 ): Promise<string> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.reserveUniqueBranch", async (ctx) => {
+        const tx = ctx.tx;
         const own =
             options.excludeWorkspaceId === undefined
                 ? undefined

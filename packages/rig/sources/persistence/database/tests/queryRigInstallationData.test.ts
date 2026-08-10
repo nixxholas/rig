@@ -23,8 +23,10 @@ import {
 } from "../migrateSessionDatabase.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import { dropSchemaAddedAfterIdentityMigrations } from "./dropSchemaAddedAfterIdentityMigrations.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 
 const directories: string[] = [];
+const root = createTestRootContext();
 
 afterEach(() => {
     for (const directory of directories.splice(0)) {
@@ -34,11 +36,11 @@ afterEach(() => {
 
 describe("queryRigInstallationData", () => {
     it("reports absent data without creating its directory or database", async () => {
-        const root = testDirectory();
-        const dataDirectory = join(root, "rig-data");
+        const directory = testDirectory();
+        const dataDirectory = join(directory, "rig-data");
         const databasePath = join(dataDirectory, "sessions.sqlite");
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({ status: "absent" });
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({ status: "absent" });
         expect(existsSync(dataDirectory)).toBe(false);
     });
 
@@ -46,14 +48,16 @@ describe("queryRigInstallationData", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         writeFileSync(databasePath, "");
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({ status: "uninitialized" });
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
+            status: "uninitialized",
+        });
     });
 
     it("reports a garbage non-SQLite file as unavailable instead of safely initializable", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         writeFileSync(databasePath, "not a SQLite database");
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             message: expect.stringContaining("damaged"),
             reason: "unreadable",
             status: "unavailable",
@@ -62,17 +66,17 @@ describe("queryRigInstallationData", () => {
 
     it("returns the same initialized epoch on every read and reopen", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "epoch-stable" });
-        await opened.database.close();
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "epoch-stable" });
+        await opened.database.close(opened.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "epoch-stable",
             schemaCompatibility: "current",
             schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
             status: "initialized",
         });
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "epoch-stable",
             schemaCompatibility: "current",
             schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
@@ -82,13 +86,13 @@ describe("queryRigInstallationData", () => {
 
     it("creates a new epoch when a foreign data generation is atomically reset", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "epoch-before" });
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "epoch-before" });
         await opened.database.run(sql.raw("PRAGMA application_id = 0"));
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "epoch-after" });
-        await opened.database.close();
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "epoch-after" });
+        await opened.database.close(opened.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "epoch-after",
             schemaCompatibility: "current",
             schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
@@ -98,8 +102,8 @@ describe("queryRigInstallationData", () => {
 
     it("seeds one epoch when an existing Rig database receives the identity migration", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded-epoch" });
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "discarded-epoch" });
         await dropSchemaAddedAfterIdentityMigrations(opened.database);
         await opened.database.run(
             sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"),
@@ -107,24 +111,24 @@ describe("queryRigInstallationData", () => {
         await opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_SCHEMA_VERSION)}`),
         );
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "discarded-epoch",
             schemaCompatibility: "upgrade_required",
             schemaVersion: RIG_DATA_IDENTITY_SCHEMA_VERSION,
             status: "initialized",
         });
 
-        const upgraded = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(upgraded.database, {
+        const upgraded = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(upgraded.ctx, {
             createDataEpoch: () => {
                 throw new Error("Migration 17 must not be replayed.");
             },
         });
-        await upgraded.database.close();
+        await upgraded.database.close(upgraded.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "discarded-epoch",
             schemaCompatibility: "current",
             schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
@@ -134,12 +138,12 @@ describe("queryRigInstallationData", () => {
 
     it("reports a current schema without its committed identity as damaged", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "missing-epoch" });
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "missing-epoch" });
         await opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             message: expect.stringContaining("damaged"),
             reason: "unreadable",
             status: "unavailable",
@@ -148,12 +152,12 @@ describe("queryRigInstallationData", () => {
 
     it("reports an invalid committed identity as damaged", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "valid-epoch" });
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "valid-epoch" });
         await opened.database.run(sql.raw("UPDATE rig_data_identity SET epoch = ''"));
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             message: expect.stringContaining("damaged"),
             reason: "unreadable",
             status: "unavailable",
@@ -162,16 +166,16 @@ describe("queryRigInstallationData", () => {
 
     it("reports a structurally corrupt Rig schema as unavailable", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "corrupt-epoch" });
-        await opened.database.close();
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "corrupt-epoch" });
+        await opened.database.close(opened.ctx);
         rmSync(`${databasePath}-wal`, { force: true });
         rmSync(`${databasePath}-shm`, { force: true });
         const descriptor = openSync(databasePath, "r+");
         writeSync(descriptor, Buffer.alloc(32, 0xff), 0, 32, 100);
         closeSync(descriptor);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             message: expect.stringContaining("input/output"),
             reason: "io_error",
             status: "unavailable",
@@ -180,14 +184,14 @@ describe("queryRigInstallationData", () => {
 
     it("preserves the epoch while safely rejecting a newer schema", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "future-epoch" });
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "future-epoch" });
         await opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(CURRENT_SESSION_DATABASE_VERSION + 1)}`),
         );
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "future-epoch",
             message: expect.stringContaining("newer schema version"),
             reason: "newer_schema",
@@ -207,7 +211,7 @@ describe("queryRigInstallationData", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         writeFileSync(databasePath, "");
 
-        const result = await queryRigInstallationData(databasePath, {
+        const result = await queryRigInstallationData(root, databasePath, {
             openDatabase: async () => {
                 throw Object.assign(new Error("inspection failed"), { code });
             },
@@ -222,37 +226,37 @@ describe("queryRigInstallationData", () => {
 
     it("reads an initialized database while its WAL connection is active", async () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "hot-wal-epoch" });
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "hot-wal-epoch" });
         await opened.database.run(sql.raw("UPDATE projects SET updated_at_ms = updated_at_ms"));
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             epoch: "hot-wal-epoch",
             schemaCompatibility: "current",
             schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
             status: "initialized",
         });
 
-        await opened.database.close();
+        await opened.database.close(opened.ctx);
     });
 
     it("documents SQLite sidecars created while inspecting a stopped WAL database", async () => {
-        const root = testDirectory();
-        const databasePath = join(root, "sessions.sqlite");
-        const opened = await openSessionDatabase(databasePath);
-        await migrateSessionDatabase(opened.database, { createDataEpoch: () => "cold-wal-epoch" });
-        await opened.database.close();
-        expect(readdirSync(root).sort()).toEqual([
+        const directory = testDirectory();
+        const databasePath = join(directory, "sessions.sqlite");
+        const opened = await openSessionDatabase(root, databasePath);
+        await migrateSessionDatabase(opened.ctx, { createDataEpoch: () => "cold-wal-epoch" });
+        await opened.database.close(opened.ctx);
+        expect(readdirSync(directory).sort()).toEqual([
             "sessions.sqlite",
             "sessions.sqlite-shm",
             "sessions.sqlite-wal",
         ]);
 
-        expect(await queryRigInstallationData(databasePath)).toMatchObject({
+        expect(await queryRigInstallationData(root, databasePath)).toMatchObject({
             epoch: "cold-wal-epoch",
             status: "initialized",
         });
-        expect(readdirSync(root).sort()).toEqual([
+        expect(readdirSync(directory).sort()).toEqual([
             "sessions.sqlite",
             "sessions.sqlite-shm",
             "sessions.sqlite-wal",
@@ -263,7 +267,7 @@ describe("queryRigInstallationData", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         mkdirSync(databasePath);
 
-        expect(await queryRigInstallationData(databasePath)).toEqual({
+        expect(await queryRigInstallationData(root, databasePath)).toEqual({
             message: expect.any(String),
             reason: "unreadable",
             status: "unavailable",

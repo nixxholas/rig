@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -25,6 +26,7 @@ import { WorkletNotFoundError } from "./WorkletNotFoundError.js";
 import { DEFAULT_WORKLET_STARTUP_TIMEOUT_MS } from "./WorkletStartupState.js";
 import type { ExpectedWorkletDeclaration, WorkletStore } from "./WorkletStore.js";
 import type { WorkletToolRegistry } from "./WorkletToolRegistry.js";
+import { withWorkerContext } from "../observability/index.js";
 
 interface WorkletRuntime {
     failure?: string;
@@ -43,7 +45,7 @@ export interface WorkletManagerOptions {
     environment?: NodeJS.ProcessEnv;
     now?: () => number;
     /** Delivers a change to the live global stream. */
-    publish: (event: WorkletsChangedEvent) => void;
+    publish: (ctx: Context, event: WorkletsChangedEvent) => void;
     registry: WorkletToolRegistry;
     /** How long a worklet has to declare its tools and report ready. */
     startupTimeoutMs?: number;
@@ -63,7 +65,7 @@ export class WorkletManager {
     readonly #now: () => number;
     readonly #pendingPublications = new Set<Promise<void>>();
     #publicationTail = Promise.resolve();
-    readonly #publish: (event: WorkletsChangedEvent) => void;
+    readonly #publish: (ctx: Context, event: WorkletsChangedEvent) => void;
     readonly #registry: WorkletToolRegistry;
     readonly #runtimes = new Map<string, WorkletRuntime>();
     readonly #lifecycleByName = new Map<string, Promise<void>>();
@@ -87,84 +89,87 @@ export class WorkletManager {
     }
 
     /** Launches every installed worklet at once and resolves when all of them have settled. */
-    async start(): Promise<void> {
-        await this.#store.cleanupStaging();
-        const installed = await this.#store.list();
+    async start(ctx: Context): Promise<void> {
+        await this.#store.cleanupStaging(ctx);
+        const installed = await this.#store.list(ctx);
         await Promise.all(
             installed.map((worklet) =>
-                this.#serializeLifecycle(worklet.name, () => this.#launch(worklet)),
+                this.#serializeLifecycle(worklet.name, () => this.#launch(ctx, worklet)),
             ),
         );
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
     }
 
-    async list(): Promise<readonly Worklet[]> {
-        return (await this.#store.list()).map((worklet) => this.#present(worklet));
+    async list(ctx: Context): Promise<readonly Worklet[]> {
+        return (await this.#store.list(ctx)).map((worklet) => this.#present(worklet));
     }
 
     /** The current worklets together with the change they reflect. */
-    async catalog(): Promise<{ version: EventId; worklets: readonly Worklet[] }> {
-        return { version: this.#version, worklets: await this.list() };
+    async catalog(ctx: Context): Promise<{ version: EventId; worklets: readonly Worklet[] }> {
+        return { version: this.#version, worklets: await this.list(ctx) };
     }
 
-    async get(name: string): Promise<Worklet | undefined> {
-        const stored = await this.#store.get(name);
+    async get(ctx: Context, name: string): Promise<Worklet | undefined> {
+        const stored = await this.#store.get(ctx, name);
         return stored === undefined ? undefined : this.#present(stored);
     }
 
     async install(
+        ctx: Context,
         request: InstallWorkletRequest,
         sourceFileSystem?: FileSystemContext | WorkletSourceReader,
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<Worklet> {
         // The first read discovers only which lifecycle queue owns the operation. The store copies
         // and validates an immutable snapshot again inside that queue before committing anything.
-        const inspected = await this.#store.inspect(request.path, sourceFileSystem);
+        const inspected = await this.#store.inspect(ctx, request.path, sourceFileSystem);
         return this.#serializeLifecycle(inspected.name, async () => {
-            const stored = await this.#store.install(request, sourceFileSystem, {
+            const stored = await this.#store.install(ctx, request, sourceFileSystem, {
                 ...expected,
                 name: inspected.name,
             });
-            await this.#launch(stored);
-            await this.#publishChanged();
+            await this.#launch(ctx, stored);
+            await this.#publishChanged(ctx);
             return this.#present(stored);
         });
     }
 
     async update(
+        ctx: Context,
         name: string,
         request: UpdateWorkletRequest,
         sourceFileSystem?: FileSystemContext | WorkletSourceReader,
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<Worklet> {
         return this.#serializeLifecycle(name, async () => {
-            const stored = await this.#store.update(name, request, sourceFileSystem, expected);
+            const stored = await this.#store.update(ctx, name, request, sourceFileSystem, expected);
             await this.#stop(name, "The worklet was replaced.");
-            await this.#launch(stored);
-            await this.#publishChanged();
+            await this.#launch(ctx, stored);
+            await this.#publishChanged(ctx);
             return this.#present(stored);
         });
     }
 
     async revert(
+        ctx: Context,
         name: string,
         request: RevertWorkletRequest,
         expected: ExpectedWorkletDeclaration = {},
     ): Promise<Worklet> {
         return this.#serializeLifecycle(name, async () => {
-            const stored = await this.#store.revert(name, request, expected);
+            const stored = await this.#store.revert(ctx, name, request, expected);
             await this.#stop(name, "The worklet was replaced.");
-            await this.#launch(stored);
-            await this.#publishChanged();
+            await this.#launch(ctx, stored);
+            await this.#publishChanged(ctx);
             return this.#present(stored);
         });
     }
 
-    async uninstall(name: string): Promise<void> {
+    async uninstall(ctx: Context, name: string): Promise<void> {
         await this.#serializeLifecycle(name, async () => {
             await this.#stop(name);
             try {
-                await this.#store.remove(name);
+                await this.#store.remove(ctx, name);
                 // The runtime folder is Rig's own, so it goes with the worklet rather than
                 // outliving it the way the worklet's data folder does.
                 await rm(getWorkletRuntimeDirectory(name, this.#environment), {
@@ -172,21 +177,25 @@ export class WorkletManager {
                     recursive: true,
                 });
             } catch (error) {
-                if ((await this.#store.get(name)) === undefined) this.#runtimes.delete(name);
-                await this.#publishChanged();
+                if ((await this.#store.get(ctx, name)) === undefined) this.#runtimes.delete(name);
+                await this.#publishChanged(ctx);
                 throw error;
             }
             this.#runtimes.delete(name);
-            await this.#publishChanged();
+            await this.#publishChanged(ctx);
         });
     }
 
-    async readIcon(name: string, format: WorkletIconFormat): Promise<WorkletIconFileResult> {
-        return this.#store.readIcon(name, format);
+    async readIcon(
+        ctx: Context,
+        name: string,
+        format: WorkletIconFormat,
+    ): Promise<WorkletIconFileResult> {
+        return this.#store.readIcon(ctx, name, format);
     }
 
-    async readLog(name: string): Promise<{ log: string; truncated: boolean }> {
-        if ((await this.#store.get(name)) === undefined) {
+    async readLog(ctx: Context, name: string): Promise<{ log: string; truncated: boolean }> {
+        if ((await this.#store.get(ctx, name)) === undefined) {
             throw new WorkletNotFoundError(`No worklet named ${JSON.stringify(name)} exists.`);
         }
         const runtime = this.#runtimes.get(name);
@@ -198,7 +207,7 @@ export class WorkletManager {
         return { log: "", truncated: false };
     }
 
-    async close(): Promise<void> {
+    async close(_ctx: Context): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
         await Promise.allSettled(
@@ -240,13 +249,13 @@ export class WorkletManager {
         }
     }
 
-    async #launch(worklet: StoredWorklet): Promise<void> {
+    async #launch(ctx: Context, worklet: StoredWorklet): Promise<void> {
         if (this.#closed) return;
         const runtime: WorkletRuntime = { state: "starting", tools: [] };
         this.#runtimes.set(worklet.name, runtime);
         let running: RunningWorklet;
         try {
-            running = await startWorklet({
+            running = await startWorklet(ctx, {
                 dataDirectory: this.#store.dataDirectory(worklet.name),
                 environment: this.#environment,
                 logPath: this.#logPath(worklet.name),
@@ -256,14 +265,19 @@ export class WorkletManager {
                     this.#publishChangedInBackground();
                 },
                 onToolsRetired: (reason) => {
-                    void this.#serializeLifecycle(worklet.name, async () => {
-                        // A retirement notification belongs to this exact generation. If an
-                        // update or revert replaced it while the notification waited in the
-                        // lifecycle queue, it must not stop the replacement.
-                        if (this.#runtimes.get(worklet.name) !== runtime) return;
-                        await this.#stop(worklet.name, reason);
-                        await this.#publishChanged();
-                    });
+                    void withWorkerContext(
+                        "worklet-tools-retired",
+                        (ctx) =>
+                            this.#serializeLifecycle(worklet.name, async () => {
+                                // A retirement notification belongs to this exact generation. If an
+                                // update or revert replaced it while the notification waited in the
+                                // lifecycle queue, it must not stop the replacement.
+                                if (this.#runtimes.get(worklet.name) !== runtime) return;
+                                await this.#stop(worklet.name, reason);
+                                await this.#publishChanged(ctx);
+                            }),
+                        { workletName: worklet.name },
+                    ).catch(rethrowDatabaseFailure);
                 },
                 permissions: worklet.permissions,
                 registry: this.#registry,
@@ -329,12 +343,18 @@ export class WorkletManager {
                 (error: unknown) => errorToMessage(error),
             )
             .then((failure) => {
-                if (this.#runtimes.get(worklet.name) !== runtime) return;
-                runtime.state = failure === undefined ? "stopped" : "failed";
-                if (failure !== undefined) runtime.failure = failure;
-                runtime.tools = [];
-                delete runtime.running;
-                this.#publishChangedInBackground();
+                void withWorkerContext(
+                    "worklet-exit",
+                    async (ctx) => {
+                        if (this.#runtimes.get(worklet.name) !== runtime) return;
+                        runtime.state = failure === undefined ? "stopped" : "failed";
+                        if (failure !== undefined) runtime.failure = failure;
+                        runtime.tools = [];
+                        delete runtime.running;
+                        await this.#publishChanged(ctx);
+                    },
+                    { workletName: worklet.name },
+                ).catch(rethrowDatabaseFailure);
             });
     }
 
@@ -365,14 +385,14 @@ export class WorkletManager {
         };
     }
 
-    #publishChanged(): Promise<void> {
+    #publishChanged(ctx: Context): Promise<void> {
         const publication = this.#publicationTail
             .catch(() => undefined)
             .then(async () => {
                 if (this.#closed) return;
                 this.#version = this.#createEventId();
-                const worklets = await this.list();
-                this.#publish({
+                const worklets = await this.list(ctx);
+                this.#publish(ctx, {
                     createdAt: this.#now(),
                     data: { version: this.#version, worklets },
                     id: this.#createEventId(),
@@ -389,7 +409,9 @@ export class WorkletManager {
      */
     #publishChangedInBackground(): void {
         if (this.#closed) return;
-        const publication = this.#publishChanged();
+        const publication = withWorkerContext("worklet-publish", (ctx) =>
+            this.#publishChanged(ctx),
+        );
         this.#pendingPublications.add(publication);
         void publication
             .finally(() => {

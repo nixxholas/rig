@@ -6,9 +6,11 @@ import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { McpClientManager } from "./McpClientManager.js";
 
 describe("McpClientManager", () => {
+    const ctx = createTestRootContext();
     it.each(["read_only", "workspace_write"] as const)(
         "does not start trusted servers or expose their tools in %s mode",
         async (permissionMode) => {
@@ -377,7 +379,9 @@ describe("McpClientManager", () => {
             if (tool === undefined) throw new Error("Echo MCP tool was not discovered.");
             expect(Value.Check(tool.arguments, { value: "hello" })).toBe(true);
             const harness = createJustBashToolHarness();
-            const result = await tool?.execute({ value: "hello" } as never, harness.context, {});
+            const result = await tool?.execute({ value: "hello" } as never, harness.context, {
+                ctx,
+            });
             expect(tool?.toLLM(result as never)).toEqual([{ type: "text", text: "Echo: hello" }]);
             expect(tool?.locks).toEqual(["mcp:test server"]);
 
@@ -390,11 +394,9 @@ describe("McpClientManager", () => {
             const elicitingTool = loaded.tools.find(
                 (candidate) => candidate.name === "mcp__test_server__ask_environment",
             );
-            const elicitationResult = await elicitingTool?.execute(
-                {} as never,
-                harness.context,
-                {},
-            );
+            const elicitationResult = await elicitingTool?.execute({} as never, harness.context, {
+                ctx,
+            });
             expect(elicitingTool?.toLLM(elicitationResult as never)).toEqual([
                 { type: "text", text: "Selected: staging" },
             ]);
@@ -405,7 +407,7 @@ describe("McpClientManager", () => {
             const resourceResult = await readResource?.execute(
                 { server: "test server", uri: "rig://guide" } as never,
                 harness.context,
-                {},
+                { ctx },
             );
             expect(readResource?.toLLM(resourceResult as never)).toEqual([
                 { type: "text", text: "Use pnpm." },
@@ -419,7 +421,7 @@ describe("McpClientManager", () => {
                     arguments: { focus: "permissions" },
                 } as never,
                 harness.context,
-                {},
+                { ctx },
             );
             expect(getPrompt?.toLLM(promptResult as never)).toEqual([
                 { type: "text", text: expect.stringContaining("Review permissions.") },
@@ -474,7 +476,7 @@ describe("McpClientManager", () => {
             const result = await originalTool.execute(
                 { value: "still active" } as never,
                 harness.context,
-                {},
+                { ctx },
             );
             expect(originalTool.toLLM(result as never)).toEqual([
                 { type: "text", text: "Echo: still active" },
@@ -483,7 +485,7 @@ describe("McpClientManager", () => {
             expect(first.release).toBeTypeOf("function");
             await first.release?.();
             await expect(
-                originalTool.execute({ value: "released" } as never, harness.context, {}),
+                originalTool.execute({ value: "released" } as never, harness.context, { ctx }),
             ).rejects.toThrow();
         } finally {
             await manager.close();
@@ -556,7 +558,7 @@ describe("McpClientManager", () => {
             const listResult = await listTools?.execute(
                 { server: "restricted" } as never,
                 harness.context,
-                {},
+                { ctx },
             );
             expect(listTools?.toLLM(listResult as never)[0]).toEqual({
                 type: "text",
@@ -568,7 +570,7 @@ describe("McpClientManager", () => {
                 callTool?.execute(
                     { server: "restricted", name: "ask_environment" } as never,
                     harness.context,
-                    {},
+                    { ctx },
                 ),
             ).rejects.toThrow("disabled by the server policy");
         } finally {

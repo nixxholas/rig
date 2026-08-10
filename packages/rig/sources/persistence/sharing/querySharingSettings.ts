@@ -1,7 +1,8 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
 
-import type { DatabaseScope } from "../Transaction.js";
 import { sharingSettings } from "../database/schema.js";
 
 export interface SharingSettings {
@@ -9,10 +10,9 @@ export interface SharingSettings {
     updatedAt: number;
 }
 
-export async function querySharingSettings(
-    tx: DatabaseScope,
-): Promise<SharingSettings | undefined> {
-    return await inDatabase(tx, async (tx) => {
+export async function querySharingSettings(ctx: Context): Promise<SharingSettings | undefined> {
+    return await inDatabase(ctx, "rig.sql.sharing.querySharingSettings", async (ctx) => {
+        const tx = ctx.tx;
         const stored = await tx
             .select({
                 enabled: sharingSettings.enabled,

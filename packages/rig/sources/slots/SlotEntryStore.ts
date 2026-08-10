@@ -1,7 +1,10 @@
 import { createId } from "@paralleldrive/cuid2";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import { inTx } from "../persistence/inTx.js";
+import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import { withDatabase } from "../persistence/databaseContext.js";
 import { queryApplet } from "../persistence/applets/queryApplet.js";
 import { querySlotEntries } from "../persistence/slots/querySlotEntries.js";
 import { querySlotEntry } from "../persistence/slots/querySlotEntry.js";
@@ -10,7 +13,6 @@ import { slotEntryCreate } from "../persistence/slots/slotEntryCreate.js";
 import { slotEntryRemove } from "../persistence/slots/slotEntryRemove.js";
 import { slotEntriesRemoveByPluginAuthor } from "../persistence/slots/slotEntriesRemoveByPluginAuthor.js";
 import { slotEntryUpdate } from "../persistence/slots/slotEntryUpdate.js";
-import type { TX } from "../persistence/Transaction.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
 import {
     createSlotEntryRequestSchema,
@@ -27,15 +29,15 @@ import { SlotEntryInvalidError } from "./SlotEntryInvalidError.js";
 import { SlotEntryNotFoundError } from "./SlotEntryNotFoundError.js";
 
 export interface SlotEntryStoreOptions {
+    database: SessionDatabase;
     now?: () => number;
     /** Delivers a change to the live global stream after the database write committed. */
-    publish: (event: SlotsChangedEvent) => void | Promise<void>;
+    publish: (ctx: Context, event: SlotsChangedEvent) => void | Promise<void>;
     /**
      * Whether a session id names a live session. The in-memory store holds sessions outside
      * SQLite, so the slot store asks its owner instead of the sessions table.
      */
-    sessionExists: (tx: TX, sessionId: string) => boolean | Promise<boolean>;
-    tx: () => TX;
+    sessionExists: (ctx: Context, sessionId: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -48,19 +50,20 @@ export interface SlotEntryStoreOptions {
  */
 export class SlotEntryStore {
     readonly #createEventId = createEventIdFactory();
+    readonly #database: SessionDatabase;
     readonly #now: () => number;
-    readonly #publish: (event: SlotsChangedEvent) => void | Promise<void>;
-    readonly #sessionExists: (tx: TX, sessionId: string) => boolean | Promise<boolean>;
-    readonly #tx: () => TX;
+    readonly #publish: (ctx: Context, event: SlotsChangedEvent) => void | Promise<void>;
+    readonly #sessionExists: (ctx: Context, sessionId: string) => boolean | Promise<boolean>;
 
     constructor(options: SlotEntryStoreOptions) {
+        this.#database = options.database;
         this.#now = options.now ?? Date.now;
         this.#publish = options.publish;
         this.#sessionExists = options.sessionExists;
-        this.#tx = options.tx;
     }
 
-    async create(request: CreateSlotEntryRequest): Promise<SlotEntry> {
+    async create(ctx: Context, request: CreateSlotEntryRequest): Promise<SlotEntry> {
+        ctx = withDatabase(ctx, this.#database);
         if (!Value.Check(createSlotEntryRequestSchema, request)) {
             throw new SlotEntryInvalidError(describeInvalid(createSlotEntryRequestSchema, request));
         }
@@ -78,46 +81,52 @@ export class SlotEntryStore {
             createdAt: now,
             updatedAt: now,
         };
-        const created = await inTx(this.#tx(), async (tx) => {
-            await this.#requireAppletScope(tx, entry.content, entry.scope);
-            await this.#requireScopeTarget(tx, entry);
-            await slotEntryCreate(tx, entry);
-            return querySlotEntry(tx, entry.id);
+        const created = await inTx(ctx, "rig.sql.slots.store_create", async (ctx) => {
+            await this.#requireAppletScope(ctx, entry.content, entry.scope);
+            await this.#requireScopeTarget(ctx, entry);
+            await slotEntryCreate(ctx, entry);
+            return querySlotEntry(ctx, entry.id);
         });
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         return created ?? entry;
     }
 
-    async list(filter: SlotEntryFilter = {}): Promise<readonly SlotEntry[]> {
-        return querySlotEntries(this.#tx(), filter);
+    async list(ctx: Context, filter: SlotEntryFilter = {}): Promise<readonly SlotEntry[]> {
+        ctx = withDatabase(ctx, this.#database);
+        return querySlotEntries(ctx, filter);
     }
 
-    async remove(id: string): Promise<SlotEntry> {
-        const removed = await inTx(this.#tx(), async (tx) => {
-            const entry = await querySlotEntry(tx, id);
+    async remove(ctx: Context, id: string): Promise<SlotEntry> {
+        ctx = withDatabase(ctx, this.#database);
+        const removed = await inTx(ctx, "rig.sql.slots.store_remove", async (ctx) => {
+            const entry = await querySlotEntry(ctx, id);
             if (entry === undefined) {
                 throw new SlotEntryNotFoundError(`No slot entry with the id ${id} exists.`);
             }
-            await slotEntryRemove(tx, id);
+            await slotEntryRemove(ctx, id);
             return entry;
         });
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         return removed;
     }
 
     /** Removes the entries whose author disappeared with an uninstalled plugin. */
-    async removeByPluginAuthor(folder: string): Promise<number> {
-        const removed = await inTx(this.#tx(), (tx) => slotEntriesRemoveByPluginAuthor(tx, folder));
-        if (removed > 0) await this.#publishChanged();
+    async removeByPluginAuthor(ctx: Context, folder: string): Promise<number> {
+        ctx = withDatabase(ctx, this.#database);
+        const removed = await inTx(ctx, "rig.sql.slots.store_remove_by_plugin", (ctx) =>
+            slotEntriesRemoveByPluginAuthor(ctx, folder),
+        );
+        if (removed > 0) await this.#publishChanged(ctx);
         return removed;
     }
 
-    async update(id: string, request: UpdateSlotEntryRequest): Promise<SlotEntry> {
+    async update(ctx: Context, id: string, request: UpdateSlotEntryRequest): Promise<SlotEntry> {
+        ctx = withDatabase(ctx, this.#database);
         if (!Value.Check(updateSlotEntryRequestSchema, request)) {
             throw new SlotEntryInvalidError(describeInvalid(updateSlotEntryRequestSchema, request));
         }
-        const updated = await inTx(this.#tx(), async (tx) => {
-            const existing = await querySlotEntry(tx, id);
+        const updated = await inTx(ctx, "rig.sql.slots.store_update", async (ctx) => {
+            const existing = await querySlotEntry(ctx, id);
             if (existing === undefined) {
                 throw new SlotEntryNotFoundError(`No slot entry with the id ${id} exists.`);
             }
@@ -133,18 +142,18 @@ export class SlotEntryStore {
                 requireAllowedSlotScope(entry.slot, entry.scope);
             }
             if (request.slot !== undefined || request.content !== undefined) {
-                await this.#requireAppletScope(tx, entry.content, entry.scope);
+                await this.#requireAppletScope(ctx, entry.content, entry.scope);
             }
-            await slotEntryUpdate(tx, entry);
+            await slotEntryUpdate(ctx, entry);
             return entry;
         });
-        await this.#publishChanged();
+        await this.#publishChanged(ctx);
         return updated;
     }
 
-    async #publishChanged(): Promise<void> {
-        const entries = await this.list();
-        await this.#publish({
+    async #publishChanged(ctx: Context): Promise<void> {
+        const entries = await this.list(ctx);
+        await this.#publish(ctx, {
             createdAt: this.#now(),
             data: { entries },
             id: this.#createEventId(),
@@ -152,7 +161,7 @@ export class SlotEntryStore {
         });
     }
 
-    async #requireScopeTarget(tx: TX, entry: SlotEntry): Promise<void> {
+    async #requireScopeTarget(ctx: Context, entry: SlotEntry): Promise<void> {
         if (entry.scope === "everywhere") return;
         const id =
             entry.scope === "project"
@@ -167,8 +176,8 @@ export class SlotEntryStore {
         }
         const exists =
             entry.scope === "session"
-                ? await this.#sessionExists(tx, id)
-                : await querySlotScopeTargetExists(tx, entry.scope, id);
+                ? await this.#sessionExists(ctx, id)
+                : await querySlotScopeTargetExists(ctx, entry.scope, id);
         if (!exists) {
             throw new SlotEntryInvalidError(
                 `The ${entry.scope} ${id} the slot entry points at does not exist.`,
@@ -177,12 +186,12 @@ export class SlotEntryStore {
     }
 
     async #requireAppletScope(
-        tx: TX,
+        ctx: Context,
         content: SlotEntry["content"],
         scope: SlotEntry["scope"],
     ): Promise<void> {
         if (content.type !== "button" || content.action.type !== "open-applet") return;
-        const applet = await queryApplet(tx, content.action.applet);
+        const applet = await queryApplet(ctx, content.action.applet);
         if (applet === undefined || applet.allowedScopes.includes(scope)) return;
         throw new SlotEntryInvalidError(describeAppletScopeNotAllowed(applet, scope));
     }

@@ -1,14 +1,16 @@
 import { inDatabase } from "../database/inDatabase.js";
 import { eq } from "drizzle-orm";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { HappyCloudProfileCiphertextResponse } from "../../protocol/HappyCloudProtocol.js";
 import { happyCloudEnrollment } from "../database/schema.js";
 import type { DatabaseScope } from "../Transaction.js";
 
 export async function queryHappyCloudProfile(
-    tx: DatabaseScope,
+    ctx: Context,
 ): Promise<HappyCloudProfileCiphertextResponse | undefined> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.happy_cloud.query_profile", async (ctx) => {
+        const tx = ctx.tx;
         const row = await tx
             .select({
                 ciphertext: happyCloudEnrollment.profileCiphertext,

@@ -1,6 +1,7 @@
 import { and, count, eq, isNull, ne, sql } from "drizzle-orm";
+import { createRootContext, type Context, type RootContext } from "@steve.kite/stdlib";
 
-import type { SessionDatabase } from "./SessionDatabase.js";
+import { inDatabase } from "./inDatabase.js";
 import { projectWorkspaces, projects, sessionEvents, sessionMessages, sessions } from "./schema.js";
 
 export interface SessionDatabaseInspection {
@@ -21,11 +22,17 @@ export interface SessionDatabaseInspection {
     schemaVersion: number;
 }
 
+/** Creates the isolated context used by the read-only database inspection CLI. */
+export function createDatabaseInspectionContext(): RootContext {
+    return createRootContext();
+}
+
 export async function inspectSessionDatabase(
-    database: SessionDatabase,
+    ctx: Context,
     options: { fullIntegrityCheck?: boolean } = {},
 ): Promise<SessionDatabaseInspection> {
-    return await database.runInLock(async (connection) => {
+    return await inDatabase(ctx, "rig.sql.database.inspect", async (ctx) => {
+        const connection = ctx.tx;
         const integrityPragma =
             options.fullIntegrityCheck === true ? "integrity_check" : "quick_check";
         const integrityRow = await connection.get<Record<string, unknown>>(

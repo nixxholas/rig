@@ -68,6 +68,7 @@ import {
     type OneOffInferenceRoute,
     type SearchInferenceRoutes,
 } from "../tools/search/index.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface CreateCodingAssistantAgentOptions {
     attachmentScope?: AttachmentScope;
@@ -75,6 +76,7 @@ export interface CreateCodingAssistantAgentOptions {
     agentCommunication?: AgentCommunicationContext;
     agentTreeUsage?: AgentTreeUsageContext;
     cwd: string;
+    ctx: Context;
     docker?: DockerExecutionConfig;
     durableSkills?: readonly DurableSkillDefinition[];
     agentId?: string;
@@ -148,7 +150,7 @@ export function createCodingAssistantAgent(
         process.env.RIG_GYM_RUNTIME === "just-bash"
             ? createGymJustBashAgentContext(sharedContextOptions)
             : options.docker === undefined
-              ? createNodeAgentContext({
+              ? createNodeAgentContext(options.ctx, {
                     ...sharedContextOptions,
                     cwd: options.cwd,
                     environment: shellEnvironment,
@@ -291,7 +293,7 @@ export function createCodingAssistantAgent(
                       : { protectedPaths: options.protectedPaths }),
               })
             : options.docker === undefined
-              ? createNodeAgentContext({
+              ? createNodeAgentContext(options.ctx, {
                     cwd: options.cwd,
                     environment: shellEnvironment,
                     permissionMode: "read_only",

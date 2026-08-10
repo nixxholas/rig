@@ -1,10 +1,11 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { eq } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
 import type { PersistedQueuedRun, PersistedSessionMessage } from "../../session/InMemorySession.js";
 import { sessions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { sessionAppendEvent } from "./sessionAppendEvent.js";
 import { sessionSaveMessage } from "./sessionSaveMessage.js";
 import { sessionSaveQueuedRun } from "./sessionSaveQueuedRun.js";
@@ -21,14 +22,15 @@ export interface SessionAcceptQueuedRunInput {
 
 /** Durably accepts one visible user message and its run as a single consistency boundary. */
 export async function sessionAcceptQueuedRun(
-    tx: DatabaseScope,
+    ctx: Context,
     input: SessionAcceptQueuedRunInput,
 ): Promise<void> {
-    await inTx(tx, async (tx) => {
-        await sessionSaveQueuedRun(tx, input.sessionId, input.run, input.now);
-        await sessionSaveMessage(tx, input.sessionId, input.message, input.now);
+    await inTx(ctx, "rig.sql.session.session_accept_queued_run", async (ctx) => {
+        const tx = ctx.tx;
+        await sessionSaveQueuedRun(ctx, input.sessionId, input.run, input.now);
+        await sessionSaveMessage(ctx, input.sessionId, input.message, input.now);
         await sessionAppendEvent(
-            tx,
+            ctx,
             input.event,
             {
                 messageId: input.event.data.message.id,

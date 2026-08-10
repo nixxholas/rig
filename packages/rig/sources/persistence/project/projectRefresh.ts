@@ -1,10 +1,12 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { eq, sql } from "drizzle-orm";
 import { projects } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 
-export async function projectRefresh(tx: DatabaseScope, id: string, now: number): Promise<number> {
-    return await inDatabase(tx, async (tx) => {
+export async function projectRefresh(ctx: Context, id: string, now: number): Promise<number> {
+    return await inDatabase(ctx, "rig.sql.project.projectRefresh", async (ctx) => {
+        const tx = ctx.tx;
         return Number(
             (
                 await tx

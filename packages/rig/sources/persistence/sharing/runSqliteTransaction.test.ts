@@ -1,3 +1,5 @@
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import { runSqliteTransaction, type SqliteTransactionHandle } from "./runSqliteTransaction.js";
@@ -21,7 +23,7 @@ describe("runSqliteTransaction", () => {
         const failure = new Error("operation failed");
 
         await expect(
-            runSqliteTransaction(handle(), async () => {
+            runSqliteTransaction(createTestRootContext(), handle(), async () => {
                 throw failure;
             }),
         ).rejects.toBe(failure);
@@ -34,6 +36,7 @@ describe("runSqliteTransaction", () => {
 
         try {
             await runSqliteTransaction(
+                createTestRootContext(),
                 handle({
                     close: () => {
                         throw close;
@@ -59,6 +62,7 @@ describe("runSqliteTransaction", () => {
 
         try {
             await runSqliteTransaction(
+                createTestRootContext(),
                 handle({
                     commit: async () => {
                         throw commit;

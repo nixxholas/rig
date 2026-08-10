@@ -8,6 +8,8 @@ import type { Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
+
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { GitStateTracker } from "../../git/GitStateTracker.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
@@ -21,16 +23,27 @@ afterEach(async () => {
 });
 
 describe("Git state over HTTP", { timeout: 30_000 }, () => {
-    it("serves a change snapshot for a project and keeps it warm", async () => {
+    it("answers a cold project immediately and publishes its snapshot in the background", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n2\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         const response = await fixture.get(`/projects/${projectId}/git`);
 
         expect(response.status).toBe(200);
         expect(response.body.git).toMatchObject({
+            changedFiles: 0,
+            comparison: "unavailable",
+            error: "Git state is loading.",
+            version: 0,
+        });
+        await waitUntil(
+            () => fixture.tracker.snapshot({ path: repository, projectId }) !== undefined,
+        );
+        expect(fixture.tracker.snapshot({ path: repository, projectId })).toMatchObject({
             changedFiles: 1,
             comparison: "ready",
             insertions: 2,
@@ -41,26 +54,33 @@ describe("Git state over HTTP", { timeout: 30_000 }, () => {
         expect(fixture.tracker.trackedKeys).toEqual([`project:${projectId}`]);
     });
 
-    it("rescans on demand when the caller asks for a refresh", async () => {
+    it("answers legacy refresh polling from cache without manufacturing a scan", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
         await fixture.get(`/projects/${projectId}/git`);
+        await waitUntil(
+            () => fixture.tracker.snapshot({ path: repository, projectId }) !== undefined,
+        );
 
         await writeFile(join(repository, "new.txt"), "x\ny\nz\n");
         const stale = await fixture.get(`/projects/${projectId}/git`);
         const fresh = await fixture.get(`/projects/${projectId}/git?refresh=1`);
 
         expect(stale.body.git.changedFiles).toBe(0);
-        expect(fresh.body.git.changedFiles).toBe(1);
-        expect(fresh.body.git.insertions).toBe(3);
-        expect(fresh.body.git.version).toBeGreaterThan(stale.body.git.version);
+        expect(fresh.body.git).toEqual(stale.body.git);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(fixture.tracker.snapshot({ path: repository, projectId })).toEqual(stale.body.git);
     });
 
     it("reports a missing project and an unknown workspace separately", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         expect((await fixture.get("/projects/nope/git")).status).toBe(404);
         expect((await fixture.get(`/projects/${projectId}/workspaces/nope/git`)).status).toBe(404);
@@ -70,7 +90,9 @@ describe("Git state over HTTP", { timeout: 30_000 }, () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
 
         const response = await fixture.post("/git/watch", { entities: [{ projectId }] });
 
@@ -83,8 +105,11 @@ describe("Git state over HTTP", { timeout: 30_000 }, () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
         await fixture.get(`/projects/${projectId}/git`);
+        await waitUntil(() => fixture.tracker.liveSnapshots().length === 1);
 
         const watched = await fixture.post("/git/watch", { entities: [{ projectId }] });
 
@@ -99,13 +124,15 @@ describe("Git state over HTTP", { timeout: 30_000 }, () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
         // Background project initialization publishes durable events of its own, so the cursor is
         // only stable once it has settled; capturing before that races it.
         await waitUntil(
             async () =>
-                (await fixture.store.getProject(projectId))?.initializationStatus !==
-                "initializing",
+                (await fixture.store.getProject(createTestRootContext(), projectId))
+                    ?.initializationStatus !== "initializing",
         );
         const cursorBefore = fixture.store.globalEventQueue.cursor();
 
@@ -132,7 +159,9 @@ describe("Git state over HTTP", { timeout: 30_000 }, () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
-        const projectId = (await fixture.store.create({ cwd: repository })).snapshot().projectId!;
+        const projectId = (
+            await fixture.store.create(createTestRootContext(), { cwd: repository })
+        ).snapshot().projectId!;
         await fixture.get(`/projects/${projectId}/git`);
         await waitUntil(() => fixture.tracker.liveSnapshots().length === 1);
 
@@ -175,12 +204,13 @@ async function startServer(): Promise<{
     const root = await mkdtemp(join(tmpdir(), "rig-git-http-"));
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
-    const store = await InMemorySessionStore.open();
+    const store = await InMemorySessionStore.open(createTestRootContext(), {});
     const tracker = new GitStateTracker({
         onLiveEvent: (event) => store.globalEventQueue.publishLive(event),
         tuning: { debounceMs: 1, maximumDebounceMs: 5, reconcileIntervalMs: 60_000 },
+        watch: () => () => {},
     });
-    const server: Server = await createProtocolHttpServer({
+    const server: Server = await createProtocolHttpServer(createTestRootContext(), {
         gitStateTracker: tracker,
         store,
         token: "t",
@@ -195,7 +225,7 @@ async function startServer(): Promise<{
     cleanups.push(async () => {
         tracker.dispose();
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        await store.close();
+        await store.close(createTestRootContext());
         await Promise.all([
             rm(root, { force: true, recursive: true }),
             rm(socketDirectory, { force: true, recursive: true }),

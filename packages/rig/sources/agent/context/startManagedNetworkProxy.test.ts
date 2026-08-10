@@ -1,13 +1,18 @@
 import { createServer } from "node:net";
 import { connect } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HappyNetworkEvent } from "happy-plugins";
 import { PluginNetworkRegistry } from "../../plugins/PluginNetworkRegistry.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { isNonPublicAddress, startManagedNetworkProxy } from "./startManagedNetworkProxy.js";
 
 const closeables: Array<{ close(): Promise<void> | void }> = [];
+
+beforeEach(() => {
+    createTestRootContext();
+});
 
 afterEach(async () => {
     await Promise.all(closeables.splice(0).map((value) => value.close()));

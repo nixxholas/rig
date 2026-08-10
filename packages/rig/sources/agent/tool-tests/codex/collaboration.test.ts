@@ -4,6 +4,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { ManagedSubagent, SpawnSubagentRequest } from "../../index.js";
 import { claudeSendMessageTool } from "../../tools/claude/SendMessage.js";
 import { createJustBashToolHarness } from "../../../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { codexV1Tools, codexV2Tools } from "../../tools/codex/assembleCodexTools.js";
 import { codexV1SpawnAgentTool } from "../../tools/codex/v1/spawn_agent.js";
 import { codexV1WaitAgentTool } from "../../tools/codex/v1/wait_agent.js";
@@ -15,6 +16,8 @@ import { codexSpawnAgentTool } from "../../tools/codex/v2/spawn_agent.js";
 import { codexExtendedFollowupTaskTool } from "../../tools/codex/v2/collaboration_ext/followup_task.js";
 import { codexExtendedSpawnAgentTool } from "../../tools/codex/v2/collaboration_ext/spawn_agent.js";
 import { codexWaitAgentTool } from "../../tools/codex/v2/wait_agent.js";
+
+const ctx = createTestRootContext();
 
 describe("Codex collaboration tools", () => {
     it("keeps plaintext v1 and encrypted v2 as separate fixed arrays", () => {
@@ -85,7 +88,7 @@ describe("Codex collaboration tools", () => {
                     task_name: "inspect_code",
                 },
                 harness.context,
-                { toolCallId: "tool-1" },
+                { ctx, toolCallId: "tool-1" },
             ),
         ).resolves.toEqual({
             agent_id: "unguessable-agent-1",
@@ -109,7 +112,7 @@ describe("Codex collaboration tools", () => {
             codexFollowupTaskTool.execute(
                 { message: "Check the tests too.", target: "unguessable-agent-1" },
                 harness.context,
-                {},
+                { ctx },
             ),
         ).resolves.toEqual({
             agent_id: "unguessable-agent-1",
@@ -126,7 +129,7 @@ describe("Codex collaboration tools", () => {
                     to: "/root/inspect_code",
                 },
                 harness.context,
-                {},
+                { ctx },
             ),
         ).resolves.toEqual({
             agentId: "unguessable-agent-1",
@@ -139,7 +142,7 @@ describe("Codex collaboration tools", () => {
             "Review the final diff.",
             "low",
         );
-        expect(codexListAgentsTool.execute({}, harness.context, {})).toEqual({
+        expect(codexListAgentsTool.execute({}, harness.context, { ctx })).toEqual({
             agents: [
                 {
                     agent_id: "unguessable-agent-1",
@@ -149,14 +152,16 @@ describe("Codex collaboration tools", () => {
             ],
         });
         await expect(
-            codexInterruptAgentTool.execute({ target: "unguessable-agent-1" }, harness.context, {}),
+            codexInterruptAgentTool.execute({ target: "unguessable-agent-1" }, harness.context, {
+                ctx,
+            }),
         ).resolves.toEqual({
             agent_id: "unguessable-agent-1",
             path: "/root/inspect_code",
             previous_status: "running",
         });
         await expect(
-            codexWaitAgentTool.execute({ timeout_ms: 300_000 }, harness.context, {}),
+            codexWaitAgentTool.execute({ timeout_ms: 300_000 }, harness.context, { ctx }),
         ).resolves.toEqual({
             agents: [
                 {
@@ -190,7 +195,7 @@ describe("Codex collaboration tools", () => {
             }),
         };
 
-        await codexWaitAgentTool.execute({}, harness.context, {});
+        await codexWaitAgentTool.execute({}, harness.context, { ctx });
 
         expect(requestedTimeout).toBe(3_600_000);
         expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 30_000 })).toBe(false);
@@ -223,7 +228,7 @@ describe("Codex collaboration tools", () => {
         };
 
         await expect(
-            codexInterruptAgentTool.execute({ target: "stable-target" }, harness.context, {}),
+            codexInterruptAgentTool.execute({ target: "stable-target" }, harness.context, { ctx }),
         ).resolves.toEqual({
             agent_id: "stable-target",
             path: "/root/identified",
@@ -321,6 +326,7 @@ describe("Codex collaboration tools", () => {
                 },
                 harness.context,
                 {
+                    ctx,
                     messages: [parentMessage, currentAgentMessage],
                     signal,
                     toolCallId: "tool-ext",
@@ -355,7 +361,7 @@ describe("Codex collaboration tools", () => {
                     target: "/root/review_claude",
                 },
                 harness.context,
-                {},
+                { ctx },
             ),
         ).resolves.toEqual({
             agent_id: "unguessable-agent-claude",
@@ -410,7 +416,7 @@ describe("Codex collaboration tools", () => {
                 task_name: "inspect_code",
             },
             harness.context,
-            { toolCallId: "tool-1" },
+            { ctx, toolCallId: "tool-1" },
         );
         expect(spawn).toHaveBeenCalledWith(
             expect.objectContaining({
@@ -428,7 +434,7 @@ describe("Codex collaboration tools", () => {
                 target: "unguessable-agent-1",
             },
             harness.context,
-            {},
+            { ctx },
         );
         expect(setReadOnly).toHaveBeenCalledWith("unguessable-agent-1", true);
         expect(followUp).toHaveBeenCalledWith(
@@ -445,7 +451,7 @@ describe("Codex collaboration tools", () => {
                 target: "/root/inspect_code",
             },
             harness.context,
-            {},
+            { ctx },
         );
         expect(setReadOnly).toHaveBeenLastCalledWith("/root/inspect_code", false);
         expect(sendMessage).toHaveBeenCalledWith(
@@ -504,7 +510,7 @@ describe("Codex collaboration tools", () => {
                     service_tier: "priority",
                 },
                 harness.context,
-                { toolCallId: "tool-v1" },
+                { ctx, toolCallId: "tool-v1" },
             ),
         ).resolves.toEqual({
             agent_id: "unguessable-agent-1",
@@ -555,7 +561,7 @@ describe("Codex collaboration tools", () => {
             codexV1WaitAgentTool.execute(
                 { targets: ["unguessable-target"], timeout_ms: 30_000 },
                 harness.context,
-                {},
+                { ctx },
             ),
         ).resolves.toEqual({
             agents: [

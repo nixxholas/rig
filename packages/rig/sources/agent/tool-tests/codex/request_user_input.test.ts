@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createJustBashToolHarness } from "../../../tools/testing/createJustBashToolHarness.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
 import { codexRequestUserInputTool } from "../../tools/codex/request_user_input.js";
+
+const ctx = createTestRootContext();
 
 describe("Codex request_user_input tool", () => {
     it("pauses for a structured answer and returns Codex's answer shape", async () => {
@@ -27,6 +30,7 @@ describe("Codex request_user_input tool", () => {
             { autoResolutionMs: 60_000, questions },
             harness.context,
             {
+                ctx,
                 toolBatchId: "batch-1",
                 toolCallId: "call-1",
                 toolCallIndex: 0,

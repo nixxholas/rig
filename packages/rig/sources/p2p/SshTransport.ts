@@ -1,5 +1,7 @@
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 
+import type { Context } from "@steve.kite/stdlib";
+
 import type { P2pPeerStatus, P2pTransportStatus } from "../protocol/P2pProtocol.js";
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import {
@@ -149,106 +151,116 @@ export class SshTransport implements P2pTransport {
         await Promise.resolve();
     }
 
+    peerApiAvailable(peerId: string): boolean {
+        return this.#peerById.has(peerId);
+    }
+
     async fetch(
+        ctx: Context,
         peerId: string,
         request: P2pHttpRequest,
         signal: AbortSignal,
     ): Promise<P2pHttpResponse> {
-        const peer = this.#peerById.get(peerId);
-        if (peer === undefined) throw new Error("That peer has no configured SSH bridge.");
-        const startedAt = Date.now();
-        const channel = await this.#openAuthenticatedChannel(peer, signal);
-        const release = () => {
-            signal.removeEventListener("abort", release);
-            this.#releaseChannel(channel);
-        };
-        if (signal.aborted) {
-            release();
-            throw new Error("The SSH P2P request was cancelled.");
-        }
-        signal.addEventListener("abort", release, { once: true });
-        try {
-            await writeBytes(channel.duplex.send, Uint8Array.of(SSH_OPERATION_HTTP));
-            await withDeadline(
-                writeP2pHttpRequest(channel.duplex.send, request),
-                REQUEST_TIMEOUT_MS,
-                "The SSH P2P request took too long to send.",
-                () => channel.close(),
-            );
-            const response = await withDeadline(
-                readP2pHttpResponse(channel.duplex.recv, release),
-                RESPONSE_HEAD_TIMEOUT_MS,
-                "The SSH P2P bridge did not return response headers in time.",
-                () => channel.close(),
-            );
-            this.#setPeerStatus(peer, "connected", {
-                lastSeenAt: Date.now(),
-                rttMs: Date.now() - startedAt,
-            });
-            return response;
-        } catch (error) {
-            release();
-            this.#setPeerStatus(peer, "unreachable", {
-                error: describeFailure(error, channel),
-            });
-            throw error;
-        }
+        return await ctx.span("rig.p2p.ssh.fetch", async () => {
+            const peer = this.#peerById.get(peerId);
+            if (peer === undefined) throw new Error("That peer has no configured SSH bridge.");
+            const startedAt = Date.now();
+            const channel = await this.#openAuthenticatedChannel(peer, signal);
+            const release = () => {
+                signal.removeEventListener("abort", release);
+                this.#releaseChannel(channel);
+            };
+            if (signal.aborted) {
+                release();
+                throw new Error("The SSH P2P request was cancelled.");
+            }
+            signal.addEventListener("abort", release, { once: true });
+            try {
+                await writeBytes(channel.duplex.send, Uint8Array.of(SSH_OPERATION_HTTP));
+                await withDeadline(
+                    writeP2pHttpRequest(channel.duplex.send, request),
+                    REQUEST_TIMEOUT_MS,
+                    "The SSH P2P request took too long to send.",
+                    () => channel.close(),
+                );
+                const response = await withDeadline(
+                    readP2pHttpResponse(channel.duplex.recv, release),
+                    RESPONSE_HEAD_TIMEOUT_MS,
+                    "The SSH P2P bridge did not return response headers in time.",
+                    () => channel.close(),
+                );
+                this.#setPeerStatus(peer, "connected", {
+                    lastSeenAt: Date.now(),
+                    rttMs: Date.now() - startedAt,
+                });
+                return response;
+            } catch (error) {
+                release();
+                this.#setPeerStatus(peer, "unreachable", {
+                    error: describeFailure(error, channel),
+                });
+                throw error;
+            }
+        });
     }
 
     async openTunnel(
+        ctx: Context,
         peerId: string,
         request: P2pTunnelRequestHead,
         signal: AbortSignal,
     ): Promise<P2pTunnelConnection> {
-        const peer = this.#peerById.get(peerId);
-        if (peer === undefined) throw new Error("That peer has no configured SSH bridge.");
-        const startedAt = Date.now();
-        const channel = await this.#openAuthenticatedChannel(peer, signal);
-        const release = () => {
-            signal.removeEventListener("abort", release);
-            this.#releaseChannel(channel);
-        };
-        if (signal.aborted) {
-            release();
-            throw new Error("The SSH P2P tunnel was cancelled.");
-        }
-        signal.addEventListener("abort", release, { once: true });
-        try {
-            await writeBytes(channel.duplex.send, Uint8Array.of(SSH_OPERATION_TUNNEL));
-            await withDeadline(
-                writeP2pTunnelRequest(channel.duplex.send, request),
-                REQUEST_TIMEOUT_MS,
-                "The SSH P2P tunnel request took too long to send.",
-                () => channel.close(),
-            );
-            const response = await withDeadline(
-                readP2pTunnelResponse(channel.duplex.recv),
-                RESPONSE_HEAD_TIMEOUT_MS,
-                "The SSH P2P bridge did not return tunnel response headers in time.",
-                () => channel.close(),
-            );
-            if (response.status !== (request.method === "GET" ? 101 : 200)) {
-                release();
-                return { response, stream: createClosedP2pTunnelStream() };
-            }
-            this.#setPeerStatus(peer, "connected", {
-                lastSeenAt: Date.now(),
-                rttMs: Date.now() - startedAt,
-            });
-            return {
-                response,
-                stream: createP2pTunnelStream(channel.duplex, {
-                    close: release,
-                    signal,
-                }),
+        return await ctx.span("rig.p2p.ssh.openTunnel", async () => {
+            const peer = this.#peerById.get(peerId);
+            if (peer === undefined) throw new Error("That peer has no configured SSH bridge.");
+            const startedAt = Date.now();
+            const channel = await this.#openAuthenticatedChannel(peer, signal);
+            const release = () => {
+                signal.removeEventListener("abort", release);
+                this.#releaseChannel(channel);
             };
-        } catch (error) {
-            release();
-            this.#setPeerStatus(peer, "unreachable", {
-                error: describeFailure(error, channel),
-            });
-            throw error;
-        }
+            if (signal.aborted) {
+                release();
+                throw new Error("The SSH P2P tunnel was cancelled.");
+            }
+            signal.addEventListener("abort", release, { once: true });
+            try {
+                await writeBytes(channel.duplex.send, Uint8Array.of(SSH_OPERATION_TUNNEL));
+                await withDeadline(
+                    writeP2pTunnelRequest(channel.duplex.send, request),
+                    REQUEST_TIMEOUT_MS,
+                    "The SSH P2P tunnel request took too long to send.",
+                    () => channel.close(),
+                );
+                const response = await withDeadline(
+                    readP2pTunnelResponse(channel.duplex.recv),
+                    RESPONSE_HEAD_TIMEOUT_MS,
+                    "The SSH P2P bridge did not return tunnel response headers in time.",
+                    () => channel.close(),
+                );
+                if (response.status !== (request.method === "GET" ? 101 : 200)) {
+                    release();
+                    return { response, stream: createClosedP2pTunnelStream() };
+                }
+                this.#setPeerStatus(peer, "connected", {
+                    lastSeenAt: Date.now(),
+                    rttMs: Date.now() - startedAt,
+                });
+                return {
+                    response,
+                    stream: createP2pTunnelStream(channel.duplex, {
+                        close: release,
+                        signal,
+                    }),
+                };
+            } catch (error) {
+                release();
+                this.#setPeerStatus(peer, "unreachable", {
+                    error: describeFailure(error, channel),
+                });
+                throw error;
+            }
+        });
     }
 
     /** Opens a bridge, runs the signed hello, and leaves the channel ready for an operation. */

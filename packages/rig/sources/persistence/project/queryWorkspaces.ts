@@ -1,16 +1,18 @@
+import type { Context } from "@steve.kite/stdlib";
+
 import { inDatabase } from "../database/inDatabase.js";
 import { asc, eq, getTableColumns } from "drizzle-orm";
 
 import type { ProjectWorkspace } from "../../protocol/index.js";
 import { projects, projectWorkspaces } from "../database/schema.js";
-import type { DatabaseScope } from "../Transaction.js";
 import { workspaceReadRow } from "./impl/workspaceReadRow.js";
 
 export async function queryWorkspaces(
-    tx: DatabaseScope,
+    ctx: Context,
     projectId?: string,
 ): Promise<readonly ProjectWorkspace[]> {
-    return await inDatabase(tx, async (tx) => {
+    return await inDatabase(ctx, "rig.sql.project.queryWorkspaces", async (ctx) => {
+        const tx = ctx.tx;
         const rows =
             projectId === undefined
                 ? await tx

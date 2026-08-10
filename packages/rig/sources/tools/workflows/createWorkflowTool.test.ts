@@ -66,7 +66,7 @@ describe("createWorkflowTool", () => {
                 ].join("\n"),
             },
             harness.context,
-            { messages: parentMessages },
+            { ctx: harness.ctx, messages: parentMessages },
         );
 
         await launchRequest!.execute({
