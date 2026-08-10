@@ -6,6 +6,7 @@ import { NativeProcessManager } from "../processes/index.js";
 import {
     modelAnthropicFable5,
     modelAnthropicOpus5,
+    modelAnthropicSonnet5,
     modelOpenaiGpt56Luna,
     modelOpenaiGpt56Sol,
     modelXaiGrok45,
@@ -128,6 +129,12 @@ describe("createCodingAssistantAgent", () => {
 
         expect(runtime.executor.id).toBe("claude");
         expect(runtime.agent.model.id).toBe(modelAnthropicFable5.id);
+        expect(runtime.executor.reviewerModelFor?.(modelAnthropicFable5)).toEqual(
+            modelAnthropicSonnet5,
+        );
+        expect(runtime.executor.reviewerModelFor?.(modelAnthropicOpus5)).toEqual(
+            modelAnthropicSonnet5,
+        );
         expect(runtime.agent.tools.map((tool) => tool.name)).toEqual([
             "TaskOutput",
             "Bash",

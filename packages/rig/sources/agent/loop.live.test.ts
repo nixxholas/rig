@@ -504,7 +504,7 @@ describe("agent loop live", () => {
                                       type: "toolCall",
                                       id: "call-duplicate",
                                       name: "send",
-                                      arguments: { message: "One delivery.", target: "agent-1" },
+                                      arguments: { target: "agent-1", message: "One delivery." },
                                   },
                               ],
                               "toolUse",

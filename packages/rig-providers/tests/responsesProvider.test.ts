@@ -174,6 +174,37 @@ describe("ResponsesProvider", () => {
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
     });
 
+    it("preserves a completed response that requests another inference", async () => {
+        const provider = new ResponsesProvider({
+            apiKey: "test-key",
+            endpoint: "https://responses.example/v1",
+            model: "open-model",
+            fetch: async () =>
+                sseResponse([
+                    {
+                        type: "response.completed",
+                        response: {
+                            id: "response-continue",
+                            end_turn: false,
+                            output: [],
+                        },
+                    },
+                ]),
+        });
+        const session = await provider.session("responses-end-turn", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events = await collectSessionEvents(
+            session.run({
+                context: { messages: [{ role: "user", content: "Keep working." }] },
+            }),
+        );
+
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal", endTurn: false });
+    });
+
     it("runs the standard Responses SSE protocol with configured endpoint and model", async () => {
         let requestBody: unknown;
         const provider = new ResponsesProvider({

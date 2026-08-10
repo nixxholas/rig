@@ -207,6 +207,48 @@ describe("Codex response items", () => {
         expect(getCodexIncrementalInput(previousRequest, responseItems, rebuilt)).toBeUndefined();
     });
 
+    it("keeps GPT continuation incremental after executor argument normalization", () => {
+        const user = { type: "message", role: "user", content: "Read it." };
+        const functionCall = {
+            type: "function_call",
+            call_id: "call-1",
+            name: "Read",
+            arguments: '{"file_path": "/tmp/input"}',
+        };
+        const previousRequest = { model: "gpt-5.6-sol", input: [user] };
+        const rebuilt = {
+            model: "gpt-5.6-sol",
+            input: toOpenAIResponseInput({
+                instructions: "instructions",
+                messages: [
+                    { role: "user", content: "Read it." },
+                    {
+                        role: "assistant",
+                        content: "",
+                        responseItems: [JSON.stringify(functionCall)],
+                        toolCalls: [
+                            {
+                                callId: "call-1",
+                                name: "Read",
+                                arguments: '{"file_path":"/tmp/input"}',
+                            },
+                        ],
+                    },
+                    { role: "tool", callId: "call-1", content: "done" },
+                ],
+            }),
+        };
+
+        expect(rebuilt.input[1]).toEqual(functionCall);
+        expect(getCodexIncrementalInput(previousRequest, [functionCall], rebuilt)).toEqual([
+            {
+                type: "function_call_output",
+                call_id: "call-1",
+                output: "done",
+            },
+        ]);
+    });
+
     /**
      * What a search the provider ran costs the turn after it.
      *

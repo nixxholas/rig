@@ -140,6 +140,34 @@ describe("createExecutorInferenceStream", () => {
         expect(result.contextTokens).toBeUndefined();
     });
 
+    it("preserves a provider request to continue after a completed response", async () => {
+        const executor = {
+            run: async function* () {
+                yield { type: "done", state: "normal", endTurn: false } as const;
+            },
+        } as unknown as Executor;
+        const stream = createExecutorInferenceStream({
+            context: { messages: [] },
+            executor,
+            model: defineModel({
+                id: "openai/test",
+                name: "Test",
+                thinkingLevels: ["off"],
+                defaultThinkingLevel: "off",
+            }),
+            providerId: "codex",
+        });
+
+        for await (const _event of stream) {
+            // Consume the stream as the agent loop does.
+        }
+
+        await expect(stream.result()).resolves.toMatchObject({
+            endTurn: false,
+            stopReason: "stop",
+        });
+    });
+
     it("records the latest inference usage as both usage and occupied context", async () => {
         const executor = {
             run: async function* () {

@@ -1,5 +1,10 @@
 import { createInferenceStream } from "@slopus/rig-execution";
-import { defineProvider, type Provider, type StreamOptions } from "@slopus/rig-execution";
+import {
+    defineProvider,
+    type Model,
+    type Provider,
+    type StreamOptions,
+} from "@slopus/rig-execution";
 import type { DebugLog } from "./DebugLog.js";
 
 export interface CreateDebugProviderOptions {
@@ -23,6 +28,9 @@ export function createDebugProvider(
         ...(provider.type === undefined ? {} : { type: provider.type }),
         models: provider.models,
         ...(provider.reviewerModel === undefined ? {} : { reviewerModel: provider.reviewerModel }),
+        ...(provider.reviewerModelFor === undefined
+            ? {}
+            : { reviewerModelFor: (model: Model) => provider.reviewerModelFor?.(model) }),
         ...(provider.serviceTiers === undefined ? {} : { serviceTiers: provider.serviceTiers }),
         ...(compact === undefined
             ? {}

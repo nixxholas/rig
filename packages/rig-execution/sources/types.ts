@@ -343,6 +343,8 @@ export interface Provider {
     readonly models: readonly Model[];
     /** Dedicated Auto permission review model, when this provider ships one. */
     readonly reviewerModel?: Model | undefined;
+    /** Selects an Auto permission review model for the active conversation model. */
+    reviewerModelFor?(model: Model): Model | undefined;
     /** Independent provider context for a separate agent workflow. */
     isolate?(label: string): Provider;
     selectProvider?(providerId: string): void;

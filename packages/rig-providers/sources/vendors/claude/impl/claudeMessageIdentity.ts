@@ -30,7 +30,7 @@ function toIdentity(message: SessionMessage): unknown {
             toolCalls: (message.toolCalls ?? []).map((call) => [
                 call.callId,
                 call.name,
-                call.arguments,
+                normalizeArguments(call.arguments),
             ]),
         };
     }
@@ -51,4 +51,12 @@ function toIdentity(message: SessionMessage): unknown {
         content: message.content,
         input: message.role === "user" ? message.input : undefined,
     };
+}
+
+function normalizeArguments(argumentsJson: string): string {
+    try {
+        return JSON.stringify(JSON.parse(argumentsJson));
+    } catch {
+        return argumentsJson;
+    }
 }

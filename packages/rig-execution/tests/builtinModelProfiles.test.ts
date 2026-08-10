@@ -34,14 +34,23 @@ describe("builtinModelProfiles", () => {
         expect(opus5).not.toBe(opus48);
     });
 
-    it("hides a dedicated review model behind Codex and reviews Bedrock on GPT-5.4", () => {
+    it("uses Sonnet to review Opus and Fable while preserving dedicated reviewers", () => {
         const codex = builtinModelProfiles("codex", "codex");
+        const claude = builtinModelProfiles("claude", "claude");
         const bedrock = builtinModelProfiles("bedrock", "bedrock");
 
         expect(reviewerModelForProvider(codex)?.id).toBe("openai/codex-auto-review");
         expect(reviewerModelForProvider(bedrock)?.id).toBe("openai/gpt-5.4");
-        expect(reviewerModelForProvider(builtinModelProfiles("claude", "claude"))).toBeUndefined();
+        expect(reviewerModelForProvider(claude)).toBeUndefined();
         expect(reviewerModelForProvider(builtinModelProfiles("grok", "grok"))).toBeUndefined();
+        for (const activeModelId of ["anthropic/opus-5", "anthropic/fable-5"]) {
+            expect(reviewerModelForProvider(claude, activeModelId)?.id).toBe(
+                "anthropic/sonnet-5",
+            );
+            expect(reviewerModelForProvider(bedrock, activeModelId)?.id).toBe(
+                "anthropic/sonnet-5",
+            );
+        }
         expect(
             codex.find((profile) => profile.id === "openai/codex-auto-review")?.defaultEffort,
         ).toBe("low");

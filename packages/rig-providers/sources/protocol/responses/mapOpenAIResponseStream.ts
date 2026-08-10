@@ -19,6 +19,10 @@ import { responseStreamError } from "@/protocol/responses/responseStreamError.js
 /** Call-id prefix the provider puts on searches it ran itself; client calls never carry it. */
 const HOSTED_SEARCH_CALL_PREFIX = "xs_";
 
+const completedResponseExtensionSchema = Type.Object({
+    end_turn: Type.Optional(Type.Boolean()),
+});
+
 interface ActiveOutputItem {
     callId?: string;
     name?: string;
@@ -643,10 +647,19 @@ export async function* mapOpenAIResponseStream(
                     )) || sawToolUse;
                 usage = toSessionCacheUsage(event.response.usage);
                 outputTokensReported = hasReportedOutputTokens(event.response.usage);
+                const completedResponse = Value.Check(
+                    completedResponseExtensionSchema,
+                    event.response,
+                )
+                    ? event.response
+                    : undefined;
                 yield { type: "token_usage", usage };
                 yield {
                     type: "done",
                     state: sawToolUse ? "tool_call" : "normal",
+                    ...(!sawToolUse && completedResponse?.end_turn !== undefined
+                        ? { endTurn: completedResponse.end_turn }
+                        : {}),
                 };
                 return {
                     assistantText,

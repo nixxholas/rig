@@ -289,6 +289,9 @@ async function* streamExecutorInference(options: {
             partial = {
                 ...partial,
                 ...(responseItems.length === 0 ? {} : { responseItems: [...responseItems] }),
+                ...(event.state === "normal" && event.endTurn !== undefined
+                    ? { endTurn: event.endTurn }
+                    : {}),
                 stopReason:
                     event.state === "cancelled"
                         ? "aborted"

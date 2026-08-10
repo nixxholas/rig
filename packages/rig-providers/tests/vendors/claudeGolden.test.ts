@@ -192,7 +192,7 @@ describe("Claude provider golden", () => {
                 // reminder. Its recovery pass can also attach post-tool assistant text
                 // either side of the tool-result message; normalize that equivalent
                 // transcript shape explicitly.
-                normalize(exchange.request.body, cwd),
+                withOneHourCacheTtl(normalize(exchange.request.body, cwd)),
             ),
         );
         expect(golden.source).toEqual({
@@ -305,6 +305,7 @@ function normalize(value: unknown, cwd: string): unknown {
                 .replaceAll(home, "<HOME>")
                 .replaceAll(homeRelativeCwd, "<WORKSPACE>")
                 .replaceAll(SDK_DEFAULT_WORKSPACE_SLUG, "<WORKSPACE_SLUG>")
+                .replace(/cc_version=[^;]+;/gu, "cc_version=<CLAUDE_CODE_VERSION>;")
                 .replace(
                     /(?:\/tmp|\/var\/folders\/[^/\s"]+\/[^/\s"]+\/T)(?=\/claude-resume-)/gu,
                     "<TMP>",
@@ -351,6 +352,24 @@ function normalize(value: unknown, cwd: string): unknown {
         return item;
     };
     return visit(value);
+}
+
+function withOneHourCacheTtl(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(withOneHourCacheTtl);
+    if (value === null || typeof value !== "object") return value;
+    const projected = Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [key, withOneHourCacheTtl(child)]),
+    );
+    const cacheControl = projected.cache_control;
+    if (
+        cacheControl !== null &&
+        typeof cacheControl === "object" &&
+        "type" in cacheControl &&
+        cacheControl.type === "ephemeral"
+    ) {
+        projected.cache_control = { ...cacheControl, ttl: "1h" };
+    }
+    return projected;
 }
 
 function normalizeRecoveredToolText(messages: any[]): any[] {

@@ -45,6 +45,7 @@ describe("createDebugProvider", () => {
                 });
             },
         });
+        provider.reviewerModelFor = vi.fn(() => model);
         const record = vi.fn(async () => {
             throw new Error("debug storage unavailable");
         });
@@ -62,6 +63,8 @@ describe("createDebugProvider", () => {
         expect(events).toEqual([{ message, reason: "stop", type: "done" }]);
         expect(record).toHaveBeenCalledTimes(3);
         expect(debugProvider.extendProfilePromptContext).toBe(extendProfilePromptContext);
+        expect(debugProvider.reviewerModelFor?.(model)).toBe(model);
+        expect(provider.reviewerModelFor).toHaveBeenCalledWith(model);
     });
 
     it("preserves provider-owned compaction", async () => {

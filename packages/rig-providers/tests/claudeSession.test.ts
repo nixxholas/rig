@@ -1353,6 +1353,7 @@ describe("ClaudeSession", () => {
             CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
             CLAUDE_CODE_MAX_RETRIES: "10",
             DISABLE_AUTO_COMPACT: "1",
+            ENABLE_PROMPT_CACHING_1H: "1",
         });
         expect(options?.env).not.toHaveProperty("ANTHROPIC_API_KEY");
         expect(options?.env).not.toHaveProperty("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR");
@@ -1567,7 +1568,7 @@ describe("ClaudeSession", () => {
         expect(textFromSessionEvents(events)).toBe("CONTINUED");
     });
 
-    it("keeps one live query when a tool result completes the batch it generated", async () => {
+    it("keeps one live query when the executor normalizes tool argument JSON", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const query = vi.fn<ClaudeSdkQuery>(() => fakeLiveToolLoopQuery("CONTINUED"));
@@ -2047,7 +2048,7 @@ function fakeToolCallQuery(close: () => void): ReturnType<ClaudeSdkQuery> {
                 index: 0,
                 delta: {
                     type: "input_json_delta",
-                    partial_json: '{"command":"echo done"}',
+                    partial_json: '{"command": "echo done"}',
                 },
             },
             parent_tool_use_id: null,

@@ -26,6 +26,7 @@ describe("routeProviderThroughGym", () => {
                 throw new Error("Native inference should be replaced.");
             },
         });
+        native.reviewerModelFor = vi.fn(() => model);
 
         const routed = routeProviderThroughGym(native, {
             RIG_GYM_INFERENCE_URL: "https://gym.test/inference",
@@ -38,5 +39,7 @@ describe("routeProviderThroughGym", () => {
         expect(routed.type).toBe("codex");
         expect(routed.models).toEqual([model]);
         expect(routed.extendProfilePromptContext).toBe(extendProfilePromptContext);
+        expect(routed.reviewerModelFor?.(model)).toBe(model);
+        expect(native.reviewerModelFor).toHaveBeenCalledWith(model);
     });
 });

@@ -1825,7 +1825,7 @@ async function executeToolCall(
 /** One externally visible action, independent of provider-generated call ids. */
 function sameBatchToolAction(toolCall: ProviderToolCall): string {
     try {
-        return JSON.stringify([
+        return canonicalJson([
             toolCall.name,
             toolCall.namespace ?? null,
             toolCall.kind ?? null,
@@ -1837,6 +1837,19 @@ function sameBatchToolAction(toolCall: ProviderToolCall): string {
         // guessing that two opaque values describe the same action.
         return toolCall.id;
     }
+}
+
+function canonicalJson(value: unknown): string {
+    const serialized = JSON.stringify(value, (_key, entry: unknown) => {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return entry;
+        return Object.fromEntries(
+            Object.entries(entry as Record<string, unknown>).sort(([left], [right]) =>
+                left < right ? -1 : left > right ? 1 : 0,
+            ),
+        );
+    });
+    if (serialized === undefined) throw new Error("Tool arguments are not JSON.");
+    return serialized;
 }
 
 /** Reuses one execution result while answering every provider call it represents. */

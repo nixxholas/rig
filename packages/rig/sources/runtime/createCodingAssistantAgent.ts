@@ -386,7 +386,7 @@ export function createCodingAssistantAgent(
             createPermissionReviewSideAgent({
                 context: createPermissionReviewContext(),
                 id: `${agentId}:auto-reviewer`,
-                model: provider.reviewerModel ?? model,
+                model: provider.reviewerModelFor?.(model) ?? provider.reviewerModel ?? model,
                 provider,
                 readSecurityPolicy: async () => {
                     const [globalPolicy, projectPolicy] = await Promise.all([

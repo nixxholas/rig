@@ -116,6 +116,10 @@ export class Executor {
         return reviewerModelForProvider(this.selectedProvider.profiles);
     }
 
+    reviewerModelFor(model: Model): Model | undefined {
+        return reviewerModelForProvider(this.selectedProvider.profiles, model.id);
+    }
+
     get serviceTiers(): readonly ServiceTier[] | undefined {
         return this.selectedProvider.serviceTiers;
     }
@@ -420,7 +424,7 @@ export class Executor {
         if (this.forceClosed) throw new Error("The executor is closed.");
         const clientTools = filterProviderCompatibleSessionTools(tools);
         const provider = this.providersById.get(profile.providerId)!;
-        const toolsKey = JSON.stringify(clientTools);
+        const toolsKey = canonicalJson(clientTools);
         if (
             this.active !== undefined &&
             this.active.profile.providerId === profile.providerId &&
@@ -527,6 +531,19 @@ export class Executor {
     private get selectedProvider(): ExecutorProvider {
         return this.providersById.get(this.selectedProviderId)!;
     }
+}
+
+function canonicalJson(value: unknown): string {
+    const serialized = JSON.stringify(value, (_key, entry: unknown) => {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return entry;
+        return Object.fromEntries(
+            Object.entries(entry as Record<string, unknown>).sort(([left], [right]) =>
+                left < right ? -1 : left > right ? 1 : 0,
+            ),
+        );
+    });
+    if (serialized === undefined) throw new Error("Executor configuration is not JSON.");
+    return serialized;
 }
 
 function nativeKey(provider: ExecutorProvider, profile: ExecutorModelProfile): string {

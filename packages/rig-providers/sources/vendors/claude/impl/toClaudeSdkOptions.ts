@@ -61,6 +61,8 @@ export function toClaudeSdkOptions(options: {
             CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
             CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
             CLAUDE_CODE_MAX_RETRIES: String(options.maxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES),
+            // Match Claude Code's normal one-hour prompt-cache lifetime deterministically.
+            ENABLE_PROMPT_CACHING_1H: "1",
             ...(toolSearchEnabled ? { ENABLE_TOOL_SEARCH: "true" } : {}),
         },
         extraArgs: options.compaction ? {} : { "disable-slash-commands": null },

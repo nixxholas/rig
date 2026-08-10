@@ -283,6 +283,48 @@ describe("Executor", () => {
         expect(native.options[1]?.tools?.map((candidate) => candidate.name)).toEqual(["write"]);
     });
 
+    it("keeps the native session when tool schema object keys are reordered", async () => {
+        const native = new RecordingProvider();
+        const executor = new Executor(
+            [
+                {
+                    id: "codex",
+                    native,
+                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
+                },
+            ],
+            { environment: TEST_ENVIRONMENT },
+        );
+        const properties = {
+            path: { type: "string" },
+            offset: { type: "number" },
+        };
+        const first = {
+            type: "object",
+            properties,
+            required: ["path", "offset"],
+            additionalProperties: false,
+        };
+        const reordered = {
+            additionalProperties: false,
+            required: ["path", "offset"],
+            properties: { offset: properties.offset, path: properties.path },
+            type: "object",
+        };
+
+        for (const parameters of [first, reordered]) {
+            await collect(
+                executor.run({
+                    context: { messages: [] },
+                    selection: { modelId: "openai/sol", providerId: "codex" },
+                    tools: [{ ...tool("read"), parameters: parameters as never }],
+                }),
+            );
+        }
+
+        expect(native.sessions).toHaveLength(1);
+    });
+
     it("replaces only the execution-owned base prompt", async () => {
         const native = new RecordingProvider();
         const executor = new Executor(

@@ -70,5 +70,8 @@ export function routeProviderThroughGym(
         ...(provider.selectProvider === undefined
             ? {}
             : { selectProvider: provider.selectProvider.bind(provider) }),
+        ...(provider.reviewerModelFor === undefined
+            ? {}
+            : { reviewerModelFor: provider.reviewerModelFor.bind(provider) }),
     };
 }

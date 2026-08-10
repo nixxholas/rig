@@ -48,7 +48,7 @@ export type SessionEvent =
     | { type: "retrying"; attempt: number; reason: string }
     | { type: "token_usage"; usage: SessionCacheUsage }
     | { type: "done"; state: "cancelled" }
-    | { type: "done"; state: "normal" }
+    | { type: "done"; state: "normal"; endTurn?: boolean }
     | { type: "done"; state: "tool_call" }
     | { type: "done"; state: "length" }
     | {
