@@ -554,6 +554,15 @@ describe("ChatStore", () => {
                         thumbhash: "AQID",
                         width: 30,
                     },
+                    {
+                        description: "Credentials used to publish releases.",
+                        environmentVariables: ["NPM_TOKEN"],
+                        id: "secret-request-1",
+                        instructions: "Create an npm access token with publish permission.",
+                        kind: "secret_request",
+                        operation: "create",
+                        secretId: "npm-publishing",
+                    },
                 ],
                 modelLocked: false,
                 runId: "run-1",
@@ -567,6 +576,16 @@ describe("ChatStore", () => {
             "group_end",
         ]);
         expect(store.elements()[1]).toMatchObject({
+            attachments: [
+                { id: "image-1", kind: "image" },
+                {
+                    environmentVariables: ["NPM_TOKEN"],
+                    id: "secret-request-1",
+                    kind: "secret_request",
+                    operation: "create",
+                    secretId: "npm-publishing",
+                },
+            ],
             kind: "agent_attachments",
             messageId: "m1",
         });

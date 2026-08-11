@@ -84,10 +84,12 @@ export type {
     SendMessageInput,
     SessionFinished,
     SecretAttachmentScope,
+    SecretOperationOptions,
     ShellCommandInput,
     TerminalPresence,
     UserInputAnswers,
 } from "./connectRig.js";
+export type { SecretRegistration, SecretSummary, SecretUpdate } from "./protocol.js";
 export {
     PluginAppRequestError,
     PluginCatalogRequestError,

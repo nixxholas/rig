@@ -2,10 +2,13 @@ import { Type, type Static } from "@sinclair/typebox";
 
 export const PROJECT_GIT_SECRET_ID = "project-git";
 
-const secretIdSchema = Type.String({
+export const secretIdSchema = Type.String({
     maxLength: 128,
     minLength: 1,
     pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+});
+export const environmentVariableNameSchema = Type.String({
+    pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
 });
 const environmentVariableValueSchema = Type.String({
     pattern: "^[^\\u0000]*$",
@@ -14,11 +17,10 @@ const environmentVariableValueSchema = Type.String({
 export const environmentSecretRegistrationSchema = Type.Object(
     {
         description: Type.String({ minLength: 1 }),
-        environment: Type.Record(
-            Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }),
-            environmentVariableValueSchema,
-            { additionalProperties: false, minProperties: 1 },
-        ),
+        environment: Type.Record(environmentVariableNameSchema, environmentVariableValueSchema, {
+            additionalProperties: false,
+            minProperties: 1,
+        }),
         id: secretIdSchema,
     },
     { additionalProperties: false },
@@ -29,7 +31,7 @@ export const environmentSecretUpdateSchema = Type.Object(
         description: Type.Optional(Type.String({ minLength: 1 })),
         environment: Type.Optional(
             Type.Record(
-                Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }),
+                environmentVariableNameSchema,
                 Type.Union([environmentVariableValueSchema, Type.Null()]),
                 { additionalProperties: false, minProperties: 1 },
             ),

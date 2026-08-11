@@ -273,6 +273,15 @@ export type Attachment =
           query?: Record<string, string>;
           thumbhash: string;
           applet: string;
+      }
+    | {
+          description: string;
+          environmentVariables: readonly string[];
+          id: string;
+          instructions: string;
+          kind: "secret_request";
+          operation: "create" | "update";
+          secretId: string;
       };
 
 export type ContentBlock = TextBlock | ImageBlock;
@@ -1501,6 +1510,63 @@ export interface PluginAppContribution {
 
 const exact = { additionalProperties: false } as const;
 export const PROJECT_WORKSPACE_ERROR_MAX_LENGTH = 500;
+
+export const secretIdSchema = Type.String({
+    maxLength: 128,
+    minLength: 1,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+});
+const environmentVariableNameSchema = Type.String({
+    pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+});
+const environmentVariableValueSchema = Type.String({
+    pattern: "^[^\\u0000]*$",
+});
+export const secretRegistrationSchema = Type.Object(
+    {
+        description: Type.String({ minLength: 1 }),
+        environment: Type.Record(environmentVariableNameSchema, environmentVariableValueSchema, {
+            additionalProperties: false,
+            minProperties: 1,
+        }),
+        id: secretIdSchema,
+    },
+    exact,
+);
+export const secretUpdateSchema = Type.Object(
+    {
+        description: Type.Optional(Type.String({ minLength: 1 })),
+        environment: Type.Optional(
+            Type.Record(
+                environmentVariableNameSchema,
+                Type.Union([environmentVariableValueSchema, Type.Null()]),
+                { additionalProperties: false, minProperties: 1 },
+            ),
+        ),
+    },
+    { ...exact, minProperties: 1 },
+);
+export const secretSummarySchema = Type.Object(
+    {
+        availableToModel: Type.Optional(Type.Boolean()),
+        description: Type.String(),
+        environmentVariables: Type.Unsafe<readonly string[]>(
+            Type.Array(environmentVariableNameSchema),
+        ),
+        id: secretIdSchema,
+        kind: Type.Optional(Type.Literal("github")),
+    },
+    exact,
+);
+export const listSecretsResponseSchema = Type.Object(
+    { secrets: Type.Array(secretSummarySchema) },
+    exact,
+);
+export const secretResponseSchema = Type.Object({ secret: secretSummarySchema }, exact);
+
+export type SecretRegistration = Static<typeof secretRegistrationSchema>;
+export type SecretUpdate = Static<typeof secretUpdateSchema>;
+export type SecretSummary = Static<typeof secretSummarySchema>;
 
 const projectGitFactsSchema = Type.Object(
     {

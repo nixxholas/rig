@@ -1,5 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+import { environmentVariableNameSchema, secretIdSchema } from "../secrets/types.js";
+
 const attachmentBase = {
     downloadUrl: Type.Optional(Type.String({ minLength: 1 })),
     id: Type.String({ minLength: 1 }),
@@ -21,6 +23,29 @@ export const AttachmentImagePreviewSchema = Type.Object(
         }),
         thumbhash: Type.String({ minLength: 1 }),
         width: Type.Integer({ minimum: 1 }),
+    },
+    { additionalProperties: false },
+);
+
+export const SecretRequestAttachmentSchema = Type.Object(
+    {
+        description: Type.String({
+            description: "Description to use when creating or updating the secret.",
+            minLength: 1,
+        }),
+        environmentVariables: Type.Array(environmentVariableNameSchema, {
+            description: "Environment variable names whose values the user needs to provide.",
+            minItems: 1,
+            uniqueItems: true,
+        }),
+        id: Type.String({ minLength: 1 }),
+        instructions: Type.String({
+            description: "Human-readable guidance for obtaining and entering the secret values.",
+            minLength: 1,
+        }),
+        kind: Type.Literal("secret_request"),
+        operation: Type.Union([Type.Literal("create"), Type.Literal("update")]),
+        secretId: secretIdSchema,
     },
     { additionalProperties: false },
 );
@@ -103,7 +128,9 @@ export const AttachmentSchema = Type.Union([
         },
         { additionalProperties: false },
     ),
+    SecretRequestAttachmentSchema,
 ]);
 
 export type AttachmentImagePreview = Static<typeof AttachmentImagePreviewSchema>;
+export type SecretRequestAttachment = Static<typeof SecretRequestAttachmentSchema>;
 export type Attachment = Static<typeof AttachmentSchema>;

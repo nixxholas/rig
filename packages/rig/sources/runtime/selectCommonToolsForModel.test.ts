@@ -12,6 +12,7 @@ describe("selectCommonToolsForModel", () => {
             }).map((tool) => tool.name),
         ).toEqual([
             "attach",
+            "request_secret",
             "transfer_session",
             "wait",
             "wait_until",
@@ -50,6 +51,7 @@ describe("selectCommonToolsForModel", () => {
             }).map((tool) => tool.name),
         ).toEqual([
             "attach",
+            "request_secret",
             "wait",
             "wait_until",
             "get_agent_tree_usage",

@@ -16,3 +16,7 @@ only `generated/...` locators and session-scoped HTTP routes, never host or
 container paths. Clients fetch attachment bytes through `downloadUrl` and video
 frames through `preview.downloadUrl`; locators are not endpoint-relative URLs.
 URL metadata comes from bounded HTML fetches and Open Graph tags.
+
+The separate `request_secret` tool uses the same pending lifecycle for a
+metadata-only attachment that clients open as a masked secret form. It carries
+requested environment variable names and setup guidance, never secret values.

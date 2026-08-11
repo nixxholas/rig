@@ -299,6 +299,9 @@ type _HappyCloudSessionBlob = Assignable<
     daemon.HappyCloudSessionBlobResponse
 >;
 type _Attachment = Assignable<local.Attachment, daemon.Attachment>;
+type _SecretRegistration = Assignable<local.SecretRegistration, daemon.RegisterSecretRequest>;
+type _SecretUpdate = Assignable<local.SecretUpdate, daemon.UpdateSecretRequest>;
+type _SecretSummary = Assignable<local.SecretSummary, daemon.SecretSummary>;
 type _Applet = Assignable<local.Applet, daemon.Applet>;
 type _ResolveAppletOpenRequest = Assignable<
     daemon.ResolveAppletOpenRequest,

@@ -14,6 +14,7 @@ import { appletListTool } from "../tools/applets/applet_list.js";
 import { appletRevertTool } from "../tools/applets/applet_revert.js";
 import { appletUpdateTool } from "../tools/applets/applet_update.js";
 import { attachTool } from "../tools/attachments/attach.js";
+import { requestSecretTool } from "../tools/secrets/requestSecret.js";
 import { folderTools } from "../tools/folders/folderTools.js";
 import { createGeminiTools } from "../tools/gemini/createGeminiTools.js";
 import { transferSessionTool } from "../tools/workspaces/transfer_session.js";
@@ -37,6 +38,7 @@ export function selectCommonToolsForModel(options: {
     return [
         ...(options.searchTools ?? []),
         attachTool,
+        requestSecretTool,
         ...(options.geminiApiKey === undefined ? [] : createGeminiTools(options.geminiApiKey)),
         ...(options.isSubagent || !options.hasWorkspaceContext ? [] : [transferSessionTool]),
         waitTool,

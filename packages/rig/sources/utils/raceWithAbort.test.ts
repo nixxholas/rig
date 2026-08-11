@@ -15,9 +15,7 @@ describe("raceWithAbort", () => {
             },
         });
 
-        await expect(raceWithAbort(observed, AbortSignal.abort())).resolves.toBe(
-            ABORTED_BY_SIGNAL,
-        );
+        await expect(raceWithAbort(observed, AbortSignal.abort())).resolves.toBe(ABORTED_BY_SIGNAL);
         expect(rejectionObserved).toBe(true);
     });
 });

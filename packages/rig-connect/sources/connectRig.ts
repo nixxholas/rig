@@ -118,6 +118,9 @@ import type {
     CreateSharingInvitationResponse,
     FolderShareStatus,
     UpdateRigProfileRequest,
+    SecretRegistration,
+    SecretSummary,
+    SecretUpdate,
 } from "./protocol.js";
 import {
     HAPPY_CLOUD_CONTRACT_VERSION,
@@ -164,6 +167,11 @@ import {
     projectRegistrationErrorResponseSchema,
     projectResponseSchema,
     projectWorkspaceSchema,
+    listSecretsResponseSchema,
+    secretIdSchema,
+    secretRegistrationSchema,
+    secretResponseSchema,
+    secretUpdateSchema,
 } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
 import { endpointUrl } from "./endpointUrl.js";
@@ -917,6 +925,19 @@ export interface RigConnection {
     }>;
     /** Reads one bounded current-run log or startup-failure diagnostic snapshot. */
     readPluginLog: (name: string, options?: { signal?: AbortSignal }) => Promise<PluginLogSnapshot>;
+    /** Reads secret metadata only. Secret values are never returned by Rig. */
+    listSecrets: (options?: SecretOperationOptions) => Promise<readonly SecretSummary[]>;
+    /** Stores values entered through a client-owned masked secret form. */
+    registerSecret: (
+        registration: SecretRegistration,
+        options?: SecretOperationOptions,
+    ) => Promise<SecretSummary>;
+    /** Updates only the fields and values supplied by the client. */
+    updateSecret: (
+        secretId: string,
+        update: SecretUpdate,
+        options?: SecretOperationOptions,
+    ) => Promise<SecretSummary>;
     /** Resolves and validates one explicit GitHub repository plugin catalog. */
     discoverPluginCatalog: (
         source: DiscoverPluginCatalogRequest,
@@ -1023,6 +1044,10 @@ export interface RigConnection {
 }
 
 export interface HappyCloudOperationOptions {
+    signal?: AbortSignal;
+}
+
+export interface SecretOperationOptions {
     signal?: AbortSignal;
 }
 
@@ -7177,6 +7202,93 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return ((await response.json()) as PluginLogResponse).log;
     };
 
+    const callSecretApi = async <TSchema_ extends TSchema>(
+        path: string,
+        method: "GET" | "PATCH" | "POST",
+        body: unknown,
+        schema: TSchema_,
+        operationOptions: SecretOperationOptions = {},
+    ): Promise<Static<TSchema_>> => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            const response = await request(endpointUrl(options.endpoint, path), {
+                ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+                headers: {
+                    accept: "application/json",
+                    authorization: `Bearer ${options.token}`,
+                    ...(body === undefined ? {} : { "content-type": "application/json" }),
+                },
+                method,
+                signal: operation.signal,
+            });
+            if (!response.ok) {
+                throw new Error(
+                    `Rig could not ${method === "GET" ? "read" : "save"} secrets (${String(response.status)}).`,
+                );
+            }
+            const payload: unknown = await response.json().catch(() => undefined);
+            try {
+                return Value.Decode(schema, payload);
+            } catch {
+                throw new Error("Rig answered a secret request with an invalid response.");
+            }
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const listSecrets: RigConnection["listSecrets"] = async (operationOptions) =>
+        (
+            await callSecretApi(
+                "secrets",
+                "GET",
+                undefined,
+                listSecretsResponseSchema,
+                operationOptions,
+            )
+        ).secrets;
+
+    const registerSecret: RigConnection["registerSecret"] = async (
+        registration,
+        operationOptions,
+    ) => {
+        let decoded: SecretRegistration;
+        try {
+            decoded = Value.Decode(secretRegistrationSchema, registration);
+        } catch {
+            throw new Error("The client must provide a valid secret registration.");
+        }
+        return (
+            await callSecretApi("secrets", "POST", decoded, secretResponseSchema, operationOptions)
+        ).secret;
+    };
+
+    const updateSecret: RigConnection["updateSecret"] = async (
+        secretId,
+        update,
+        operationOptions,
+    ) => {
+        if (!Value.Check(secretIdSchema, secretId)) {
+            throw new Error("The client must provide a valid secret ID.");
+        }
+        let decoded: SecretUpdate;
+        try {
+            decoded = Value.Decode(secretUpdateSchema, update);
+        } catch {
+            throw new Error("The client must provide a valid secret update.");
+        }
+        return (
+            await callSecretApi(
+                `secrets/${encodeURIComponent(secretId)}`,
+                "PATCH",
+                decoded,
+                secretResponseSchema,
+                operationOptions,
+            )
+        ).secret;
+    };
+
     const discoverPluginCatalog: RigConnection["discoverPluginCatalog"] = async (
         source,
         operationOptions = {},
@@ -7449,9 +7561,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         joinP2pInvitation,
         folders,
         listProfiles,
+        listSecrets,
         projects,
         readBackgroundProcess,
         readPluginLog,
+        registerSecret,
         recordActivity,
         renameGroup,
         resolveExternalToolCall,
@@ -7481,6 +7595,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         switchModel,
         uninstallPlugin,
         updateProfile,
+        updateSecret,
     };
 }
 

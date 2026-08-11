@@ -316,9 +316,7 @@ describe("InMemorySession metadata settlement", () => {
                 titleStatus: "ready",
             }),
         );
-        await vi.waitFor(() =>
-            expect(inheritedTitles).toEqual(["Delayed session metadata"]),
-        );
+        await vi.waitFor(() => expect(inheritedTitles).toEqual(["Delayed session metadata"]));
 
         // The failure was reported while it stood, and then it was tried again rather than
         // leaving the chat and its workspace unnamed for good.
