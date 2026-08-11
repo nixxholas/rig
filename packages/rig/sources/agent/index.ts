@@ -13,20 +13,20 @@ export { runAgentLoop } from "./loop.js";
 export type { AgentLoopEvent, AgentLoopResult, RunAgentLoopOptions } from "./loop.js";
 export { createSystemPrompt } from "./prompt/createSystemPrompt.js";
 export type { CreateSystemPromptOptions } from "./prompt/createSystemPrompt.js";
-export { loadAgentsMdInstructions } from "./loadAgentsMdInstructions.js";
+export { loadAgentsMdInstructions } from "./impl/loadAgentsMdInstructions.js";
 export { formatSkillInvocation } from "./skills/formatSkillInvocation.js";
 export { loadSkillInstructions } from "./skills/loadSkillInstructions.js";
 export { loadSkills } from "./skills/loadSkills.js";
 export type { Skill } from "./skills/Skill.js";
-export { printAgentMessageToConsole } from "./printAgentMessageToConsole.js";
-export type { AgentConsole } from "./printAgentMessageToConsole.js";
-export { agentMessageToText } from "./agentMessageToText.js";
+export { printAgentMessageToConsole } from "./impl/printAgentMessageToConsole.js";
+export type { AgentConsole } from "./impl/printAgentMessageToConsole.js";
+export { agentMessageToText } from "./impl/agentMessageToText.js";
 export { createSubagentInstructions } from "./prompt/instructions.js";
-export { findLastAgentResponseText } from "./findLastAgentResponseText.js";
-export { findFirstUserRequestText } from "./findFirstUserRequestText.js";
-export { contentBlockToText } from "./contentBlockToText.js";
-export { createErrorMessage } from "./createErrorMessage.js";
-export { selectChatHistoryPage } from "./selectChatHistoryPage.js";
+export { findLastAgentResponseText } from "./impl/findLastAgentResponseText.js";
+export { findFirstUserRequestText } from "./impl/findFirstUserRequestText.js";
+export { contentBlockToText } from "./impl/contentBlockToText.js";
+export { createErrorMessage } from "./impl/createErrorMessage.js";
+export { selectChatHistoryPage } from "./impl/selectChatHistoryPage.js";
 export type {
     AgentBlock,
     AgentMessage,

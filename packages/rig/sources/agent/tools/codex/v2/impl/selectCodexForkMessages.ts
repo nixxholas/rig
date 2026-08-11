@@ -1,5 +1,5 @@
 import type { AgentMessage, Message } from "../../../../types.js";
-import { isExcludedFromModelContext } from "../../../../isExcludedFromModelContext.js";
+import { isExcludedFromModelContext } from "../../../../impl/isExcludedFromModelContext.js";
 
 export function selectCodexForkMessages(
     messages: readonly Message[],

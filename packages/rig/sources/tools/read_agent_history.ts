@@ -1,7 +1,7 @@
 import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../agent/types.js";
-import type { ChatHistoryStats } from "../agent/summarizeChatHistory.js";
+import type { ChatHistoryStats } from "../agent/impl/summarizeChatHistory.js";
 import { formatChatHistoryPage } from "./formatChatHistoryPage.js";
 
 const historyStatsSchema = Type.Object({

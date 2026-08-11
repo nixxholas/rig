@@ -3,27 +3,27 @@ import { Value } from "@sinclair/typebox/value";
 import { extractProviderErrorDiagnostics } from "@slopus/happy-providers";
 import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
-import { assistantMessageToAgentMessage } from "./assistantMessageToAgentMessage.js";
-import { boundToolResultBlocks } from "./boundToolResultBlocks.js";
-import { createErrorToolResultBlock } from "./createErrorToolResultBlock.js";
-import { formatInvalidToolArguments } from "./formatInvalidToolArguments.js";
-import { createErrorMessage } from "./createErrorMessage.js";
-import { createToolResultBlock } from "./createToolResultBlock.js";
-import { isExcludedFromModelContext } from "./isExcludedFromModelContext.js";
+import { assistantMessageToAgentMessage } from "./impl/assistantMessageToAgentMessage.js";
+import { boundToolResultBlocks } from "./impl/boundToolResultBlocks.js";
+import { createErrorToolResultBlock } from "./impl/createErrorToolResultBlock.js";
+import { formatInvalidToolArguments } from "./impl/formatInvalidToolArguments.js";
+import { createErrorMessage } from "./impl/createErrorMessage.js";
+import { createToolResultBlock } from "./impl/createToolResultBlock.js";
+import { isExcludedFromModelContext } from "./impl/isExcludedFromModelContext.js";
 import type { AgentContext } from "./context/AgentContext.js";
 import type { BashSessionActivity } from "./context/BashContext.js";
-import { isContextWindowExceededError } from "./isContextWindowExceededError.js";
-import { isInvalidImageRequestError } from "./isInvalidImageRequestError.js";
-import { normalizeToolCallArguments } from "./normalizeToolCallArguments.js";
-import { prepareProviderMessageImages } from "./prepareProviderMessageImages.js";
-import { presentToolCall, type PresentedToolCall } from "./presentToolCall.js";
-import { replaceLastTurnToolResultImages } from "./replaceLastTurnToolResultImages.js";
+import { isContextWindowExceededError } from "./impl/isContextWindowExceededError.js";
+import { isInvalidImageRequestError } from "./impl/isInvalidImageRequestError.js";
+import { normalizeToolCallArguments } from "./impl/normalizeToolCallArguments.js";
+import { prepareProviderMessageImages } from "./impl/prepareProviderMessageImages.js";
+import { presentToolCall, type PresentedToolCall } from "./impl/presentToolCall.js";
+import { replaceLastTurnToolResultImages } from "./impl/replaceLastTurnToolResultImages.js";
 import { finalizeCompactionMessage } from "./compaction/finalizeCompactionMessage.js";
-import { systemMessageToText } from "./systemMessageToText.js";
+import { systemMessageToText } from "./impl/systemMessageToText.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
 import { createProviderPrompt, type ProviderPrompt } from "./prompt/createSystemPrompt.js";
-import { ToolLockManager } from "./ToolLockManager.js";
-import { toToolExecutionEndResult } from "./toToolExecutionEndResult.js";
+import { ToolLockManager } from "./impl/ToolLockManager.js";
+import { toToolExecutionEndResult } from "./impl/toToolExecutionEndResult.js";
 import { errorToMessage } from "../errorToMessage.js";
 import type {
     AgentBlock,
@@ -71,7 +71,7 @@ import {
 } from "../permissions/index.js";
 import type { DebugLog } from "../debug/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
-import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
+import { resolveModelImageProfile } from "./impl/resolveModelImageProfile.js";
 import { toExecutorTool } from "./tools/toExecutorTool.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 

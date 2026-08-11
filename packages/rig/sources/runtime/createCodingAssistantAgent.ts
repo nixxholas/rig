@@ -46,7 +46,7 @@ import type { DurableSkillDefinition } from "../external-skills/types.js";
 import { resolveGeminiApiKey } from "../tools/search/resolveGeminiApiKey.js";
 import { readAgentHistoryTool } from "../tools/read_agent_history.js";
 import { agentCommunicationTools } from "../tools/agents/index.js";
-import { agentFolderLabel } from "../agent/agentFolderLabel.js";
+import { agentFolderLabel } from "../agent/impl/agentFolderLabel.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import type { SlotContext } from "../agent/context/SlotContext.js";
 import type { FolderContext } from "../agent/context/FolderContext.js";

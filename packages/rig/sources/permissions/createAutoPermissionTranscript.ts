@@ -1,6 +1,6 @@
 import type { ContentBlock, Message } from "../agent/types.js";
-import { isExcludedFromModelContext } from "../agent/isExcludedFromModelContext.js";
-import { isInternalMessage } from "../agent/isInternalMessage.js";
+import { isExcludedFromModelContext } from "../agent/impl/isExcludedFromModelContext.js";
+import { isInternalMessage } from "../agent/impl/isInternalMessage.js";
 
 interface TranscriptEntry {
     category: "message" | "tool";

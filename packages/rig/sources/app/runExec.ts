@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 
-import { findLastAgentResponseText } from "../agent/findLastAgentResponseText.js";
+import { findLastAgentResponseText } from "../agent/impl/findLastAgentResponseText.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { ensureLocalProtocolServer } from "../client/index.js";
 import {

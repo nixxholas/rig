@@ -1,0 +1,81 @@
+import { describe, expect, it } from "vitest";
+
+import { createSandboxFilesystemConfig } from "../createSandboxFilesystemConfig.js";
+
+describe("createSandboxFilesystemConfig", () => {
+    it("denies the private home directory and re-allows the selected workspace", async () => {
+        const config = await createSandboxFilesystemConfig({
+            cwd: "/home/tester/projects/rig",
+            environment: {
+                AWS_SHARED_CREDENTIALS_FILE: "/secrets/aws-credentials",
+                CLAUDE_CONFIG_DIR: "/secrets/claude",
+                CODEX_HOME: "/secrets/codex",
+                PATH: "/home/tester/.cargo/bin:/home/tester/.ssh/bin:/usr/bin",
+                RIG_SERVER_DIRECTORY: "/workspace/.rig-dev",
+                RIG_SERVER_SOCKET_PATH: "/run/rig/custom-socket",
+                RIG_SERVER_TOKEN_PATH: "/run/rig/custom-token",
+                RIG_HOME: "/private/rig-home",
+                XDG_CONFIG_HOME: "/home/tester/custom-config",
+            },
+            homeDirectory: "/home/tester",
+            mode: "workspace_write",
+            sandboxConfigDirectory: "/temporary/rig-sandbox-policy",
+            temporaryDirectory: "/temporary",
+            uid: 123,
+        });
+
+        expect(config.allowRead).toContain("/home/tester/projects/rig");
+        expect(config.allowRead).toContain("/home/tester/.codex/skills");
+        expect(config.allowRead).toContain("/home/tester/.agents/skills");
+        if (process.platform !== "win32") {
+            expect(config.allowRead.some((path) => path.endsWith("/home/tester/.cargo/bin"))).toBe(
+                true,
+            );
+            expect(config.allowRead).not.toContain("/home/tester/.ssh/bin");
+        }
+        expect(config.allowWrite).toContain("/home/tester/projects/rig");
+        expect(config.allowWrite).toContain("/temporary");
+        expect(config.denyRead).toEqual(
+            expect.arrayContaining([
+                "/home/tester",
+                "/home/tester/.ssh",
+                "/home/tester/.aws",
+                "/home/tester/.claude",
+                "/home/tester/.codex",
+                "/home/tester/custom-config/gh",
+                "/private/rig-home",
+                "/secrets/aws-credentials",
+                "/secrets/claude",
+                "/secrets/codex",
+                "/run/rig/custom-token",
+                "/workspace/.rig-dev",
+                "/temporary/rig-123",
+                "/temporary/rig-sandbox-policy",
+            ]),
+        );
+        expect(config.denyWrite).toEqual([
+            "/temporary/rig-123",
+            "/workspace/.rig-dev",
+            "/run/rig/custom-socket",
+            "/run/rig/custom-token",
+            "/temporary/rig-sandbox-policy",
+        ]);
+    });
+
+    it("makes an explicitly granted socket writable without widening the workspace", async () => {
+        const config = await createSandboxFilesystemConfig({
+            cwd: "/home/tester/projects/rig",
+            environment: { RIG_HOME: "/private/rig-home" },
+            homeDirectory: "/home/tester",
+            mode: "read_only",
+            temporaryDirectory: "/temporary",
+            uid: 123,
+            unixSocketPaths: ["/private/rig-home/worklets/github-watch/worklet.sock"],
+        });
+
+        // Connecting to a Unix socket writes to the socket itself, so it alone becomes writable.
+        expect(config.allowWrite).toContain("/private/rig-home/worklets/github-watch/worklet.sock");
+        expect(config.allowWrite).not.toContain("/private/rig-home/worklets/github-watch");
+        expect(config.allowWrite).not.toContain("/home/tester/projects/rig");
+    });
+});

@@ -1,9 +1,9 @@
 import { join, resolve } from "node:path";
 
-import { buildAncestorDirs } from "../buildAncestorDirs.js";
+import { buildAncestorDirs } from "../impl/buildAncestorDirs.js";
 import type { FileSystemContext } from "../context/FileSystemContext.js";
 import { createUserSkillRootPaths } from "../context/createUserSkillRootPaths.js";
-import { findProjectRoot } from "../findProjectRoot.js";
+import { findProjectRoot } from "../impl/findProjectRoot.js";
 import { isDirectoryAtPath } from "./isDirectoryAtPath.js";
 import { getBuiltinSkillRoot } from "./getBuiltinSkillRoot.js";
 

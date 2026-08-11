@@ -7,7 +7,7 @@ import {
     TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_HEAD_CHARACTERS,
     TOOL_RESULT_PRESENTATION_RETAINED_OUTPUT_TAIL_CHARACTERS,
     TOOL_RESULT_PRESENTATION_TRUNCATION_NOTICE,
-} from "../../agent/boundToolResultPresentation.js";
+} from "../../agent/impl/boundToolResultPresentation.js";
 import { inTx } from "../inTx.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 

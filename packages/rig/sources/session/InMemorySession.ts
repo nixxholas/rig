@@ -14,10 +14,10 @@ import { errorToMessage } from "../errorToMessage.js";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
-import { assistantMessageToAgentMessage } from "../agent/assistantMessageToAgentMessage.js";
-import { agentFolderLabel } from "../agent/agentFolderLabel.js";
-import { isInternalMessage } from "../agent/isInternalMessage.js";
-import { isExcludedFromModelContext } from "../agent/isExcludedFromModelContext.js";
+import { assistantMessageToAgentMessage } from "../agent/impl/assistantMessageToAgentMessage.js";
+import { agentFolderLabel } from "../agent/impl/agentFolderLabel.js";
+import { isInternalMessage } from "../agent/impl/isInternalMessage.js";
+import { isExcludedFromModelContext } from "../agent/impl/isExcludedFromModelContext.js";
 import { findFirstUserRequestText, findLastAgentResponseText } from "../agent/index.js";
 import type {
     AgentContext,
@@ -264,10 +264,10 @@ import {
     type ExternalToolInstallation,
     type ResolveExternalToolCallResponse,
 } from "../external-tools/index.js";
-import { createErrorMessage } from "../agent/createErrorMessage.js";
-import { createErrorToolResultBlock } from "../agent/createErrorToolResultBlock.js";
-import { createModelSwitchHistoryMessage } from "../agent/createModelSwitchHistoryMessage.js";
-import { createToolResultBlock } from "../agent/createToolResultBlock.js";
+import { createErrorMessage } from "../agent/impl/createErrorMessage.js";
+import { createErrorToolResultBlock } from "../agent/impl/createErrorToolResultBlock.js";
+import { createModelSwitchHistoryMessage } from "../agent/impl/createModelSwitchHistoryMessage.js";
+import { createToolResultBlock } from "../agent/impl/createToolResultBlock.js";
 import type { AgentMessage, ErrorMessage, ToolCallBlock, ToolResultBlock } from "../agent/types.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
 import { createDurableSkillTool, type DurableSkillDefinition } from "../external-skills/index.js";

@@ -13,10 +13,13 @@ import { runAgentLoop, type AgentLoopEvent, type AgentLoopResult } from "./loop.
 import { toProviderMessages } from "./loop.js";
 import { toExecutorTool } from "./tools/toExecutorTool.js";
 import { createProviderPrompt } from "./prompt/createSystemPrompt.js";
-import { prepareProviderMessageImages } from "./prepareProviderMessageImages.js";
-import { reconcileAgentsMdMessages } from "./reconcileAgentsMdMessages.js";
+import { prepareProviderMessageImages } from "./impl/prepareProviderMessageImages.js";
+import { reconcileAgentsMdMessages } from "./impl/reconcileAgentsMdMessages.js";
 import { createDebugProvider, type DebugLog } from "../debug/index.js";
-import { printAgentMessageToConsole, type AgentConsole } from "./printAgentMessageToConsole.js";
+import {
+    printAgentMessageToConsole,
+    type AgentConsole,
+} from "./impl/printAgentMessageToConsole.js";
 import type {
     AnyDefinedTool,
     ContentBlock,
@@ -31,7 +34,7 @@ import type { PermissionMode, PermissionReviewAgent } from "../permissions/index
 import { isPermissionReduction } from "../permissions/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
+import { resolveModelImageProfile } from "./impl/resolveModelImageProfile.js";
 
 export type AgentStatus = "idle" | "running" | "aborted";
 

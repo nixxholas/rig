@@ -1,5 +1,5 @@
 import type { ContentBlock } from "../agent/types.js";
-import { boundToolResultContent } from "../agent/boundToolResultContent.js";
+import { boundToolResultContent } from "../agent/impl/boundToolResultContent.js";
 import type { ExternalToolCallResolution } from "./types.js";
 
 export function externalToolResolutionToContent(

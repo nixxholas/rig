@@ -1,5 +1,5 @@
 import type { Message } from "../types.js";
-import type { ChatHistoryStats } from "../summarizeChatHistory.js";
+import type { ChatHistoryStats } from "../impl/summarizeChatHistory.js";
 
 export type ChatHistoryRole = "assistant" | "error" | "system" | "user";
 

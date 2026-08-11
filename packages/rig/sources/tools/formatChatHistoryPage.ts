@@ -1,5 +1,5 @@
 import type { ChatHistoryPage, Message } from "../agent/index.js";
-import { summarizeChatHistory } from "../agent/summarizeChatHistory.js";
+import { summarizeChatHistory } from "../agent/impl/summarizeChatHistory.js";
 
 const MAX_HISTORY_CHARACTERS = 80_000;
 
