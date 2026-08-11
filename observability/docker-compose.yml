@@ -1,13 +1,17 @@
 services:
     grafana:
         image: grafana/grafana:12.4.1
+        restart: unless-stopped
+        user: "${OBSERVABILITY_UID}:${OBSERVABILITY_GID}"
         ports:
             - "3000:3000"
         volumes:
             - ./grafana/provisioning:/etc/grafana/provisioning:ro
+            - ${OBSERVABILITY_DATA_DIR}/grafana:/var/lib/grafana
     otel-collector:
         image: otel/opentelemetry-collector-contrib:0.143.0
         command: ["--config=/etc/otelcol-contrib/config.yaml"]
+        restart: unless-stopped
         ports:
             - "4318:4318"
         volumes:
@@ -16,16 +20,22 @@ services:
             - tempo
     prometheus:
         image: prom/prometheus:v3.9.1
+        restart: unless-stopped
+        user: "${OBSERVABILITY_UID}:${OBSERVABILITY_GID}"
         ports:
             - "9090:9090"
         volumes:
             - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - ${OBSERVABILITY_DATA_DIR}/prometheus:/prometheus
         extra_hosts:
             - "host.docker.internal:host-gateway"
     tempo:
         image: grafana/tempo:2.10.3
         command: ["-config.file=/etc/tempo.yaml"]
+        restart: unless-stopped
+        user: "${OBSERVABILITY_UID}:${OBSERVABILITY_GID}"
         ports:
             - "3200:3200"
         volumes:
             - ./tempo.yaml:/etc/tempo.yaml:ro
+            - ${OBSERVABILITY_DATA_DIR}/tempo:/var/lib/tempo
