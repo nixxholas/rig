@@ -1,4 +1,4 @@
-import type { ProviderQuota, ProviderQuotaSource, ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderQuota, ProviderQuotaSource, ProviderUsage } from "@slopus/happy-providers";
 import { describe, expect, it, vi } from "vitest";
 
 import { createProviderQuotaService } from "./createProviderQuotaService.js";

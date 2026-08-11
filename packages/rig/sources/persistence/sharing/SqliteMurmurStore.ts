@@ -67,16 +67,45 @@ export class SqliteMurmurStore implements MurmurStore {
         operation: (transaction: StoreTransaction) => Promise<Result>,
     ): Promise<Result> {
         return this.#run(async (database) => {
-            const sqliteTransaction = await database.transaction("write");
+            // libSQL's local `transaction()` detaches its SQLite connection from
+            // the client, but its transaction handle never closes that connection
+            // after commit. The native connection then survives until garbage
+            // collection, retaining the database and WAL descriptors meanwhile.
+            // This store already owns an exclusive lock, so use the client's one
+            // connection directly and keep its lifetime tied to the store.
+            await database.execute("BEGIN IMMEDIATE");
+            let active = true;
+            const runInTransaction = <Result>(operation: () => Promise<Result>): Promise<Result> =>
+                active ? operation() : Promise.reject(new Error("Murmur transaction is closed"));
             const transaction: StoreTransaction = {
-                delete: (key) => this.#delete(sqliteTransaction, key),
-                get: (key) => this.#get(sqliteTransaction, key),
+                delete: (key) => runInTransaction(() => this.#delete(database, key)),
+                get: (key) => runInTransaction(() => this.#get(database, key)),
                 list: (prefix) =>
-                    this.#scan(sqliteTransaction, prefix, { limit: MAXIMUM_STORE_SCAN_ITEMS }),
-                scan: (prefix, options) => this.#scan(sqliteTransaction, prefix, options),
-                set: (key, value) => this.#set(sqliteTransaction, key, value),
+                    runInTransaction(() =>
+                        this.#scan(database, prefix, { limit: MAXIMUM_STORE_SCAN_ITEMS }),
+                    ),
+                scan: (prefix, options) =>
+                    runInTransaction(() => this.#scan(database, prefix, options)),
+                set: (key, value) => runInTransaction(() => this.#set(database, key, value)),
             };
-            return await runSqliteTransactionBody(sqliteTransaction, () => operation(transaction));
+            return await runSqliteTransactionBody(
+                {
+                    close: () => undefined,
+                    commit: async () => {
+                        await database.execute("COMMIT");
+                    },
+                    rollback: async () => {
+                        await database.execute("ROLLBACK");
+                    },
+                },
+                async () => {
+                    try {
+                        return await operation(transaction);
+                    } finally {
+                        active = false;
+                    }
+                },
+            );
         });
     }
 

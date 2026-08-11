@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
-import type { SessionEvent, SessionTool } from "@slopus/rig-providers";
+import type { SessionEvent, SessionTool } from "@slopus/happy-providers";
 
 import { createBedrockWebSearchTool } from "../BedrockWebSearch.js";
 import { createTestRootContext } from "../../../testing/createTestRootContext.js";

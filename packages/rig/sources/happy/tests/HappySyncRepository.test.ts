@@ -6,9 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
-import { sessions } from "../../persistence/database/schema.js";
+import { sessionEvents, sessions } from "../../persistence/database/schema.js";
 import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
 import { HappySyncRepository } from "../HappySyncRepository.js";
+import { HappyMessageMapper } from "../mapSessionEventToHappyMessages.js";
+import type { SessionEvent } from "../../protocol/index.js";
 import { isDatabaseFailure } from "../../persistence/isDatabaseFailure.js";
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
@@ -25,6 +27,52 @@ afterEach(async () => {
 });
 
 describe("HappySyncRepository", () => {
+    it("atomically records one initial backfill even after its outbox has drained", async () => {
+        const { repository } = await createRepository();
+        const historical = createMessage("historical");
+        const repeated = createMessage("repeated");
+        const initial = await repository.ensureSession(ctx, {
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        expect(initial.historyBackfilled).toBe(false);
+
+        await repository.enqueueInitialBackfill(ctx, "session-1", [historical]);
+        expect((await repository.getSession(ctx, "session-1"))?.historyBackfilled).toBe(true);
+        await repository.acknowledge(ctx, "session-1", [historical.localId]);
+        await repository.enqueueInitialBackfill(ctx, "session-1", [repeated]);
+
+        expect(await repository.pending(ctx, "session-1")).toEqual([]);
+        await repository.close(ctx);
+    });
+
+    it("rolls back the initial-backfill marker when its bounded enqueue fails", async () => {
+        const { databasePath, repository } = await createRepository();
+        await repository.ensureSession(ctx, {
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        await repository.close(ctx);
+        const bounded = await HappySyncRepository.open(
+            createTestRootContext(),
+            databasePath,
+            Date.now,
+            1,
+        );
+        await expect(
+            bounded.enqueueInitialBackfill(ctx, "session-1", [
+                createMessage("historical-1"),
+                createMessage("historical-2"),
+            ]),
+        ).rejects.toThrow("Happy sync outbox is full");
+
+        expect((await bounded.getSession(ctx, "session-1"))?.historyBackfilled).toBe(false);
+        expect(await bounded.pending(ctx, "session-1")).toEqual([]);
+        await bounded.close(ctx);
+    });
+
     it("acknowledges the Happy outbox with the operation context", async () => {
         const ctx = createTestRootContext().named("happy-outbox-acknowledge");
         const { repository } = await createRepository();
@@ -59,6 +107,196 @@ describe("HappySyncRepository", () => {
             bounded.enqueue(ctx, "session-1", [createMessage("message-3")]),
         ).rejects.toThrow("Happy sync outbox is full");
         expect(await bounded.pending(ctx, "session-1")).toEqual([first, second]);
+        await bounded.close(ctx);
+    });
+
+    it("durably defers the exact next projection behind a full delivery window", async () => {
+        const { databasePath, repository } = await createRepository();
+        await repository.close(ctx);
+        const opened = await openSessionDatabase(createTestRootContext(), databasePath);
+        await opened.ctx.tx
+            .insert(sessionEvents)
+            .values([
+                {
+                    createdAtMs: 1,
+                    dataJson: "{}",
+                    eventId: "event-history",
+                    sessionId: "session-1",
+                    type: "session_updated",
+                },
+                {
+                    createdAtMs: 2,
+                    dataJson: "{}",
+                    eventId: "event-x",
+                    sessionId: "session-1",
+                    type: "session_updated",
+                },
+            ])
+            .run();
+        await opened.database.close(opened.ctx);
+
+        const bounded = await HappySyncRepository.open(
+            createTestRootContext(),
+            databasePath,
+            Date.now,
+            1,
+        );
+        await bounded.ensureSession(ctx, {
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        const historical = createMessage("historical");
+        await bounded.enqueueInitialBackfill(ctx, "session-1", [historical], "event-history");
+        await bounded.acknowledge(ctx, "session-1", [historical.localId]);
+        const filler = createMessage("filler");
+        await bounded.enqueue(ctx, "session-1", [filler]);
+
+        await expect(
+            bounded.enqueueProjection(ctx, "session-1", "event-x", [createMessage("x")]),
+        ).resolves.toEqual({ deferred: true, status: "projected" });
+        expect((await bounded.getSession(ctx, "session-1"))?.projectedEventId).toBe("event-x");
+        await bounded.close(ctx);
+
+        const restarted = await HappySyncRepository.open(
+            createTestRootContext(),
+            databasePath,
+            Date.now,
+            1,
+        );
+        expect(await restarted.pending(ctx, "session-1")).toEqual([filler]);
+        await restarted.acknowledge(ctx, "session-1", [filler.localId]);
+        expect(await restarted.pending(ctx, "session-1")).toEqual([createMessage("x")]);
+        expect(
+            (await restarted.pending(ctx, "session-1")).map((message) => message.localId),
+        ).not.toContain("historical");
+        await restarted.close(ctx);
+    });
+
+    it("advances zero-output events and preserves stateful mapper output in event order", async () => {
+        const { databasePath, repository } = await createRepository();
+        await repository.close(ctx);
+        const events: SessionEvent[] = [
+            event("session_updated", "history", {}),
+            event("run_started", "run-started", { runId: "run-1" }),
+            event("message_submitted", "agent-header", {
+                delivery: "run",
+                displayText: "Delegated work",
+                message: {
+                    blocks: [{ text: "Delegated work", type: "text" }],
+                    id: "agent-header",
+                    provenance: "agent",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+            event("agent_event", "iteration", {
+                event: { iteration: 1, messageId: "agent-1", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+        ];
+        const opened = await openSessionDatabase(createTestRootContext(), databasePath);
+        await opened.ctx.tx
+            .insert(sessionEvents)
+            .values(
+                events.map((source, index) => ({
+                    createdAtMs: index + 1,
+                    dataJson: JSON.stringify(source.data),
+                    eventId: source.id,
+                    sessionId: source.sessionId,
+                    type: source.type,
+                })),
+            )
+            .run();
+        await opened.database.close(opened.ctx);
+
+        const bounded = await HappySyncRepository.open(
+            createTestRootContext(),
+            databasePath,
+            Date.now,
+            2,
+        );
+        await bounded.ensureSession(ctx, {
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        await bounded.enqueueInitialBackfill(ctx, "session-1", [], "history");
+        const filler = createMessage("filler");
+        await bounded.enqueue(ctx, "session-1", [filler]);
+        const mapper = new HappyMessageMapper();
+        const runStarted = mapper.map(events[1]!);
+        const header = mapper.map(events[2]!);
+        const iteration = mapper.map(events[3]!);
+        expect(runStarted).toEqual([]);
+        expect(header).toEqual([]);
+        expect(iteration.map((message) => message.content.ev.t)).toEqual(["service", "turn-start"]);
+
+        await expect(
+            bounded.enqueueProjection(ctx, "session-1", events[1]!.id, runStarted),
+        ).resolves.toMatchObject({ status: "projected" });
+        await expect(
+            bounded.enqueueProjection(ctx, "session-1", events[2]!.id, header),
+        ).resolves.toMatchObject({ status: "projected" });
+        await expect(
+            bounded.enqueueProjection(ctx, "session-1", events[3]!.id, iteration),
+        ).resolves.toEqual({ deferred: true, status: "projected" });
+        expect((await bounded.getSession(ctx, "session-1"))?.projectedEventId).toBe("iteration");
+
+        expect(await bounded.pending(ctx, "session-1")).toEqual([filler]);
+        await bounded.acknowledge(ctx, "session-1", [filler.localId]);
+        expect(
+            (await bounded.pending(ctx, "session-1")).map((message) => message.content.ev.t),
+        ).toEqual(["service", "turn-start"]);
+        await bounded.close(ctx);
+    });
+
+    it("durably stalls an oversized event and prevents later events from leapfrogging it", async () => {
+        const { databasePath, repository } = await createRepository();
+        await repository.close(ctx);
+        const opened = await openSessionDatabase(createTestRootContext(), databasePath);
+        await opened.ctx.tx
+            .insert(sessionEvents)
+            .values(
+                ["history", "oversized", "later"].map((eventId, index) => ({
+                    createdAtMs: index + 1,
+                    dataJson: "{}",
+                    eventId,
+                    sessionId: "session-1",
+                    type: "session_updated",
+                })),
+            )
+            .run();
+        await opened.database.close(opened.ctx);
+        const bounded = await HappySyncRepository.open(
+            createTestRootContext(),
+            databasePath,
+            Date.now,
+            1,
+        );
+        await bounded.ensureSession(ctx, {
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        await bounded.enqueueInitialBackfill(ctx, "session-1", [], "history");
+
+        await expect(
+            bounded.enqueueProjection(ctx, "session-1", "oversized", [
+                createMessage("one"),
+                createMessage("two"),
+            ]),
+        ).resolves.toMatchObject({ status: "stalled" });
+        await expect(
+            bounded.enqueueProjection(ctx, "session-1", "later", []),
+        ).resolves.toMatchObject({ cause: "event_too_large", status: "stalled" });
+        expect(await bounded.getSession(ctx, "session-1")).toMatchObject({
+            projectedEventId: "history",
+            projectionError:
+                "One Rig event produces more Happy messages than the bounded recovery queue can retain.",
+            projectionStatus: "stalled",
+        });
+        expect(await bounded.pending(ctx, "session-1")).toEqual([]);
         await bounded.close(ctx);
     });
 
@@ -228,6 +466,10 @@ function createMessage(localId: string) {
         meta: { sentFrom: "rig" as const },
         role: "session" as const,
     };
+}
+
+function event(type: SessionEvent["type"], id: string, data: unknown): SessionEvent {
+    return { createdAt: 1, data, id, sessionId: "session-1", type } as SessionEvent;
 }
 
 async function createRepository(now: () => number = Date.now) {

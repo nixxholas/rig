@@ -69,14 +69,17 @@ export class P2pCredentialReplicator {
         }
     }
 
-    peerChanged(ctx: Context, peerId: string): void {
+    peerChanged(ctx: Context, peerId: string): Promise<void> {
         this.#synchronizedDigests.delete(peerId);
-        void this.ensureForRequest(ctx, peerId);
+        return this.ensureForRequest(ctx, peerId);
     }
 
     async syncAll(ctx: Context): Promise<void> {
-        for (const peer of await this.#options.listPeers(ctx))
-            this.peerChanged(ctx, peer.instanceId);
+        await Promise.all(
+            (await this.#options.listPeers(ctx)).map((peer) =>
+                this.peerChanged(ctx, peer.instanceId),
+            ),
+        );
     }
 
     async close(_ctx: Context): Promise<void> {

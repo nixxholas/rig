@@ -1,4 +1,9 @@
 import { sql } from "drizzle-orm";
+import { execFile } from "node:child_process";
+import { access, mkdtemp, readdir, readlink, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import { createTestRootContext } from "../../../testing/createTestRootContext.js";
@@ -140,6 +145,69 @@ describe("SessionDatabase", () => {
         }
     });
 
+    it("rejects direct work and retained query builders after a transaction ends", async () => {
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+        await opened.ctx.tx.run(sql.raw("CREATE TABLE values_log (value TEXT NOT NULL)"));
+        let stale: DatabaseScope | undefined;
+        let useRetainedBuilder: (() => unknown) | undefined;
+
+        try {
+            await inTx(opened.ctx, "rig.sql.test.escape", async (ctx) => {
+                stale = ctx.tx;
+                const retainedBuilder = ctx.tx.select();
+                useRetainedBuilder = () => retainedBuilder.from(sessions);
+                await ctx.tx.run(sql`INSERT INTO values_log (value) VALUES ('committed')`);
+            });
+
+            expect(() =>
+                stale?.run(sql`INSERT INTO values_log (value) VALUES ('escaped')`),
+            ).toThrow(
+                expect.objectContaining({
+                    name: "SessionDatabaseTransactionError",
+                    reason: "stale",
+                }),
+            );
+            expect(() => useRetainedBuilder?.()).toThrow(
+                expect.objectContaining({
+                    name: "SessionDatabaseTransactionError",
+                    reason: "stale",
+                }),
+            );
+            expect(await opened.ctx.tx.all(sql`SELECT value FROM values_log`)).toEqual([
+                { value: "committed" },
+            ]);
+        } finally {
+            await opened.database.close(opened.ctx);
+        }
+    });
+
+    it("ignores an expired ambient transaction for work using the base database context", async () => {
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+        await opened.ctx.tx.run(sql.raw("CREATE TABLE values_log (value TEXT NOT NULL)"));
+        let releaseDescendant!: () => void;
+        const descendantGate = new Promise<void>((resolve) => {
+            releaseDescendant = resolve;
+        });
+        let descendant!: Promise<void>;
+
+        await inTx(opened.ctx, "rig.sql.test.ambient_parent", async () => {
+            // Promise reactions retain the transaction's AsyncLocalStorage scope even when they
+            // run after commit. The operation itself deliberately uses the base database context.
+            descendant = descendantGate.then(async () => {
+                await inDatabase(opened.ctx, "rig.sql.test.ambient_descendant", async (ctx) => {
+                    await ctx.tx.run(sql`INSERT INTO values_log (value) VALUES ('descendant')`);
+                });
+            });
+        });
+
+        releaseDescendant();
+        await expect(descendant).resolves.toBeUndefined();
+        expect(await opened.ctx.tx.all(sql`SELECT value FROM values_log`)).toEqual([
+            { value: "descendant" },
+        ]);
+        await opened.database.close(opened.ctx);
+    });
+
     it("drains admitted work and rejects new work while closing", async () => {
         const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         let release!: () => void;
@@ -230,4 +298,69 @@ describe("SessionDatabase", () => {
 
         await opened.database.close(opened.ctx);
     });
+
+    it("does not retain SQLite file descriptors across repeated transactions or close", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-session-database-fds-"));
+        const path = join(directory, "sessions.sqlite");
+        const opened = await openSessionDatabase(createTestRootContext(), path);
+        const retainedContexts: ReturnType<typeof setInterval>[] = [];
+        let baselineDescriptors = Number.MAX_SAFE_INTEGER;
+        try {
+            await opened.ctx.tx.run(sql.raw("CREATE TABLE values_log (value INTEGER NOT NULL)"));
+            baselineDescriptors = await countFileDescriptors(path);
+
+            for (let index = 0; index < 40; index += 1) {
+                await inTx(opened.ctx, "rig.sql.test.fd_transaction", async (ctx) => {
+                    // Async descendants retain their transaction's ALS scope.
+                    // That scope may outlive the transaction, but it must not own
+                    // a detached native SQLite connection while it does.
+                    retainedContexts.push(setInterval(() => undefined, 60_000));
+                    await ctx.tx.run(sql`INSERT INTO values_log (value) VALUES (${index})`);
+                });
+            }
+
+            expect(await countFileDescriptors(path)).toBeLessThanOrEqual(baselineDescriptors + 2);
+        } finally {
+            for (const timer of retainedContexts) clearInterval(timer);
+            await opened.database.close(opened.ctx);
+            // libSQL may keep its one native connection alive until the client
+            // wrapper is collected. Closing must nevertheless leave the count
+            // bounded at the owner's baseline instead of one per transaction.
+            expect(await countFileDescriptors(path)).toBeLessThanOrEqual(baselineDescriptors + 2);
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
 });
+
+async function countFileDescriptors(path: string): Promise<number> {
+    const resolvedPath = await realpath(path);
+    if (!(await exists("/proc/self/fd"))) {
+        const { stdout } = await promisify(execFile)("lsof", [
+            "-a",
+            "-d",
+            "0-999999",
+            "-Fn",
+            "-p",
+            String(process.pid),
+        ]);
+        return stdout.split("\n").filter((line) => line.startsWith(`n${resolvedPath}`)).length;
+    }
+    const descriptors = await readdir("/proc/self/fd");
+    const targets = await Promise.all(
+        descriptors.map(async (descriptor) => {
+            try {
+                return await readlink(`/proc/self/fd/${descriptor}`);
+            } catch {
+                return undefined;
+            }
+        }),
+    );
+    return targets.filter((target) => target?.startsWith(resolvedPath)).length;
+}
+
+async function exists(path: string): Promise<boolean> {
+    return access(path).then(
+        () => true,
+        () => false,
+    );
+}

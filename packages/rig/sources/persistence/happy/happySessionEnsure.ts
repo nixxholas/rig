@@ -12,8 +12,14 @@ export interface HappySessionState {
     credentialFingerprint: string;
     encryptionKey: Uint8Array;
     encryptionVariant: HappyEncryptionVariant;
+    historyBackfilled: boolean;
     lastRemoteSeq: number;
     remoteSessionId?: string;
+    projectedEventId?: string;
+    projectedEventSeq?: number;
+    projectionError?: string;
+    projectionStallCause?: "capacity" | "event_too_large" | "gap";
+    projectionStatus: "active" | "stalled";
     sessionId: string;
     tag: string;
 }
@@ -57,8 +63,14 @@ export async function happySessionEnsure(
                 credentialFingerprint: input.credentialFingerprint,
                 encryptionKeyBase64: Buffer.from(encryptionKey).toString("base64"),
                 encryptionVariant: input.encryptionVariant,
+                historyBackfilled: false,
                 lastRemoteSeq: 0,
                 remoteSessionId: null,
+                projectedEventId: null,
+                projectedEventSeq: null,
+                projectionError: null,
+                projectionStallCause: null,
+                projectionStatus: "active",
                 sessionId: input.sessionId,
                 tag,
                 updatedAtMs: input.now,
@@ -69,8 +81,14 @@ export async function happySessionEnsure(
                     credentialFingerprint: input.credentialFingerprint,
                     encryptionKeyBase64: Buffer.from(encryptionKey).toString("base64"),
                     encryptionVariant: input.encryptionVariant,
+                    historyBackfilled: false,
                     lastRemoteSeq: 0,
                     remoteSessionId: null,
+                    projectedEventId: null,
+                    projectedEventSeq: null,
+                    projectionError: null,
+                    projectionStallCause: null,
+                    projectionStatus: "active",
                     tag,
                     updatedAtMs: input.now,
                 },
@@ -83,9 +101,11 @@ export async function happySessionEnsure(
             credentialFingerprint: input.credentialFingerprint,
             encryptionKey,
             encryptionVariant: input.encryptionVariant,
+            historyBackfilled: false,
             lastRemoteSeq: 0,
             sessionId: input.sessionId,
             tag,
+            projectionStatus: "active",
         };
     });
 }
@@ -95,8 +115,16 @@ function toSessionState(row: typeof happySessions.$inferSelect): HappySessionSta
         credentialFingerprint: row.credentialFingerprint,
         encryptionKey: new Uint8Array(Buffer.from(row.encryptionKeyBase64, "base64")),
         encryptionVariant: row.encryptionVariant as HappyEncryptionVariant,
+        historyBackfilled: row.historyBackfilled,
         lastRemoteSeq: row.lastRemoteSeq,
         ...(row.remoteSessionId === null ? {} : { remoteSessionId: row.remoteSessionId }),
+        ...(row.projectedEventId === null ? {} : { projectedEventId: row.projectedEventId }),
+        ...(row.projectedEventSeq === null ? {} : { projectedEventSeq: row.projectedEventSeq }),
+        ...(row.projectionError === null ? {} : { projectionError: row.projectionError }),
+        ...(row.projectionStallCause === null
+            ? {}
+            : { projectionStallCause: row.projectionStallCause }),
+        projectionStatus: row.projectionStatus,
         sessionId: row.sessionId,
         tag: row.tag,
     };

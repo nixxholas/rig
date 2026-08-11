@@ -3,7 +3,7 @@ import { createId } from "@paralleldrive/cuid2";
 import type { Context } from "@steve.kite/stdlib";
 
 import { inDatabase } from "./inDatabase.js";
-import { withTransaction } from "../databaseContext.js";
+import { inTx } from "../inTx.js";
 import type { DrizzleSessionTx } from "./SessionDatabase.js";
 import { init } from "./migrations/01-init.js";
 import { delegatedSessions } from "./migrations/02-delegated-sessions.js";
@@ -57,6 +57,8 @@ import { sharingMurmurIdentity } from "./migrations/49-sharing-murmur-identity.j
 import { sharingSettings } from "./migrations/50-sharing-settings.js";
 import { folderChildOrderSpace } from "./migrations/51-folder-child-order-space.js";
 import { folderSharing } from "./migrations/52-folder-sharing.js";
+import { happyHistoryBackfill } from "./migrations/53-happy-history-backfill.js";
+import { happyProjectionProgress } from "./migrations/54-happy-projection-progress.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -121,6 +123,8 @@ const migrations: readonly SessionDatabaseMigration[] = [
     sharingSettings,
     folderChildOrderSpace,
     folderSharing,
+    happyHistoryBackfill,
+    happyProjectionProgress,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;
@@ -135,65 +139,57 @@ export async function migrateSessionDatabase(
 ): Promise<void> {
     const createDataEpoch = options.createDataEpoch ?? createId;
     const localInstanceId = options.localInstanceId ?? createId();
-    await inDatabase(ctx, "rig.sql.database.migrate", async (ctx) => {
+    await inDatabase(ctx, "rig.sql.database.migrate.configure", async (ctx) => {
         const plainDatabase = ctx.tx;
         await plainDatabase.run(sql.raw("PRAGMA journal_mode = WAL"));
         await plainDatabase.run(sql.raw("PRAGMA synchronous = FULL"));
         await plainDatabase.run(sql.raw("PRAGMA busy_timeout = 5000"));
         await plainDatabase.run(sql.raw("PRAGMA foreign_keys = OFF"));
-        try {
-            await plainDatabase.transaction(
-                async (transaction) => {
-                    const transactionCtx = withTransaction(ctx, transaction);
-                    const applicationId =
-                        (
-                            await transaction.get<{ application_id: number }>(
-                                sql.raw("PRAGMA application_id"),
-                            )
-                        )?.application_id ?? 0;
-                    let currentVersion =
-                        (
-                            await transaction.get<{ user_version: number }>(
-                                sql.raw("PRAGMA user_version"),
-                            )
-                        )?.user_version ?? 0;
-                    if (applicationId !== SESSION_DATABASE_APPLICATION_ID) {
-                        await resetDatabase(transactionCtx);
-                        currentVersion = 0;
-                    } else if (currentVersion > CURRENT_SESSION_DATABASE_VERSION) {
-                        throw new Error(
-                            `The session database uses schema version ${String(currentVersion)}, but this Rig version supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}.`,
-                        );
-                    }
-                    for (
-                        let version = currentVersion;
-                        version < CURRENT_SESSION_DATABASE_VERSION;
-                        version += 1
-                    ) {
-                        await transactionCtx.span(
-                            `rig.sql.database.migration.${String(version + 1)}`,
-                            async () =>
-                                migrations[version]!(transaction, {
-                                    createDataEpoch,
-                                    localInstanceId,
-                                }),
-                        );
-                        await transaction.run(
-                            sql.raw(`PRAGMA user_version = ${String(version + 1)}`),
-                        );
-                    }
-                    await transaction.run(
-                        sql.raw(
-                            `PRAGMA application_id = ${String(SESSION_DATABASE_APPLICATION_ID)}`,
-                        ),
-                    );
-                },
-                { behavior: "immediate" },
-            );
-        } finally {
-            await plainDatabase.run(sql.raw("PRAGMA foreign_keys = ON"));
-        }
     });
+    try {
+        await inTx(ctx, "rig.sql.database.migrate", async (transactionCtx) => {
+            const transaction = transactionCtx.tx;
+            const applicationId =
+                (
+                    await transaction.get<{ application_id: number }>(
+                        sql.raw("PRAGMA application_id"),
+                    )
+                )?.application_id ?? 0;
+            let currentVersion =
+                (await transaction.get<{ user_version: number }>(sql.raw("PRAGMA user_version")))
+                    ?.user_version ?? 0;
+            if (applicationId !== SESSION_DATABASE_APPLICATION_ID) {
+                await resetDatabase(transactionCtx);
+                currentVersion = 0;
+            } else if (currentVersion > CURRENT_SESSION_DATABASE_VERSION) {
+                throw new Error(
+                    `The session database uses schema version ${String(currentVersion)}, but this Rig version supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}.`,
+                );
+            }
+            for (
+                let version = currentVersion;
+                version < CURRENT_SESSION_DATABASE_VERSION;
+                version += 1
+            ) {
+                await transactionCtx.span(
+                    `rig.sql.database.migration.${String(version + 1)}`,
+                    async () =>
+                        migrations[version]!(transaction, {
+                            createDataEpoch,
+                            localInstanceId,
+                        }),
+                );
+                await transaction.run(sql.raw(`PRAGMA user_version = ${String(version + 1)}`));
+            }
+            await transaction.run(
+                sql.raw(`PRAGMA application_id = ${String(SESSION_DATABASE_APPLICATION_ID)}`),
+            );
+        });
+    } finally {
+        await inDatabase(ctx, "rig.sql.database.migrate.restore_foreign_keys", async (ctx) => {
+            await ctx.tx.run(sql.raw("PRAGMA foreign_keys = ON"));
+        });
+    }
 }
 
 async function resetDatabase(ctx: Context): Promise<void> {

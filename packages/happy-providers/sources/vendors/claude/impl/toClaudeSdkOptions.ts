@@ -133,7 +133,7 @@ function createClaudeMcpServer(
     const instance = new McpServer(
         {
             name: RIG_MCP_SERVER_NAME,
-            version: "rig-providers",
+            version: "happy-providers",
         },
         {
             capabilities: { tools: {} },

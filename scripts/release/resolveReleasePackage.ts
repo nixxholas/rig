@@ -3,6 +3,14 @@ import { fileURLToPath } from "node:url";
 import type { ReleasePackage, ReleasePackageKey } from "./ReleasePackage.js";
 
 const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
+    "happy-providers": {
+        buildArguments: ["--filter", "@slopus/happy-providers", "build"],
+        commitPrefix: "Release happy-providers v",
+        directory: fileURLToPath(new URL("../../packages/happy-providers/", import.meta.url)),
+        key: "happy-providers",
+        manifestPath: "packages/happy-providers/package.json",
+        tagPrefix: "happy-providers-v",
+    },
     "happy-plugins": {
         buildArguments: ["--filter", "happy-plugins", "build"],
         commitPrefix: "Release happy-plugins v",
@@ -31,9 +39,14 @@ const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
 
 export function resolveReleasePackage(value: string | undefined): ReleasePackage {
     const key = value ?? "rig";
-    if (key !== "rig" && key !== "rig-connect" && key !== "happy-plugins") {
+    if (
+        key !== "rig" &&
+        key !== "rig-connect" &&
+        key !== "happy-plugins" &&
+        key !== "happy-providers"
+    ) {
         throw new Error(
-            `Unknown release package ${key}. Expected rig, rig-connect, or happy-plugins.`,
+            `Unknown release package ${key}. Expected rig, rig-connect, happy-plugins, or happy-providers.`,
         );
     }
     return PACKAGES[key];

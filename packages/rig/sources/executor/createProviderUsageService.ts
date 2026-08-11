@@ -1,4 +1,4 @@
-import { ProviderUsageRequestError, type ProviderUsage } from "@slopus/rig-providers";
+import { ProviderUsageRequestError, type ProviderUsage } from "@slopus/happy-providers";
 
 import { PROVIDER_USAGE_POLL_INTERVAL_MS } from "./createProviderUsageTracker.js";
 

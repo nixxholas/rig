@@ -2,13 +2,13 @@ import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { createClient, type Client, type Transaction } from "@libsql/client";
+import { createClient, type Client } from "@libsql/client";
 
 const DEFAULT_RETRY_INTERVAL_MS = 25;
 
 export interface SqliteProcessLock {
     readonly path: string;
-    release(): void;
+    release(): Promise<void>;
 }
 
 export interface AcquireSqliteProcessLockOptions {
@@ -53,7 +53,6 @@ export async function acquireSqliteProcessLock(
 
 async function tryAcquireSqliteProcessLock(path: string): Promise<SqliteProcessLock | undefined> {
     let client: Client | undefined;
-    let transaction: Transaction | undefined;
     try {
         const previousUmask = process.umask(0o077);
         try {
@@ -67,7 +66,10 @@ async function tryAcquireSqliteProcessLock(path: string): Promise<SqliteProcessL
         }
         chmodSync(path, 0o600);
         await client.execute("PRAGMA journal_mode = DELETE");
-        transaction = await client.transaction("write");
+        // Keep the lock on the client's own connection. A libSQL transaction
+        // handle detaches that connection, and neither handle.close() nor
+        // client.close() can close it after commit/rollback.
+        await client.execute("BEGIN IMMEDIATE");
     } catch (error) {
         try {
             client?.close();
@@ -78,17 +80,23 @@ async function tryAcquireSqliteProcessLock(path: string): Promise<SqliteProcessL
         throw error;
     }
 
-    let released = false;
+    let releasePromise: Promise<void> | undefined;
     return {
         path,
-        release() {
-            if (released) return;
-            released = true;
-            try {
-                transaction?.close();
-            } finally {
-                client?.close();
+        async release() {
+            if (releasePromise === undefined) {
+                releasePromise = (async () => {
+                    try {
+                        // Explicit rollback releases the kernel lock. client.close() alone leaves
+                        // the native wrapper alive until collection, and callers must not start a
+                        // replacement owner until the rollback has actually settled.
+                        await client?.execute("ROLLBACK");
+                    } finally {
+                        client?.close();
+                    }
+                })();
             }
+            await releasePromise;
         },
     };
 }

@@ -3,7 +3,7 @@ import {
     fetchCodexProviderUsage,
     fetchGrokProviderUsage,
     type ProviderUsage,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 import type { ConfigProviders } from "../config/types.js";
 import { providerCredentialEnvironment } from "./providerCredentialEnvironment.js";

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { openSessionDatabase } from "../database/openSessionDatabase.js";
+import { inReadTx } from "../inReadTx.js";
 import { inTx } from "../inTx.js";
 
 describe("inTx", () => {
@@ -67,6 +68,32 @@ describe("inTx", () => {
         expect(traced.errors).toHaveLength(2);
         expect(traced.names).toEqual(["rig.sql.test.outer", "rig.sql.test.inner"]);
         await opened.database.close(opened.ctx);
+    });
+
+    it("keeps an outer write transaction active around a nested read on another database", async () => {
+        const root = createTestRootContext();
+        const first = await openSessionDatabase(root, ":memory:");
+        const second = await openSessionDatabase(root, ":memory:");
+        await first.ctx.tx.run(sql.raw("CREATE TABLE values_log (value TEXT NOT NULL)"));
+        await second.ctx.tx.run(sql.raw("CREATE TABLE lookup (value TEXT NOT NULL)"));
+        await second.ctx.tx.run(sql`INSERT INTO lookup (value) VALUES ('read')`);
+
+        await inTx(first.ctx, "rig.sql.test.outer_write", async (ctx) => {
+            await ctx.tx.run(sql`INSERT INTO values_log (value) VALUES ('before')`);
+            await expect(
+                inReadTx(second.ctx, "rig.sql.test.nested_read", async (readCtx) =>
+                    readCtx.tx.all<{ value: string }>(sql`SELECT value FROM lookup`),
+                ),
+            ).resolves.toEqual([{ value: "read" }]);
+            await ctx.tx.run(sql`INSERT INTO values_log (value) VALUES ('after')`);
+        });
+
+        expect(
+            await first.ctx.tx.all<{ value: string }>(
+                sql`SELECT value FROM values_log ORDER BY rowid`,
+            ),
+        ).toEqual([{ value: "before" }, { value: "after" }]);
+        await Promise.all([first.database.close(first.ctx), second.database.close(second.ctx)]);
     });
 });
 

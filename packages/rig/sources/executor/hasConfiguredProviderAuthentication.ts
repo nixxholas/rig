@@ -6,7 +6,7 @@ import {
     GrokApiKeyCredential,
     GrokSessionCredential,
     loadCodexCredential,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 import type { ConfigProvider } from "../config/types.js";
 import { readConfiguredBedrockBearerToken } from "./readConfiguredBedrockBearerToken.js";

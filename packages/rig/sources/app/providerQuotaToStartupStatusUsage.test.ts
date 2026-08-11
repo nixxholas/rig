@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderQuota } from "@slopus/happy-providers";
 import { providerQuotaToStartupStatusUsage } from "./providerQuotaToStartupStatusUsage.js";
 
 describe("providerQuotaToStartupStatusUsage", () => {

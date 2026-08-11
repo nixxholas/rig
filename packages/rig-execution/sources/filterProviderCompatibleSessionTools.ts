@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { SessionTool } from "@slopus/rig-providers";
+import type { SessionTool } from "@slopus/happy-providers";
 
 const providerToolParametersSchema = Type.Union([
     Type.Undefined(),

@@ -213,6 +213,92 @@ describe("RemoteAgent", () => {
         expect(agent.snapshot().messages).toEqual([message]);
     });
 
+    it("keeps the loaded transcript when a current-state session update arrives", () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "openai/test",
+            name: "Test model",
+            thinkingLevels: ["off"],
+        });
+        const session = protocolSession(model);
+        const message = {
+            blocks: [{ text: "Already loaded.", type: "text" as const }],
+            id: "agent-message-1",
+            role: "agent" as const,
+        };
+        const agent = new RemoteAgent({
+            client: {} as ProtocolHttpClient,
+            context: createJustBashToolHarness().context,
+            session: {
+                ...session,
+                snapshot: { ...session.snapshot, messages: [message] },
+            },
+        });
+
+        agent.applySessionEvent({
+            createdAt: 1,
+            data: {
+                session: {
+                    ...session,
+                    appendSystemPrompt: "New instructions.",
+                    snapshot: { ...session.snapshot, messages: [] },
+                },
+            },
+            id: "event-current-state",
+            sessionId: session.id,
+            type: "session_updated",
+        });
+
+        expect(agent.snapshot().messages).toEqual([message]);
+    });
+
+    it("applies the bounded model-context addition carried by a workspace transfer update", () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "openai/test",
+            name: "Test model",
+            thinkingLevels: ["off"],
+        });
+        const session = protocolSession(model);
+        const existing = {
+            blocks: [{ text: "Existing context.", type: "text" as const }],
+            id: "context-1",
+            role: "user" as const,
+        };
+        const transferNotice = {
+            blocks: [{ text: "This session moved workspaces.", type: "text" as const }],
+            id: "transfer-context-1",
+            internal: true as const,
+            role: "system" as const,
+        };
+        const agent = new RemoteAgent({
+            client: {} as ProtocolHttpClient,
+            context: createJustBashToolHarness().context,
+            session: {
+                ...session,
+                snapshot: { ...session.snapshot, contextMessages: [existing] },
+            },
+        });
+
+        agent.applySessionEvent({
+            createdAt: 1,
+            data: {
+                appendedContextMessage: transferNotice,
+                session: {
+                    ...session,
+                    cwd: "/workspace-two",
+                    snapshot: { ...session.snapshot, messages: [] },
+                },
+            },
+            id: "event-workspace-transfer",
+            sessionId: session.id,
+            type: "session_updated",
+        });
+
+        expect(agent.snapshot().contextMessages).toEqual([existing, transferNotice]);
+        expect(agent.snapshot().messages).toEqual([]);
+    });
+
     it("keeps goal controls synchronized with responses and events", async () => {
         const model = defineModel({
             id: "openai/test",
@@ -405,7 +491,6 @@ describe("RemoteAgent", () => {
                 modelId: model.id,
                 providerId: session.snapshot.providerId,
                 serviceTier: null,
-                snapshot: { ...session.snapshot, effort: "high" },
             },
             id: "event-effort",
             sessionId: session.id,
@@ -531,7 +616,6 @@ describe("RemoteAgent", () => {
                 modelId: model.id,
                 providerId: fastSession.snapshot.providerId,
                 serviceTier: "fast",
-                snapshot: fastSession.snapshot,
             },
             id: "event-fast",
             sessionId: session.id,
@@ -629,7 +713,6 @@ describe("RemoteAgent", () => {
                 modelId: model.id,
                 providerId: authoritativeSnapshot.providerId,
                 serviceTier: null,
-                snapshot: authoritativeSnapshot,
             },
             id: "event-effort",
             sessionId: session.id,

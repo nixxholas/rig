@@ -35,12 +35,18 @@ afterEach(async () => {
     for (const server of started.splice(0)) await server.close();
 });
 
-async function startDaemon(options: { inferenceGate?: Promise<void>; withModel?: boolean } = {}) {
+async function startDaemon(
+    options: {
+        inferenceGate?: Promise<void>;
+        partialAtStart?: boolean;
+        withModel?: boolean;
+    } = {},
+) {
     const store =
         options.withModel === true
             ? await InMemorySessionStore.open(ctx, {
                   createRuntime: (runtimeOptions) =>
-                      createRuntime(runtimeOptions, options.inferenceGate),
+                      createRuntime(runtimeOptions, options.inferenceGate, options.partialAtStart),
                   modelCatalog: testCatalog(),
               })
             : await InMemorySessionStore.open(ctx);
@@ -249,7 +255,7 @@ describe("rig-connect against a live daemon", () => {
 
         await withSessionConnection(
             endpoint,
-            { onChange: () => undefined, sessionId: session.id, transcriptTurnLimit: 20 },
+            { onChange: () => undefined, sessionId: session.id },
             async (connection) => {
                 await waitFor(
                     () => connection.session().connection === "live",
@@ -283,6 +289,96 @@ describe("rig-connect against a live daemon", () => {
                 expect(connection.session().transcriptComplete).toBe(true);
             },
         );
+    });
+
+    it("keeps visible agent output when an interrupted turn becomes history", async () => {
+        let releaseInference = (): void => undefined;
+        const inferenceGate = new Promise<void>((resolve) => {
+            releaseInference = resolve;
+        });
+        const { endpoint, store } = await startDaemon({
+            inferenceGate,
+            partialAtStart: true,
+            withModel: true,
+        });
+        const session = await store.create(ctx, { cwd: "/tmp/rig-connect-interrupted-partial" });
+        const submitted = await session.submit(ctx, { text: "Start an answer." });
+        await waitFor(
+            () =>
+                session
+                    .partialMessage()
+                    ?.message.blocks.some(
+                        (block) => block.type === "text" && block.text === "Hello",
+                    ) === true,
+            "the partial agent message to be stored",
+        );
+        const interrupted = session.markInterrupted(ctx, {
+            interruptedAt: Date.now(),
+            message: "The local server stopped before the run completed.",
+            reason: "crash",
+            runId: submitted.runId,
+        });
+        // A fresh attach racing interruption must see either the live overlay or
+        // its committed replacement. Clearing the overlay before the durable
+        // transaction begins creates a window where it sees neither.
+        expect(session.partialMessage()).toMatchObject({
+            message: { blocks: [{ text: "Hello", type: "text" }] },
+            runId: submitted.runId,
+        });
+        releaseInference();
+        await interrupted;
+
+        await withSessionConnection(
+            endpoint,
+            { onChange: () => undefined, sessionId: session.id },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
+                expect(connection.elements()).toContainEqual(
+                    expect.objectContaining({ kind: "agent_text", text: "Hello" }),
+                );
+            },
+        );
+    });
+
+    it("commits visible partial output as soon as a user abort is accepted", async () => {
+        let releaseInference = (): void => undefined;
+        const inferenceGate = new Promise<void>((resolve) => {
+            releaseInference = resolve;
+        });
+        const { endpoint, store } = await startDaemon({
+            inferenceGate,
+            partialAtStart: true,
+            withModel: true,
+        });
+        const session = await store.create(ctx, { cwd: "/tmp/rig-connect-aborted-partial" });
+        const submitted = await session.submit(ctx, { text: "Start an answer." });
+        await waitFor(
+            () =>
+                session
+                    .partialMessage()
+                    ?.message.blocks.some(
+                        (block) => block.type === "text" && block.text === "Hello",
+                    ) === true,
+            "the partial agent message to be stored",
+        );
+
+        await session.abort(ctx, { expectedRunId: submitted.runId });
+        const transcript = await fetchJson(endpoint, `/sessions/${session.id}/transcript`);
+        releaseInference();
+
+        expect(transcript.status).toBe(200);
+        expect(transcript.body).toMatchObject({
+            messages: [
+                expect.objectContaining({ role: "user" }),
+                expect.objectContaining({
+                    blocks: [expect.objectContaining({ text: "Hello", type: "text" })],
+                    role: "agent",
+                }),
+            ],
+        });
     });
 
     it("exposes one authoritative active clock from submission through completion", async () => {
@@ -404,13 +500,40 @@ function testModel() {
     });
 }
 
-function testProvider(inferenceGate?: Promise<void>) {
+function testProvider(inferenceGate?: Promise<void>, partialAtStart = false) {
     const model = testModel();
     return defineProvider({
         id: "test",
         models: [model],
-        stream() {
+        stream(_model, _context, options) {
             const message = assistantMessage(model.id);
+            if (partialAtStart && options?.sessionId?.endsWith(":title") === true) {
+                return createInferenceStream(async function* () {
+                    yield { type: "start", partial: { ...message, content: [] } };
+                    yield { type: "done", reason: "stop", message };
+                    return message;
+                });
+            }
+            if (partialAtStart) {
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        yield { type: "start" as const, partial: { ...message, content: [] } };
+                        yield {
+                            type: "text_delta" as const,
+                            contentIndex: 0,
+                            delta: "Hello",
+                            partial: message,
+                        };
+                        await inferenceGate;
+                        yield { type: "done" as const, reason: "stop" as const, message };
+                        return message;
+                    },
+                    async result() {
+                        await inferenceGate;
+                        return message;
+                    },
+                };
+            }
             return createInferenceStream(async function* () {
                 yield { type: "start", partial: { ...message, content: [] } };
                 await inferenceGate;
@@ -424,8 +547,9 @@ function testProvider(inferenceGate?: Promise<void>) {
 function createRuntime(
     options: CreateCodingAssistantAgentOptions,
     inferenceGate?: Promise<void>,
+    partialAtStart = false,
 ): CodingAssistantRuntime {
-    const provider = testProvider(inferenceGate);
+    const provider = testProvider(inferenceGate, partialAtStart);
     const processManager = new NativeProcessManager();
     const context = createNodeAgentContext(ctx, { cwd: options.cwd, processManager });
     return {

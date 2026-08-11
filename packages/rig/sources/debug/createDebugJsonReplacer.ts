@@ -1,4 +1,4 @@
-import { extractProviderErrorDiagnostics } from "@slopus/rig-providers";
+import { extractProviderErrorDiagnostics } from "@slopus/happy-providers";
 
 export function createDebugJsonReplacer(): (key: string, value: unknown) => unknown {
     const ancestors: object[] = [];

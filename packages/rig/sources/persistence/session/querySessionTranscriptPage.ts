@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
-import { inTx } from "../inTx.js";
+import { inReadTx } from "../inReadTx.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
 import { querySessionTranscriptNotices } from "./querySessionTranscriptNotices.js";
 
@@ -19,7 +19,7 @@ export async function querySessionTranscriptPage(
     turnLimit: number,
     before?: string,
 ): Promise<SessionTranscriptMessagePage | undefined> {
-    return await inTx(ctx, "rig.sql.session.query_session_transcript_page", async (ctx) => {
+    return await inReadTx(ctx, "rig.sql.session.query_session_transcript_page", async (ctx) => {
         const tx = ctx.tx;
         const beforeRow =
             before === undefined

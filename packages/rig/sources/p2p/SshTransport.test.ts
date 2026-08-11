@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
+import type { Context } from "@steve.kite/stdlib";
 
 import { createTestRootContext } from "../testing/createTestRootContext.js";
 
@@ -122,6 +123,57 @@ describe("SSH P2P transport", () => {
         await transport.close();
     });
 
+    it("keeps its handshake context alive while trust validation is gated", async () => {
+        const remote = createP2pInstanceIdentity();
+        let releaseValidation!: () => void;
+        const validationGate = new Promise<void>((resolve) => {
+            releaseValidation = resolve;
+        });
+        let markValidationStarted!: () => void;
+        const validationStarted = new Promise<void>((resolve) => {
+            markValidationStarted = resolve;
+        });
+        let operationEnded = false;
+        let usedEndedContext = false;
+        const transport = SshTransport.create({
+            handshakeTimeoutMs: 5,
+            identity: createP2pInstanceIdentity(),
+            openChannel: () =>
+                Promise.resolve(
+                    fakeBridge(HOST_KEY_HASH, (duplex, binding) =>
+                        serveBridge(duplex, remote, binding),
+                    ),
+                ),
+            peers: [peerConfig(remote)],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (operationCtx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => {
+                try {
+                    return await work(ctx);
+                } finally {
+                    operationEnded = true;
+                }
+            },
+            validatePeer: async () => {
+                markValidationStarted();
+                await validationGate;
+                usedEndedContext = operationEnded;
+            },
+        });
+        const ping = transport.ping(remote.instanceId, new AbortController().signal);
+
+        await validationStarted;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(operationEnded).toBe(false);
+
+        releaseValidation();
+        await ping;
+        expect(operationEnded).toBe(true);
+        expect(usedEndedContext).toBe(false);
+        await transport.close();
+    });
+
     it("refuses a bridge whose signed identity is not the configured peer", async () => {
         const configured = createP2pInstanceIdentity();
         const impostor = createP2pInstanceIdentity();
@@ -160,6 +212,10 @@ describe("SSH P2P transport", () => {
                 });
             },
             peers: [peerConfig(remote)],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (ctx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => await work(ctx.named("ssh-handshake")),
             validatePeer: () => Promise.resolve(),
         });
 

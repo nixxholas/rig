@@ -222,6 +222,7 @@ import {
 } from "./SessionTransactionContext.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
+const RESTORED_SESSION_EVENT_BYTES = 4 * 1_024 * 1_024;
 const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
 /**
  * How often the daemon looks for Unsorted chats that have run out of time. A chat has a whole day
@@ -236,6 +237,7 @@ const UNSORTED_SWEEP_MAX_MS = 250;
 const TOOL_RESULT_SWEEP_BATCH_LIMIT = 10;
 const TOOL_RESULT_SWEEP_MAX_SCANNED_MESSAGES = 100;
 const TOOL_RESULT_SWEEP_MAX_MS = 250;
+const TOOL_RESULT_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -266,6 +268,8 @@ export interface PersistentSessionStoreOptions {
     workspacesDirectory?: string;
     workspaceFeatures?: WorkspaceFeatures;
 }
+
+type WorkspaceArchiveTeardown = (ctx: Context) => Promise<void>;
 
 export class PersistentSessionStore implements SessionStore, InMemorySessionPersistence {
     #agentManager: AgentSessionManager;
@@ -304,6 +308,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #unsortedSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     readonly #toolResultRetentionMs: number | undefined;
     #toolResultSweepCursor: SessionToolResultPruneCursor | undefined;
+    #toolResultSweepTimer: ReturnType<typeof setInterval> | undefined;
+    #toolResultSweepFollowup: ReturnType<typeof setImmediate> | undefined;
+    #toolResultSweepStopped = true;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
         reference: WeakRef<InMemorySession>;
@@ -622,6 +629,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         await this.repairInterruptedSessions(ctx, "crash");
         await this.#armScheduledMessageTimer(ctx);
         this.#armUnsortedSweepTimer();
+        if (this.#toolResultRetentionMs !== undefined) this.#armToolResultSweepTimer();
         const recover = () =>
             withWorkerContext("workspace-recovery", async (ctx) =>
                 this.#recoverProjectWorkspaces(withDatabase(ctx, this.#database)),
@@ -736,6 +744,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearImmediate(this.#unsortedSweepFollowup);
             this.#unsortedSweepFollowup = undefined;
         }
+        this.#stopToolResultSweep();
         await this.remoteTerminals.close(ctx);
         this.#workspaceReadyWaiters.close();
         await this.#projects.close(ctx);
@@ -1928,31 +1937,36 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         // Every workspace is logically archived above; its sessions follow one transaction at a
         // time so no session teardown runs while the project archival holds the write lock.
-        const workspaces: { cleanup: Promise<void>[]; workspaceId: string }[] = [];
+        const workspaces: { teardown: WorkspaceArchiveTeardown[]; workspaceId: string }[] = [];
         for (const workspaceId of archiving) {
             try {
                 workspaces.push({
-                    cleanup: await this.#archiveWorkspaceSessions(ctx, workspaceId),
+                    teardown: await this.#archiveWorkspaceSessions(ctx, projectId, workspaceId),
                     workspaceId,
                 });
             } catch (error) {
                 if (!isSessionTransactionPostCommitError(error)) throw error;
                 postCommitFailures.push(error);
-                workspaces.push({ cleanup: [], workspaceId });
+                workspaces.push({ teardown: [], workspaceId });
             }
         }
         // All logical state is committed before physical cleanup yields.
-        const cleanup = await Promise.allSettled([
-            this.remoteTerminals.closeProject(ctx, projectId),
-            ...workspaces.map((workspace) =>
-                this.#completeWorkspaceArchive(
-                    ctx,
-                    projectId,
-                    workspace.workspaceId,
-                    workspace.cleanup,
-                ),
-            ),
-        ]);
+        const cleanup = await this.#runWorkspaceArchiveCleanup(
+            projectId,
+            undefined,
+            async (cleanupCtx) =>
+                await Promise.allSettled([
+                    this.remoteTerminals.closeProject(cleanupCtx, projectId),
+                    ...workspaces.map((workspace) =>
+                        this.#completeWorkspaceArchive(
+                            cleanupCtx,
+                            projectId,
+                            workspace.workspaceId,
+                            workspace.teardown.map((teardown) => teardown(cleanupCtx)),
+                        ),
+                    ),
+                ]),
+        );
         const failures = [
             ...postCommitFailures,
             ...cleanup.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
@@ -1992,9 +2006,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (workspace === undefined || workspace.status === "archived") {
             return Promise.resolve(workspace);
         }
-        const cleanup = await this.#archiveWorkspaceSessions(ctx, workspaceId);
-        cleanup.push(this.remoteTerminals.closeWorkspace(ctx, projectId, workspaceId));
-        const finish = () => this.#completeWorkspaceArchive(ctx, projectId, workspaceId, cleanup);
+        const teardowns = await this.#archiveWorkspaceSessions(ctx, projectId, workspaceId);
+        const finish = () =>
+            this.#runWorkspaceArchiveCleanup(projectId, workspaceId, async (cleanupCtx) => {
+                const cleanup = teardowns.map((teardown) => teardown(cleanupCtx));
+                cleanup.push(
+                    this.remoteTerminals.closeWorkspace(cleanupCtx, projectId, workspaceId),
+                );
+                return await this.#completeWorkspaceArchive(
+                    cleanupCtx,
+                    projectId,
+                    workspaceId,
+                    cleanup,
+                );
+            });
         const background = this.#taskDrain?.run(finish) ?? finish();
         void background.catch((error: unknown) => {
             // Residue left behind is worth a warning because a later attempt can still clear it.
@@ -2012,7 +2037,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
      * transaction commits. A failure in any queued-run/event write restores every session touched
      * by the transaction, so memory cannot get ahead of SQLite.
      */
-    async #archiveWorkspaceSessions(ctx: Context, workspaceId: string): Promise<Promise<void>[]> {
+    async #archiveWorkspaceSessions(
+        ctx: Context,
+        projectId: string,
+        workspaceId: string,
+    ): Promise<WorkspaceArchiveTeardown[]> {
         // Sessions cannot join a workspace that is already archiving, so this list only shrinks.
         const pending = await this.#transaction(ctx, () =>
             queryUnarchivedSessionIdsForWorkspace(ctx, workspaceId),
@@ -2021,7 +2050,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             checkpoint: ReturnType<InMemorySession["captureMutationCheckpoint"]>;
             session: InMemorySession;
         }> = [];
-        const teardowns: Array<() => Promise<void>> = [];
+        const teardowns: WorkspaceArchiveTeardown[] = [];
         try {
             await this.#transaction(ctx, async () => {
                 for (const sessionId of pending) {
@@ -2037,7 +2066,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             });
         } catch (error) {
             if (isSessionTransactionPostCommitError(error)) {
-                const cleanup = await Promise.allSettled(teardowns.map((teardown) => teardown()));
+                const cleanup = await this.#runWorkspaceArchiveCleanup(
+                    projectId,
+                    workspaceId,
+                    async (cleanupCtx) =>
+                        await Promise.allSettled(teardowns.map((teardown) => teardown(cleanupCtx))),
+                );
                 const failures = cleanup.flatMap((result) =>
                     result.status === "rejected" ? [result.reason] : [],
                 );
@@ -2054,7 +2088,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             }
             throw error;
         }
-        return teardowns.map((teardown) => teardown());
+        return teardowns;
+    }
+
+    #runWorkspaceArchiveCleanup<Result>(
+        projectId: string,
+        workspaceId: string | undefined,
+        work: (ctx: Context) => Promise<Result>,
+    ): Promise<Result> {
+        return withWorkerContext(
+            "workspace-archive-cleanup",
+            (workerCtx) => work(withDatabase(workerCtx, this.#database)),
+            { projectId, ...(workspaceId === undefined ? {} : { workspaceId }) },
+        );
     }
 
     async #completeWorkspaceArchive(
@@ -2244,6 +2290,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             clearImmediate(this.#unsortedSweepFollowup);
             this.#unsortedSweepFollowup = undefined;
         }
+        this.#stopToolResultSweep();
         const closingSessions = new Set(this.#cachedSessions());
         const cleanup: Promise<void>[] = [
             ...[...closingSessions].map((session) => session.beginShutdown(ctx)),
@@ -2598,6 +2645,56 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return true;
     }
 
+    #armToolResultSweepTimer(): void {
+        this.#toolResultSweepStopped = false;
+        this.#scheduleToolResultSweep();
+        this.#toolResultSweepTimer = setInterval(() => {
+            void withWorkerContext("tool-result-sweep", (ctx) =>
+                this.#sweepToolResults(withDatabase(ctx, this.#database)),
+            ).catch(rethrowDatabaseFailure);
+        }, TOOL_RESULT_SWEEP_INTERVAL_MS);
+        this.#toolResultSweepTimer.unref();
+    }
+
+    async #sweepToolResults(ctx: Context): Promise<void> {
+        if (this.#toolResultSweepStopped) return;
+        try {
+            const moreToolResults = await this.pruneStaleToolResults(ctx);
+            if (moreToolResults) this.#scheduleToolResultSweep();
+        } catch (error) {
+            if (this.#database.closed) return;
+            if (isDatabaseFailure(error)) throw error;
+        }
+    }
+
+    #scheduleToolResultSweep(): void {
+        if (
+            this.#toolResultSweepStopped ||
+            this.#database.closed ||
+            this.#toolResultSweepFollowup !== undefined
+        )
+            return;
+        this.#toolResultSweepFollowup = setImmediate(() => {
+            this.#toolResultSweepFollowup = undefined;
+            void withWorkerContext("tool-result-sweep-followup", (ctx) =>
+                this.#sweepToolResults(withDatabase(ctx, this.#database)),
+            ).catch(rethrowDatabaseFailure);
+        });
+        this.#toolResultSweepFollowup.unref();
+    }
+
+    #stopToolResultSweep(): void {
+        this.#toolResultSweepStopped = true;
+        if (this.#toolResultSweepTimer !== undefined) {
+            clearInterval(this.#toolResultSweepTimer);
+            this.#toolResultSweepTimer = undefined;
+        }
+        if (this.#toolResultSweepFollowup !== undefined) {
+            clearImmediate(this.#toolResultSweepFollowup);
+            this.#toolResultSweepFollowup = undefined;
+        }
+    }
+
     async #deliverDueScheduledMessages(ctx: Context): Promise<void> {
         for (;;) {
             const next = await queryNextPendingScheduledMessage(ctx);
@@ -2792,7 +2889,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             deferEventNotification: (eventCtx, notify) =>
                 this.#afterTransactionCommit(eventCtx, notify),
-            events: await querySessionEvents(ctx, sessionId, RESTORED_SESSION_EVENT_LIMIT),
+            events: await querySessionEvents(ctx, sessionId, {
+                maxBytes: RESTORED_SESSION_EVENT_BYTES,
+                maxCount: RESTORED_SESSION_EVENT_LIMIT,
+            }),
             ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
             modelCatalog: this.#modelCatalogFor(ownerInstanceId),
             now: this.#now,

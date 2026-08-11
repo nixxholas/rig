@@ -10,8 +10,8 @@ describe("protocol tracing", () => {
         "peer.global-events-stream",
         "peer.live-events-stream",
         "peer.stream",
-    ])("does not trace the long-running %s route", (route) => {
-        expect(shouldTraceProtocolRoute(route)).toBe(false);
+    ])("traces only the finite setup of the %s route", (route) => {
+        expect(shouldTraceProtocolRoute(route)).toBe(true);
     });
 
     it.each(["session-state", "session-transcript", "peer.session-state"])(

@@ -1,4 +1,4 @@
-import type { SessionReasoningEffort } from "@slopus/rig-providers";
+import type { SessionReasoningEffort } from "@slopus/happy-providers";
 
 export function resolveProfileDefaultEffort(
     defaultThinkingLevel: string,

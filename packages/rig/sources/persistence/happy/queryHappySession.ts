@@ -23,8 +23,16 @@ export async function queryHappySession(
             credentialFingerprint: row.credentialFingerprint,
             encryptionKey: new Uint8Array(Buffer.from(row.encryptionKeyBase64, "base64")),
             encryptionVariant: row.encryptionVariant as HappyEncryptionVariant,
+            historyBackfilled: row.historyBackfilled,
             lastRemoteSeq: row.lastRemoteSeq,
             ...(row.remoteSessionId === null ? {} : { remoteSessionId: row.remoteSessionId }),
+            ...(row.projectedEventId === null ? {} : { projectedEventId: row.projectedEventId }),
+            ...(row.projectedEventSeq === null ? {} : { projectedEventSeq: row.projectedEventSeq }),
+            ...(row.projectionError === null ? {} : { projectionError: row.projectionError }),
+            ...(row.projectionStallCause === null
+                ? {}
+                : { projectionStallCause: row.projectionStallCause }),
+            projectionStatus: row.projectionStatus,
             sessionId: row.sessionId,
             tag: row.tag,
         };

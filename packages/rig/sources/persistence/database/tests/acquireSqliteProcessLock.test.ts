@@ -14,7 +14,7 @@ const heldLocks = new Set<SqliteProcessLock>();
 const roots = new Set<string>();
 
 afterEach(async () => {
-    for (const lock of heldLocks) lock.release();
+    for (const lock of heldLocks) await lock.release();
     heldLocks.clear();
     await Promise.all([...roots].map((root) => rm(root, { force: true, recursive: true })));
     roots.clear();
@@ -29,7 +29,9 @@ describe("SQLite process locks", () => {
             SqliteProcessLockUnavailableError,
         );
 
-        first.release();
+        const released = first.release();
+        expect(released).toBeInstanceOf(Promise);
+        await released;
         heldLocks.delete(first);
         const second = hold(await acquireSqliteProcessLock(path));
         expect(second.path).toBe(await realpath(path));
@@ -44,12 +46,9 @@ describe("SQLite process locks", () => {
             timeoutMs: 1_000,
         });
 
-        queueMicrotask(() => {
-            first.release();
-            heldLocks.delete(first);
-        });
-
+        const released = first.release().then(() => heldLocks.delete(first));
         hold(await waiting);
+        await released;
     });
 
     it("canonicalizes symlinked parent directories to one ownership boundary", async () => {

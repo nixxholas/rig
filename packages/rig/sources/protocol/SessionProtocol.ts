@@ -14,7 +14,7 @@ import {
     type ProviderModelCompatibilityType,
     type ProviderQuota,
     type ProviderUsage,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import type { McpServerSummary } from "../mcp/index.js";
@@ -625,8 +625,6 @@ export interface SessionStreamCurrentState {
  * event log is never replayed on top of it.
  */
 export const SESSION_STREAM_TURN_LIMIT = 20;
-/** Default recent history carried while opening a chat; clients may explicitly request more. */
-export const SESSION_BOOTSTRAP_TURN_LIMIT = 1;
 /** Service rows are bounded separately and never consume the conversational turn budget. */
 export const SESSION_TRANSCRIPT_NOTICE_LIMIT = 50;
 
@@ -1189,9 +1187,23 @@ export interface BaseSessionEvent<TType extends string, TData> {
 
 export type SessionCreatedEvent = BaseSessionEvent<"session_created", { session: ProtocolSession }>;
 
+/**
+ * A current-state refresh. `session.snapshot` never carries transcript or model-context messages;
+ * those have their own bounded transcript protocol and durable message rows.
+ */
 export type SessionUpdatedEvent = BaseSessionEvent<
     "session_updated",
-    { mutationId?: string; session: ProtocolSession }
+    {
+        /**
+         * One model-context message introduced by this state transition.
+         *
+         * This is deliberately singular: full model context remains daemon-owned, while
+         * visible history is loaded through the bounded request-response transcript.
+         */
+        appendedContextMessage?: SystemMessage;
+        mutationId?: string;
+        session: ProtocolSession;
+    }
 >;
 
 export type SessionArchiveChangedEvent = BaseSessionEvent<
@@ -1426,7 +1438,9 @@ export type SessionConfigurationField = "model" | "effort" | "serviceTier";
  * Several of these can move together, most often when a message carries them, so one event
  * reports everything that changed at once. `changed` names the fields the change actually
  * altered; the remaining fields describe the resulting configuration and are always present so
- * a reader never has to reconstruct them from earlier events.
+ * a reader never has to reconstruct them from earlier events. Conversation state does not belong
+ * in this event: messages are delivered through the transcript protocol and stored once in the
+ * message table.
  */
 export type SessionConfigurationChangedEvent = BaseSessionEvent<
     "session_configuration_changed",
@@ -1436,7 +1450,6 @@ export type SessionConfigurationChangedEvent = BaseSessionEvent<
         modelId: string;
         providerId: string;
         serviceTier: ServiceTier | null;
-        snapshot: AgentSnapshot;
         mutationId?: string;
     }
 >;

@@ -111,8 +111,8 @@ export class SharingLifecycleService implements SharingLifecycleServiceContract 
         return this.#requireService().createFolderShare(ctx, folderId, contacts);
     }
 
-    foldersChanged(ctx: Context): void {
-        this.#service?.foldersChanged(ctx);
+    async foldersChanged(ctx: Context): Promise<void> {
+        await this.#service?.foldersChanged(ctx);
     }
 
     rejectContact(ctx: Context, requestId: string): Promise<void> {

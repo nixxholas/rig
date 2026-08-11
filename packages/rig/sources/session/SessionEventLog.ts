@@ -6,7 +6,7 @@ import {
     type ShellCommandState,
 } from "../protocol/index.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderQuota } from "@slopus/happy-providers";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
 import { asyncLock, type AsyncLock } from "../concurrency/index.js";
 import type { Context } from "@steve.kite/stdlib";

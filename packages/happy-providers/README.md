@@ -1,0 +1,757 @@
+# @slopus/happy-providers
+
+One small, stateful session interface for talking to coding-agent model backends. You work with a
+session — create it, run turns, compact, destroy — while the library absorbs the low-level vendor
+machinery underneath: wire protocols and transports, request framing, streaming, headers,
+credentials, and each vendor's own quirks. Swap the provider and the session works the same.
+
+What you get:
+
+🔌 **Managed connections** — a session keeps its transport open and warm across turns, so you
+never think about keep-alive, reconnects, or which wire protocol a vendor speaks this week.
+
+🚨 **Typed errors** — failures are parsed into meaningful, typed cases with human-readable
+messages wherever we can classify them; only genuinely unknown failures fall back to an
+unclassified error, and even those arrive readable.
+
+🔑 **Coding-assistant credentials and tokens** — reuse the credentials your local Codex or Claude
+Code installation already manages, pass an API key or bearer token directly, or discover every
+account on the machine and let the user pick.
+
+🧪 **Tested against the real thing** — golden traces are captured from the actual Codex, Claude
+Code, and Grok clients talking to their real backends, and the test suite verifies our requests
+match what the native clients send.
+
+🔁 **Retries handled for you** — each provider retries its own failures the way its native client
+does, reporting every retry to you as it happens and rewinding any half-streamed output cleanly.
+If an error ever reaches you, it's terminal.
+
+⚡ **Prompt-cache continuity** — cache prefixes stay byte-stable across turns, so continuing a
+conversation costs what a continuation should cost.
+
+🗜️ **Native compaction** — the vendor's own compaction protocol produces the replacement
+context. It is never automatic: you decide when to compact and when to adopt the result.
+
+🛠️ **Tools stay yours** — the library streams tool calls to you and carries your results back,
+but it never executes anything. Permissions and policy live in your application, where they
+belong.
+
+Supported providers:
+
+- **Anthropic** — one provider that selects the Claude Code SDK or Anthropic Messages on Bedrock
+  from the credential you give it
+- **OpenAI Codex** — Responses, Responses Lite, and OpenAI on Bedrock
+- **OpenAI API** — any generic Responses-compatible endpoint with your own key
+- **Grok Build** — xAI's Responses-compatible protocol
+
+If you only remember one thing, make it the last section of this document:
+[a session is a stateful, managed endpoint](#the-most-important-part-sessions-are-stateful-and-managed).
+It keeps connections and caches warm, it retries failures on its own, and it never executes tools
+for you.
+
+This package owns the provider boundary and nothing more. There is deliberately no agent loop, no
+tool executor, no permission system, and no conversation database — those belong to your
+application.
+
+## Installing
+
+This is an ESM-only **Node.js library** for Node 22.19 and newer. It needs real Node process,
+filesystem, and networking APIs, so it won't run in browsers, bundlers targeting the browser, edge
+runtimes, or React Native. The package manifest sets `browser` to `false` on purpose.
+
+```sh
+pnpm add @slopus/happy-providers
+```
+
+If your application defines tools, add TypeBox as a direct dependency too — tool parameters are
+TypeBox schemas:
+
+```sh
+pnpm add @sinclair/typebox
+```
+
+## Quick start
+
+Here's the whole flow in one small program. It signs in with the credentials your local Codex
+installation already manages, opens a session, and has a two-turn conversation. Notice that the
+message history lives in _your_ array — the session keeps the connection and continuation state
+warm, but you own the transcript.
+
+```ts
+import {
+    CodexProvider,
+    CodexSessionCredential,
+    type SessionMessage,
+} from "@slopus/happy-providers";
+
+const credential = await CodexSessionCredential.tryLoad();
+if (credential === null) {
+    throw new Error("Sign in with Codex before starting a session.");
+}
+
+const provider = new CodexProvider({
+    credential,
+    model: "gpt-5.6-sol",
+    transport: "auto",
+});
+const session = await provider.session("conversation-1", {
+    instructions: "You are a concise coding assistant.",
+    tools: [],
+});
+
+const messages: SessionMessage[] = [];
+
+async function ask(content: string): Promise<string> {
+    messages.push({ role: "user", content });
+
+    let response = "";
+    for await (const event of session.run({ context: { messages } })) {
+        if (event.type === "text_delta") response += event.delta;
+        if (event.type === "done" && event.state === "error") {
+            throw new Error(event.message);
+        }
+    }
+
+    messages.push({ role: "assistant", content: response });
+    return response;
+}
+
+try {
+    console.log(await ask("What makes a provider session stateful?"));
+    console.log(await ask("Summarize that in one sentence."));
+} finally {
+    await session.destroy();
+}
+```
+
+A production caller should persist more than plain text — reasoning, response items, tool calls,
+tool results, and their opaque `vendor` fields all belong in your durable transcript.
+[EXAMPLES.md](EXAMPLES.md) walks through a complete event collector and a tool-call continuation.
+
+## Providers and credentials
+
+| Provider            | Talks to                                               | Credential options                                               |
+| ------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- |
+| `AnthropicProvider` | Claude Code SDK or Anthropic Messages on Bedrock       | Claude Code, OAuth, auth token, API key, or Bedrock bearer token |
+| `CodexProvider`     | OpenAI Responses, Responses Lite, or OpenAI on Bedrock | Codex session, OpenAI API key, Bedrock bearer token              |
+| `GrokProvider`      | Grok Responses-compatible protocol                     | Grok session or xAI API key                                      |
+| `ResponsesProvider` | Any generic Responses-compatible endpoint              | Explicit endpoint and API key                                    |
+
+You always choose the credential; the library never picks an account for you. Each vendor
+credential class has a `tryLoad()` that accepts explicit values or reads the native client's
+on-disk credentials. When you want to offer the user a choice of accounts, `tryLoadCredentials()`
+discovers everything available on the machine.
+
+For Anthropic there is deliberately no second provider choice. Construct `AnthropicProvider`
+with whichever credential the user selected. `ClaudeCodeCredential`, `ClaudeOAuthCredential`,
+`ClaudeAuthTokenCredential`, and `ClaudeApiKeyCredential` select the persistent Claude Agent SDK
+implementation. `BedrockBearerTokenCredential` selects Anthropic Messages on Bedrock. The
+provider's canonical `name` remains `"claude"` on either transport.
+
+Credentials are reusable: load one once and share it across every session you open — sessions
+don't take ownership of it, and there is no need to reload it per conversation. Token refreshing
+is handled for you.
+
+Model catalogs are curated in source. The library never fetches a model list during startup or
+session creation.
+
+## Configuring a session
+
+`provider.session(id, options)` takes the immutable, model-visible configuration — the things the
+model will actually see:
+
+```ts
+const session = await provider.session("stable-application-id", {
+    instructions: "Your complete system instructions.",
+    tools,
+    inferenceMaxRetries: 3,
+    modelConfigurations: {
+        // Optional complete instruction/tool overrides for models selected on later runs.
+    },
+});
+```
+
+You supply the instructions and tools yourself. The vendor prompts and tool descriptors you'll
+find reproduced in this source tree are reference data for protocol tests, and they are
+intentionally not exported.
+
+Each `run()` then takes the complete transcript plus anything you want to vary per turn: model,
+reasoning effort, priority service tier, structured output schema, and an abort signal:
+
+```ts
+const stream = session.run({
+    context: { messages },
+    model: "gpt-5.6-sol",
+    effort: "high",
+    abort: abortController.signal,
+});
+```
+
+### Session IDs
+
+Session IDs should be globally unique. The library treats the ID as an opaque string you own: it
+does not generate, validate, or persist one for you. Generate an ID when a logical conversation is
+created, store it with that conversation, and don't reuse it for anything else.
+
+CUID2 is a good default, though UUIDs or any other collision-resistant identifier work too:
+
+```sh
+pnpm add @paralleldrive/cuid2
+```
+
+```ts
+import { createId } from "@paralleldrive/cuid2";
+
+const sessionId = createId();
+const session = await provider.session(sessionId, {
+    instructions,
+    tools,
+});
+```
+
+Why global uniqueness? It keeps independent conversations, processes, machines, logs, and
+provider-side continuation state from accidentally sharing an identity. Keep the ID stable while
+continuing the same conversation; mint a new one for a new conversation or an independent branch.
+
+## Messages and events
+
+`SessionMessage` covers user, assistant, tool-result, system-notice, agent, and compaction
+messages. Multimodal content uses ordered text/image parts in `input`.
+
+Some fields exist purely so the provider can continue a conversation faithfully, and their
+contents are intentionally opaque. Whenever these appear, store them byte-for-byte and send them
+back unchanged:
+
+- assistant `encryptedReasoning` and `responseItems`;
+- tool-call and tool-result `vendor` metadata;
+- signed reasoning blocks;
+- compaction `encryptedContent` and `vendor` metadata.
+
+`SessionStream` is an `AsyncIterable<SessionEvent>`. You'll see text and reasoning deltas,
+tool-call boundaries, provider-owned tool results, token usage, retry notices, and block rollback
+boundaries. Every started stream ends with exactly one `done` event. When collecting a stream, use
+`committedSessionEvents()` so output invalidated by `block_reset` is discarded correctly — more on
+that in the [retries section](#retries-happen-inside-the-session) below.
+
+## Tools: you run them, not the library
+
+The library serializes your tool definitions, sends them to the model, and streams tool calls back
+to you. Executing the call is entirely your application's job. That separation is deliberate: tool
+execution is where permissions, sandboxing, and product policy live, and none of that belongs in a
+network layer.
+
+Tool parameters use TypeBox schemas:
+
+```ts
+import { Type } from "@sinclair/typebox";
+import type { SessionTool } from "@slopus/happy-providers";
+
+const readFile = {
+    name: "read_file",
+    description: "Read a UTF-8 text file.",
+    parameters: Type.Object({ path: Type.String() }),
+} satisfies SessionTool;
+```
+
+The one exception is provider-owned tools — "server tools" the vendor executes inside its own
+backend, like web search. You define one on the same `SessionTool` shape by setting `server` to
+the vendor's exact native descriptor:
+
+```ts
+const webSearch = {
+    name: "web_search",
+    server: { type: "web_search" },
+} satisfies SessionTool;
+```
+
+The presence of `server` is what marks ownership: the provider passes the descriptor through to
+the wire verbatim instead of deriving a native tool type from the name, and the call settles
+inside the provider's own response. Never execute a server-tool call yourself or send a tool
+result for it.
+
+## Compaction
+
+When a transcript gets long, `compact()` asks the provider to produce a shorter replacement
+context using its native compaction protocol. Compaction is explicit — the library never compacts
+behind your back:
+
+```ts
+const compacted = await session.compact({
+    context: { messages },
+    inputTokens,
+    signal: abortController.signal,
+});
+
+if (compacted.status === "completed") {
+    messages.splice(0, messages.length, ...compacted.context.messages);
+}
+```
+
+On success, adopt and persist the complete returned `context` as your new transcript. On
+cancellation or failure, keep the original — nothing was changed out from under you.
+
+## The most important part: sessions are stateful and managed
+
+Everything above is mechanics. This is the mental model.
+
+A session is not a thin request wrapper. It is a long-lived, **managed endpoint** for one
+conversation:
+
+```text
+provider.session(id, options)
+            |
+            v
+      BaseSession
+       |  |  |
+       |  |  +-- destroy()          release session resources
+       |  +----- compact()          update provider-native compacted state
+       +-------- run()              stream one inference turn
+```
+
+Create one session per conversation and keep using it across turns. Behind the scenes it holds the
+state that makes continuations fast and correct: open connections, warm cache prefixes, turn
+identifiers, active model state, and the context adopted by native compaction. Throwing a session
+away between turns throws that warmth away with it.
+
+The division of labor is strict, and it's worth internalizing:
+
+- **The session keeps the connection.** Transport choice, keep-alive, reconnection, and
+  prompt-cache continuity are its problem, not yours.
+- **The session retries for itself.** You never replay a failed `run()`. Details below.
+- **The session never calls tools.** It streams tool calls out to you and carries your results
+  back. Execution — and everything execution implies, like permissions — stays in your
+  application.
+- **You keep the transcript.** Pass the complete message history to every `run()`, persist the
+  opaque provider fields unchanged, and adopt the replacement context a successful `compact()`
+  returns. Because history is yours, you can restore a conversation in a brand-new process without
+  the session ever becoming a hidden database.
+
+Because history is yours, tracking it accurately is also on you. All the warmth above assumes
+each `run()` receives the previous turn's history plus the new messages — append-only, with the
+earlier messages byte-for-byte identical. Rewrite, reorder, or drop something earlier in the
+transcript and some providers will nuke the prompt cache and continuation state on the spot. You
+_can_ replace the history wholesale, but the price is the session: its warm provider-side state
+no longer matches, so treat it as starting a conversation cold. The one sanctioned replacement is
+the context a successful `compact()` returns — that's the provider itself handing you the new
+history its state expects.
+
+### One thing at a time
+
+A session accepts one active operation at a time. Don't overlap two `run()` calls, a `run()` and a
+`compact()`, or two `compact()` calls. Sessions do not queue or lock for you — you serialize.
+
+A `run()` counts as active until you have consumed its iterator all the way through the terminal
+`done` event. If you abort a run, keep draining the iterator until it finishes before starting the
+next operation.
+
+```ts
+// Correct: turns on one session are sequential.
+for await (const event of session.run({ context: { messages } })) {
+    // Consume every event.
+}
+
+const compacted = await session.compact({ context: { messages } });
+```
+
+Independent sessions run concurrently just fine — use one session per conversation or branch:
+
+```ts
+const first = await provider.session("conversation-1", firstOptions);
+const second = await provider.session("conversation-2", secondOptions);
+
+const runFirst = async () => {
+    for await (const event of first.run({ context: { messages: firstMessages } })) {
+        // Consume the first conversation's events.
+    }
+};
+const runSecond = async () => {
+    for await (const event of second.run({ context: { messages: secondMessages } })) {
+        // Consume the second conversation's events.
+    }
+};
+
+await Promise.all([runFirst(), runSecond()]);
+```
+
+The same rule covers switching models or reasoning effort: finish the current operation, then pick
+the new `model` or `effort` on the next `run()`. You may execute client-owned tool calls in
+parallel once the provider stream finishes, but append every tool result to your transcript before
+the next inference begins.
+
+### Branching
+
+`BaseSession` does not currently expose `fork()`. Don't branch by running the same session twice
+or by creating two session objects with the same ID.
+
+To branch today, copy your transcript and open a new session with its own ID. Include all opaque
+reasoning, response items, tool metadata, and compaction messages in the copy:
+
+```ts
+const branchMessages = structuredClone(messages);
+const branch = await provider.session("conversation-1-branch-1", {
+    instructions,
+    tools,
+    modelConfigurations,
+});
+
+for await (const event of branch.run({
+    context: { messages: branchMessages },
+    model,
+    effort,
+})) {
+    // Consume the branch independently from the original session.
+}
+```
+
+This preserves the logical conversation — the history was always yours — but it starts cold on the
+provider side: no shared connection, warm cache, response chain, or other transport state. A true
+session fork would need to clone that internal state safely; until the API provides one, separate
+sessions are the supported branching boundary.
+
+### Retries happen inside the session
+
+Retries belong to the provider. Each one knows which of its failures are safe to retry and how
+long to wait, based on its native protocol. Retries are never silent, though: every attempt is
+reported to you as a `retrying` event with the attempt number and the reason, so your UI can show
+what's happening — the provider just performs the retry itself. **Never replay a failed `run()`
+yourself**: by the time a `done` event with `state: "error"` reaches you, the failure was either
+not retryable or the provider already exhausted its retry budget. What surfaces to you is
+terminal — show it to the user, don't resubmit it.
+
+There's a subtlety: a retry can happen _after_ the model has already streamed text, reasoning, or
+a tool call. Model backends can't resume a generation mid-stream — Anthropic in particular has no
+way to pick up where a broken stream left off — so when a stream dies halfway through a message
+or a tool call, the retry has to regenerate that output from scratch, and the half-streamed part
+must be thrown away. Session events use blocks so the provider can rewind that tentative output
+without duplicating it:
+
+```text
+block_start -> text/tool deltas -> block_reset -> retrying
+                 discarded
+
+block_start -> replacement deltas -> block_stop -> done
+                   committed
+```
+
+- `block_start` begins tentative output for an attempt.
+- `block_reset` retracts everything since the matching `block_start`.
+- `retrying` reports the next provider-owned retry and its reason.
+- `block_stop` commits the current block; its output is now safe to persist as the response.
+
+`block_reset` may also precede cancellation or a terminal error when no retry follows. It rewinds
+stream output only — it never asks you to delete durable conversation history, restore an older
+session, or resubmit the request. Token-usage events from a failed attempt may stay committed for
+accounting even though the generated content was rewound.
+
+Collecting a stream after the fact? Capture everything, then let `committedSessionEvents()` strip
+out the rewound output:
+
+```ts
+import { committedSessionEvents, type SessionEvent } from "@slopus/happy-providers";
+
+const streamed: SessionEvent[] = [];
+for await (const event of session.run({ context: { messages } })) {
+    streamed.push(event);
+}
+
+const committed = committedSessionEvents(streamed);
+```
+
+Rendering live? Keep events after `block_start` in a tentative buffer. Show them provisionally if
+you like, clear that presentation on `block_reset`, and move them into durable history only on
+`block_stop`. Events outside a block — `retrying`, usage, the terminal `done` — are never part of
+the rewound content.
+
+The default budget is ten retries after the initial request, so at most eleven attempts. You can
+set a provider-wide budget or override it per session; zero disables provider-owned retries for
+that session:
+
+```ts
+const provider = new CodexProvider({
+    credential,
+    inferenceMaxRetries: 4,
+});
+
+const oneShotSession = await provider.session(createId(), {
+    instructions,
+    tools,
+    inferenceMaxRetries: 0,
+});
+```
+
+Retry budgets are capped at 100. Retry classification, delay schedules, connection recovery, and
+credential refresh all stay provider-owned. When something does fail terminally, the error event
+carries a human-readable message and, when recognized, a typed `SessionProviderError` with bounded
+diagnostics.
+
+## Package surface
+
+The root export contains the stable shared types, provider classes, credential classes, usage and
+quota helpers, and provider-specific option types. Internal request builders, transports, native
+prompts, native tool catalogs, and trace fixtures are not exported.
+
+More reference documentation:
+
+- [EXAMPLES.md](EXAMPLES.md) — multi-turn collection, tools, compaction, and provider setup
+- [VENDOR_CODEX.md](VENDOR_CODEX.md)
+- [VENDOR_CLAUDE.md](VENDOR_CLAUDE.md)
+- [VENDOR_GROK.md](VENDOR_GROK.md)
+- [VENDOR_ANTHROPIC_BEDROCK.md](VENDOR_ANTHROPIC_BEDROCK.md)
+
+## Provider settings
+
+Every option each provider constructor accepts, and how the defaults are chosen.
+
+### Shared by every provider
+
+- `inferenceMaxRetries` — maximum provider-owned retries. Defaults to `10` (up to eleven total
+  attempts), capped at `100`. `0` disables provider-owned retries. A session can override this
+  with its own `inferenceMaxRetries` in `provider.session(id, options)`.
+- `resolveInferenceMaxRetries` — a callback that resolves the current retry limit on every run,
+  so long-lived sessions follow runtime configuration changes instead of the value captured at
+  construction.
+- `waitForInferenceRetry` — a test seam that replaces the provider's retry backoff wait. Leave it
+  unset in production.
+
+### `CodexProvider` (OpenAI Codex)
+
+- `credential` _(required)_ — a Codex session, an OpenAI API key, or a Bedrock bearer token. The
+  credential also picks the default endpoint: a Codex session talks to
+  `https://chatgpt.com/backend-api`, an API key to `https://api.openai.com/v1`, and a Bedrock
+  bearer token to the Bedrock Mantle endpoint for the resolved region.
+- `endpoint` — overrides that default endpoint.
+- `model` — the session's default model, resolved against the curated catalog. On Bedrock the
+  catalog maps it to the corresponding Bedrock model ID.
+- `parallelToolCalls` — enables multi-call tool batches. Because batches are unavailable under
+  Responses Lite, setting this to `true` also forces standard Responses for v2 models (see below).
+- `region` — the Bedrock region. Resolution order: this option, then `AWS_REGION`, then
+  `AWS_DEFAULT_REGION`, then `us-east-1`.
+- `streamIdleTimeoutMs` — how long a connected stream may sit idle before it is treated as dead.
+  Defaults to `300000` (five minutes), matching upstream Codex.
+- `transport` — `"websocket"`, `"sse"`, or `"auto"` (the default). `auto` starts on WebSocket and,
+  if the WebSocket transport turns out to be unavailable or fails with a retryable stream error,
+  falls back to SSE for the rest of the session. Bedrock always uses SSE regardless of this
+  option.
+- `userAgent` — overrides the native Codex user agent. Meant only for replaying a captured native
+  request.
+
+**How the Codex API version is chosen.** There are two request shapes: standard Responses ("v1")
+and Responses Lite ("v2"). The choice is made per model from the curated catalog — each model
+carries a flag saying whether it is a Responses Lite model. A v2 model gets a Responses Lite
+request (marked with the `x-openai-internal-codex-responses-lite: true` header), exactly as the
+native Codex CLI sends it. There are two exceptions: setting `parallelToolCalls: true` forces
+standard Responses even for a v2 model, since Lite cannot carry multi-call batches, and v1 models
+always use standard Responses.
+
+### `AnthropicProvider`
+
+`credential` is required and selects the implementation. There is no transport flag and no
+separate Bedrock provider class in the public API:
+
+- A `ClaudeCodeCredential`, `ClaudeOAuthCredential`, `ClaudeAuthTokenCredential`, or
+  `ClaudeApiKeyCredential` uses the Anthropic Agent SDK. This branch accepts `env`, `model`,
+  `onAccountUsage`, `pathToClaudeCodeExecutable`, `query`, and `userAgent`.
+- A `BedrockBearerTokenCredential` uses Anthropic Messages on Amazon Bedrock. This branch accepts
+  `client`, `endpoint`, `model`, `region` (default `us-east-1`), `transport` (`"mantle"` by
+  default, or `"runtime"`), and `userAgent`.
+
+The exported `AnthropicProviderOptions` union describes both credential-specific option shapes. A
+credential selected dynamically may remain typed as the complete `AnthropicCredential` union;
+the common `{ credential, model, userAgent }` constructor shape accepts it directly. `query` and
+`client` are advanced injection seams for tests; production callers normally leave them unset.
+
+### `GrokProvider` (Grok Build)
+
+- `credential` _(required)_ — a Grok session or an xAI API key.
+- `endpoint` — defaults to `https://cli-chat-proxy.grok.com/v1`, the endpoint grok-build uses.
+- `model` — the session's default model, resolved against the curated catalog.
+- `userAgent` — identifies your application upstream instead of reproducing the grok-build user
+  agent.
+
+### `ResponsesProvider` (OpenAI API)
+
+- `apiKey` _(required)_ — sent as a bearer token.
+- `endpoint` _(required)_ — the base URL of the Responses-compatible endpoint.
+- `model` — the session's default model, passed through as-is; there is no catalog for generic
+  endpoints.
+- `headers` — extra headers added to every request.
+- `fetch` — a custom `fetch` implementation, for proxying or tests.
+- `nativeCompaction` — whether the endpoint implements the native compaction protocol. Defaults
+  to `true`; set it to `false` for endpoints that don't, so `compact()` fails cleanly instead of
+  sending a request the endpoint cannot answer.
+- `capabilities` — which optional Responses features the endpoint supports: `encryptedReasoning`,
+  `parallelToolCalls`, `reasoning`, and `textVerbosity`. Defaults to the minimal set (all off), so
+  any Responses-compatible endpoint works out of the box; turn on what your endpoint actually
+  implements.
+
+## Session types in detail
+
+A complete tour of the objects you exchange with a session. Everything here is exported from the
+package root.
+
+### `BaseSession`
+
+What `provider.session(id, options)` returns. It carries the caller-supplied `id` and three
+operations:
+
+- `run(request)` — streams one inference turn as a `SessionStream`.
+- `compact(options?)` — asks the provider for a shorter replacement context; resolves to a
+  `SessionCompaction`.
+- `destroy()` — releases connections and any other session resources. Always call it when the
+  conversation is over.
+
+### `SessionOptions`
+
+The immutable, model-visible configuration a session is created with:
+
+- `instructions` — your complete system instructions.
+- `tools` — the `SessionTool` array the model sees.
+- `inferenceMaxRetries` — a retry budget for this session alone, overriding the provider's. Zero
+  means a failure is reported the moment it happens.
+- `modelConfigurations` — alternate `{ instructions, tools }` pairs keyed by model ID, for
+  sessions that switch between models whose model-visible configuration differs.
+
+There are no initial messages here on purpose — history always arrives with each `run()`.
+
+### `SessionRunRequest`
+
+What one `run()` takes:
+
+- `context.messages` — the complete rebuilt conversation history for this turn.
+- `model` — the model for this turn, when it differs from the provider default.
+- `effort` — reasoning effort: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, or
+  `"max"`. Providers map it onto whatever their protocol supports.
+- `serviceTier` — `"priority"` requests priority processing where the vendor offers it.
+- `structuredOutput` — a `{ name, schema }` pair (TypeBox schema) when the response must conform
+  to a JSON schema.
+- `abort` — an `AbortSignal` for cancelling the turn.
+
+### `SessionMessage` — the transcript
+
+The transcript you own is an array of these six message shapes, discriminated by `role`:
+
+**`role: "user"`** — a user turn. `content` is the text; `input` optionally replaces it with
+ordered multimodal parts (`{ type: "text", text }` and `{ type: "image", data, mimeType }`).
+`contextOnly: true` marks background context that does not establish a provider turn boundary.
+
+**`role: "assistant"`** — a model turn, and the shape with the most to preserve:
+
+- `content` — the visible response text.
+- `reasoning` — ordered reasoning blocks, each `{ text, signature?, redacted? }`. Anthropic signs
+  the text of its thinking blocks, so a signature replayed beside different text is rejected —
+  keep block and signature together, untouched.
+- `encryptedReasoning` — the opaque encrypted-reasoning payload from Responses-compatible
+  backends. Store it byte-for-byte.
+- `toolCalls` — the completed client tool calls emitted with this message (see `SessionToolCall`).
+- `responseItems` — ordered, opaque Responses output items. Providers replay these to reproduce
+  commentary, reasoning, and parallel tool calls without flattening or reordering. Opaque; store
+  unchanged.
+
+**`role: "tool"`** — your answer to a tool call: `callId` ties it to the call, `content` (or
+multimodal `input`) carries the result, `isError: true` reports a failed invocation, and `vendor`
+echoes back the opaque metadata that arrived with the call.
+
+**`role: "system"`** — a system notice injected into the conversation; `content` is a string or a
+list of strings.
+
+**`role: "agent"`** — an opaque provider-native message exchanged between collaborating Codex
+agents: `author`, `recipient`, `header`, and `encryptedContent`, plus `agentMessageTriggerTurn`
+when the message establishes a new inference turn boundary. Preserve it as-is.
+
+**`role: "compaction"`** — the checkpoint a native compaction produced: `content` (the summary
+text, possibly `null`), `encryptedContent` (the opaque payload, possibly `null`), and `vendor`
+metadata. It sits in the transcript where the compacted history used to be; never edit it.
+
+### `SessionToolCall`
+
+One completed client tool call: `callId`, `name`, optional `namespace`, `arguments` as the raw
+JSON string the model produced, `incomplete: true` when the provider stopped before the call
+became executable (do not run it), and opaque `vendor` metadata to persist and echo back on the
+result.
+
+### `SessionTool`
+
+A tool definition, as covered in the [Tools section](#tools-you-run-them-not-the-library):
+`name`, `description`, and TypeBox `parameters`, plus optional `namespace` and
+`namespaceDescription` for namespaced tools, `server` for provider-owned tools, `deferLoading` to
+expose the tool through native tool discovery, `grammar` for OpenAI-style Lark-grammar tools
+(ignored by providers that don't support them), and opaque `vendor` metadata.
+
+### `SessionEvent` — the stream
+
+`run()` yields a `SessionStream`, an `AsyncIterable<SessionEvent>`. The events, by group:
+
+**Blocks** — `block_start`, `block_stop`, `block_reset` bracket tentative output so
+provider-owned retries can rewind it; see
+[the retries section](#retries-happen-inside-the-session).
+
+**Content** — `text_delta` and `reasoning_delta` carry incremental text; `encrypted_reasoning`
+delivers the opaque reasoning payload to persist; `response_items` delivers the opaque Responses
+output items to persist.
+
+**Client tool calls** — `toolcall_start` (with `callId`, `name`, optional `namespace` and
+`vendor`), `toolcall_delta` streaming the argument JSON, and `toolcall_end` with the final
+`arguments` and an `incomplete` flag when the provider stopped early.
+
+**Server tool calls** — `toolcall_start` arrives with `server: true`, and the provider-owned
+result streams beside it as `toolcall_result_start` / `toolcall_result_delta` /
+`toolcall_result_end`. Ordinary tools never emit result events — you answer those with a tool
+message; server tools settle inside the same response.
+
+**Progress** — `retrying { attempt, reason }` reports a provider-owned retry;
+`token_usage { usage }` reports a `SessionCacheUsage`.
+
+**Termination** — exactly one `done` event ends every started stream, with one of five states:
+
+- `"normal"` — the model finished its answer; `endTurn` marks an explicit end of turn.
+- `"tool_call"` — the model stopped to wait for your tool results.
+- `"length"` — the response hit a length limit.
+- `"cancelled"` — the run was aborted.
+- `"error"` — the run failed terminally, with a `kind` (`"internal_error"`,
+  `"context_overflow"`, `"billing_error"`, or `"unknown"`), a human-readable `message`, and a
+  `providerError` when the failure was classified (see `SessionProviderError`).
+
+The helpers `isSessionDoneEvent()` and `isSessionErrorDone()` narrow events, and
+`committedSessionEvents()` filters a collected stream down to what survived block rewinds.
+
+### `SessionCacheUsage`
+
+Token accounting for one attempt: `input`, `output`, `cacheRead`, `cacheWrite`, and
+`totalTokens`. Cache reads are the payoff of prompt-cache continuity — a healthy continuation
+shows most of its input arriving as `cacheRead`.
+
+### `SessionCompaction`
+
+What `compact(options)` resolves to. The options are `model`, provider-native `instructions` for
+what to retain, the selected `context`, an `inputTokens` estimate, and an abort `signal`. The
+result is one of three statuses:
+
+- `"completed"` — carries the complete replacement `context` to adopt, plus how it was built: a
+  plain-text `summary` (providers without native compaction), an opaque `compaction` checkpoint
+  message (native compaction), optional `encryptedReasoning` emitted while summarizing,
+  `preservedMessages` retained alongside the summary, and the `usage` it cost.
+- `"cancelled"` — the original context is still active; nothing changed.
+- `"failed"` — same, plus a `kind` (`"inference_error"`, `"invalid_summary"`, or `"tool_call"`)
+  and a human-readable `message`.
+
+### `SessionProviderError`
+
+The typed classification attached to a terminal error `done` event when the failure was
+recognized:
+
+- `authentication` — the credential was rejected.
+- `out_of_tokens` — the account's quota is exhausted; `resetAt` says when it returns, when known.
+- `rate_limit` — too many requests; `resetAt` says when to come back, when known.
+- `server_overloaded` — the backend is shedding load.
+- `internal_server_error` — the backend failed.
+- `empty_response` — the provider returned nothing usable.
+- `unclassified` — we don't know how to recover from this; the human-readable message on the
+  `done` event is the best available explanation.
+
+Every case may carry bounded `diagnostics` — `status`, `code`, `errorType`, `requestId`,
+`responseId`, `attempts`, `retryDirective`, and a truncated `upstreamMessage` — sized for logs,
+never a raw upstream dump.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

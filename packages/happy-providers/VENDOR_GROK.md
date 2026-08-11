@@ -137,14 +137,15 @@ search both send.
 A server tool is declared by type alone — `{"type": "web_search"}` and `{"type": "x_search"}` —
 because the backend owns its schema. `sources/vendors/grok/tools/server_web_search.ts` and
 `server_x_search.ts` are those declarations, exported together as `grok_server_tools`, and
-`impl/toGrokToolDefinitions.ts` emits supported tools marked `server: true` in that shape. They are
-kept apart from `grok_4_5_tools`, which remains a literal capture of what CLI 0.2.111 sent,
-including the older client-executed `web_search` function.
+`impl/toGrokToolDefinitions.ts` passes the exact `server: { type: ... }` descriptor in that shape.
+They are kept apart from `grok_4_5_tools`, which remains a literal capture of what CLI 0.2.111
+sent, including the older client-executed `web_search` function.
 
-Server tools are ordinary session definitions. `server: true` is the only execution distinction:
-Grok receives them in the same request catalog, completes them before `response.completed`, and
-Rig never puts them in the executor batch or sends a tool result. Local permission modes do not
-gate them because they do not cross Rig's filesystem, shell, or tool-execution boundary.
+Server tools are ordinary session definitions. The exact native `server` descriptor is the only
+execution distinction: Grok receives them in the same request catalog, completes them before
+`response.completed`, and Rig never puts them in the executor batch or sends a tool result. Local
+permission modes do not gate them because they do not cross Rig's filesystem, shell, or
+tool-execution boundary.
 
 X search reaches the client as ordinary `custom_tool_call` items named `x_keyword_search` or
 `x_semantic_search`; web search has its own `web_search_call` item. Neither may be mistaken for a
@@ -153,11 +154,12 @@ carries `server: true`, keeps them out of the run's tool calls, and leaves the t
 `normal` rather than `tool_call`.
 
 Classification rests on the exact server definitions carried by the request. A `web_search_call`
-qualifies only when `web_search` was declared with `server: true`. Grok's X subcalls additionally
-need the reserved `xs_` call-id prefix, which keeps an ordinary client custom call executable even
-when its name resembles an X backend action. Function calls never qualify: an undeclared function
-name is a model mistake the model needs to hear about. A mapper given no `serverToolNames` treats
-every custom or function call as client-executed, which also keeps compaction out of this path.
+qualifies only when `web_search` was declared with a native `server` descriptor. Grok's X subcalls
+additionally need the reserved `xs_` call-id prefix, which keeps an ordinary client custom call
+executable even when its name resembles an X backend action. Function calls never qualify: an
+undeclared function name is a model mistake the model needs to hear about. A mapper given no
+`serverToolNames` treats every custom or function call as client-executed, which also keeps
+compaction out of this path.
 
 Server calls are settled against the terminal response the way ordinary tool calls already are.
 One that streamed a start but never its completion is closed using the terminal payload's
@@ -390,7 +392,8 @@ continuation, and structural compaction against Grok 4.5.
   native tools, and its permission UI are not authoritative.
 - Only Grok 4.5 is supported. Models are not discovered from Grok during startup.
 - The complete vanilla prompt and tools are exported assets, not hidden defaults. Server search is
-  present only when the session tool catalog contains the corresponding `server: true` definitions.
+  present only when the session tool catalog contains the corresponding native `server`
+  descriptors.
 - Server search other than web and X search is unobserved. Grok reports code interpreter, file
   search, MCP, document search, and image generation in its usage details, but Rig declares only
   the two it has captured.

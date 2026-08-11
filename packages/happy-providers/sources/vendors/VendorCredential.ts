@@ -17,6 +17,8 @@ export type ClaudeCredential =
     | ClaudeCodeCredential
     | ClaudeOAuthCredential;
 
+export type AnthropicCredential = BedrockCredential | ClaudeCredential;
+
 export type CodexCredential = CodexApiKeyCredential | CodexSessionCredential;
 
 export type CodexProviderCredential = BedrockCredential | CodexCredential;
@@ -26,8 +28,7 @@ export type GeminiCredential = GeminiApiKeyCredential;
 export type GrokCredential = GrokApiKeyCredential | GrokSessionCredential;
 
 export type VendorCredential =
-    | BedrockCredential
-    | ClaudeCredential
+    | AnthropicCredential
     | CodexCredential
     | GeminiCredential
     | GrokCredential;

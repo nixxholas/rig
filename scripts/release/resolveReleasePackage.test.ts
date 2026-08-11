@@ -28,6 +28,15 @@ describe("resolveReleasePackage", () => {
         assert.deepEqual(target.buildArguments, ["--filter", "happy-plugins", "build"]);
     });
 
+    it("gives happy-providers its own tag namespace and package directory", () => {
+        const target = resolveReleasePackage("happy-providers");
+
+        assert.equal(target.key, "happy-providers");
+        assert.equal(target.tagPrefix, "happy-providers-v");
+        assert.match(target.directory, /packages\/happy-providers\/?$/u);
+        assert.deepEqual(target.buildArguments, ["--filter", "@slopus/happy-providers", "build"]);
+    });
+
     it("rejects a target that could publish an unintended workspace package", () => {
         assert.throws(() => resolveReleasePackage("other"), /Unknown release package other/u);
     });

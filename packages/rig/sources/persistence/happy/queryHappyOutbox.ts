@@ -1,5 +1,5 @@
-import { inDatabase } from "../database/inDatabase.js";
-import { asc, eq } from "drizzle-orm";
+import { inTx } from "../inTx.js";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { HappySessionProtocolMessage } from "../../happy/types.js";
@@ -11,16 +11,47 @@ export async function queryHappyOutbox(
     sessionId: string,
     limit: number,
 ): Promise<readonly HappySessionProtocolMessage[]> {
-    return await inDatabase(ctx, "rig.sql.happy.query_outbox", async (ctx) => {
+    return await inTx(ctx, "rig.sql.happy.query_outbox", async (ctx) => {
         const tx = ctx.tx;
-        return (
-            await tx
-                .select({ payloadJson: happyOutbox.payloadJson })
+        let rows = await tx
+            .select({ payloadJson: happyOutbox.payloadJson })
+            .from(happyOutbox)
+            .where(and(eq(happyOutbox.sessionId, sessionId), eq(happyOutbox.deferred, false)))
+            .orderBy(asc(happyOutbox.seq))
+            .limit(limit)
+            .all();
+        if (rows.length === 0) {
+            const deferred = await tx
+                .select({ seq: happyOutbox.seq })
                 .from(happyOutbox)
-                .where(eq(happyOutbox.sessionId, sessionId))
+                .where(and(eq(happyOutbox.sessionId, sessionId), eq(happyOutbox.deferred, true)))
                 .orderBy(asc(happyOutbox.seq))
                 .limit(limit)
-                .all()
-        ).map((row) => JSON.parse(row.payloadJson) as HappySessionProtocolMessage);
+                .all();
+            if (deferred.length > 0) {
+                await tx
+                    .update(happyOutbox)
+                    .set({ deferred: false })
+                    .where(
+                        inArray(
+                            happyOutbox.seq,
+                            deferred.map((row) => row.seq),
+                        ),
+                    )
+                    .run();
+                rows = await tx
+                    .select({ payloadJson: happyOutbox.payloadJson })
+                    .from(happyOutbox)
+                    .where(
+                        inArray(
+                            happyOutbox.seq,
+                            deferred.map((row) => row.seq),
+                        ),
+                    )
+                    .orderBy(asc(happyOutbox.seq))
+                    .all();
+            }
+        }
+        return rows.map((row) => JSON.parse(row.payloadJson) as HappySessionProtocolMessage);
     });
 }

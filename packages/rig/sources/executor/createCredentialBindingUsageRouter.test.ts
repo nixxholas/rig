@@ -1,4 +1,4 @@
-import type { ProviderQuota, ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderQuota, ProviderUsage } from "@slopus/happy-providers";
 import { describe, expect, it, vi } from "vitest";
 
 import type { OwnerProviderScope } from "../credentials/buildOwnerProviderScope.js";

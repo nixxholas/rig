@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExecutorImageGenerationUnavailableError } from "@slopus/rig-execution";
-import { CodexImageGenerationError, CodexProvider } from "@slopus/rig-providers";
+import { CodexImageGenerationError, CodexProvider } from "@slopus/happy-providers";
 
 import { codexExecution } from "./codexExecution.js";
 

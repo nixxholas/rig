@@ -5,7 +5,7 @@ import type {
     SessionServiceTier,
     SessionStructuredOutput,
     SessionTool,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import type { Model } from "@/types.js";
 
 export interface ExecutorModelProfile {

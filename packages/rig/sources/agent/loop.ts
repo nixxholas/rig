@@ -1,6 +1,6 @@
 import { createId } from "@paralleldrive/cuid2";
 import { Value } from "@sinclair/typebox/value";
-import { extractProviderErrorDiagnostics } from "@slopus/rig-providers";
+import { extractProviderErrorDiagnostics } from "@slopus/happy-providers";
 import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 import { assistantMessageToAgentMessage } from "./assistantMessageToAgentMessage.js";

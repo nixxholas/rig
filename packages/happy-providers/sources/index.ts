@@ -95,7 +95,12 @@ export type {
 export type { ProviderModality } from "@/core/ProviderModality.js";
 export { PROVIDER_MODALITIES } from "@/core/ProviderModality.js";
 export { GrokProvider, type GrokProviderOptions } from "@/vendors/grok/GrokProvider.js";
-export { ClaudeProvider, type ClaudeProviderOptions } from "@/vendors/claude/ClaudeProvider.js";
+export {
+    AnthropicProvider,
+    type AnthropicCredentialProviderOptions,
+    type AnthropicProviderOptions,
+    type AnthropicSession,
+} from "@/vendors/anthropic/AnthropicProvider.js";
 export {
     fetchClaudeProviderUsage,
     parseClaudeProviderUsage,
@@ -150,10 +155,6 @@ export {
     resolveInferenceMaxRetries,
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
-export {
-    AnthropicBedrockProvider,
-    type AnthropicBedrockProviderOptions,
-} from "@/vendors/bedrock/AnthropicBedrockProvider.js";
 export {
     AnthropicBedrockSession,
     type AnthropicBedrockClient,
@@ -233,6 +234,7 @@ export {
     type GrokSessionCredentialValue,
 } from "@/vendors/grok/GrokSessionCredential.js";
 export type {
+    AnthropicCredential,
     BedrockCredential,
     ClaudeCredential,
     CodexCredential,

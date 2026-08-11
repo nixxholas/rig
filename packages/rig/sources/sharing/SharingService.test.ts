@@ -13,6 +13,7 @@ import {
     type MurmurSynchronizeResult,
     type MurmurSyncOptions,
 } from "@slopus/murmur";
+import type { Span, Tracer } from "@opentelemetry/api";
 import { describe, expect, it, vi } from "vitest";
 
 import { RigProfileStore } from "../profiles/index.js";
@@ -300,6 +301,36 @@ describe("SharingService", () => {
         }
     });
 
+    it("ends each synchronization worker span while the connection remains open", async () => {
+        const spans: Array<{ ended: boolean; name: string }> = [];
+        const tracedContext = createTestRootContext(recordingTracer(spans));
+        const database = await PersistentSessionStore.open(tracedContext, {
+            databasePath: ":memory:",
+        });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: "alocalinstance00000000001",
+            publish: () => undefined,
+        });
+        const client = new FakeMurmurClient();
+        const sharing = new SharingService({
+            client,
+            database,
+            profiles,
+            publish: () => undefined,
+        });
+        spans.length = 0;
+        try {
+            sharing.start(tracedContext);
+            await vi.waitFor(() => expect(client.syncCalls).toBe(1));
+            expect(spans.map((span) => span.name)).toContain("rig.worker.sharing-synchronize");
+            expect(spans.filter((span) => !span.ended)).toEqual([]);
+        } finally {
+            await sharing.close(tracedContext);
+            await database.close(tracedContext);
+        }
+    });
+
     it("drains queued folder work before closing Murmur", async () => {
         const database = await PersistentSessionStore.open(ctx, {
             databasePath: ":memory:",
@@ -325,7 +356,7 @@ describe("SharingService", () => {
                     throw new Error("Not used");
                 },
                 drain,
-                foldersChanged: () => undefined,
+                foldersChanged: async () => undefined,
                 recover: async () => undefined,
                 statuses: async () => [],
             },
@@ -519,4 +550,25 @@ class FakeMurmurClient implements SharingMurmurClient {
             options.abort?.addEventListener("abort", () => resolve(), { once: true });
         });
     }
+}
+
+function recordingTracer(spans: Array<{ ended: boolean; name: string }>): Tracer {
+    return {
+        startSpan: (name: string) => {
+            const record = { ended: false, name };
+            spans.push(record);
+            return {
+                end: () => {
+                    record.ended = true;
+                },
+                recordException: () => undefined,
+                setStatus: () => undefined,
+                spanContext: () => ({
+                    spanId: "2".repeat(16),
+                    traceFlags: 1,
+                    traceId: "1".repeat(32),
+                }),
+            } as unknown as Span;
+        },
+    } as unknown as Tracer;
 }

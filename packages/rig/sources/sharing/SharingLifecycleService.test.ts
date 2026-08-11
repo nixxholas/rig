@@ -58,6 +58,37 @@ describe("SharingLifecycleService", () => {
         }
     });
 
+    it("keeps folder-change work inside the caller operation", async () => {
+        const fixture = await createFixture();
+        const profile = await fixture.profiles.create(ctx, {
+            email: "steve@example.test",
+            name: "Steve",
+        });
+        let release!: () => void;
+        const pending = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        fixture.service.foldersChanged.mockReturnValueOnce(pending);
+        try {
+            await fixture.lifecycle.onboardMurmur(ctx, { enabled: true, profileId: profile.id });
+
+            const changed = fixture.lifecycle.foldersChanged(ctx);
+            let settled = false;
+            void changed.then(() => {
+                settled = true;
+            });
+            await Promise.resolve();
+            expect(settled).toBe(false);
+
+            release();
+            await expect(changed).resolves.toBeUndefined();
+            expect(fixture.service.foldersChanged).toHaveBeenCalledWith(ctx);
+        } finally {
+            await fixture.lifecycle.close(ctx);
+            await fixture.database.close(ctx);
+        }
+    });
+
     it("restores enabled Murmur on restart and keeps disabled restarts offline", async () => {
         const fixture = await createFixture();
         const profile = await fixture.profiles.create(ctx, {
@@ -182,6 +213,7 @@ function fakeService(
 ): ManagedSharingService & {
     bindProfile: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
+    foldersChanged: ReturnType<typeof vi.fn>;
     start: ReturnType<typeof vi.fn>;
 } {
     const snapshot: SharingSnapshot = {
@@ -202,7 +234,7 @@ function fakeService(
         createFolderShare: vi.fn(async () => {
             throw new Error("Not implemented by this fixture.");
         }),
-        foldersChanged: vi.fn(),
+        foldersChanged: vi.fn(async () => undefined),
         rejectContact: vi.fn(async () => undefined),
         removeContact: vi.fn(async () => undefined),
         requestContact: vi.fn(async () => ({

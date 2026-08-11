@@ -82,7 +82,7 @@ export async function streamLiveEvents(options: LiveStreamOptions): Promise<void
 
     while (!options.signal.aborted) {
         try {
-            const delivered = await readStreamOnce(fetchImpl, cursor, options, (accepted) => {
+            const deliveredUpdate = await readStreamOnce(fetchImpl, cursor, options, (accepted) => {
                 cursor = accepted;
             });
             // A stream that ends without throwing is a closed connection, so it
@@ -91,7 +91,7 @@ export async function streamLiveEvents(options: LiveStreamOptions): Promise<void
             // the request and then closes immediately would otherwise be retried
             // in a hot loop forever, which is exactly the busy work this library
             // must not do.
-            if (delivered) retryDelay = options.retryDelayMs ?? INITIAL_RETRY_MS;
+            if (deliveredUpdate) retryDelay = options.retryDelayMs ?? INITIAL_RETRY_MS;
             if (options.signal.aborted) return;
             options.onDisconnected(new Error("The live stream closed."));
         } catch (error) {
@@ -111,7 +111,7 @@ export async function streamLiveEvents(options: LiveStreamOptions): Promise<void
     }
 }
 
-/** Reads one connection, reporting whether it delivered any frame at all. */
+/** Reads one connection, reporting whether it delivered an update after its hello. */
 async function readStreamOnce(
     fetchImpl: typeof globalThis.fetch,
     after: string | undefined,
@@ -133,9 +133,8 @@ async function readStreamOnce(
     }
     if (response.body === null) throw new Error("The live stream carried no body.");
 
-    let delivered = false;
+    let deliveredUpdate = false;
     for await (const frame of readSseFrames(response.body)) {
-        delivered = true;
         if (frame.name === "hello") {
             const hello = frame.data as LiveStreamHello;
             // Recorded before the caller is told, so a reload triggered from
@@ -145,10 +144,11 @@ async function readStreamOnce(
             continue;
         }
         const update = frame.data as { cursor: string; event: GlobalEvent };
+        deliveredUpdate = true;
         options.onEvent(update.event, update.cursor);
         onCursor(update.cursor);
     }
-    return delivered;
+    return deliveredUpdate;
 }
 
 function defaultWait(ms: number, signal: AbortSignal): Promise<void> {

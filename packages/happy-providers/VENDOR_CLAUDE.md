@@ -1,4 +1,4 @@
-# Claude provider
+# Claude Agent SDK transport
 
 This package runs Claude through `@anthropic-ai/claude-agent-sdk`, while Rig remains the
 owner of conversation persistence, tool execution, permissions, and the agent loop. The
@@ -24,12 +24,13 @@ for retry behavior, and `src/services/compact/compact.ts` for native summaries a
 
 ## Runtime construction
 
-`ClaudeProvider.ts` constructs `ClaudeSession.ts`. Each Rig session receives a private UUID
-for the SDK's resume contract; the caller's Rig session ID remains independent. Every run
-reconstructs the SDK transcript from the caller-supplied `SessionContext` through
-`impl/createClaudeSessionReplay.ts` when a query is first created. Compatible subsequent
-turns use the same streaming SDK query and subprocess, so the HTTP connection and prompt
-cache remain live. Claude's filesystem transcript is not Rig's source of truth.
+The public `AnthropicProvider` selects the internal `ClaudeProvider` for Claude Code, OAuth,
+auth-token, and API-key credentials; that implementation constructs `ClaudeSession.ts`. Each Rig
+session receives a private UUID for the SDK's resume contract; the caller's Rig session ID remains
+independent. Every run reconstructs the SDK transcript from the caller-supplied `SessionContext`
+through `impl/createClaudeSessionReplay.ts` when a query is first created. Compatible subsequent
+turns use the same streaming SDK query and subprocess, so the HTTP connection and prompt cache
+remain live. Claude's filesystem transcript is not Rig's source of truth.
 
 `impl/toClaudeSdkOptions.ts` deliberately strips the native Claude environment:
 

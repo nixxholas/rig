@@ -475,9 +475,8 @@ function snapshotEvent(
         data: {
             ...(type === "session_rewound" ? { messageId: "message-1" } : {}),
             ...(type === "session_configuration_changed"
-                ? { changed: ["model"], modelId, serviceTier: null }
-                : {}),
-            snapshot: { modelId, providerId },
+                ? { changed: ["model"], modelId, providerId, serviceTier: null }
+                : { snapshot: { modelId, providerId } }),
         },
         id,
         sessionId: "session-1",

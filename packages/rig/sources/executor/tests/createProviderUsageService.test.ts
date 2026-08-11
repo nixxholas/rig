@@ -1,4 +1,4 @@
-import { ProviderUsageRequestError, type ProviderUsage } from "@slopus/rig-providers";
+import { ProviderUsageRequestError, type ProviderUsage } from "@slopus/happy-providers";
 import { describe, expect, it, vi } from "vitest";
 
 import { gracefulShutdown } from "../../concurrency/index.js";

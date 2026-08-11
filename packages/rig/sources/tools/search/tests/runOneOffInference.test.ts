@@ -5,7 +5,7 @@ import type {
     SessionEvent,
     SessionOptions,
     SessionRunRequest,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import { builtinModelProfiles } from "@slopus/rig-execution";
 
 import { runOneOffInference } from "../runOneOffInference.js";

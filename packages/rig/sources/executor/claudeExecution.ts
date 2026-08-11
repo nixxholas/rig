@@ -3,9 +3,9 @@ import {
     ClaudeAuthTokenCredential,
     ClaudeCodeCredential,
     ClaudeOAuthCredential,
-    ClaudeProvider,
+    AnthropicProvider,
     type ProviderUsage,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
 import type { ConfigClaudeProvider } from "../config/types.js";
@@ -69,7 +69,7 @@ export function claudeExecution(options: {
                     "Claude authentication is unavailable. Sign in with Claude Code or configure a credential.",
                 );
             }
-            return new ClaudeProvider({
+            return new AnthropicProvider({
                 credential,
                 env: environment,
                 ...(options.resolveInferenceMaxRetries === undefined

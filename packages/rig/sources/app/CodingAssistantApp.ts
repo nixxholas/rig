@@ -814,7 +814,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 if (this.#steeringInterruptIntent?.runId === event.data.runId) {
                     this.#tryRequestSteeringInterrupt(event.data.runId);
                 }
-                this.#recordUserInput(event.createdAt);
+                if (localSteering === undefined) this.#recordUserInput(event.createdAt);
                 if (
                     !this.#pendingSteeringMessages.some(
                         (pending) => pending.id === event.data.message.id,
@@ -831,7 +831,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 this.#requestRender();
                 return;
             } else {
-                this.#recordUserInput(event.createdAt);
                 if (
                     this.#reconcileSubmittedUserEntry(event.data.message.id, event.data.displayText)
                 ) {
@@ -840,6 +839,7 @@ export class CodingAssistantApp implements Component, Focusable {
                     }
                     return;
                 }
+                this.#recordUserInput(event.createdAt);
             }
             this.#appendEntry({
                 ...(event.data.source === "notification" ? { childText: true } : {}),
@@ -1845,7 +1845,7 @@ export class CodingAssistantApp implements Component, Focusable {
 
         this.#editor.addToHistory(prompt);
 
-        if (!this.#sessionBacked) this.#recordUserInput(this.#now());
+        this.#recordUserInput(this.#now());
         this.#modelLocked = true;
         if (this.#running) {
             if (this.#sessionBacked && this.#activeSessionRunId === undefined) {
@@ -2006,7 +2006,7 @@ export class CodingAssistantApp implements Component, Focusable {
             displayText: prompt,
         };
 
-        if (!this.#sessionBacked) this.#recordUserInput(this.#now());
+        this.#recordUserInput(this.#now());
         this.#modelLocked = true;
         if (this.#running) {
             if (this.#sessionBacked && this.#activeSessionRunId === undefined) {

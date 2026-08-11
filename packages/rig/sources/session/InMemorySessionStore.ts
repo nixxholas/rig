@@ -139,6 +139,8 @@ export interface InMemorySessionStoreOptions {
     workspacesDirectory?: string;
 }
 
+type WorkspaceArchiveTeardown = (ctx: Context) => Promise<void>;
+
 export class InMemorySessionStore implements SessionStore {
     #agentManager: AgentSessionManager;
     #createRuntime: InMemorySessionOptions["createRuntime"];
@@ -169,6 +171,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly worklets: WorkletStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
+    readonly #workspaceArchiveCleanups = new Set<Promise<unknown>>();
     readonly #workspaceTransferReservations = new Map<string, string>();
     static async open(
         ctx: Context,
@@ -1573,7 +1576,7 @@ export class InMemorySessionStore implements SessionStore {
         expectedVersion?: number,
     ): Promise<Project | undefined> {
         let project: Project | undefined;
-        let workspaces: { teardown: (() => Promise<void>)[]; workspaceId: string }[] = [];
+        let workspaces: { teardown: WorkspaceArchiveTeardown[]; workspaceId: string }[] = [];
         const workspaceIds = new Set(
             (await this.#projects.listWorkspaces(ctx, projectId)).map((workspace) => workspace.id),
         );
@@ -1645,7 +1648,7 @@ export class InMemorySessionStore implements SessionStore {
                     (
                         workspace,
                     ): workspace is {
-                        teardown: (() => Promise<void>)[];
+                        teardown: WorkspaceArchiveTeardown[];
                         workspaceId: string;
                     } => workspace !== undefined,
                 );
@@ -1667,17 +1670,22 @@ export class InMemorySessionStore implements SessionStore {
         // Every logical archive write above is complete before physical terminal
         // and worktree cleanup yields, so a later unarchive can never be
         // overtaken by stale child writes from this operation.
-        const cleanup = await Promise.allSettled([
-            this.remoteTerminals.closeProject(ctx, projectId),
-            ...workspaces.map((workspace) =>
-                this.#completeWorkspaceArchive(
-                    ctx,
-                    projectId,
-                    workspace.workspaceId,
-                    workspace.teardown.map((teardown) => teardown()),
-                ),
-            ),
-        ]);
+        const cleanup = await this.#runWorkspaceArchiveCleanup(
+            projectId,
+            undefined,
+            async (cleanupCtx) =>
+                await Promise.allSettled([
+                    this.remoteTerminals.closeProject(cleanupCtx, projectId),
+                    ...workspaces.map((workspace) =>
+                        this.#completeWorkspaceArchive(
+                            cleanupCtx,
+                            projectId,
+                            workspace.workspaceId,
+                            workspace.teardown.map((teardown) => teardown(cleanupCtx)),
+                        ),
+                    ),
+                ]),
+        );
         const failures = [
             ...(postCommitError === undefined ? [] : [postCommitError]),
             ...cleanup.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
@@ -1717,7 +1725,7 @@ export class InMemorySessionStore implements SessionStore {
         const checkpoints = new Map(
             sessions.map((session) => [session, session.captureMutationCheckpoint()] as const),
         );
-        const teardowns: Array<() => Promise<void>> = [];
+        const teardowns: WorkspaceArchiveTeardown[] = [];
         try {
             await this.#transaction(ctx, async () => {
                 for (const session of sessions) {
@@ -1726,7 +1734,12 @@ export class InMemorySessionStore implements SessionStore {
             });
         } catch (error) {
             if (isSessionTransactionPostCommitError(error)) {
-                const cleanup = await Promise.allSettled(teardowns.map((teardown) => teardown()));
+                const cleanup = await this.#runWorkspaceArchiveCleanup(
+                    projectId,
+                    workspaceId,
+                    async (cleanupCtx) =>
+                        await Promise.allSettled(teardowns.map((teardown) => teardown(cleanupCtx))),
+                );
                 const failures = cleanup.flatMap((result) =>
                     result.status === "rejected" ? [result.reason] : [],
                 );
@@ -1743,17 +1756,45 @@ export class InMemorySessionStore implements SessionStore {
             }
             throw error;
         }
-        const cleanup = teardowns.map((teardown) => teardown());
-        cleanup.push(this.remoteTerminals.closeWorkspace(ctx, projectId, workspaceId));
-        void this.#completeWorkspaceArchive(ctx, projectId, workspaceId, cleanup).catch(
-            (error: unknown) => {
-                // Residue left behind is worth a warning because a later attempt can still clear
-                // it. A database that cannot answer is neither reportable nor retryable.
-                if (isDatabaseFailure(error)) throw error;
-                this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
+        const cleanup = this.#runWorkspaceArchiveCleanup(
+            projectId,
+            workspaceId,
+            async (cleanupCtx) => {
+                const work = teardowns.map((teardown) => teardown(cleanupCtx));
+                work.push(this.remoteTerminals.closeWorkspace(cleanupCtx, projectId, workspaceId));
+                return await this.#completeWorkspaceArchive(
+                    cleanupCtx,
+                    projectId,
+                    workspaceId,
+                    work,
+                );
             },
         );
+        void cleanup.catch((error: unknown) => {
+            // Residue left behind is worth a warning because a later attempt can still clear
+            // it. A database that cannot answer is neither reportable nor retryable.
+            if (isDatabaseFailure(error)) throw error;
+            this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
+        });
         return workspace;
+    }
+
+    #runWorkspaceArchiveCleanup<Result>(
+        projectId: string,
+        workspaceId: string | undefined,
+        work: (ctx: Context) => Promise<Result>,
+    ): Promise<Result> {
+        const cleanup = withWorkerContext(
+            "workspace-archive-cleanup",
+            (workerCtx) => work(withDatabase(workerCtx, this.#database)),
+            { projectId, ...(workspaceId === undefined ? {} : { workspaceId }) },
+        );
+        this.#workspaceArchiveCleanups.add(cleanup);
+        void cleanup.then(
+            () => this.#workspaceArchiveCleanups.delete(cleanup),
+            () => this.#workspaceArchiveCleanups.delete(cleanup),
+        );
+        return cleanup;
     }
 
     async #completeWorkspaceArchive(
@@ -1926,6 +1967,7 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     async close(ctx: Context): Promise<void> {
+        await Promise.allSettled(this.#workspaceArchiveCleanups);
         await this.remoteTerminals.close(ctx);
         this.#workspaceReadyWaiters.close();
         await this.#projects.close(ctx);

@@ -1,10 +1,11 @@
-# Anthropic Bedrock provider
+# Anthropic Bedrock transport
 
-`AnthropicBedrockProvider` sends Anthropic Messages API requests directly to Amazon Bedrock
-through `@anthropic-ai/bedrock-sdk`. It supports the Anthropic-compatible Mantle endpoint and
-Bedrock Runtime, preferring Mantle when the selected model is available in-region. Its caller
-supplies the complete system instructions and tool definitions; the provider does not launch
-Claude Code or adopt its tool execution and permission runtime.
+The public `AnthropicProvider` selects its internal Bedrock implementation whenever it receives a
+`BedrockBearerTokenCredential`. That implementation sends Anthropic Messages API requests directly
+to Amazon Bedrock through `@anthropic-ai/bedrock-sdk`. It supports the Anthropic-compatible Mantle
+endpoint and Bedrock Runtime, preferring Mantle when the selected model is available in-region. Its
+caller supplies the complete system instructions and tool definitions; the provider does not
+launch Claude Code or adopt its tool execution and permission runtime.
 
 ## Request contract
 

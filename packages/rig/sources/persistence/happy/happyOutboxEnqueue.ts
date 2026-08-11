@@ -6,7 +6,14 @@ import type { HappySessionProtocolMessage } from "../../happy/types.js";
 import { inTx } from "../inTx.js";
 import type { DatabaseScope } from "../Transaction.js";
 
-export class HappySyncOutboxFullError extends Error {}
+export class HappySyncOutboxFullError extends Error {
+    constructor(
+        message: string,
+        readonly recoverable = true,
+    ) {
+        super(message);
+    }
+}
 
 export async function happyOutboxEnqueue(
     ctx: Context,

@@ -799,6 +799,16 @@ export const happySessions = sqliteTable("happy_sessions", {
     lastRemoteSeq: integer("last_remote_seq").notNull(),
     createdAtMs: integer("created_at_ms").notNull(),
     updatedAtMs: integer("updated_at_ms").notNull(),
+    historyBackfilled: integer("history_backfilled", { mode: "boolean" }).notNull(),
+    projectedEventSeq: integer("projected_event_seq"),
+    projectedEventId: text("projected_event_id"),
+    projectionStatus: text("projection_status", { enum: ["active", "stalled"] })
+        .notNull()
+        .default("active"),
+    projectionError: text("projection_error"),
+    projectionStallCause: text("projection_stall_cause", {
+        enum: ["capacity", "event_too_large", "gap"],
+    }),
 });
 
 export const happyOutbox = sqliteTable(
@@ -811,10 +821,12 @@ export const happyOutbox = sqliteTable(
         localId: text("local_id").notNull(),
         payloadJson: text("payload_json").notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
+        deferred: integer("deferred", { mode: "boolean" }).notNull().default(false),
     },
     (table) => [
         unique().on(table.sessionId, table.localId),
         index("happy_outbox_session_seq").on(table.sessionId, table.seq),
+        index("happy_outbox_session_deferred_seq").on(table.sessionId, table.deferred, table.seq),
     ],
 );
 

@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import type { EventId } from "../../protocol/index.js";
-import { inTx } from "../inTx.js";
+import { inReadTx } from "../inReadTx.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 import {
     querySessionTranscriptNotices,
@@ -19,7 +19,7 @@ export async function querySessionTranscriptSince(
     turnLimit: number,
     after: EventId,
 ): Promise<SessionTranscriptMessageRange | undefined> {
-    return await inTx(ctx, "rig.sql.session.query_session_transcript_since", async (ctx) => {
+    return await inReadTx(ctx, "rig.sql.session.query_session_transcript_since", async (ctx) => {
         const tx = ctx.tx;
         const anchor = await tx.get<Record<string, unknown>>(sql`
         SELECT

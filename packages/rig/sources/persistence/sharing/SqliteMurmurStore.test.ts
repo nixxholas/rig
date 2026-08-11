@@ -1,8 +1,10 @@
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, mkdtemp, readFile, readdir, readlink, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { MurmurClient } from "@slopus/murmur";
 import type { Span, Tracer } from "@opentelemetry/api";
@@ -190,4 +192,83 @@ describe("SqliteMurmurStore", () => {
             await rm(directory, { force: true, recursive: true });
         }
     });
+
+    it("does not retain SQLite file descriptors across repeated transactions", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-murmur-fds-"));
+        const path = join(directory, "sharing.sqlite");
+        const store = new SqliteMurmurStore(path);
+        const retainedTransactions: unknown[] = [];
+        let baselineDescriptors = Number.MAX_SAFE_INTEGER;
+        try {
+            await store.set("murmur/test/value", new Uint8Array([0]));
+            baselineDescriptors = await countFileDescriptors(path);
+
+            for (let index = 0; index < 40; index += 1) {
+                await store.transaction(async (transaction) => {
+                    // A caller may retain its facade after the callback. A stale
+                    // facade must not retain a detached native connection with it.
+                    retainedTransactions.push(transaction);
+                    await transaction.set("murmur/test/value", new Uint8Array([index % 256]));
+                });
+            }
+
+            expect(await countFileDescriptors(path)).toBeLessThanOrEqual(baselineDescriptors + 2);
+        } finally {
+            await store.close();
+            expect(await countFileDescriptors(path)).toBeLessThanOrEqual(baselineDescriptors + 2);
+            retainedTransactions.length = 0;
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
+    it("rejects a transaction facade after its callback ends", async () => {
+        const store = new SqliteMurmurStore(":memory:");
+        let escaped: Parameters<Parameters<typeof store.transaction>[0]>[0] | undefined;
+        try {
+            await store.transaction(async (transaction) => {
+                escaped = transaction;
+                await transaction.set("murmur/test/committed", new Uint8Array([1]));
+            });
+
+            await expect(escaped?.set("murmur/test/escaped", new Uint8Array([2]))).rejects.toThrow(
+                "Murmur transaction is closed",
+            );
+            expect(await store.get("murmur/test/escaped")).toBeUndefined();
+        } finally {
+            await store.close();
+        }
+    });
 });
+
+async function countFileDescriptors(path: string): Promise<number> {
+    const resolvedPath = await realpath(path);
+    if (!(await exists("/proc/self/fd"))) {
+        const { stdout } = await promisify(execFile)("lsof", [
+            "-a",
+            "-d",
+            "0-999999",
+            "-Fn",
+            "-p",
+            String(process.pid),
+        ]);
+        return stdout.split("\n").filter((line) => line.startsWith(`n${resolvedPath}`)).length;
+    }
+    const descriptors = await readdir("/proc/self/fd");
+    const targets = await Promise.all(
+        descriptors.map(async (descriptor) => {
+            try {
+                return await readlink(`/proc/self/fd/${descriptor}`);
+            } catch {
+                return undefined;
+            }
+        }),
+    );
+    return targets.filter((target) => target?.startsWith(resolvedPath)).length;
+}
+
+async function exists(path: string): Promise<boolean> {
+    return access(path).then(
+        () => true,
+        () => false,
+    );
+}

@@ -6,8 +6,15 @@ export function getDaemonIdentity(
     version: string = readPackageVersion(),
 ): DaemonIdentity {
     const developmentBuildId = environment.RIG_DEVELOPMENT_BUILD_ID?.trim();
+    const globalDevelopmentVersion = environment.RIG_DAEMON_IDENTITY_VERSION?.trim();
+    const identityVersion =
+        environment.RIG_RUNTIME_MODE === "global-development" &&
+        globalDevelopmentVersion !== undefined &&
+        globalDevelopmentVersion.length > 0
+            ? globalDevelopmentVersion
+            : version;
     return {
-        version,
+        version: identityVersion,
         ...(developmentBuildId === undefined || developmentBuildId.length === 0
             ? {}
             : { developmentBuildId }),

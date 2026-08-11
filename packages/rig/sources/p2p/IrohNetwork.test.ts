@@ -13,6 +13,7 @@ import {
 } from "@number0/iroh/index.js";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Context } from "@steve.kite/stdlib";
 
 import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
@@ -27,6 +28,10 @@ import { createP2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.j
 import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
 const ctx = createTestRootContext();
+const runTestPeerOperation = async <Result>(
+    _operation: "address-refresh" | "handshake",
+    work: (operationCtx: Context) => Result | PromiseLike<Result>,
+): Promise<Awaited<Result>> => await work(ctx);
 const ALPN = [...Buffer.from("rig/p2p/5", "utf8")];
 const networks: IrohNetwork[] = [];
 const directories: string[] = [];
@@ -41,6 +46,75 @@ afterEach(async () => {
 });
 
 describe("IrohNetwork", () => {
+    it("uses one bounded operation context for trust validation and commit", async () => {
+        const clientKey = SecretKey.generate();
+        const serverKey = SecretKey.generate();
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const [clientEndpoint, serverEndpoint] = await Promise.all([
+            Endpoint.bind({ alpns: [ALPN], secretKey: clientKey.toBytes() }, RelayMode.disabled()),
+            Endpoint.bind({ alpns: [ALPN], secretKey: serverKey.toBytes() }, RelayMode.disabled()),
+        ]);
+        const clientId = clientEndpoint.id().toString();
+        const serverId = serverEndpoint.id().toString();
+        const operations = new Map<Context, Context[]>();
+        let handshakeOperationCount = 0;
+        const runPeerOperation = async <Result>(
+            _operation: "address-refresh" | "handshake",
+            work: (ctx: Context) => Result | PromiseLike<Result>,
+        ): Promise<Awaited<Result>> => {
+            const operationCtx = createTestRootContext().named(
+                "rig.worker.p2p-iroh-peer-handshake",
+            );
+            if (_operation === "handshake") {
+                handshakeOperationCount += 1;
+                operations.set(operationCtx, []);
+            }
+            return await work(operationCtx);
+        };
+        const observe = (ctx: Context): void => {
+            operations.get(ctx)?.push(ctx);
+        };
+        const client = await IrohNetwork.create({
+            config: {},
+            endpointIds: [serverId],
+            endpoint: clientEndpoint,
+            identity: clientIdentity,
+            knownPeer: () => namedPeer(serverIdentity, "Server Rig"),
+            peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
+            pingIntervalMs: 60_000,
+            relayMode: RelayMode.disabled(),
+            secretKey: clientKey,
+        });
+        networks.push(client);
+        const server = await IrohNetwork.create({
+            commitPeer: async (operationCtx) => observe(operationCtx),
+            config: {},
+            endpointIds: [clientId],
+            endpoint: serverEndpoint,
+            identity: serverIdentity,
+            knownPeer: () => namedPeer(clientIdentity, "Client Rig"),
+            peerAddresses: new Map([[clientId, clientEndpoint.addr()]]),
+            pingIntervalMs: 60_000,
+            relayMode: RelayMode.disabled(),
+            runPeerOperation,
+            secretKey: serverKey,
+            validatePeer: async (operationCtx) => observe(operationCtx),
+        });
+        networks.push(server);
+
+        await vi.waitFor(() =>
+            expect([...operations.values()].some((seen) => seen.length === 2)).toBe(true),
+        );
+        const completed = [...operations.values()].filter((seen) => seen.length > 0);
+        expect(completed).not.toHaveLength(0);
+        for (const seen of completed) {
+            expect(seen).toHaveLength(2);
+            expect(seen[0]).toBe(seen[1]);
+        }
+        expect(handshakeOperationCount).toBe(completed.length);
+    });
+
     it("connects, keeps pinging, and publishes liveness when both peers are trusted", async () => {
         const firstKey = SecretKey.generate();
         const secondKey = SecretKey.generate();
@@ -54,7 +128,12 @@ describe("IrohNetwork", () => {
         const secondId = secondEndpoint.id().toString();
         const firstStatusChanged = vi.fn();
         const updateSecondPeerAddress = vi.fn(
-            async (_identity: P2pPeerIdentity, _endpointId: string, _ticket: string) => undefined,
+            async (
+                _operationCtx: Context,
+                _identity: P2pPeerIdentity,
+                _endpointId: string,
+                _ticket: string,
+            ) => undefined,
         );
         const first = await IrohNetwork.create({
             config: {},
@@ -84,6 +163,7 @@ describe("IrohNetwork", () => {
             peerAddresses: new Map([[firstId, firstEndpoint.addr()]]),
             pingIntervalMs: 150,
             relayMode: RelayMode.disabled(),
+            runPeerOperation: runTestPeerOperation,
             secretKey: secondKey,
             updatePeerAddress: updateSecondPeerAddress,
         });
@@ -110,7 +190,7 @@ describe("IrohNetwork", () => {
             );
         });
         await vi.waitFor(() => expect(updateSecondPeerAddress).toHaveBeenCalled());
-        const learnedTicket = updateSecondPeerAddress.mock.calls[0]![2];
+        const learnedTicket = updateSecondPeerAddress.mock.calls[0]![3];
         expect(EndpointTicket.fromString(learnedTicket).endpointAddr().id().toString()).toBe(
             firstId,
         );
@@ -337,10 +417,11 @@ describe("IrohNetwork", () => {
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
             secretKey: serverKey,
-            commitPeer: (identity, endpointId) =>
-                trust.verifyOrPin(trustCtx, identity, "iroh", endpointId),
-            validatePeer: (identity, endpointId) =>
-                trust.validate(trustCtx, identity, "iroh", endpointId),
+            commitPeer: (operationCtx, identity, endpointId) =>
+                trust.verifyOrPin(operationCtx, identity, "iroh", endpointId),
+            runPeerOperation: runTestPeerOperation,
+            validatePeer: (operationCtx, identity, endpointId) =>
+                trust.validate(operationCtx, identity, "iroh", endpointId),
         });
         networks.push(server);
 
@@ -389,8 +470,8 @@ describe("IrohNetwork", () => {
             connection.close(0n, []);
         })();
         const client = await IrohNetwork.create({
-            commitPeer: (identity, endpointId) =>
-                clientTrust.verifyOrPin(clientTrustCtx, identity, "iroh", endpointId),
+            commitPeer: (operationCtx, identity, endpointId) =>
+                clientTrust.verifyOrPin(operationCtx, identity, "iroh", endpointId),
             config: {},
             endpointIds: [serverId],
             endpoint: clientEndpoint,
@@ -399,9 +480,10 @@ describe("IrohNetwork", () => {
             peerAddresses: new Map([[serverId, serverEndpoint.addr()]]),
             pingIntervalMs: 10,
             relayMode: RelayMode.disabled(),
+            runPeerOperation: runTestPeerOperation,
             secretKey: clientKey,
-            validatePeer: (identity, endpointId) =>
-                clientTrust.validate(clientTrustCtx, identity, "iroh", endpointId),
+            validatePeer: (operationCtx, identity, endpointId) =>
+                clientTrust.validate(operationCtx, identity, "iroh", endpointId),
         });
         networks.push(client);
 
@@ -1478,6 +1560,111 @@ describe("IrohNetwork", () => {
         });
 
         await expect(network.close()).resolves.toBeUndefined();
+    });
+
+    it("does not end a handshake context while gated trust work still uses it", async () => {
+        const ownEndpointId = SecretKey.generate().public();
+        const peerEndpointId = SecretKey.generate().public();
+        const ownIdentity = createP2pInstanceIdentity();
+        const peerIdentity = createP2pInstanceIdentity();
+        const hello = duplexPair();
+        let releaseValidation!: () => void;
+        const validationGate = new Promise<void>((resolve) => {
+            releaseValidation = resolve;
+        });
+        let markValidationStarted!: () => void;
+        const validationStarted = new Promise<void>((resolve) => {
+            markValidationStarted = resolve;
+        });
+        let markCommitted!: () => void;
+        const committed = new Promise<void>((resolve) => {
+            markCommitted = resolve;
+        });
+        let operationEnded = false;
+        let usedEndedContext = false;
+        let rejectServing!: (error: Error) => void;
+        const serving = new Promise<never>((_resolve, reject) => {
+            rejectServing = reject;
+        });
+        let acceptedStreams = 0;
+        const incomingConnection = {
+            acceptBi: async () => {
+                acceptedStreams += 1;
+                if (acceptedStreams === 1) return hello.left;
+                return serving;
+            },
+            close: () => rejectServing(new Error("The test closed the incoming connection.")),
+            remoteId: () => peerEndpointId,
+            setMaxConcurrentBiStreams: () => undefined,
+        } as unknown as Connection;
+        let accepted = false;
+        let finishAccept!: () => void;
+        const waitingAccept = new Promise<null>((resolve) => {
+            finishAccept = () => resolve(null);
+        });
+        const endpoint = {
+            acceptNext: async () => {
+                if (accepted) return waitingAccept;
+                accepted = true;
+                return {
+                    accept: async () => ({
+                        connect: () => Promise.resolve(incomingConnection),
+                    }),
+                };
+            },
+            close: async () => finishAccept(),
+            connect: () => new Promise<Connection>(() => undefined),
+            id: () => ownEndpointId,
+        } as unknown as Endpoint;
+        void (async () => {
+            await hello.right.send.writeAll([3]);
+            await runP2pInitiatorHello(createIrohFrameDuplex(hello.right.recv, hello.right.send), {
+                identity: peerIdentity,
+                localChannelBinding: peerEndpointId.toString(),
+                remoteChannelBinding: ownEndpointId.toString(),
+                transport: "iroh",
+            });
+        })().catch(() => undefined);
+        const network = await IrohNetwork.create({
+            bindings: {} as never,
+            closeTimeoutMs: 20,
+            commitPeer: async () => markCommitted(),
+            config: {},
+            connectTimeoutMs: 5,
+            endpoint,
+            endpointIds: [peerEndpointId.toString()],
+            handshakeTimeoutMs: 5,
+            identity: ownIdentity,
+            knownPeer: () => namedPeer(peerIdentity),
+            peerAddresses: new Map([[peerEndpointId.toString(), {} as EndpointAddr]]),
+            relayMode: RelayMode.disabled(),
+            runPeerOperation: async <Result>(
+                _operation: "address-refresh" | "handshake",
+                work: (operationCtx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => {
+                try {
+                    return await work(ctx);
+                } finally {
+                    operationEnded = true;
+                }
+            },
+            secretKey: null as never,
+            validatePeer: async () => {
+                markValidationStarted();
+                await validationGate;
+                usedEndedContext = operationEnded;
+            },
+        });
+        networks.push(network);
+
+        await validationStarted;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(operationEnded).toBe(false);
+
+        releaseValidation();
+        await committed;
+        await vi.waitFor(() => expect(operationEnded).toBe(true));
+        expect(usedEndedContext).toBe(false);
     });
 
     it("bounds shutdown when the native endpoint does not close", async () => {

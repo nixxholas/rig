@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createId } from "@paralleldrive/cuid2";
-import type { BaseProvider, SessionEvent, SessionTool } from "@slopus/rig-providers";
+import type { BaseProvider, SessionEvent, SessionTool } from "@slopus/happy-providers";
 
 import type { OneOffInferenceRoute } from "./OneOffInferenceRoute.js";
 

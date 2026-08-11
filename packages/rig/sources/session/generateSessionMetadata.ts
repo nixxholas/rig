@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Model, Provider } from "@slopus/rig-execution";
-import { providerModelFamily } from "@slopus/rig-providers";
+import { providerModelFamily } from "@slopus/happy-providers";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
 

@@ -27,6 +27,54 @@ export interface P2pFrameDuplex {
     readonly send: P2pFrameWriter;
 }
 
+/**
+ * Bounds the aggregate time spent waiting for transport progress while leaving application work
+ * between frames outside the deadline. This is important when a framed protocol performs durable
+ * validation: the transport can time out, but its caller's context must not end around live DB work.
+ */
+export function withFrameProgressDeadline(
+    duplex: P2pFrameDuplex,
+    timeoutMs: number,
+    timeoutError: () => Error,
+    onTimeout?: () => void,
+): P2pFrameDuplex {
+    let remainingMs = timeoutMs;
+    let timedOut = false;
+    const awaitProgress = async <Result>(operation: Promise<Result>): Promise<Result> => {
+        const startedAt = performance.now();
+        try {
+            return await new Promise<Result>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    if (!timedOut) {
+                        timedOut = true;
+                        onTimeout?.();
+                    }
+                    reject(timeoutError());
+                }, remainingMs);
+                void operation.then(
+                    (value) => {
+                        clearTimeout(timer);
+                        resolve(value);
+                    },
+                    (error: unknown) => {
+                        clearTimeout(timer);
+                        reject(error);
+                    },
+                );
+            });
+        } finally {
+            remainingMs = Math.max(0, remainingMs - (performance.now() - startedAt));
+        }
+    };
+    return {
+        recv: { read: (length) => awaitProgress(duplex.recv.read(length)) },
+        send: {
+            finish: () => awaitProgress(duplex.send.finish()),
+            write: (bytes) => awaitProgress(duplex.send.write(bytes)),
+        },
+    };
+}
+
 export class P2pFrameWriteTimeoutError extends Error {}
 
 export function createIrohFrameReader(recv: RecvStream, onReceive?: () => void): P2pFrameReader {

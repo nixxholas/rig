@@ -8,7 +8,7 @@ inference implementation for every provider. It should have one implementation
 per protocol, with each concrete provider configuring the protocol it uses and
 the capabilities or variations it supports.
 
-Protocol implementations belong in the `protocol` area of `rig-providers`.
+Protocol implementations belong in the `protocol` area of `happy-providers`.
 Provider-specific code should select and configure those implementations rather
 than duplicate them.
 
@@ -51,7 +51,7 @@ provider implementations.
 
 ## Order and criteria
 
-First, establish the protocol implementations in `rig-providers/protocol`.
+First, establish the protocol implementations in `happy-providers/protocol`.
 Then configure OpenAI, Grok, and OpenAI on Bedrock on top of the shared Responses
 API implementation, while keeping Responses Lite separate. Finally, validate
 the shared implementation through OpenRouter and record genuine differences as

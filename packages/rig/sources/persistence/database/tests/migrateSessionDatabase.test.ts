@@ -81,6 +81,157 @@ describe("migrateSessionDatabase", () => {
         await opened.database.close(opened.ctx);
     });
 
+    it("marks only demonstrably queued pre-v53 Happy history as backfilled", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.ctx);
+        await opened.database.run(sql.raw("PRAGMA foreign_keys = OFF"));
+        await opened.database.run(
+            sql.raw("ALTER TABLE happy_sessions DROP COLUMN history_backfilled"),
+        );
+        await opened.database.run(
+            sql.raw(`
+                INSERT INTO happy_sessions (
+                    session_id,
+                    credential_fingerprint,
+                    tag,
+                    remote_session_id,
+                    encryption_variant,
+                    encryption_key_base64,
+                    last_remote_seq,
+                    created_at_ms,
+                    updated_at_ms
+                ) VALUES
+                    ('crash-window', 'account', 'rig:crash-window', NULL, 'dataKey', 'key', 0, 1, 1),
+                    ('queued', 'account', 'rig:queued', NULL, 'dataKey', 'key', 0, 1, 1),
+                    ('remote', 'account', 'rig:remote', 'remote-session', 'dataKey', 'key', 0, 1, 1)
+            `),
+        );
+        await opened.database.run(
+            sql.raw(`
+                INSERT INTO happy_outbox (
+                    session_id,
+                    local_id,
+                    payload_json,
+                    created_at_ms
+                ) VALUES ('queued', 'queued-message', '{}', 1)
+            `),
+        );
+        await opened.database.run(
+            sql.raw(`
+                INSERT INTO session_events (
+                    session_id,
+                    event_id,
+                    type,
+                    data_json,
+                    created_at_ms
+                ) VALUES
+                    ('crash-window', 'event-crash', 'session_updated', '{}', 1),
+                    ('queued', 'event-queued', 'session_updated', '{}', 2),
+                    ('remote', 'event-remote', 'session_updated', '{}', 3)
+            `),
+        );
+        await opened.database.run(sql.raw("PRAGMA user_version = 52"));
+
+        await migrateSessionDatabase(opened.ctx);
+
+        expect(
+            await opened.database.all<{ history_backfilled: number; session_id: string }>(
+                sql.raw(`
+                    SELECT session_id, history_backfilled
+                    FROM happy_sessions
+                    ORDER BY session_id
+                `),
+            ),
+        ).toEqual([
+            { history_backfilled: 0, session_id: "crash-window" },
+            { history_backfilled: 1, session_id: "queued" },
+            { history_backfilled: 1, session_id: "remote" },
+        ]);
+        expect(
+            await opened.database.all<{
+                projected_event_id: string | null;
+                session_id: string;
+            }>(
+                sql.raw(`
+                    SELECT session_id, projected_event_id
+                    FROM happy_sessions
+                    ORDER BY session_id
+                `),
+            ),
+        ).toEqual([
+            { projected_event_id: null, session_id: "crash-window" },
+            { projected_event_id: "event-queued", session_id: "queued" },
+            { projected_event_id: "event-remote", session_id: "remote" },
+        ]);
+        await opened.database.close(opened.ctx);
+    });
+
+    it("baselines acknowledged Happy history when upgrading directly from version 53", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.ctx);
+        await opened.database.run(sql.raw("PRAGMA foreign_keys = OFF"));
+        await opened.database.run(
+            sql.raw(`
+                INSERT INTO happy_sessions (
+                    session_id,
+                    credential_fingerprint,
+                    tag,
+                    encryption_variant,
+                    encryption_key_base64,
+                    last_remote_seq,
+                    created_at_ms,
+                    updated_at_ms,
+                    history_backfilled
+                ) VALUES ('session-53', 'account', 'rig:session-53', 'dataKey', 'key', 0, 1, 1, 1)
+            `),
+        );
+        await opened.database.run(
+            sql.raw(`
+                INSERT INTO session_events (
+                    session_id,
+                    event_id,
+                    type,
+                    data_json,
+                    created_at_ms
+                ) VALUES ('session-53', 'event-53', 'session_updated', '{}', 1)
+            `),
+        );
+        await opened.database.run(sql.raw("PRAGMA user_version = 53"));
+
+        await migrateSessionDatabase(opened.ctx);
+
+        expect(
+            await opened.database.get<{
+                projected_event_id: string | null;
+                projection_status: string;
+            }>(
+                sql.raw(`
+                    SELECT projected_event_id, projection_status
+                    FROM happy_sessions
+                    WHERE session_id = 'session-53'
+                `),
+            ),
+        ).toEqual({ projected_event_id: "event-53", projection_status: "active" });
+        await opened.database.close(opened.ctx);
+    });
+
+    it("does not advance a valid v52 database that lost the Happy session table", async () => {
+        const opened = await openTestDatabase();
+        await migrateSessionDatabase(opened.ctx);
+        await opened.database.run(sql.raw("PRAGMA foreign_keys = OFF"));
+        await opened.database.run(sql.raw("DROP TABLE happy_sessions"));
+        await opened.database.run(sql.raw("PRAGMA user_version = 52"));
+
+        await expect(migrateSessionDatabase(opened.ctx)).rejects.toThrow(
+            "Cannot migrate Happy history because happy_sessions is missing.",
+        );
+        expect(await opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+            user_version: 52,
+        });
+
+        await opened.database.close(opened.ctx);
+    });
+
     it("normalizes folder and item keys into one space per parent", async () => {
         const opened = await openTestDatabase();
         await migrateSessionDatabase(opened.ctx);
@@ -410,6 +561,35 @@ describe("migrateSessionDatabase", () => {
             sql.raw(
                 "CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1)",
             ),
+        );
+        // This partial version-9 fixture skips init, so keep the Happy tables that a real
+        // version-9 database already owns while isolating the applet migration behavior.
+        await opened.database.run(
+            sql.raw(`
+                CREATE TABLE happy_sessions (
+                    session_id TEXT NOT NULL PRIMARY KEY,
+                    credential_fingerprint TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    remote_session_id TEXT,
+                    encryption_variant TEXT NOT NULL,
+                    encryption_key_base64 TEXT NOT NULL,
+                    last_remote_seq INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                )
+            `),
+        );
+        await opened.database.run(
+            sql.raw(`
+                CREATE TABLE happy_outbox (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    local_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    UNIQUE (session_id, local_id)
+                )
+            `),
         );
         await opened.database.run(
             sql.raw(`

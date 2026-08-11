@@ -6,7 +6,7 @@ const REFRESH_SCOPE_RUNTIME = Symbol("refresh-scope-runtime");
 
 import { createId } from "@paralleldrive/cuid2";
 import { Executor } from "@slopus/rig-execution";
-import { areProviderModelsCompatible, type ProviderUsage } from "@slopus/rig-providers";
+import { areProviderModelsCompatible, type ProviderUsage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 import { withWorkerContext } from "../observability/index.js";
 
@@ -1392,6 +1392,9 @@ export class InMemorySession {
             await this.#cancelDurableWaits(ctx, runId);
         }
         this.#activeRun?.controller.abort();
+        if (runId !== undefined) {
+            await this.#commitStoppedPartialMessages(ctx, runId);
+        }
         this.#restoredActiveRunId = undefined;
         const event = await this.#append(ctx, "abort_requested", {
             ...(shouldContinuePendingSteering ? { continuePendingSteering: true as const } : {}),
@@ -2016,7 +2019,10 @@ export class InMemorySession {
         this.#git = undefined;
         this.#contextMessages = nextContextMessages;
         this.#workspaceTransfer = succeeded;
-        await this.#append(ctx, "session_updated", { session: this.snapshot() });
+        await this.#append(ctx, "session_updated", {
+            appendedContextMessage: notice,
+            session: this.clientSnapshot(),
+        });
         return this.snapshot();
     }
 
@@ -2084,7 +2090,7 @@ export class InMemorySession {
                     runId,
                 });
             } else {
-                await this.#append(ctx, "session_updated", { session: this.snapshot() });
+                await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
             }
         }
     }
@@ -2221,7 +2227,6 @@ export class InMemorySession {
             modelId: this.#modelId,
             providerId: this.#providerId,
             serviceTier: this.#serviceTier ?? null,
-            snapshot: this.#agentSnapshot(),
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
         return this.snapshot();
@@ -2348,7 +2353,7 @@ export class InMemorySession {
         } else {
             this.#models = this.#modelsForProvider(this.#providerId);
             if (catalogChanged) {
-                await this.#append(ctx, "session_updated", { session: this.snapshot() });
+                await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
             }
         }
         return Promise.all([stopProcesses, runtime?.agent.close() ?? Promise.resolve()]).then(
@@ -2458,7 +2463,7 @@ export class InMemorySession {
             this.#interruption = undefined;
             await this.#append(ctx, "session_updated", {
                 ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
-                session: this.snapshot(),
+                session: this.clientSnapshot(),
             });
             return this.snapshot();
         });
@@ -2477,7 +2482,7 @@ export class InMemorySession {
      * session is running rather than only at the moment a client attaches.
      */
     async noteShareCapabilitiesChanged(ctx: Context): Promise<void> {
-        await this.#append(ctx, "session_updated", { session: this.snapshot() });
+        await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
     }
 
     async setOrderKey(ctx: Context, orderKey: string): Promise<ProtocolSession> {
@@ -2487,7 +2492,7 @@ export class InMemorySession {
         return await this.#runSessionMutation(ctx, async (ctx) => {
             if (this.#orderKey === orderKey) return this.snapshot();
             this.#orderKey = orderKey;
-            await this.#append(ctx, "session_updated", { session: this.snapshot() });
+            await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
             return this.snapshot();
         });
     }
@@ -2619,7 +2624,7 @@ export class InMemorySession {
                 this.#startScopeRuntimeRefresh();
             }
         }
-        await this.#append(ctx, "session_updated", { session: this.snapshot() });
+        await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
     }
 
     /** Retires a runtime whose trusted folder metadata or virtual ancestry changed. */
@@ -3915,7 +3920,10 @@ export class InMemorySession {
      * runtime, and killing processes are not database work, so the caller runs them once the
      * archival has committed rather than while it holds the write lock.
      */
-    async archiveForWorkspace(ctx: Context, workspaceId: string): Promise<() => Promise<void>> {
+    async archiveForWorkspace(
+        ctx: Context,
+        workspaceId: string,
+    ): Promise<(cleanupCtx: Context) => Promise<void>> {
         return await this.#runSessionMutation(ctx, (ctx) =>
             this.#archiveForWorkspaceMutation(ctx, workspaceId),
         );
@@ -3924,9 +3932,9 @@ export class InMemorySession {
     async #archiveForWorkspaceMutation(
         ctx: Context,
         workspaceId: string,
-    ): Promise<() => Promise<void>> {
+    ): Promise<(cleanupCtx: Context) => Promise<void>> {
         if (this.#workspaceArchived) {
-            return () => this.#shutdownCleanup ?? Promise.resolve();
+            return (_cleanupCtx) => this.#shutdownCleanup ?? Promise.resolve();
         }
         const activeRun = this.#activeRun;
         const runIds = new Set([
@@ -3971,10 +3979,10 @@ export class InMemorySession {
             workspaceId,
         });
         this.#workspaceArchived = true;
-        return () => {
+        return (cleanupCtx) => {
             this.#clearWorkspaceReadinessRetry();
             activeRun?.controller.abort();
-            return this.beginShutdown(ctx);
+            return this.beginShutdown(cleanupCtx);
         };
     }
 
@@ -3990,7 +3998,6 @@ export class InMemorySession {
         if (!this.#closing) void this.#killRuntimeProcesses(ctx);
         this.#activeRun = undefined;
         this.#restoredActiveRunId = undefined;
-        this.#activePartial = undefined;
         this.#pendingSteeringMessages.clear();
         this.#suspendedRunIds.clear();
         await this.#pauseActiveGoal(ctx);
@@ -4009,6 +4016,7 @@ export class InMemorySession {
             );
             const uniqueRunIds = new Set(interruptedRunIds);
             for (const runId of uniqueRunIds) {
+                await this.#commitStoppedPartialMessages(ctx, runId);
                 await this.#recordInterruptedToolResults(ctx, runId, interruption.message);
                 await this.#append(ctx, "run_error", {
                     errorMessage: interruption.message,
@@ -4022,6 +4030,30 @@ export class InMemorySession {
         };
         if (this.#persistence?.transaction === undefined) await persistInterruption(ctx);
         else await this.#persistence.transaction(ctx, persistInterruption);
+        // Keep the overlay attachable until the same visible row has become
+        // immutable history. Clearing it before the durable handoff leaves a
+        // fresh client with neither representation while interruption commits.
+        this.#activePartial = undefined;
+    }
+
+    /**
+     * Makes output the user already saw part of the immutable transcript before
+     * a stopped run is closed. Partial rows normally belong only to the live
+     * overlay, but an abort or daemon interruption may never receive a provider
+     * final message to replace them.
+     */
+    async #commitStoppedPartialMessages(ctx: Context, runId: string): Promise<void> {
+        const partials = this.#messages.filter(
+            (entry) =>
+                entry.isPartial &&
+                entry.runId === runId &&
+                entry.message.role === "agent" &&
+                entry.message.blocks.length > 0,
+        );
+        for (const entry of partials) {
+            await this.#storeMessage(ctx, entry.position, entry.message, false, runId);
+            await this.#append(ctx, "agent_message", { message: entry.message, runId });
+        }
     }
 
     async #recordInterruptedToolResults(
@@ -4333,7 +4365,7 @@ export class InMemorySession {
         return await this.#runSessionMutation(ctx, async (ctx) => {
             if (this.isSubagent() || this.#unread === undefined) return false;
             this.#unread = undefined;
-            await this.#append(ctx, "session_updated", { session: this.snapshot() });
+            await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
             return true;
         });
     }
@@ -7136,6 +7168,10 @@ export class InMemorySession {
         if (this.#activeRun?.runId !== runId) {
             return;
         }
+        // Once an abort has made the visible partial durable, a provider that
+        // is slow to observe its signal must not turn that same row partial
+        // again while unwinding its stream.
+        if (this.#activeRun.controller.signal.aborted && "partial" in event) return;
 
         if (event.type === "steering_applied") {
             let drainedContext: readonly PersistedPendingContextMessage[] = [];
@@ -7395,6 +7431,9 @@ export class InMemorySession {
         result: AgentRunResult,
     ): Promise<SessionRunCompletion["status"]> {
         const stopReason: StopReason = result.stopReason;
+        if (stopReason === "aborted") {
+            await this.#commitStoppedPartialMessages(ctx, runId);
+        }
         if (result.stopReason === "error") {
             await this.#appendDurableError(ctx, runId, result.errorMessage, this.#runtime, {
                 providerError: result.providerError,
@@ -7872,14 +7911,19 @@ export class InMemorySession {
         let previousBackgroundCount = runtime.context.bash.activeSessionCount?.() ?? 0;
         runtime.context.bash.setActiveSessionCountListener?.((running) => {
             const runId = this.#activeRun?.runId ?? this.#lastSessionRunId ?? "background";
-            void this.#append(ctx, "agent_event", {
-                event: {
-                    type: "background_processes_changed",
-                    processes: runtime.context.bash.activeSessions?.() ?? [],
-                    running,
-                },
-                runId,
-            }).catch(rethrowDatabaseFailure);
+            void withWorkerContext(
+                "background-process-count-change",
+                (workerCtx) =>
+                    this.#append(workerCtx, "agent_event", {
+                        event: {
+                            type: "background_processes_changed",
+                            processes: runtime.context.bash.activeSessions?.() ?? [],
+                            running,
+                        },
+                        runId,
+                    }),
+                { sessionId: this.id },
+            ).catch(rethrowDatabaseFailure);
             if (running === previousBackgroundCount) return;
             previousBackgroundCount = running;
             this.#restartMetadataSettlement();
@@ -7945,8 +7989,9 @@ export class InMemorySession {
             if (this.#runtime !== undefined) this.#installExternalTools(this.#runtime);
             changed = true;
         }
-        if (changed) await this.#append(ctx, "session_updated", { session: this.snapshot() });
-        else await this.#saveSession(ctx);
+        if (changed) {
+            await this.#append(ctx, "session_updated", { session: this.clientSnapshot() });
+        } else await this.#saveSession(ctx);
     }
 
     #installExternalTools(runtime: CodingAssistantRuntime): void {

@@ -144,7 +144,7 @@ export async function runLocalProtocolServer(
         try {
             await observability.shutdown();
         } finally {
-            databaseLock.release();
+            await databaseLock.release();
         }
     }
 }
@@ -700,8 +700,10 @@ async function runOwnedLocalProtocolServer(
                     ? {}
                     : {
                           onSessionAccess: (session) => {
+                              const service = happySyncService;
+                              if (service?.shouldAttachOnAccess(session) !== true) return;
                               void withWorkerContext("happy-session-access", (ctx) =>
-                                  happySyncService?.attach(ctx, session),
+                                  service.attach(ctx, session),
                               ).catch(rethrowDatabaseFailure);
                           },
                       }),

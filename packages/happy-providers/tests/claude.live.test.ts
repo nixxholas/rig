@@ -140,7 +140,7 @@ describe.skipIf(!live)("Claude live session", () => {
                 env: process.env,
             });
             if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
-            const session = new ClaudeSession("rig-providers-claude-live", {
+            const session = new ClaudeSession("happy-providers-claude-live", {
                 instructions:
                     "You are testing Rig's Claude provider. Follow exact reply instructions.",
                 credential,
@@ -221,7 +221,7 @@ describe.skipIf(!live)("Claude live session", () => {
     it("runs native compaction without custom instructions", { timeout: 120_000 }, async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ env: process.env });
         if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
-        const session = new ClaudeSession("rig-providers-claude-plain-compact-live", {
+        const session = new ClaudeSession("happy-providers-claude-plain-compact-live", {
             instructions: "Preserve conversation facts accurately.",
             credential,
             model: "sonnet[1m]",

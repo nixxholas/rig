@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import type { ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/happy-providers";
 
 import { createPermissionReviewSideAgent } from "../permissions/index.js";
 import { Executor, type Identity } from "@slopus/rig-execution";

@@ -1,4 +1,4 @@
-import type { SessionMessage } from "@slopus/rig-providers";
+import type { SessionMessage } from "@slopus/happy-providers";
 
 import type { Context } from "@/types.js";
 

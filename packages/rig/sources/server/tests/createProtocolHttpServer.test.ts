@@ -39,7 +39,7 @@ import type { OnboardingServiceContract } from "../../onboarding/OnboardingServi
 import { ProjectRegistrationError } from "../../project/ProjectRepository.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderQuota } from "@slopus/happy-providers";
 import { CURRENT_SESSION_DATABASE_VERSION } from "../../persistence/database/migrateSessionDatabase.js";
 import { RigProfileStore } from "../../profiles/index.js";
 

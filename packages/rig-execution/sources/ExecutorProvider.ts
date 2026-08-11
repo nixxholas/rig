@@ -1,4 +1,4 @@
-import type { BaseProvider, SessionTool } from "@slopus/rig-providers";
+import type { BaseProvider, SessionTool } from "@slopus/happy-providers";
 
 import type { ExecutorModelProfile } from "@/ExecutorModelProfile.js";
 import type { ProfilePromptContext, ServiceTier } from "@/types.js";

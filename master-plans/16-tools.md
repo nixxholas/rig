@@ -42,11 +42,11 @@ that case omitting it selects the current provider. With one available route,
 
 Server tools are a provider implementation detail. Keep their descriptors,
 selection, wire format, calls, results, citations, and replay inside
-`rig-providers`. The provider is responsible for writing server-tool calls and
+`happy-providers`. The provider is responsible for writing server-tool calls and
 results into its native history representation correctly and replaying them on
 later turns.
 
-Inside `rig-providers`, a server tool uses an optional native descriptor field
+Inside `happy-providers`, a server tool uses an optional native descriptor field
 whose required member is `type`, for example
 `server: { type: "web_search" }`. The descriptor may carry any additional
 vendor wire fields it needs. Provider mappers pass this exact descriptor
@@ -81,7 +81,7 @@ not a hidden conversation.
 
 ## Vendor truth and golden traces
 
-Tool descriptors and captured golden traces in `rig-providers` are evidence of
+Tool descriptors and captured golden traces in `happy-providers` are evidence of
 the vendor's real surface and wire protocol. Product code must conform to them.
 Do not edit, normalize, or customize vendor descriptors to fit a Rig
 abstraction.
@@ -109,7 +109,7 @@ This plan is complete when:
   and cross-vendor definitions share no schema, description, prompt, or
   definition factory;
 - no model or provider capability classification decides which tools exist;
-- server tools and `tool_search` exist only inside `rig-providers`, and
+- server tools and `tool_search` exist only inside `happy-providers`, and
   `Executor`, agents, protocols, persistence, and clients do not model them;
 - providers record server-tool calls and results in their native history and
   replay them correctly through opaque provider response items;

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { CodexSessionCredential, GrokSessionCredential } from "@slopus/rig-providers";
+import { CodexSessionCredential, GrokSessionCredential } from "@slopus/happy-providers";
 
 import type { ConfigProviders } from "../config/types.js";
 import type { P2pPeerIdentity } from "../protocol/P2pIdentityProtocol.js";

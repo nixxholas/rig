@@ -1,12 +1,19 @@
 import type { Duplex } from "node:stream";
 
+import type { Context } from "@steve.kite/stdlib";
+
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import {
     readP2pHttpRequest,
     writeP2pHttpFailure,
     writeP2pHttpResponse,
 } from "./P2pFrameProtocol.js";
-import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js";
+import {
+    readBytes,
+    withFrameProgressDeadline,
+    writeBytes,
+    type P2pFrameDuplex,
+} from "./P2pFrameDuplex.js";
 import { runP2pResponderHello } from "./P2pHelloProtocol.js";
 import type { ServeP2pHttpRequest } from "./P2pHttp.js";
 import type { P2pInstanceIdentity, P2pPeerIdentity } from "./P2pIdentity.js";
@@ -32,21 +39,29 @@ const RESPONSE_HEAD_TIMEOUT_MS = 30_000;
 const MAXIMUM_BRIDGES = 32;
 
 export interface CreateSshBridgeResponderOptions {
-    commitPeer?: (identity: P2pPeerIdentity, binding: string) => Promise<void>;
+    commitPeer?: (ctx: Context, identity: P2pPeerIdentity, binding: string) => Promise<void>;
     identity: P2pInstanceIdentity;
+    /** Test seam; production keeps the five-second authenticated transport deadline. */
+    handshakeTimeoutMs?: number;
     peers: readonly P2pTrustedPeer[];
+    runPeerOperation?: <Result>(
+        operation: "handshake",
+        work: (ctx: Context) => Result | PromiseLike<Result>,
+    ) => Promise<Awaited<Result>>;
     serveRequest: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
-    validatePeer?: (identity: P2pPeerIdentity, binding: string) => Promise<void>;
+    validatePeer?: (ctx: Context, identity: P2pPeerIdentity, binding: string) => Promise<void>;
 }
 
 export class SshBridgeResponder {
     readonly #active = new Set<Duplex>();
     readonly #options: CreateSshBridgeResponderOptions;
+    readonly #handshakeTimeoutMs: number;
     readonly #peers = new Map<string, P2pTrustedPeer>();
 
     constructor(options: CreateSshBridgeResponderOptions) {
         this.#options = options;
+        this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
         for (const peer of options.peers) this.#peers.set(peer.instanceId, peer);
     }
 
@@ -75,29 +90,33 @@ export class SshBridgeResponder {
     async acceptFrames(duplex: P2pFrameDuplex, signal?: AbortSignal): Promise<void> {
         const hostKeyHash = await withDeadline(
             readSshBridgePreface(duplex.recv),
-            HANDSHAKE_TIMEOUT_MS,
+            this.#handshakeTimeoutMs,
             "The SSH P2P bridge did not send its channel binding in time.",
         );
         const channelBinding = sshChannelBinding(hostKeyHash);
-        const identity = await withDeadline(
-            runP2pResponderHello(duplex, {
-                commitPeer: (peerIdentity) =>
-                    this.#options.commitPeer?.(peerIdentity, peerIdentity.publicKey) ??
-                    Promise.resolve(),
-                identity: this.#options.identity,
-                localChannelBinding: channelBinding,
-                remoteChannelBinding: channelBinding,
-                transport: "ssh",
-                validatePeer: (peerIdentity) =>
-                    this.#validatePeer(peerIdentity, peerIdentity.publicKey),
-            }),
-            HANDSHAKE_TIMEOUT_MS,
-            "The SSH P2P peer did not finish its signed hello in time.",
+        const identity = await this.#withPeerOperation("handshake", (ctx) =>
+            runP2pResponderHello(
+                withFrameProgressDeadline(
+                    duplex,
+                    this.#handshakeTimeoutMs,
+                    () => new Error("The SSH P2P peer did not finish its signed hello in time."),
+                ),
+                {
+                    commitPeer: (peerIdentity) =>
+                        this.#commitPeer(ctx, peerIdentity, peerIdentity.publicKey),
+                    identity: this.#options.identity,
+                    localChannelBinding: channelBinding,
+                    remoteChannelBinding: channelBinding,
+                    transport: "ssh",
+                    validatePeer: (peerIdentity) =>
+                        this.#validatePeer(ctx, peerIdentity, peerIdentity.publicKey),
+                },
+            ),
         );
         const operation = (
             await withDeadline(
                 readBytes(duplex.recv, 1),
-                HANDSHAKE_TIMEOUT_MS,
+                this.#handshakeTimeoutMs,
                 "The SSH P2P peer did not choose an operation in time.",
             )
         )[0];
@@ -201,12 +220,41 @@ export class SshBridgeResponder {
         }
     }
 
-    async #validatePeer(identity: P2pPeerIdentity, binding: string): Promise<void> {
+    async #validatePeer(
+        ctx: Context | undefined,
+        identity: P2pPeerIdentity,
+        binding: string,
+    ): Promise<void> {
         const expected = this.#peers.get(identity.instanceId);
         if (expected === undefined || expected.publicKey !== identity.publicKey) {
             throw new Error("The SSH P2P peer identity does not match its allowlist.");
         }
-        await this.#options.validatePeer?.(identity, binding);
+        if (this.#options.validatePeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("SSH bridge peer validation requires an operation context.");
+            }
+            await this.#options.validatePeer(ctx, identity, binding);
+        }
+    }
+
+    async #commitPeer(
+        ctx: Context | undefined,
+        identity: P2pPeerIdentity,
+        binding: string,
+    ): Promise<void> {
+        if (this.#options.commitPeer === undefined) return;
+        if (ctx === undefined) {
+            throw new Error("SSH bridge peer commit requires an operation context.");
+        }
+        await this.#options.commitPeer(ctx, identity, binding);
+    }
+
+    async #withPeerOperation<Result>(
+        operation: "handshake",
+        work: (ctx: Context | undefined) => Result | PromiseLike<Result>,
+    ): Promise<Awaited<Result>> {
+        if (this.#options.runPeerOperation === undefined) return await work(undefined);
+        return await this.#options.runPeerOperation(operation, work);
     }
 }
 

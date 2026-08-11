@@ -1,6 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { SessionTool } from "@slopus/rig-providers";
+import type { SessionTool } from "@slopus/happy-providers";
 
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";

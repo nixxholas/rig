@@ -8,7 +8,7 @@ import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntim
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
 import { NativeProcessManager } from "../../processes/index.js";
 import { createEventIdFactory, type ModelCatalog } from "../../protocol/index.js";
-import type { ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/happy-providers";
 import {
     defineModel,
     defineProvider,

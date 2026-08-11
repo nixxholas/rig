@@ -1,8 +1,8 @@
 import {
-    AnthropicBedrockProvider as NativeAnthropicBedrockProvider,
+    AnthropicProvider,
     BedrockBearerTokenCredential,
     CodexProvider,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import { createExecutorModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
 import { BEDROCK_MODEL_ROUTES } from "./bedrock-model-routes.js";
@@ -125,7 +125,7 @@ export function bedrockExecution(options: BedrockProviderOptions = {}): Executor
                 throw new Error("Amazon Bedrock authentication is unavailable.");
             }
             return route.provider === "anthropic"
-                ? new NativeAnthropicBedrockProvider({
+                ? new AnthropicProvider({
                       credential,
                       endpoint,
                       model: route.model.id,

@@ -28,7 +28,7 @@ import {
     type SessionWorkspaceTransferState,
 } from "../../session/sessionWorkspaceTransferState.js";
 import type { TX } from "../Transaction.js";
-import { inTx } from "../inTx.js";
+import { inReadTx } from "../inReadTx.js";
 import { parsePersistedUsage } from "./impl/persistedUsage.js";
 import {
     readNumber,
@@ -56,7 +56,7 @@ export async function querySessionRestore(
     ctx: Context,
     sessionId: string,
 ): Promise<SessionRestore | undefined> {
-    return await inTx(ctx, "rig.sql.session.query_session_restore", async (ctx) => {
+    return await inReadTx(ctx, "rig.sql.session.query_session_restore", async (ctx) => {
         const tx = ctx.tx;
         const row = await tx.get<Record<string, unknown>>(sql`
         SELECT * FROM sessions WHERE id = ${sessionId}

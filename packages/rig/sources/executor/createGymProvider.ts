@@ -1,4 +1,4 @@
-import type { ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/happy-providers";
 import { createInferenceStream } from "@slopus/rig-execution";
 import type { GymInferenceRequest, GymInferenceResponse } from "./gym-types.js";
 import {

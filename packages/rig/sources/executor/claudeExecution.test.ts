@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ClaudeProvider } from "@slopus/rig-providers";
+import { AnthropicProvider } from "@slopus/happy-providers";
 
 import { claudeExecution } from "./claudeExecution.js";
 
@@ -24,7 +24,7 @@ describe("claudeExecution", () => {
         if (profile === undefined) expect.fail("Expected a Claude model profile.");
         const provider = await definition.native(profile);
 
-        expect(provider).toBeInstanceOf(ClaudeProvider);
-        expect((provider as ClaudeProvider).credential).toMatchObject(expected);
+        expect(provider).toBeInstanceOf(AnthropicProvider);
+        expect((provider as AnthropicProvider).credential).toMatchObject(expected);
     });
 });

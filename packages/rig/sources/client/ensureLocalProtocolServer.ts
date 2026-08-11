@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { open } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import { chmod, open } from "node:fs/promises";
 
 import {
     getEnvironmentLocalServerPaths,
@@ -26,6 +26,8 @@ import { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
 
 const DAEMON_STARTUP_LOCK_TIMEOUT_MS = 60_000;
 const DATABASE_OWNERSHIP_HANDOFF_TIMEOUT_MS = 30_000;
+const DAEMON_CHILD_STARTUP_TIMEOUT_MS = 60_000;
+const DAEMON_CHILD_TERMINATION_TIMEOUT_MS = 2_000;
 
 export interface LocalProtocolServerConnection {
     client: ProtocolHttpClient;
@@ -100,7 +102,7 @@ export async function ensureLocalProtocolServer(
             const connection = await startLocalProtocolServer(paths, options);
             return connection;
         } finally {
-            startupLock.release();
+            await startupLock.release();
         }
     }
 }
@@ -167,14 +169,15 @@ async function waitForDatabaseOwnershipHandoff(paths: LocalServerPaths): Promise
         }
         throw error;
     }
-    ownership.release();
+    await ownership.release();
 }
 
 async function startLocalProtocolServer(
     paths: LocalServerPaths,
     options: EnsureLocalProtocolServerOptions,
 ): Promise<LocalProtocolServerConnection> {
-    const token = await writeLocalServerToken(paths.tokenPath);
+    const token = await readOrCreateLocalServerToken(paths.tokenPath);
+    let child: ChildProcess | undefined;
     if (process.env.RIG_GYM_IN_PROCESS_DAEMON === "1") {
         void runLocalProtocolServer({
             happyIntegration: "enabled",
@@ -187,12 +190,32 @@ async function startLocalProtocolServer(
             );
         });
     } else {
-        await spawnLocalServer(paths);
+        child = await spawnLocalServer(paths);
     }
     const client = new ProtocolHttpClient({ socketPath: paths.socketPath, token });
-    await waitForReady(client);
+    const readiness = waitForReady(client);
+    if (child === undefined) {
+        await readiness;
+    } else {
+        await superviseSpawnedLocalServer(child, readiness, DAEMON_CHILD_STARTUP_TIMEOUT_MS);
+    }
     await reconcileDaemonSettings(client);
     return { client, paths, token };
+}
+
+/**
+ * Keeps already-connected local clients authorized when the daemon process is replaced.
+ *
+ * The token file lives in the daemon's private state directory and is already restricted to the
+ * current user. Rotating it on every daemon start strands clients whose event streams reconnect
+ * after a reload: their immutable client connection still carries the previous token and the new
+ * daemon rejects it with HTTP 401.
+ */
+export async function readOrCreateLocalServerToken(tokenPath: string): Promise<string> {
+    const existing = await readTokenIfPresent(tokenPath);
+    if (existing === undefined || existing.length === 0) return writeLocalServerToken(tokenPath);
+    await chmod(tokenPath, 0o600);
+    return existing;
 }
 
 async function readHealth(
@@ -205,7 +228,7 @@ async function readHealth(
     }
 }
 
-async function spawnLocalServer(paths: LocalServerPaths): Promise<void> {
+async function spawnLocalServer(paths: LocalServerPaths): Promise<ChildProcess> {
     const entrypoint = process.argv[1];
     if (entrypoint === undefined) {
         throw new Error("Cannot locate the current CLI entrypoint.");
@@ -237,10 +260,78 @@ async function spawnLocalServer(paths: LocalServerPaths): Promise<void> {
                 stdio: ["ignore", log.fd, log.fd],
             },
         );
-        child.unref();
+        return child;
     } finally {
         await log.close();
     }
+}
+
+export interface SpawnedLocalServerProcess {
+    readonly exitCode: number | null;
+    readonly signalCode: NodeJS.Signals | null;
+    kill(signal: NodeJS.Signals): boolean;
+    once(
+        event: "exit",
+        listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+    ): unknown;
+    removeListener(
+        event: "exit",
+        listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+    ): unknown;
+    unref(): void;
+}
+
+/**
+ * Keeps a replacement child owned until it proves that it can serve the socket. A child that
+ * stalls during database ownership or startup is terminated and reaped instead of becoming an
+ * invisible detached daemon that can survive for days.
+ */
+export async function superviseSpawnedLocalServer<Result>(
+    child: SpawnedLocalServerProcess,
+    readiness: Promise<Result>,
+    timeoutMs: number,
+): Promise<Result> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(
+                () => reject(new Error("Timed out while starting the local Rig daemon.")),
+                timeoutMs,
+            );
+            timer.unref();
+        });
+        const result = await Promise.race([readiness, timeout]);
+        child.unref();
+        return result;
+    } catch (error) {
+        await terminateSpawnedLocalServer(child);
+        throw error;
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
+}
+
+async function terminateSpawnedLocalServer(child: SpawnedLocalServerProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve) => {
+        let forceTimer: NodeJS.Timeout | undefined;
+        let reapTimer: NodeJS.Timeout | undefined;
+        const finish = () => {
+            if (forceTimer !== undefined) clearTimeout(forceTimer);
+            if (reapTimer !== undefined) clearTimeout(reapTimer);
+            child.removeListener("exit", onExit);
+            resolve();
+        };
+        const onExit = () => finish();
+        child.once("exit", onExit);
+        forceTimer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }, DAEMON_CHILD_TERMINATION_TIMEOUT_MS / 2);
+        reapTimer = setTimeout(finish, DAEMON_CHILD_TERMINATION_TIMEOUT_MS);
+        forceTimer.unref();
+        reapTimer.unref();
+        child.kill("SIGTERM");
+    });
 }
 
 export async function waitForReady(client: ProtocolHttpClient): Promise<ReadyHealthResponse> {

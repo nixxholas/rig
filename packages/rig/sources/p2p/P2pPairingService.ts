@@ -185,9 +185,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
                 token,
             };
             this.#operations.set(id, operation);
-            this.#track(
-                withWorkerContext("p2p-pairing-inviter", (ctx) => this.#runInviter(ctx, operation)),
-            );
+            this.#track(this.#runInviter(operation));
             return { id, invitation: encodeInvitation(payload) };
         } catch (error) {
             await closePairingEndpoint(endpoint);
@@ -223,11 +221,7 @@ export class P2pPairingService implements P2pPairingServiceContract {
             token: payload.token,
         };
         this.#operations.set(id, operation);
-        this.#track(
-            withWorkerContext("p2p-pairing-joiner", (ctx) =>
-                this.#runJoiner(ctx, operation, payload, bindings),
-            ),
-        );
+        this.#track(this.#runJoiner(operation, payload, bindings));
         return { id };
     }
 
@@ -249,37 +243,46 @@ export class P2pPairingService implements P2pPairingServiceContract {
         return operation.state;
     }
 
-    async #runInviter(ctx: Context, operation: PairingOperation): Promise<void> {
+    async #runInviter(operation: PairingOperation): Promise<void> {
         let connection: Connection | undefined;
         try {
             const accepted = await this.#acceptInviter(operation);
             connection = accepted.connection;
-            let context: P2pHelloContext | undefined;
-            const remoteIdentity = await withPairingDeadline(
-                operation,
-                runP2pResponderHello(accepted.helloDuplex, {
-                    identity: this.#options.identity,
-                    localChannelBinding: operation.endpoint.id().toString(),
-                    onContext: (value) => {
-                        context = value;
-                    },
-                    remoteChannelBinding: connection.remoteId().toString(),
-                    transport: "iroh",
-                }),
-                "The joining Rig did not finish its signed P2P hello in time.",
-            );
-            if (context === undefined) throw new Error("The signed P2P hello did not complete.");
-            const profileStream = await withPairingDeadline(
-                operation,
-                connection.acceptBi(),
-                "The joining Rig did not start emoji verification in time.",
+            const activeConnection = accepted.connection;
+            const handshake = await withWorkerContext(
+                "p2p-pairing-handshake",
+                async () => {
+                    let context: P2pHelloContext | undefined;
+                    const remoteIdentity = await withPairingDeadline(
+                        operation,
+                        runP2pResponderHello(accepted.helloDuplex, {
+                            identity: this.#options.identity,
+                            localChannelBinding: operation.endpoint.id().toString(),
+                            onContext: (value) => {
+                                context = value;
+                            },
+                            remoteChannelBinding: activeConnection.remoteId().toString(),
+                            transport: "iroh",
+                        }),
+                        "The joining Rig did not finish its signed P2P hello in time.",
+                    );
+                    if (context === undefined) {
+                        throw new Error("The signed P2P hello did not complete.");
+                    }
+                    const profileStream = await withPairingDeadline(
+                        operation,
+                        activeConnection.acceptBi(),
+                        "The joining Rig did not start emoji verification in time.",
+                    );
+                    return { context, profileStream, remoteIdentity };
+                },
+                { pairingId: operation.state.id, role: operation.state.role },
             );
             await this.#verifyAndCommit(
-                ctx,
                 operation,
-                createIrohFrameDuplex(profileStream.recv, profileStream.send),
-                remoteIdentity,
-                context,
+                createIrohFrameDuplex(handshake.profileStream.recv, handshake.profileStream.send),
+                handshake.remoteIdentity,
+                handshake.context,
                 "responder",
             );
         } catch (error) {
@@ -344,66 +347,74 @@ export class P2pPairingService implements P2pPairingServiceContract {
     }
 
     async #runJoiner(
-        ctx: Context,
         operation: PairingOperation,
         invitation: P2pInvitationPayload,
         bindings: Awaited<ReturnType<typeof loadIrohBindings>>,
     ): Promise<void> {
         let connection: Connection | undefined;
         try {
-            const ticket = bindings.EndpointTicket.fromString(invitation.address);
-            connection = await withPairingDeadline(
-                operation,
-                operation.endpoint.connect(ticket.endpointAddr(), PAIRING_ALPN),
-                "Rig could not connect to the temporary P2P invitation endpoint.",
-            );
-            const helloStream = await withPairingDeadline(
-                operation,
-                connection.openBi(),
-                "Rig could not open the temporary P2P invitation stream.",
-            );
-            const helloDuplex = createIrohFrameDuplex(helloStream.recv, helloStream.send);
-            await withPairingDeadline(
-                operation,
-                writeJson(helloDuplex.send, { token: invitation.token, version: 1 }),
-                "Rig could not send the P2P invitation token in time.",
-            );
-            let context: P2pHelloContext | undefined;
-            const remoteIdentity = await withPairingDeadline(
-                operation,
-                runP2pInitiatorHello(helloDuplex, {
-                    identity: this.#options.identity,
-                    localChannelBinding: operation.endpoint.id().toString(),
-                    onContext: (value) => {
-                        context = value;
-                    },
-                    remoteChannelBinding: connection.remoteId().toString(),
-                    transport: "iroh",
-                    validatePeer: async (identity) => {
-                        if (
-                            identity.instanceId !== invitation.instanceId ||
-                            identity.publicKey !== invitation.publicKey
-                        ) {
-                            throw new Error(
-                                "The P2P invitation was answered by a different Rig identity.",
-                            );
-                        }
-                    },
-                }),
-                "The inviting Rig did not finish its signed P2P hello in time.",
-            );
-            if (context === undefined) throw new Error("The signed P2P hello did not complete.");
-            const profileStream = await withPairingDeadline(
-                operation,
-                connection.openBi(),
-                "Rig could not open the P2P verification stream.",
+            const handshake = await withWorkerContext(
+                "p2p-pairing-handshake",
+                async () => {
+                    const ticket = bindings.EndpointTicket.fromString(invitation.address);
+                    const activeConnection = await withPairingDeadline(
+                        operation,
+                        operation.endpoint.connect(ticket.endpointAddr(), PAIRING_ALPN),
+                        "Rig could not connect to the temporary P2P invitation endpoint.",
+                    );
+                    connection = activeConnection;
+                    const helloStream = await withPairingDeadline(
+                        operation,
+                        activeConnection.openBi(),
+                        "Rig could not open the temporary P2P invitation stream.",
+                    );
+                    const helloDuplex = createIrohFrameDuplex(helloStream.recv, helloStream.send);
+                    await withPairingDeadline(
+                        operation,
+                        writeJson(helloDuplex.send, { token: invitation.token, version: 1 }),
+                        "Rig could not send the P2P invitation token in time.",
+                    );
+                    let context: P2pHelloContext | undefined;
+                    const remoteIdentity = await withPairingDeadline(
+                        operation,
+                        runP2pInitiatorHello(helloDuplex, {
+                            identity: this.#options.identity,
+                            localChannelBinding: operation.endpoint.id().toString(),
+                            onContext: (value) => {
+                                context = value;
+                            },
+                            remoteChannelBinding: activeConnection.remoteId().toString(),
+                            transport: "iroh",
+                            validatePeer: async (identity) => {
+                                if (
+                                    identity.instanceId !== invitation.instanceId ||
+                                    identity.publicKey !== invitation.publicKey
+                                ) {
+                                    throw new Error(
+                                        "The P2P invitation was answered by a different Rig identity.",
+                                    );
+                                }
+                            },
+                        }),
+                        "The inviting Rig did not finish its signed P2P hello in time.",
+                    );
+                    if (context === undefined) {
+                        throw new Error("The signed P2P hello did not complete.");
+                    }
+                    const profileStream = await withPairingDeadline(
+                        operation,
+                        activeConnection.openBi(),
+                        "Rig could not open the P2P verification stream.",
+                    );
+                    return { context, profileStream, remoteIdentity };
+                },
+                { pairingId: operation.state.id, role: operation.state.role },
             );
             await this.#verifyAndCommit(
-                ctx,
                 operation,
-                createIrohFrameDuplex(profileStream.recv, profileStream.send),
-                remoteIdentity,
-                context,
+                createIrohFrameDuplex(handshake.profileStream.recv, handshake.profileStream.send),
+                handshake.remoteIdentity,
+                handshake.context,
                 "initiator",
             );
         } catch (error) {
@@ -415,13 +426,65 @@ export class P2pPairingService implements P2pPairingServiceContract {
     }
 
     async #verifyAndCommit(
-        ctx: Context,
         operation: PairingOperation,
         duplex: ReturnType<typeof createIrohFrameDuplex>,
         remoteIdentity: P2pPeerIdentity,
         context: P2pHelloContext,
         role: PairingProfile["role"],
     ): Promise<void> {
+        const verification = await withWorkerContext(
+            "p2p-pairing-validation",
+            (ctx) =>
+                this.#prepareVerification(ctx, operation, duplex, remoteIdentity, context, role),
+            { pairingId: operation.state.id, role: operation.state.role },
+        );
+        const decision = operation.decision;
+        if (decision === undefined) throw new Error("P2P verification was not initialized.");
+        const accept = await withDeadline(
+            decision.promise,
+            operation.state.expiresAt - Date.now(),
+            "The P2P verification expired before it was confirmed.",
+        );
+        await withPairingDeadline(
+            operation,
+            writeJson(duplex.send, { accept, version: 1 } satisfies PairingDecision),
+            "The P2P verification answer could not be sent in time.",
+        );
+        const remoteDecision = await withOperationExpiry(
+            operation,
+            readJson(duplex.recv, decisionSchema),
+            "The peer did not answer P2P verification in time.",
+        );
+        if (!accept || !remoteDecision.accept) {
+            await finishWrites(duplex.send);
+            operation.state = {
+                expiresAt: operation.state.expiresAt,
+                id: operation.state.id,
+                phase: "rejected",
+                role: operation.state.role,
+            };
+            return;
+        }
+        await withWorkerContext(
+            "p2p-pairing-commit",
+            (ctx) => this.#commitPairing(ctx, operation, duplex, verification),
+            { pairingId: operation.state.id, role: operation.state.role },
+        );
+    }
+
+    async #prepareVerification(
+        ctx: Context,
+        operation: PairingOperation,
+        duplex: ReturnType<typeof createIrohFrameDuplex>,
+        remoteIdentity: P2pPeerIdentity,
+        context: P2pHelloContext,
+        role: PairingProfile["role"],
+    ): Promise<{
+        pairingId: string;
+        peer: P2pPairingPeer;
+        remoteIdentity: P2pPeerIdentity;
+        remoteProfile: PairingProfile;
+    }> {
         const stableIrohEndpointTicket = await withPairingDeadline(
             operation,
             Promise.resolve(this.#options.stableIrohEndpointTicket()),
@@ -502,31 +565,21 @@ export class P2pPairingService implements P2pPairingServiceContract {
             phase: "verifying",
             role: operation.state.role,
         };
-        const accept = await withDeadline(
-            operation.decision.promise,
-            operation.state.expiresAt - Date.now(),
-            "The P2P verification expired before it was confirmed.",
-        );
-        await withPairingDeadline(
-            operation,
-            writeJson(duplex.send, { accept, version: 1 } satisfies PairingDecision),
-            "The P2P verification answer could not be sent in time.",
-        );
-        const remoteDecision = await withOperationExpiry(
-            operation,
-            readJson(duplex.recv, decisionSchema),
-            "The peer did not answer P2P verification in time.",
-        );
-        if (!accept || !remoteDecision.accept) {
-            await finishWrites(duplex.send);
-            operation.state = {
-                expiresAt: operation.state.expiresAt,
-                id: operation.state.id,
-                phase: "rejected",
-                role: operation.state.role,
-            };
-            return;
-        }
+        return { pairingId, peer, remoteIdentity, remoteProfile };
+    }
+
+    async #commitPairing(
+        ctx: Context,
+        operation: PairingOperation,
+        duplex: ReturnType<typeof createIrohFrameDuplex>,
+        verification: {
+            pairingId: string;
+            peer: P2pPairingPeer;
+            remoteIdentity: P2pPeerIdentity;
+            remoteProfile: PairingProfile;
+        },
+    ): Promise<void> {
+        const { pairingId, peer, remoteIdentity, remoteProfile } = verification;
         const prepared = await this.#options.peerTrustStore.preparePairing(
             ctx,
             pairingId,

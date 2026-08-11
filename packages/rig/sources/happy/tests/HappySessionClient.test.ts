@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Span, Tracer } from "@opentelemetry/api";
 
 import {
     NACL_NONCE_BYTES,
@@ -31,6 +32,105 @@ afterEach(async () => {
 });
 
 describe("HappySessionClient", () => {
+    it("owns a pending attachment download in a finite worker after sync returns", async () => {
+        const { repository } = await createRepository();
+        const sessionKey = new Uint8Array(32).fill(7);
+        const account = nobleBoxKeyPairFromSecretKey(new Uint8Array(32).fill(9));
+        const started: string[] = [];
+        const ended: string[] = [];
+        const caller = createTestRootContext(lifecycleTracer(started, ended));
+        await repository.ensureSession(caller, {
+            credentialFingerprint: "account",
+            encryptionKey: sessionKey,
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        const filePayload = encodeRemote(sessionKey, {
+            content: {
+                data: {
+                    ev: {
+                        mimeType: "image/png",
+                        name: "photo.png",
+                        ref: "sessions/remote-1/attachments/photo.enc",
+                        size: 4,
+                        t: "file",
+                    },
+                    id: "file-1",
+                    role: "user",
+                    time: 1,
+                },
+                type: "session",
+            },
+            role: "session",
+        });
+        const encryptedImage = encryptBlob(
+            new Uint8Array([1, 2, 3, 4]),
+            deriveBlobKey(sessionKey, "dataKey"),
+        );
+        const downloadStarted = deferred<void>();
+        const releaseDownload = deferred<void>();
+        const request = vi.fn<typeof fetch>(async (input, init) => {
+            const url = String(input);
+            if (url.endsWith("/v1/sessions")) {
+                return Response.json({
+                    session: { id: "remote-1", metadataVersion: 0 },
+                });
+            }
+            if (url.endsWith("/attachments/request-download")) {
+                return Response.json({ downloadUrl: "https://happy.test/blob/photo.enc" });
+            }
+            if (url.endsWith("/blob/photo.enc")) {
+                downloadStarted.resolve(undefined);
+                await releaseDownload.promise;
+                return new Response(encryptedImage);
+            }
+            if (url.includes("/v3/sessions/remote-1/messages") && init?.method !== "POST") {
+                return Response.json({
+                    hasMore: false,
+                    messages: [remoteMessage("mobile-file", 1, filePayload)],
+                });
+            }
+            return Response.json({ messages: [] });
+        });
+        const client = new HappySessionClient({
+            configuration: configuration(account.publicKey),
+            fetch: request,
+            repository,
+            session: fakeSession([]).session,
+            socketFactory: () => new FakeSocket(),
+        });
+
+        try {
+            client.start(caller);
+            await downloadStarted.promise;
+            await vi.waitFor(() => expect(ended).toContain("rig.worker.happy-session-sync"));
+
+            expect(started).toContain("rig.worker.happy-attachment-download");
+            expect(ended).not.toContain("rig.worker.happy-attachment-download");
+            const completedSyncs = ended.filter(
+                (name) => name === "rig.worker.happy-session-sync",
+            ).length;
+            client.kick(caller);
+            await vi.waitFor(() =>
+                expect(
+                    ended.filter((name) => name === "rig.worker.happy-session-sync").length,
+                ).toBeGreaterThan(completedSyncs),
+            );
+            expect(
+                request.mock.calls.filter(([input]) =>
+                    String(input).endsWith("/attachments/request-download"),
+                ),
+            ).toHaveLength(1);
+
+            releaseDownload.resolve(undefined);
+            await vi.waitFor(() => expect(ended).toContain("rig.worker.happy-attachment-download"));
+        } finally {
+            releaseDownload.resolve(undefined);
+            await client.close(caller);
+            await repository.close(caller);
+        }
+    });
+
     it("creates a v3 session, flushes encrypted messages, and delivers mobile input once", async () => {
         const { databasePath, repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
@@ -1031,4 +1131,38 @@ async function waitFor(predicate: () => boolean): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error("Timed out waiting for Happy synchronization.");
+}
+
+function lifecycleTracer(started: string[], ended: string[]): Tracer {
+    return {
+        startSpan(name: string) {
+            started.push(name);
+            const span: Span = {
+                addEvent: () => span,
+                addLink: () => span,
+                addLinks: () => span,
+                end: () => ended.push(name),
+                isRecording: () => true,
+                recordException: () => undefined,
+                setAttribute: () => span,
+                setAttributes: () => span,
+                setStatus: () => span,
+                spanContext: () => ({
+                    spanId: "2".repeat(16),
+                    traceFlags: 1,
+                    traceId: "1".repeat(32),
+                }),
+                updateName: () => span,
+            };
+            return span;
+        },
+    } as unknown as Tracer;
+}
+
+function deferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    const promise = new Promise<T>((resolvePromise) => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
 }

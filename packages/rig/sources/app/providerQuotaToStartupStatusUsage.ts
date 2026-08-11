@@ -1,4 +1,4 @@
-import type { ProviderQuota, ProviderQuotaWindow } from "@slopus/rig-providers";
+import type { ProviderQuota, ProviderQuotaWindow } from "@slopus/happy-providers";
 import { formatResetDuration } from "./formatResetDuration.js";
 import type {
     StartupStatusCardUsage,

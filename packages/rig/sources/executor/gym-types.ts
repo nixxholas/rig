@@ -1,4 +1,4 @@
-import type { ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/happy-providers";
 import type {
     AssistantContent,
     Context,

@@ -55,7 +55,7 @@ describe("InMemorySession abort", () => {
 
         await (
             await session.archiveForWorkspace(ctx, "workspace-1")
-        )();
+        )(ctx);
 
         expect(session.state()).toMatchObject({
             archived: true,
@@ -117,7 +117,7 @@ describe("InMemorySession abort", () => {
         await submitted;
         const archive = await session.archiveForWorkspace(ctx, "workspace-1");
         release.resolve();
-        await Promise.all([archive(), settled.promise]);
+        await Promise.all([archive(ctx), settled.promise]);
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         expect(session.snapshot()).toMatchObject({
@@ -1389,6 +1389,71 @@ describe("InMemorySession abort", () => {
             interruption: { reason: "shutdown" },
             status: "error",
         });
+    });
+
+    it("keeps the live partial visible until interruption commits it as history", async () => {
+        const partialStored = deferred<void>();
+        const releaseInference = deferred<void>();
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/interruption-partial-handoff",
+            name: "Interruption partial handoff",
+            thinkingLevels: ["off"],
+        });
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream(_model, _context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
+                const partial = assistantMessage("Visible before interruption.", model.id);
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        yield {
+                            partial: { ...partial, content: [] },
+                            type: "start" as const,
+                        };
+                        yield {
+                            contentIndex: 0,
+                            delta: "Visible before interruption.",
+                            partial,
+                            type: "text_delta" as const,
+                        };
+                        partialStored.resolve();
+                        await releaseInference.promise;
+                        return partial;
+                    },
+                    async result() {
+                        await releaseInference.promise;
+                        return partial;
+                    },
+                };
+            },
+        });
+        const session = createSession(provider, model, "/tmp/rig-interruption-partial-handoff");
+        const submitted = await session.submit(ctx, { text: "Keep the visible prefix." });
+        await partialStored.promise;
+
+        const interrupted = session.markInterrupted(ctx, {
+            interruptedAt: 1,
+            message: "The daemon stopped.",
+            reason: "shutdown",
+            runId: submitted.runId,
+        });
+
+        expect(session.partialMessage()).toMatchObject({
+            message: { blocks: [{ text: "Visible before interruption.", type: "text" }] },
+            runId: submitted.runId,
+        });
+        releaseInference.resolve();
+        await interrupted;
+
+        const transcript = await session.transcriptWindow(ctx);
+        expect(transcript.messages).toContainEqual(
+            expect.objectContaining({
+                blocks: [{ text: "Visible before interruption.", type: "text" }],
+                role: "agent",
+            }),
+        );
     });
 });
 

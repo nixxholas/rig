@@ -1,4 +1,4 @@
-import type { ProviderModelCompatibilityType } from "@slopus/rig-providers";
+import type { ProviderModelCompatibilityType } from "@slopus/happy-providers";
 
 import type { ExecutorModelProfile } from "@/ExecutorModelProfile.js";
 import { builtinModelProfiles } from "@/builtinModelProfiles.js";

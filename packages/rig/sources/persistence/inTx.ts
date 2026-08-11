@@ -25,10 +25,8 @@ export async function inTx<T>(
         }
         const current = currentSessionDatabaseTransaction(owner);
         if (current !== undefined) return await operation(withDatabase(ctx, current.facade));
-        return owner.runInLock(ctx, (ctx, database) =>
-            database.transaction(async (transaction) => operation(withDatabase(ctx, transaction)), {
-                behavior: "immediate",
-            }),
+        return owner.runInTransaction(ctx, (ctx, transaction) =>
+            operation(withDatabase(ctx, transaction)),
         );
     });
 }

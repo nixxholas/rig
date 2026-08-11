@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Duplex, PassThrough } from "node:stream";
 
+import type { Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
 import { createTestRootContext } from "../testing/createTestRootContext.js";
@@ -26,6 +27,126 @@ const ssh: P2pSshPeer = {
 };
 
 describe("SSH bridge responder", () => {
+    it("keeps its handshake context alive while trust validation is gated", async () => {
+        const initiatorIdentity = createP2pInstanceIdentity();
+        const responderIdentity = createP2pInstanceIdentity();
+        let releaseValidation!: () => void;
+        const validationGate = new Promise<void>((resolve) => {
+            releaseValidation = resolve;
+        });
+        let markValidationStarted!: () => void;
+        const validationStarted = new Promise<void>((resolve) => {
+            markValidationStarted = resolve;
+        });
+        let operationEnded = false;
+        let usedEndedContext = false;
+        const responder = new SshBridgeResponder({
+            handshakeTimeoutMs: 5,
+            identity: responderIdentity,
+            peers: [peer(initiatorIdentity)],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (operationCtx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => {
+                try {
+                    return await work(ctx);
+                } finally {
+                    operationEnded = true;
+                }
+            },
+            serveRequest: vi.fn(),
+            validatePeer: async () => {
+                markValidationStarted();
+                await validationGate;
+                usedEndedContext = operationEnded;
+            },
+        });
+        const transport = SshTransport.create({
+            identity: initiatorIdentity,
+            openChannel: () => Promise.resolve(bridgeChannel(responder)),
+            peers: [peer(responderIdentity)],
+        });
+        const ping = transport.ping(responderIdentity.instanceId, new AbortController().signal);
+
+        await validationStarted;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(operationEnded).toBe(false);
+
+        releaseValidation();
+        await ping;
+        expect(operationEnded).toBe(true);
+        expect(usedEndedContext).toBe(false);
+        await transport.close();
+        responder.close();
+    });
+
+    it("uses one operation context per side for validation and commit on each handshake", async () => {
+        const initiatorIdentity = createP2pInstanceIdentity();
+        const responderIdentity = createP2pInstanceIdentity();
+        const initiatorOperations: Context[] = [];
+        const initiatorValidated: Context[] = [];
+        const initiatorCommitted: Context[] = [];
+        const responderOperations: Context[] = [];
+        const responderValidated: Context[] = [];
+        const responderCommitted: Context[] = [];
+        const responder = new SshBridgeResponder({
+            commitPeer: async (ctx) => {
+                responderCommitted.push(ctx);
+            },
+            identity: responderIdentity,
+            peers: [peer(initiatorIdentity)],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (ctx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => {
+                const operationCtx = ctx.named(
+                    `ssh-responder-handshake-${String(responderOperations.length)}`,
+                );
+                responderOperations.push(operationCtx);
+                return await work(operationCtx);
+            },
+            serveRequest: vi.fn(),
+            validatePeer: async (ctx) => {
+                responderValidated.push(ctx);
+            },
+        });
+        const transport = SshTransport.create({
+            commitPeer: async (ctx) => {
+                initiatorCommitted.push(ctx);
+            },
+            identity: initiatorIdentity,
+            openChannel: () => Promise.resolve(bridgeChannel(responder)),
+            peers: [peer(responderIdentity)],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (ctx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => {
+                const operationCtx = ctx.named(
+                    `ssh-initiator-handshake-${String(initiatorOperations.length)}`,
+                );
+                initiatorOperations.push(operationCtx);
+                return await work(operationCtx);
+            },
+            validatePeer: async (ctx) => {
+                initiatorValidated.push(ctx);
+            },
+        });
+        try {
+            await transport.ping(responderIdentity.instanceId, new AbortController().signal);
+            await transport.ping(responderIdentity.instanceId, new AbortController().signal);
+
+            expect(initiatorOperations).toHaveLength(2);
+            expect(initiatorValidated).toEqual(initiatorOperations);
+            expect(initiatorCommitted).toEqual(initiatorOperations);
+            expect(responderOperations).toHaveLength(2);
+            expect(responderValidated).toEqual(responderOperations);
+            expect(responderCommitted).toEqual(responderOperations);
+        } finally {
+            await transport.close();
+            responder.close();
+        }
+    });
+
     it("mutually authenticates allowlisted identities and serves framed HTTP", async () => {
         const initiatorIdentity = createP2pInstanceIdentity();
         const responderIdentity = createP2pInstanceIdentity();
@@ -36,6 +157,10 @@ describe("SSH bridge responder", () => {
             commitPeer: committed,
             identity: responderIdentity,
             peers: [initiatorPeer],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (ctx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => await work(ctx.named("ssh-responder-handshake")),
             serveRequest: async (peerId, request) => ({
                 body: (async function* () {
                     yield Buffer.from(`${peerId}:${request.path}`);
@@ -62,6 +187,7 @@ describe("SSH bridge responder", () => {
         expect(response.status).toBe(200);
         expect(Buffer.concat(chunks).toString()).toBe(`${initiatorIdentity.instanceId}:/health`);
         expect(committed).toHaveBeenCalledWith(
+            expect.anything(),
             expect.objectContaining({ instanceId: initiatorIdentity.instanceId }),
             initiatorIdentity.publicKey,
         );

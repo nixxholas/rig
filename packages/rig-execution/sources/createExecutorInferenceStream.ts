@@ -4,7 +4,7 @@ import {
     extractProviderErrorDiagnostics,
     type SessionReasoningEffort,
     type SessionTool,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 import { createInferenceStream } from "@/createInferenceStream.js";
 import { parseOpenAIToolArguments } from "@/parseOpenAIToolArguments.js";
@@ -457,7 +457,7 @@ function emptyAssistantMessage(model: Model, providerId: string): AssistantMessa
     return {
         role: "assistant",
         content: [],
-        api: "rig-providers",
+        api: "happy-providers",
         provider: providerId,
         model: model.id,
         usage: toUsage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }),

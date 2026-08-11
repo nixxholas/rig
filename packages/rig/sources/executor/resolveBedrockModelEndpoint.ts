@@ -2,7 +2,7 @@ import {
     anthropicBedrockMantleEndpoint,
     bedrockMantleEndpoint,
     bedrockRuntimeEndpoint,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 import type { BedrockModelOverride } from "./bedrock-model-overrides.js";
 import type { BedrockModelRoute, BedrockModelTransport } from "./bedrock-model-routes.js";

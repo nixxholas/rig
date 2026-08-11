@@ -31,7 +31,8 @@ Two consequences shape the whole system:
 
 Rig builds on two Pi foundations: `@earendil-works/pi-tui` for terminal
 rendering, and Pi's design sensibility for a small core. Inference itself is
-implemented in Rig's own `@slopus/rig-providers`.
+implemented by the separately published, Node-only `@slopus/happy-providers`
+library.
 
 ## 2. Process architecture
 
@@ -46,7 +47,7 @@ Rig runs as two processes on the local machine: a **terminal UI** (or a headless
             v
    rig --server    (the daemon: sessions, agents, tools, SQLite)
             |
-            +-- provider inference  (rig-execution -> rig-providers -> vendor APIs)
+            +-- provider inference  (rig-execution -> happy-providers -> vendor APIs)
             +-- sandboxed shell, filesystem, Docker, MCP, background terminals
             +-- sessions.sqlite
 ```
@@ -153,7 +154,7 @@ agent loop               the turn: inference, tool execution, compaction
         |
 rig-execution (Executor) model profiles, system prompt assembly, session lifecycle
         |
-rig-providers            the network: transports, framing, retries, errors, credentials
+happy-providers            the network: transports, framing, retries, errors, credentials
         |
 vendor APIs              Codex, Claude Agent SDK, xAI Responses, Bedrock
 ```
@@ -206,26 +207,30 @@ decides _how_.
 
 ## 5. Providers
 
-`@slopus/rig-providers` is the only place that talks to a vendor.
+`@slopus/happy-providers` is the only place that talks to a vendor.
 
 ### The interface
 
 ```text
 BaseProvider -> .session(id, options) -> BaseSession -> .run(request) -> SessionStream
                                                      -> .compact(options)
-                                                     -> .fork()
                                                      -> .destroy()
 ```
 
+Rig installs this package as a normal npm runtime dependency. The package is kept in the same
+workspace for development, but it is built, versioned, tagged, and published independently rather
+than compiled into the Rig bundle.
+
 Providers are **stateful**: a session is created once and used for many turns, so
 connection reuse, prompt caching, sticky turn state, and native compaction are
-possible. `run` is exclusive; branching is `fork`, which copies internal state
-_including the session ID_ so the branch inherits the warm cache.
+possible. `run` is exclusive, and the caller supplies the complete durable
+transcript on each turn while the session retains provider-native continuation
+state.
 
-Exported provider classes: `CodexProvider`, `ClaudeProvider`, `GrokProvider`,
-`AnthropicBedrockProvider`, and `ResponsesProvider`. Each vendor — Codex, Claude,
-Grok, Bedrock, Gemini — follows the same fixed shape: a provider, a session,
-credentials, native prompts, native tool definitions, and error parsing.
+Exported provider classes: `AnthropicProvider`, `CodexProvider`, `GrokProvider`, and
+`ResponsesProvider`. `AnthropicProvider` selects its Claude Agent SDK or Bedrock Messages
+implementation from the credential. Each provider follows the same fixed shape: a provider, a
+session, credentials, native prompts, native tool definitions, and error parsing.
 
 ### Fidelity
 
@@ -268,7 +273,7 @@ as a disabled entry with no models and a human-readable reason.
 ### Retries and errors
 
 Retry semantics belong to the provider, never the outer loop. Everything
-retryable is retried inside `rig-providers` and surfaced as `retrying` events; an
+retryable is retried inside `happy-providers` and surfaced as `retrying` events; an
 error that reaches the agent loop is terminal by definition and is displayed, not
 replayed. Errors are parsed into a typed `SessionProviderError`
 (`authentication`, `out_of_tokens`, `rate_limit`, `server_overloaded`,
@@ -405,8 +410,8 @@ transaction, advancing `PRAGMA user_version` after each one and stamping
 | Package                       | What it is                                                                                                                                                                                     |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/rig`                | The published `@slopus/rig` CLI: terminal UI, headless `exec`, agent loop, tools, permissions, sandboxing, MCP, persistence, and the local daemon. Entry point `sources/main.ts`.              |
-| `packages/rig-providers`      | `@slopus/rig-providers` — the low-level vendor network layer: transports, sessions, retries, error parsing, credentials, native compaction. Nothing above inference lives here.                |
-| `packages/rig-execution`      | `@slopus/rig-execution` — the stable execution core: the `Executor`, curated model catalog and profiles, system-prompt assembly, and the provider-session lifecycle above `rig-providers`.     |
+| `packages/happy-providers`    | `@slopus/happy-providers` — the separately published, Node-only vendor library: stateful sessions, transports, retries, error parsing, credentials, and native compaction.                     |
+| `packages/rig-execution`      | `@slopus/rig-execution` — the stable execution core: the `Executor`, curated model catalog and profiles, system-prompt assembly, and the provider-session lifecycle above `happy-providers`.   |
 | `packages/rig-connect`        | `@slopus/rig-connect` — the client library any UI embeds to get live session, group, and plugin state from one subscription, with optimistic mutations. Web APIs only; no dependency on `rig`. |
 | `packages/ghostty-wasm`       | `@slopus/ghostty-wasm` — the Ghostty terminal emulator compiled to WebAssembly, usable from Node and the browser.                                                                              |
 | `packages/ghostty-web`        | `@slopus/ghostty-web` — the client/server protocol for remoting a Ghostty-backed terminal: snapshot, VT replay, semantic-grid recovery, flow control, paged scrollback.                        |
@@ -420,14 +425,14 @@ Inside a package, code is organized by domain module (`git`, `fs`, `sandbox`,
 `docker`, `secrets`, `session`, `server`, `persistence`, …). A module's top level
 holds what a reader needs; secondary helpers go in `impl/` with entity-then-
 operation names; tests live in a nearby `tests/` directory rather than beside the
-source; every directory carries a `README.md`. `rig-providers` is the deliberate
+source; every directory carries a `README.md`. `happy-providers` is the deliberate
 exception to one-function-per-file: it keeps larger files so a whole network path
 stays readable in one place.
 
 ## 9. Testing
 
 - Unit and integration tests run with Vitest next to the code they cover.
-- Golden-trace tests in `rig-providers` compare reconstructed requests against
+- Golden-trace tests in `happy-providers` compare reconstructed requests against
   real captured vendor traffic; recorded-response tests replay real HTTP failures
   through the real transport. Both are deterministic and need no credentials.
 - Live tests are named `*.live.test.ts` and gated behind `RIG_LIVE_TEST=1`.

@@ -1,4 +1,4 @@
-import type { ProviderQuota, ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderQuota, ProviderUsage } from "@slopus/happy-providers";
 
 import type { ConfigProvider, ConfigProviders } from "../config/types.js";
 import type { OwnerProviderScope } from "../credentials/buildOwnerProviderScope.js";

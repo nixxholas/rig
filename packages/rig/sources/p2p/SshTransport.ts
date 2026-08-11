@@ -6,6 +6,7 @@ import type { P2pPeerStatus, P2pTransportStatus } from "../protocol/P2pProtocol.
 import { createNodeFrameDuplex } from "./NodeFrameDuplex.js";
 import {
     readBytes,
+    withFrameProgressDeadline,
     writeBytes,
     type P2pFrameDuplex,
     type P2pFrameReader,
@@ -67,15 +68,25 @@ interface SshPeer {
 }
 
 export interface CreateSshTransportOptions {
-    commitPeer?: (identity: P2pPeerIdentity, channelBinding: string) => Promise<void>;
+    commitPeer?: (ctx: Context, identity: P2pPeerIdentity, channelBinding: string) => Promise<void>;
     connectTimeoutMs?: number;
     environment?: NodeJS.ProcessEnv;
+    /** Test seam; production keeps the fifteen-second authenticated transport deadline. */
+    handshakeTimeoutMs?: number;
     identity: P2pInstanceIdentity;
     onStatusChange?: (status: P2pTransportStatus) => void;
     /** Replaced in tests so the transport can run without a live SSH server. */
     openChannel?: (peer: P2pSshPeer, signal: AbortSignal) => Promise<SshBridgeChannel>;
     peers: readonly P2pTrustedPeer[];
-    validatePeer?: (identity: P2pPeerIdentity, channelBinding: string) => Promise<void>;
+    runPeerOperation?: <Result>(
+        operation: "handshake",
+        work: (ctx: Context) => Result | PromiseLike<Result>,
+    ) => Promise<Awaited<Result>>;
+    validatePeer?: (
+        ctx: Context,
+        identity: P2pPeerIdentity,
+        channelBinding: string,
+    ) => Promise<void>;
 }
 
 /**
@@ -94,10 +105,12 @@ export class SshTransport implements P2pTransport {
     readonly #connectTimeoutMs: number;
     readonly #environment: NodeJS.ProcessEnv | undefined;
     readonly #identity: P2pInstanceIdentity;
+    readonly #handshakeTimeoutMs: number;
     readonly #onStatusChange: CreateSshTransportOptions["onStatusChange"];
     readonly #openChannel: NonNullable<CreateSshTransportOptions["openChannel"]>;
     readonly #peerById = new Map<string, SshPeer>();
     readonly #peerStatuses = new Map<string, P2pPeerStatus>();
+    readonly #runPeerOperation: CreateSshTransportOptions["runPeerOperation"];
     readonly #validatePeer: CreateSshTransportOptions["validatePeer"];
     #pendingChannels = 0;
 
@@ -106,7 +119,9 @@ export class SshTransport implements P2pTransport {
         this.#connectTimeoutMs = options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
         this.#environment = options.environment;
         this.#identity = options.identity;
+        this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
         this.#onStatusChange = options.onStatusChange;
+        this.#runPeerOperation = options.runPeerOperation;
         this.#validatePeer = options.validatePeer;
         this.#openChannel =
             options.openChannel ??
@@ -273,7 +288,7 @@ export class SshTransport implements P2pTransport {
             await writeBytes(channel.duplex.send, Uint8Array.of(SSH_OPERATION_PING));
             const answer = await withDeadline(
                 readBytes(channel.duplex.recv, 1),
-                HANDSHAKE_TIMEOUT_MS,
+                this.#handshakeTimeoutMs,
                 "The SSH P2P bridge did not answer its ping in time.",
                 () => channel.close(),
             );
@@ -330,12 +345,7 @@ export class SshTransport implements P2pTransport {
         const abandon = () => this.#releaseChannel(channel);
         linked.signal.addEventListener("abort", abandon, { once: true });
         try {
-            await withDeadline(
-                this.#runHello(peer, channel),
-                HANDSHAKE_TIMEOUT_MS,
-                "The SSH P2P bridge did not finish its signed hello in time.",
-                () => channel.close(),
-            );
+            await this.#withPeerOperation("handshake", (ctx) => this.#runHello(ctx, peer, channel));
             return channel;
         } catch (error) {
             this.#releaseChannel(channel);
@@ -347,18 +357,28 @@ export class SshTransport implements P2pTransport {
         }
     }
 
-    async #runHello(peer: SshPeer, channel: SshBridgeChannel): Promise<void> {
+    async #runHello(
+        ctx: Context | undefined,
+        peer: SshPeer,
+        channel: SshBridgeChannel,
+    ): Promise<void> {
         const channelBinding = sshChannelBinding(channel.hostKeyHash);
-        await writeBytes(channel.duplex.send, encodeSshBridgePreface(channel.hostKeyHash));
-        const identity = await runP2pInitiatorHello(channel.duplex, {
+        const duplex = withFrameProgressDeadline(
+            channel.duplex,
+            this.#handshakeTimeoutMs,
+            () => new Error("The SSH P2P bridge did not finish its signed hello in time."),
+            () => channel.close(),
+        );
+        await writeBytes(duplex.send, encodeSshBridgePreface(channel.hostKeyHash));
+        const identity = await runP2pInitiatorHello(duplex, {
             commitPeer: (peerIdentity) =>
-                this.#commitAuthenticatedPeer(peerIdentity, channelBinding),
+                this.#commitAuthenticatedPeer(ctx, peerIdentity, channelBinding),
             identity: this.#identity,
             localChannelBinding: channelBinding,
             remoteChannelBinding: channelBinding,
             transport: "ssh",
             validatePeer: (peerIdentity) =>
-                this.#validateAuthenticatedPeer(peerIdentity, channelBinding, peer),
+                this.#validateAuthenticatedPeer(ctx, peerIdentity, channelBinding, peer),
         });
         if (identity.instanceId !== peer.instanceId) {
             throw new Error("The SSH bridge belongs to another Rig instance.");
@@ -366,6 +386,7 @@ export class SshTransport implements P2pTransport {
     }
 
     async #validateAuthenticatedPeer(
+        ctx: Context | undefined,
         identity: P2pPeerIdentity,
         channelBinding: string,
         expected: SshPeer,
@@ -376,14 +397,33 @@ export class SshTransport implements P2pTransport {
         ) {
             throw new Error("The SSH P2P peer identity does not match its allowlist.");
         }
-        await this.#validatePeer?.(identity, channelBinding);
+        if (this.#validatePeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("SSH P2P peer validation requires an operation context.");
+            }
+            await this.#validatePeer(ctx, identity, channelBinding);
+        }
     }
 
     async #commitAuthenticatedPeer(
+        ctx: Context | undefined,
         identity: P2pPeerIdentity,
         channelBinding: string,
     ): Promise<void> {
-        await this.#commitPeer?.(identity, channelBinding);
+        if (this.#commitPeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("SSH P2P peer commit requires an operation context.");
+            }
+            await this.#commitPeer(ctx, identity, channelBinding);
+        }
+    }
+
+    async #withPeerOperation<Result>(
+        operation: "handshake",
+        work: (ctx: Context | undefined) => Result | PromiseLike<Result>,
+    ): Promise<Awaited<Result>> {
+        if (this.#runPeerOperation === undefined) return await work(undefined);
+        return await this.#runPeerOperation(operation, work);
     }
 
     #releaseChannel(channel: SshBridgeChannel): void {

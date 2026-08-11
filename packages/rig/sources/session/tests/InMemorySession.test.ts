@@ -20,6 +20,55 @@ import {
 } from "../SessionTransactionContext.js";
 
 describe("InMemorySession", () => {
+    it("keeps current-state event payloads bounded independently of transcript size", async () => {
+        const firstModel = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/bounded-events-first",
+            name: "Bounded events first",
+            thinkingLevels: ["off"],
+        });
+        const secondModel = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/bounded-events-second",
+            name: "Bounded events second",
+            thinkingLevels: ["off"],
+        });
+        const store = await InMemorySessionStore.open(ctx, {
+            modelCatalog: {
+                defaultModelId: firstModel.id,
+                defaultProviderId: "test",
+                models: [firstModel, secondModel],
+                providers: [{ providerId: "test", models: [firstModel, secondModel] }],
+            },
+        });
+        const session = await store.create(ctx, {
+            cwd: "/tmp/rig-bounded-current-state-events",
+        });
+        await session.submitContext(ctx, { text: "large transcript ".repeat(20_000) });
+
+        await session.update(ctx, { appendSystemPrompt: "Keep replies concise." });
+        const updated = session.events.all().findLast((event) => event.type === "session_updated");
+        expect(updated?.type).toBe("session_updated");
+        if (updated?.type !== "session_updated") throw new Error("Missing session update.");
+        expect(updated.data.session.snapshot.messages).toEqual([]);
+        expect(updated.data.session.snapshot.contextMessages).toBeUndefined();
+        expect(JSON.stringify(updated.data).length).toBeLessThan(20_000);
+
+        await session.changeModel(ctx, {
+            modelId: secondModel.id,
+            providerId: "test",
+        });
+        const configured = session.events
+            .all()
+            .findLast((event) => event.type === "session_configuration_changed");
+        expect(configured?.type).toBe("session_configuration_changed");
+        if (configured?.type !== "session_configuration_changed") {
+            throw new Error("Missing session configuration change.");
+        }
+        expect(configured.data).not.toHaveProperty("snapshot");
+        expect(JSON.stringify(configured.data).length).toBeLessThan(1_000);
+    });
+
     it("stores idempotent context without starting or queuing a run", async () => {
         const session = await (
             await InMemorySessionStore.open(ctx)
@@ -687,7 +736,7 @@ describe("InMemorySession", () => {
         expect(latestEvent).toMatchObject({
             data: {
                 modelId: sharedModel.id,
-                snapshot: { providerId: "codex" },
+                providerId: "codex",
             },
             type: "session_configuration_changed",
         });

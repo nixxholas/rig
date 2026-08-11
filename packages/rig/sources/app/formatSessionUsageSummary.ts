@@ -1,5 +1,5 @@
 import type { GetSessionUsageResponse, SessionUsageGroup } from "../protocol/index.js";
-import type { ProviderQuotaWindow } from "@slopus/rig-providers";
+import type { ProviderQuotaWindow } from "@slopus/happy-providers";
 import type { CodingAssistantModelChoice } from "./CodingAssistantAgentBackend.js";
 import { formatCompactTokens } from "./formatCompactTokens.js";
 import { formatResetDuration } from "./formatResetDuration.js";

@@ -8,10 +8,11 @@ on:
             - "v*"
             - "rig-connect-v*"
             - "happy-plugins-v*"
+            - "happy-providers-v*"
     workflow_dispatch:
 
 env:
-    RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || startsWith(github.ref_name, 'happy-plugins-v') && 'happy-plugins' || 'rig' }}
+    RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || startsWith(github.ref_name, 'happy-plugins-v') && 'happy-plugins' || startsWith(github.ref_name, 'happy-providers-v') && 'happy-providers' || 'rig' }}
 
 permissions:
     contents: read
@@ -89,6 +90,7 @@ jobs:
                   case "$RELEASE_PACKAGE" in
                       rig-connect) pnpm --filter @slopus/rig-connect build ;;
                       happy-plugins) pnpm --filter happy-plugins build ;;
+                      happy-providers) pnpm --filter @slopus/happy-providers build ;;
                       *) pnpm run build ;;
                   esac
 
@@ -142,11 +144,15 @@ jobs:
                   CANARY_COMMIT: ${{ github.sha }}
                   CONNECT_CHANGED: ${{ steps.changed.outputs.connect }}
                   PLUGINS_CHANGED: ${{ steps.changed.outputs.plugins }}
+                  PROVIDERS_CHANGED: ${{ steps.changed.outputs.providers }}
               run: |
                   # happy-plugins is versioned before the build so the SDK Rig bundles carries the
                   # same canary version that is published.
                   if [[ "$PLUGINS_CHANGED" == "true" ]]; then
                       RELEASE_PACKAGE=happy-plugins pnpm exec tsx scripts/setCanaryVersion.ts
+                  fi
+                  if [[ "$PROVIDERS_CHANGED" == "true" ]]; then
+                      RELEASE_PACKAGE=happy-providers pnpm exec tsx scripts/setCanaryVersion.ts
                   fi
                   RELEASE_PACKAGE=rig pnpm exec tsx scripts/setCanaryVersion.ts
                   if [[ "$CONNECT_CHANGED" == "true" ]]; then
@@ -156,8 +162,12 @@ jobs:
             - name: Build the packages
               env:
                   CONNECT_CHANGED: ${{ steps.changed.outputs.connect }}
+                  PROVIDERS_CHANGED: ${{ steps.changed.outputs.providers }}
               run: |
                   pnpm run build
+                  if [[ "$PROVIDERS_CHANGED" == "true" ]]; then
+                      pnpm --filter @slopus/happy-providers build
+                  fi
                   if [[ "$CONNECT_CHANGED" == "true" ]]; then
                       pnpm --filter @slopus/rig-connect build
                   fi
@@ -176,10 +186,14 @@ jobs:
               env:
                   CONNECT_CHANGED: ${{ steps.changed.outputs.connect }}
                   PLUGINS_CHANGED: ${{ steps.changed.outputs.plugins }}
+                  PROVIDERS_CHANGED: ${{ steps.changed.outputs.providers }}
                   RELEASE_DIST_TAG: canary
               run: |
                   if [[ "$PLUGINS_CHANGED" == "true" ]]; then
                       RELEASE_PACKAGE=happy-plugins pnpm exec tsx scripts/publishPackage.ts
+                  fi
+                  if [[ "$PROVIDERS_CHANGED" == "true" ]]; then
+                      RELEASE_PACKAGE=happy-providers pnpm exec tsx scripts/publishPackage.ts
                   fi
                   RELEASE_PACKAGE=rig pnpm exec tsx scripts/publishPackage.ts
                   if [[ "$CONNECT_CHANGED" == "true" ]]; then

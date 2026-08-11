@@ -9,6 +9,7 @@ import type {
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { InMemorySession } from "../session/InMemorySession.js";
+import { isLiveOnlySessionEvent } from "../session/isLiveOnlySessionEvent.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
 import {
     HappySessionClient,
@@ -18,11 +19,13 @@ import {
 import { HappySyncOutboxFullError, HappySyncRepository } from "./HappySyncRepository.js";
 import { HappyMessageMapper } from "./mapSessionEventToHappyMessages.js";
 import { handleHappySpawnSession } from "./handleHappySpawnSession.js";
-import type { HappyConnectionConfiguration } from "./types.js";
+import type { HappyConnectionConfiguration, HappySessionProtocolMessage } from "./types.js";
 import type { Context } from "@steve.kite/stdlib";
 import { withWorkerContext } from "../observability/index.js";
 
 const MAX_BACKFILLED_MESSAGES = 10_000;
+const MAX_MAPPED_EVENTS = 4_096;
+const MAX_RECOVERY_EVENTS_PER_PASS = 256;
 const ATTACH_RETRY_DELAY_MS = 5_000;
 
 export interface HappySyncServiceOptions {
@@ -43,10 +46,12 @@ export interface HappySyncServiceOptions {
         session: InMemorySession,
     ) => HappyProjectContext | Promise<HappyProjectContext>;
     modelCatalog?: ModelCatalog;
+    maxPendingMessagesPerSession?: number;
     socketFactory?: HappySessionClientOptions["socketFactory"];
 }
 
 export class HappySyncService {
+    readonly #attaches = new Map<string, Promise<void>>();
     readonly #attachRetryAfter = new Map<string, number>();
     readonly #backfillTimers = new Map<string, NodeJS.Timeout>();
     readonly #clients = new Map<string, HappySessionClient>();
@@ -115,7 +120,12 @@ export class HappySyncService {
     }
 
     static async open(ctx: Context, options: HappySyncServiceOptions): Promise<HappySyncService> {
-        const repository = await HappySyncRepository.open(ctx, options.databasePath);
+        const repository = await HappySyncRepository.open(
+            ctx,
+            options.databasePath,
+            Date.now,
+            options.maxPendingMessagesPerSession,
+        );
         try {
             return new HappySyncService(options, repository);
         } catch (error) {
@@ -131,7 +141,35 @@ export class HappySyncService {
             this.#scheduleReattach(session, closure);
             return;
         }
-        await this.#attachSession(ctx, session, false);
+        await this.#attachOnce(ctx, session, false);
+    }
+
+    /** Lets the access hot path avoid creating a worker for an already synchronized session. */
+    shouldAttachOnAccess(session: InMemorySession): boolean {
+        if (this.#closed || this.#clients.has(session.id) || this.#attaches.has(session.id)) {
+            return false;
+        }
+        if (session.agentMetadata().type !== "primary" || session.isArchived()) return false;
+        if (this.#pendingReattachments.has(session.id)) return false;
+        return (this.#attachRetryAfter.get(session.id) ?? 0) <= Date.now();
+    }
+
+    async #attachOnce(
+        ctx: Context,
+        session: InMemorySession,
+        includeArchived: boolean,
+    ): Promise<void> {
+        const existing = this.#attaches.get(session.id);
+        if (existing !== undefined) return await existing;
+        const attachment = this.#attachSession(ctx, session, includeArchived);
+        this.#attaches.set(session.id, attachment);
+        try {
+            await attachment;
+        } finally {
+            if (this.#attaches.get(session.id) === attachment) {
+                this.#attaches.delete(session.id);
+            }
+        }
     }
 
     async #attachSession(
@@ -151,12 +189,13 @@ export class HappySyncService {
             if ((this.#attachRetryAfter.get(session.id) ?? 0) > Date.now()) return;
             try {
                 const encryption = this.#configuration.credentials.encryption;
-                await this.#repository.ensureSession(ctx, {
+                const state = await this.#repository.ensureSession(ctx, {
                     credentialFingerprint: this.#credentialFingerprint,
                     ...(encryption.type === "legacy" ? { encryptionKey: encryption.secret } : {}),
                     encryptionVariant: encryption.type,
                     sessionId: session.id,
                 });
+                if (this.#closed) return;
                 client = new HappySessionClient({
                     configuration: this.#configuration,
                     ...(this.#fetch === undefined ? {} : { fetch: this.#fetch }),
@@ -177,11 +216,29 @@ export class HappySyncService {
                 });
                 this.#clients.set(session.id, client);
                 if (!includeArchived) {
-                    const backfill = backfillMessages(session);
+                    const backfill = mapSessionEvents(
+                        session,
+                        state.historyBackfilled ? state.projectedEventId : undefined,
+                    );
                     this.#messageMappers.set(session.id, backfill.mapper);
-                    await client.enqueue(ctx, backfill.messages);
+                    if (!state.historyBackfilled) {
+                        await this.#repository.enqueueInitialBackfill(
+                            ctx,
+                            session.id,
+                            backfill.messages,
+                            latestDurableEventId(session),
+                        );
+                    } else if (backfill.cursorFound) {
+                        await this.#enqueueRecovered(ctx, session, client, backfill.projections);
+                    } else if (state.projectedEventId !== latestDurableEventId(session)) {
+                        const reason = `Happy projection cursor '${state.projectedEventId ?? "none"}' is outside the bounded session event window.`;
+                        await this.#repository.stallProjectionGap(ctx, session.id, reason);
+                        console.error(
+                            `Happy sync cannot recover session '${session.id}': ${reason}`,
+                        );
+                    }
                 }
-                client.start(ctx);
+                if (!this.#closed) client.start(ctx);
                 this.#attachRetryAfter.delete(session.id);
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
@@ -203,7 +260,9 @@ export class HappySyncService {
         for (const timer of this.#backfillTimers.values()) clearTimeout(timer);
         this.#backfillTimers.clear();
         this.#attachRetryAfter.clear();
-        const results = await Promise.allSettled([
+        const attachmentResults = await Promise.allSettled(this.#attaches.values());
+        this.#attaches.clear();
+        const clientResults = await Promise.allSettled([
             ...[...this.#clients.values()].map((client) => client.close(ctx)),
             ...this.#detachedClientClosures.values(),
         ]);
@@ -212,6 +271,7 @@ export class HappySyncService {
         this.#messageMappers.clear();
         this.#pendingReattachments.clear();
         await this.#repository.close(ctx);
+        const results = [...attachmentResults, ...clientResults];
         const failure =
             results.find(
                 (result): result is PromiseRejectedResult =>
@@ -229,12 +289,13 @@ export class HappySyncService {
         if (this.#closed) return;
         if (session === undefined) return;
         if (session.agentMetadata().type !== "primary") return;
+        if (isLiveOnlySessionEvent(event)) return;
         if (session.isArchived()) {
             if (
                 !this.#detachedClientClosures.has(session.id) &&
                 (await this.#repository.getSession(ctx, session.id)) !== undefined
             ) {
-                await this.#attachSession(ctx, session, true);
+                await this.#attachOnce(ctx, session, true);
             }
             this.#detach(session.id);
             return;
@@ -251,12 +312,26 @@ export class HappySyncService {
             }
             const mapper = this.#messageMappers.get(session.id) ?? new HappyMessageMapper();
             this.#messageMappers.set(session.id, mapper);
-            await this.#clients.get(session.id)?.enqueue(ctx, mapper.map(event));
+            const client = this.#clients.get(session.id);
+            if (client === undefined) return;
+            const result = await this.#repository.enqueueProjection(
+                ctx,
+                session.id,
+                event.id,
+                mapper.map(event),
+            );
+            if (result.status === "stalled") {
+                throw new HappySyncOutboxFullError(
+                    result.reason,
+                    result.cause !== "event_too_large",
+                );
+            }
+            client.kick(ctx);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             const client = this.#clients.get(session.id);
             if (error instanceof HappySyncOutboxFullError) {
-                this.#scheduleBackfill(session);
+                if (error.recoverable) this.#scheduleBackfill(session);
             } else if (client !== undefined && this.#clients.get(session.id) === client) {
                 this.#clients.delete(session.id);
                 this.#messageMappers.delete(session.id);
@@ -343,24 +418,86 @@ export class HappySyncService {
             return;
         }
         try {
-            const backfill = backfillMessages(session);
+            const state = await this.#repository.getSession(ctx, session.id);
+            if (state === undefined) return;
+            const backfill = mapSessionEvents(session, state.projectedEventId);
+            if (!backfill.cursorFound && state.projectedEventId !== latestDurableEventId(session)) {
+                const reason = "Happy projection recovery fell outside the bounded event window.";
+                await this.#repository.stallProjectionGap(ctx, session.id, reason);
+                console.error(`Happy sync cannot recover session '${session.id}': ${reason}`);
+                return;
+            }
             this.#messageMappers.set(session.id, backfill.mapper);
-            await client.enqueue(ctx, backfill.messages);
+            await this.#enqueueRecovered(ctx, session, client, backfill.projections);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
-            this.#scheduleBackfill(session);
+            if (!(error instanceof HappySyncOutboxFullError) || error.recoverable) {
+                this.#scheduleBackfill(session);
+            }
             console.error(`Happy sync could not recover session '${session.id}': ${String(error)}`);
         }
     }
+
+    async #enqueueRecovered(
+        ctx: Context,
+        session: InMemorySession,
+        client: HappySessionClient,
+        projections: readonly HappyEventProjection[],
+    ): Promise<void> {
+        const bounded = projections.slice(0, MAX_RECOVERY_EVENTS_PER_PASS);
+        for (const projection of bounded) {
+            const result = await this.#repository.enqueueProjection(
+                ctx,
+                session.id,
+                projection.event.id,
+                projection.messages,
+            );
+            if (result.status === "stalled") {
+                throw new HappySyncOutboxFullError(
+                    result.reason,
+                    result.cause !== "event_too_large",
+                );
+            }
+        }
+        client.kick(ctx);
+        if (projections.length > bounded.length) this.#scheduleBackfill(session);
+    }
 }
 
-function backfillMessages(session: InMemorySession): {
+interface HappyEventProjection {
+    event: SessionEvent;
+    messages: ReturnType<HappyMessageMapper["map"]>;
+}
+
+function latestDurableEventId(session: InMemorySession): string | undefined {
+    return session.events.all().at(-1)?.id;
+}
+
+function mapSessionEvents(
+    session: InMemorySession,
+    afterEventId?: string,
+): {
+    cursorFound: boolean;
     mapper: HappyMessageMapper;
     messages: ReturnType<HappyMessageMapper["map"]>;
+    projections: readonly HappyEventProjection[];
 } {
     const mapper = new HappyMessageMapper();
-    const mapped = (session.events.since(undefined) ?? []).flatMap((event) => mapper.map(event));
-    if (mapped.length <= MAX_BACKFILLED_MESSAGES) return { mapper, messages: mapped };
+    const events = (session.events.since(undefined) ?? []).slice(-MAX_MAPPED_EVENTS);
+    let cursorFound = afterEventId === undefined;
+    const projections: HappyEventProjection[] = [];
+    const mapped: HappySessionProtocolMessage[] = [];
+    for (const event of events) {
+        const messages = mapper.map(event);
+        if (cursorFound) {
+            projections.push({ event, messages });
+            mapped.push(...messages);
+        }
+        if (event.id === afterEventId) cursorFound = true;
+    }
+    if (mapped.length <= MAX_BACKFILLED_MESSAGES) {
+        return { cursorFound, mapper, messages: mapped, projections };
+    }
     const cutoff = mapped.length - MAX_BACKFILLED_MESSAGES;
     let start = cutoff;
     for (let index = cutoff; index >= 0; index -= 1) {
@@ -368,7 +505,12 @@ function backfillMessages(session: InMemorySession): {
         start = index;
         break;
     }
-    return { mapper, messages: mapped.slice(start) };
+    return {
+        cursorFound,
+        mapper,
+        messages: mapped.slice(start),
+        projections,
+    };
 }
 
 function fingerprint(configuration: HappyConnectionConfiguration): string {

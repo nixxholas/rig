@@ -329,6 +329,130 @@ describe("CodingAssistantApp", () => {
         await app.waitForIdle();
     });
 
+    it("keeps a submitted turn's live timer anchored to the composer message after its delayed echo", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamText("unused");
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const run = deferred<{
+            contextMessages: readonly never[];
+            messages: readonly never[];
+            runId: string;
+            stopReason: "stop";
+        }>();
+        const send = vi.fn(() => run.promise);
+        let now = 100_000;
+        const app = new CodingAssistantApp({
+            ctx: createTestRootContext().named("app"),
+            agent: Object.assign(
+                new Agent({
+                    provider,
+                    modelId: model.id,
+                    context: harness.context,
+                    printToConsole: false,
+                }),
+                { send },
+            ),
+            cwd: harness.context.fs.cwd,
+            now: () => now,
+            processManager: new NativeProcessManager(),
+            sessionBacked: true,
+            tui: fakeTui(),
+        });
+        app.applySessionEvent({
+            createdAt: 10_000,
+            data: {
+                displayText: "An earlier turn.",
+                message: {
+                    blocks: [{ text: "An earlier turn.", type: "text" }],
+                    id: "earlier-user-message",
+                    role: "user",
+                },
+                runId: "earlier-run",
+            },
+            id: "earlier-message-event",
+            sessionId: "session-1",
+            type: "message_submitted",
+        });
+
+        submit(app, "Start a fresh turn.");
+        await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+
+        now = 105_000;
+        app.applySessionEvent({
+            createdAt: now,
+            data: {
+                displayText: "Start a fresh turn.",
+                message: {
+                    blocks: [{ text: "Start a fresh turn.", type: "text" }],
+                    id: "canonical-new-user-message",
+                    role: "user",
+                },
+                runId: "new-run",
+            },
+            id: "new-message-event",
+            sessionId: "session-1",
+            type: "message_submitted",
+        });
+
+        now = 106_000;
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("Working (6s · esc to interrupt)");
+        expect(rendered).not.toContain("Working (1s · esc to interrupt)");
+
+        run.resolve({ contextMessages: [], messages: [], runId: "new-run", stopReason: "stop" });
+        await app.waitForIdle();
+
+        now = 200_000;
+        app.applySessionEvent({
+            createdAt: now,
+            data: {
+                displayText: "Start elsewhere.",
+                message: {
+                    blocks: [{ text: "Start elsewhere.", type: "text" }],
+                    id: "remote-user-message",
+                    role: "user",
+                },
+                runId: "remote-run",
+            },
+            id: "remote-message-event",
+            sessionId: "session-1",
+            type: "message_submitted",
+        });
+        app.applySessionEvent({
+            createdAt: now,
+            data: { runId: "remote-run" },
+            id: "remote-run-started",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+
+        now = 206_000;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("Working (6s · esc to interrupt)");
+        app.applySessionEvent({
+            createdAt: now,
+            data: {
+                agentRunId: "remote-agent-run",
+                modelLocked: true,
+                runId: "remote-run",
+                stopReason: "stop",
+            },
+            id: "remote-run-finished",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+    });
+
     it("warns before starting inspectors when TUI stderr is the terminal", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
@@ -3045,7 +3169,6 @@ describe("CodingAssistantApp", () => {
                 modelId: "gpt-test",
                 providerId: agent.snapshot().providerId,
                 serviceTier: "fast",
-                snapshot: agent.snapshot(),
             },
             id: "event-fast",
             sessionId: "session-1",
@@ -5636,7 +5759,6 @@ describe("CodingAssistantApp", () => {
                 modelId: model.id,
                 providerId: agent.snapshot().providerId,
                 serviceTier: null,
-                snapshot: agent.snapshot(),
             },
             id: "model-changed",
             sessionId: "session-1",

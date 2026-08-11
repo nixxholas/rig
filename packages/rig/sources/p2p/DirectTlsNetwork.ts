@@ -25,7 +25,12 @@ import {
     writeP2pHttpRequest,
     writeP2pHttpResponse,
 } from "./P2pFrameProtocol.js";
-import { readBytes, writeBytes, type P2pFrameDuplex } from "./P2pFrameDuplex.js";
+import {
+    readBytes,
+    withFrameProgressDeadline,
+    writeBytes,
+    type P2pFrameDuplex,
+} from "./P2pFrameDuplex.js";
 import { runP2pInitiatorHello, runP2pResponderHello } from "./P2pHelloProtocol.js";
 import type { P2pHttpRequest, P2pHttpResponse, ServeP2pHttpRequest } from "./P2pHttp.js";
 import { encodeBase64Url, type P2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.js";
@@ -71,17 +76,23 @@ interface DirectPeer {
 export interface CreateDirectTlsNetworkOptions {
     apiExposed?: boolean;
     closeTimeoutMs?: number;
-    commitPeer?: (identity: P2pPeerIdentity, publicKey: string) => Promise<void>;
+    commitPeer?: (ctx: Context, identity: P2pPeerIdentity, publicKey: string) => Promise<void>;
     config: ConfigDirectTransport;
     credentials?: DirectTlsCredentials;
+    /** Test seam; production keeps the five-second authenticated transport deadline. */
+    handshakeTimeoutMs?: number;
     identity: P2pInstanceIdentity;
     maximumConnections?: number;
     onStatusChange?: (status: P2pTransportStatus) => void;
     peers: readonly P2pTrustedPeer[];
+    runPeerOperation?: <Result>(
+        operation: "handshake",
+        work: (ctx: Context) => Result | PromiseLike<Result>,
+    ) => Promise<Awaited<Result>>;
     serveRequest?: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
     startPings?: boolean;
-    validatePeer?: (identity: P2pPeerIdentity, publicKey: string) => Promise<void>;
+    validatePeer?: (ctx: Context, identity: P2pPeerIdentity, publicKey: string) => Promise<void>;
 }
 
 export class DirectTlsNetwork implements P2pTransport {
@@ -93,6 +104,7 @@ export class DirectTlsNetwork implements P2pTransport {
     readonly #config: ConfigDirectTransport;
     readonly #credentials: DirectTlsCredentials;
     readonly #identity: P2pInstanceIdentity;
+    readonly #handshakeTimeoutMs: number;
     readonly #maximumConnections: number;
     readonly #onStatusChange: CreateDirectTlsNetworkOptions["onStatusChange"];
     readonly #outboundSockets = new Set<TLSSocket>();
@@ -100,6 +112,7 @@ export class DirectTlsNetwork implements P2pTransport {
     readonly #peerByPublicKey = new Map<string, DirectPeer>();
     readonly #peerApiAvailable = new Map<string, boolean>();
     readonly #peerStatuses = new Map<string, P2pPeerStatus>();
+    readonly #runPeerOperation: CreateDirectTlsNetworkOptions["runPeerOperation"];
     readonly #serveRequest: ServeP2pHttpRequest | undefined;
     readonly #serveTunnel: ServeP2pTunnel | undefined;
     readonly #startPings: boolean;
@@ -118,9 +131,11 @@ export class DirectTlsNetwork implements P2pTransport {
         this.#closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
         this.#config = options.config;
         this.#credentials = credentials;
+        this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
         this.#identity = options.identity;
         this.#maximumConnections = options.maximumConnections ?? MAXIMUM_CONNECTIONS;
         this.#onStatusChange = options.onStatusChange;
+        this.#runPeerOperation = options.runPeerOperation;
         this.#serveRequest = options.serveRequest;
         this.#serveTunnel = options.serveTunnel;
         this.#startPings = options.startPings ?? true;
@@ -300,7 +315,7 @@ export class DirectTlsNetwork implements P2pTransport {
             // The slot remains reserved after TLS completes and until the
             // authenticated connection closes.
             this.#incomingSockets.add(socket);
-            socket.setTimeout(HANDSHAKE_TIMEOUT_MS, () => socket.destroy());
+            socket.setTimeout(this.#handshakeTimeoutMs, () => socket.destroy());
             socket.once("close", () => this.#incomingSockets.delete(socket));
         });
         server.on("secureConnection", (socket) => {
@@ -327,28 +342,38 @@ export class DirectTlsNetwork implements P2pTransport {
             }
             const channelBinding = this.#channelBinding(socket);
             const duplex = createNodeFrameDuplex(socket, socket);
-            const identity = await withDeadline(
-                runP2pResponderHello(duplex, {
-                    commitPeer: (peerIdentity) =>
-                        this.#commitAuthenticatedPeer(peerIdentity, certificatePublicKey),
-                    identity: this.#identity,
-                    localChannelBinding: channelBinding,
-                    remoteChannelBinding: channelBinding,
-                    transport: "direct",
-                    validatePeer: (peerIdentity) =>
-                        this.#validateAuthenticatedPeer(
-                            peerIdentity,
-                            certificatePublicKey,
-                            expected,
-                        ),
-                }),
-                HANDSHAKE_TIMEOUT_MS,
-                "The direct P2P peer did not finish its signed hello in time.",
+            const identity = await this.#withPeerOperation("handshake", (ctx) =>
+                runP2pResponderHello(
+                    withFrameProgressDeadline(
+                        duplex,
+                        this.#handshakeTimeoutMs,
+                        () =>
+                            new Error(
+                                "The direct P2P peer did not finish its signed hello in time.",
+                            ),
+                        () => socket.destroy(),
+                    ),
+                    {
+                        commitPeer: (peerIdentity) =>
+                            this.#commitAuthenticatedPeer(ctx, peerIdentity, certificatePublicKey),
+                        identity: this.#identity,
+                        localChannelBinding: channelBinding,
+                        remoteChannelBinding: channelBinding,
+                        transport: "direct",
+                        validatePeer: (peerIdentity) =>
+                            this.#validateAuthenticatedPeer(
+                                ctx,
+                                peerIdentity,
+                                certificatePublicKey,
+                                expected,
+                            ),
+                    },
+                ),
             );
             const operation = (
                 await withDeadline(
                     readBytes(duplex.recv, 1),
-                    HANDSHAKE_TIMEOUT_MS,
+                    this.#handshakeTimeoutMs,
                     "The direct P2P peer did not choose an operation in time.",
                 )
             )[0];
@@ -529,7 +554,7 @@ export class DirectTlsNetwork implements P2pTransport {
             this.#sockets.delete(socket);
         });
         try {
-            await waitForSecureConnect(socket, signal);
+            await waitForSecureConnect(socket, signal, this.#handshakeTimeoutMs);
             this.#assertAlpn(socket);
             const certificatePublicKey = this.#peerCertificatePublicKey(socket);
             if (certificatePublicKey !== peer.publicKey) {
@@ -538,19 +563,33 @@ export class DirectTlsNetwork implements P2pTransport {
                 );
             }
             const channelBinding = this.#channelBinding(socket);
-            const identity = await withDeadline(
-                runP2pInitiatorHello(createNodeFrameDuplex(socket, socket), {
-                    commitPeer: (peerIdentity) =>
-                        this.#commitAuthenticatedPeer(peerIdentity, certificatePublicKey),
-                    identity: this.#identity,
-                    localChannelBinding: channelBinding,
-                    remoteChannelBinding: channelBinding,
-                    transport: "direct",
-                    validatePeer: (peerIdentity) =>
-                        this.#validateAuthenticatedPeer(peerIdentity, certificatePublicKey, peer),
-                }),
-                HANDSHAKE_TIMEOUT_MS,
-                "The direct P2P peer did not finish its signed hello in time.",
+            const identity = await this.#withPeerOperation("handshake", (ctx) =>
+                runP2pInitiatorHello(
+                    withFrameProgressDeadline(
+                        createNodeFrameDuplex(socket, socket),
+                        this.#handshakeTimeoutMs,
+                        () =>
+                            new Error(
+                                "The direct P2P peer did not finish its signed hello in time.",
+                            ),
+                        () => socket.destroy(),
+                    ),
+                    {
+                        commitPeer: (peerIdentity) =>
+                            this.#commitAuthenticatedPeer(ctx, peerIdentity, certificatePublicKey),
+                        identity: this.#identity,
+                        localChannelBinding: channelBinding,
+                        remoteChannelBinding: channelBinding,
+                        transport: "direct",
+                        validatePeer: (peerIdentity) =>
+                            this.#validateAuthenticatedPeer(
+                                ctx,
+                                peerIdentity,
+                                certificatePublicKey,
+                                peer,
+                            ),
+                    },
+                ),
             );
             if (identity.instanceId !== peer.instanceId) {
                 throw new Error("The direct address belongs to another Rig instance.");
@@ -583,6 +622,7 @@ export class DirectTlsNetwork implements P2pTransport {
     }
 
     async #validateAuthenticatedPeer(
+        ctx: Context | undefined,
         identity: P2pPeerIdentity,
         certificatePublicKey: string,
         expected: DirectPeer,
@@ -594,14 +634,33 @@ export class DirectTlsNetwork implements P2pTransport {
         ) {
             throw new Error("The direct P2P peer identity does not match its allowlist.");
         }
-        await this.#validatePeer?.(identity, certificatePublicKey);
+        if (this.#validatePeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("Direct P2P peer validation requires an operation context.");
+            }
+            await this.#validatePeer(ctx, identity, certificatePublicKey);
+        }
     }
 
     async #commitAuthenticatedPeer(
+        ctx: Context | undefined,
         identity: P2pPeerIdentity,
         certificatePublicKey: string,
     ): Promise<void> {
-        await this.#commitPeer?.(identity, certificatePublicKey);
+        if (this.#commitPeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("Direct P2P peer commit requires an operation context.");
+            }
+            await this.#commitPeer(ctx, identity, certificatePublicKey);
+        }
+    }
+
+    async #withPeerOperation<Result>(
+        operation: "handshake",
+        work: (ctx: Context | undefined) => Result | PromiseLike<Result>,
+    ): Promise<Awaited<Result>> {
+        if (this.#runPeerOperation === undefined) return await work(undefined);
+        return await this.#runPeerOperation(operation, work);
     }
 
     #setPeerStatus(
@@ -640,11 +699,15 @@ export class DirectTlsNetwork implements P2pTransport {
     }
 }
 
-function waitForSecureConnect(socket: TLSSocket, signal: AbortSignal): Promise<void> {
+function waitForSecureConnect(
+    socket: TLSSocket,
+    signal: AbortSignal,
+    timeoutMs: number,
+): Promise<void> {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(
             () => finish(new Error("The direct P2P TLS handshake timed out.")),
-            HANDSHAKE_TIMEOUT_MS,
+            timeoutMs,
         );
         const connected = () => finish();
         const failed = (error: Error) => finish(error);

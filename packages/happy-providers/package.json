@@ -1,19 +1,31 @@
 {
-    "name": "@slopus/rig-providers",
+    "name": "@slopus/happy-providers",
     "version": "0.0.0",
-    "description": "Provider abstractions for Rig.",
+    "description": "Stateful Node.js sessions for Codex, Claude, Grok, Bedrock, and Responses-compatible model providers.",
+    "keywords": [
+        "ai",
+        "anthropic",
+        "codex",
+        "grok",
+        "openai",
+        "provider",
+        "session"
+    ],
     "license": "MIT",
     "repository": {
         "type": "git",
         "url": "git+https://github.com/slopus/rig.git",
-        "directory": "packages/rig-providers"
+        "directory": "packages/happy-providers"
     },
     "files": [
         "dist",
+        "EXAMPLES.md",
         "LICENSE",
-        "README.md"
+        "README.md",
+        "VENDOR_*.md"
     ],
     "type": "module",
+    "browser": false,
     "exports": {
         ".": {
             "types": "./dist/index.d.ts",
@@ -22,11 +34,13 @@
         }
     },
     "publishConfig": {
-        "access": "public"
+        "access": "public",
+        "provenance": true
     },
     "scripts": {
         "build": "node --eval \"import('node:fs/promises').then(({ rm }) => rm('dist', { force: true, recursive: true }))\" && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
         "check": "tsc --noEmit",
+        "prepack": "pnpm run build",
         "test": "vitest run --passWithNoTests"
     },
     "dependencies": {
@@ -58,6 +72,6 @@
         "@anthropic-ai/claude-agent-sdk-win32-x64": "^0.3.226"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22.19.0"
     }
 }

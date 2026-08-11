@@ -151,7 +151,7 @@ function toSessionStoreEntries(
             timestamp: new Date(index).toISOString(),
             userType: "external",
             uuid,
-            version: "rig-providers",
+            version: "happy-providers",
         };
         if (message.role === "assistant") {
             const sdkMessage = toSdkAssistantMessage(message, options.model, uuid);

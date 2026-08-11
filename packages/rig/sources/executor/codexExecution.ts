@@ -2,7 +2,7 @@ import {
     CodexImageGenerationError,
     CodexProvider,
     loadCodexCredential,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import {
     builtinModelProfiles,
     ExecutorImageGenerationUnavailableError,

@@ -1,4 +1,5 @@
 import * as Iroh from "@number0/iroh/index.js";
+import type { Span, Tracer } from "@opentelemetry/api";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createTestRootContext } from "../testing/createTestRootContext.js";
@@ -17,6 +18,54 @@ afterEach(async () => {
 });
 
 describe("P2pPairingService", () => {
+    it("keeps invitation and emoji waits outside finite pairing operation spans", async () => {
+        const spans = spanLifecycleTracer();
+        createTestRootContext(spans.tracer);
+        try {
+            const inviter = service(
+                "Main",
+                createP2pInstanceIdentity(),
+                recordingTrustStore().store,
+                noPrimaryChange,
+            );
+            const joiner = service(
+                "Remote",
+                createP2pInstanceIdentity(),
+                recordingTrustStore().store,
+                noPrimaryChange,
+            );
+
+            const invitation = await inviter.createInvitation();
+            expect(spans.active()).toEqual([]);
+
+            const joined = await joiner.join(invitation.invitation);
+            await Promise.all([
+                waitForPhase(inviter, invitation.id, "verifying"),
+                waitForPhase(joiner, joined.id, "verifying"),
+            ]);
+
+            expect(spans.active()).toEqual([]);
+            expect(spans.started()).toEqual(
+                expect.arrayContaining([
+                    "rig.worker.p2p-pairing-handshake",
+                    "rig.worker.p2p-pairing-validation",
+                ]),
+            );
+
+            inviter.answer(invitation.id, true);
+            joiner.answer(joined.id, true);
+            await Promise.all([
+                waitForPhase(inviter, invitation.id, "connected"),
+                waitForPhase(joiner, joined.id, "connected"),
+            ]);
+
+            expect(spans.active()).toEqual([]);
+            expect(spans.started()).toContain("rig.worker.p2p-pairing-commit");
+        } finally {
+            createTestRootContext();
+        }
+    });
+
     it("contains a locally closed rejection from background pairing cleanup", async () => {
         const endpointId = Iroh.SecretKey.generate().public();
         const address = new Iroh.EndpointAddr(endpointId, "https://relay.example.com", [
@@ -327,6 +376,35 @@ describe("P2pPairingService", () => {
         expect(joinerTrust.pins).toEqual([]);
     });
 });
+
+function spanLifecycleTracer(): {
+    active(): string[];
+    started(): string[];
+    tracer: Tracer;
+} {
+    const active = new Map<string, number>();
+    const started: string[] = [];
+    return {
+        active: () =>
+            [...active].flatMap(([name, count]) => Array.from({ length: count }, () => name)),
+        started: () => [...started],
+        tracer: {
+            startSpan: (name: string) => {
+                started.push(name);
+                active.set(name, (active.get(name) ?? 0) + 1);
+                return {
+                    end: () => {
+                        const remaining = (active.get(name) ?? 1) - 1;
+                        if (remaining === 0) active.delete(name);
+                        else active.set(name, remaining);
+                    },
+                    recordException: () => undefined,
+                    setStatus: () => undefined,
+                } as unknown as Span;
+            },
+        } as Tracer,
+    };
+}
 
 function service(
     name: string,

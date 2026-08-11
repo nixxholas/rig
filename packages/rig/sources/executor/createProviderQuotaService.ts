@@ -4,7 +4,7 @@ import {
     type ProviderQuota,
     type ProviderUsage,
     unavailableProviderQuota,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 import type { ConfigProviders } from "../config/types.js";
 import { providerUsageToClaudeQuota } from "./providerUsageToClaudeQuota.js";

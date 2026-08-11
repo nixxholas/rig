@@ -16,6 +16,7 @@ import {
     createIrohFrameDuplex,
     finishWrites,
     P2pFrameWriteTimeoutError,
+    withFrameProgressDeadline,
 } from "./P2pFrameDuplex.js";
 import {
     readP2pHttpRequest,
@@ -81,7 +82,7 @@ export interface CreateIrohNetworkOptions {
     /** Test seam. Production dynamically loads the platform's native Iroh binding. */
     bindings?: IrohBindings;
     closeTimeoutMs?: number;
-    commitPeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
+    commitPeer?: (ctx: Context, identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
     config: ConfigIrohTransport;
     connectTimeoutMs?: number;
     endpointIds: readonly string[];
@@ -99,6 +100,11 @@ export interface CreateIrohNetworkOptions {
     peerTickets?: ReadonlyMap<string, string>;
     /** Test seam. Production uses Iroh's n0 relay and discovery preset. */
     relayMode?: RelayMode;
+    /** Creates one finite trace context for a peer authentication operation. */
+    runPeerOperation?: <Result>(
+        operation: "address-refresh" | "handshake",
+        work: (ctx: Context) => Result | PromiseLike<Result>,
+    ) => Promise<Awaited<Result>>;
     pingIntervalMs?: number;
     pingTimeoutMs?: number;
     responseWriteProgressTimeoutMs?: number;
@@ -108,8 +114,9 @@ export interface CreateIrohNetworkOptions {
     knownPeer?: (endpointId: string) => (P2pPeerIdentity & { name: string }) | undefined;
     serveRequest?: ServeP2pHttpRequest;
     serveTunnel?: ServeP2pTunnel;
-    validatePeer?: (identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
+    validatePeer?: (ctx: Context, identity: P2pPeerIdentity, endpointId: string) => Promise<void>;
     updatePeerAddress?: (
+        ctx: Context,
         identity: P2pPeerIdentity,
         endpointId: string,
         ticket: string,
@@ -148,7 +155,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #bindings: IrohBindings;
     readonly #closeTimeoutMs: number;
     readonly #commitPeer:
-        | ((identity: P2pPeerIdentity, endpointId: string) => Promise<void>)
+        | ((ctx: Context, identity: P2pPeerIdentity, endpointId: string) => Promise<void>)
         | undefined;
     readonly #config: ConfigIrohTransport;
     readonly #connectTimeoutMs: number;
@@ -179,6 +186,7 @@ export class IrohNetwork implements P2pTransport {
     readonly #pingIntervalMs: number;
     readonly #pingTimeoutMs: number;
     readonly #responseWriteProgressTimeoutMs: number;
+    readonly #runPeerOperation: CreateIrohNetworkOptions["runPeerOperation"];
     readonly #addressReadyTimeoutMs: number;
     readonly #addressSupervisionIntervalMs: number;
     readonly #restartCooldownMs: number;
@@ -186,10 +194,15 @@ export class IrohNetwork implements P2pTransport {
     readonly #serveTunnel: ServeP2pTunnel | undefined;
     readonly #tasks = new Set<Promise<void>>();
     readonly #validatePeer:
-        | ((identity: P2pPeerIdentity, endpointId: string) => Promise<void>)
+        | ((ctx: Context, identity: P2pPeerIdentity, endpointId: string) => Promise<void>)
         | undefined;
     readonly #updatePeerAddress:
-        | ((identity: P2pPeerIdentity, endpointId: string, ticket: string) => Promise<void>)
+        | ((
+              ctx: Context,
+              identity: P2pPeerIdentity,
+              endpointId: string,
+              ticket: string,
+          ) => Promise<void>)
         | undefined;
     readonly #authenticatedConnections = new Set<Connection>();
     #endpointClosePending: Promise<void> | undefined;
@@ -231,6 +244,7 @@ export class IrohNetwork implements P2pTransport {
         this.#pingTimeoutMs = options.pingTimeoutMs ?? DEFAULT_PING_TIMEOUT_MS;
         this.#responseWriteProgressTimeoutMs =
             options.responseWriteProgressTimeoutMs ?? RESPONSE_WRITE_PROGRESS_TIMEOUT_MS;
+        this.#runPeerOperation = options.runPeerOperation;
         this.#addressReadyTimeoutMs =
             options.addressReadyTimeoutMs ?? DEFAULT_ADDRESS_READY_TIMEOUT_MS;
         this.#addressSupervisionIntervalMs =
@@ -616,25 +630,34 @@ export class IrohNetwork implements P2pTransport {
                 ]);
                 return;
             }
-            const authenticated = await withDeadline(
-                runP2pResponderHello(createIrohFrameDuplex(stream.recv, stream.send), {
-                    commitPeer: (identity, endpointId) =>
-                        this.#commitAuthenticatedPeer(identity, endpointId),
-                    identity: this.#identity,
-                    localChannelBinding: this.localAddress(),
-                    remoteChannelBinding: remoteId,
-                    transport: "iroh",
-                    validatePeer: (identity, endpointId) =>
-                        this.#validateAuthenticatedPeer(identity, endpointId),
-                }),
-                this.#handshakeTimeoutMs,
-                "The peer did not finish its signed identity hello in time.",
-            );
-            await withDeadline(
-                stream.recv.readToEnd(0),
-                this.#handshakeTimeoutMs,
-                "The peer did not finish its signed identity hello stream in time.",
-            );
+            const authenticated = await this.#withPeerOperation("handshake", async (ctx) => {
+                const peer = await runP2pResponderHello(
+                    withFrameProgressDeadline(
+                        createIrohFrameDuplex(stream.recv, stream.send),
+                        this.#handshakeTimeoutMs,
+                        () =>
+                            new IrohOperationTimeoutError(
+                                "The peer did not finish its signed identity hello in time.",
+                            ),
+                    ),
+                    {
+                        commitPeer: (identity, endpointId) =>
+                            this.#commitAuthenticatedPeer(ctx, identity, endpointId),
+                        identity: this.#identity,
+                        localChannelBinding: this.localAddress(),
+                        remoteChannelBinding: remoteId,
+                        transport: "iroh",
+                        validatePeer: (identity, endpointId) =>
+                            this.#validateAuthenticatedPeer(ctx, identity, endpointId),
+                    },
+                );
+                await withDeadline(
+                    stream.recv.readToEnd(0),
+                    this.#handshakeTimeoutMs,
+                    "The peer did not finish its signed identity hello stream in time.",
+                );
+                return peer;
+            });
             this.#rememberPeer(remoteId, authenticated);
             this.#recordPeerActivity(remoteId);
             this.#authenticatedConnections.add(connection);
@@ -1122,7 +1145,10 @@ export class IrohNetwork implements P2pTransport {
             if (connection.remoteId().toString() !== endpointId) {
                 throw new Error("Iroh connected to a different endpoint identity.");
             }
-            const identity = await this.#authenticateOutgoing(connection, endpointId);
+            const authenticatedConnection = connection;
+            const identity = await this.#withPeerOperation("handshake", async (ctx) => {
+                return await this.#authenticateOutgoing(ctx, authenticatedConnection, endpointId);
+            });
             if (
                 this.#closed ||
                 this.#abort.signal.aborted ||
@@ -1333,10 +1359,18 @@ export class IrohNetwork implements P2pTransport {
         if (ticket.length > 4_096 || this.#peerTickets.get(endpointId) === ticket) return;
         this.#peerAddresses.set(endpointId, address);
         this.#peerTickets.set(endpointId, ticket);
-        await this.#updatePeerAddress?.(identity, endpointId, ticket);
+        if (this.#updatePeerAddress !== undefined) {
+            await this.#withPeerOperation("address-refresh", async (ctx) => {
+                if (ctx === undefined) {
+                    throw new Error("Iroh peer address persistence requires an operation context.");
+                }
+                await this.#updatePeerAddress!(ctx, identity, endpointId, ticket);
+            });
+        }
     }
 
     async #authenticateOutgoing(
+        ctx: Context | undefined,
         connection: Connection,
         endpointId: string,
     ): Promise<P2pPeerIdentity> {
@@ -1346,18 +1380,25 @@ export class IrohNetwork implements P2pTransport {
             "Rig could not open a signed identity hello in time.",
         );
         await stream.send.writeAll([STREAM_KIND_HELLO]);
-        const identity = await withDeadline(
-            runP2pInitiatorHello(createIrohFrameDuplex(stream.recv, stream.send), {
-                commitPeer: (identity, address) => this.#commitAuthenticatedPeer(identity, address),
+        const identity = await runP2pInitiatorHello(
+            withFrameProgressDeadline(
+                createIrohFrameDuplex(stream.recv, stream.send),
+                this.#handshakeTimeoutMs,
+                () =>
+                    new IrohOperationTimeoutError(
+                        "The peer did not finish its signed identity hello in time.",
+                    ),
+            ),
+            {
+                commitPeer: (identity, address) =>
+                    this.#commitAuthenticatedPeer(ctx, identity, address),
                 identity: this.#identity,
                 localChannelBinding: this.localAddress(),
                 remoteChannelBinding: endpointId,
                 transport: "iroh",
                 validatePeer: (identity, address) =>
-                    this.#validateAuthenticatedPeer(identity, address),
-            }),
-            this.#handshakeTimeoutMs,
-            "The peer did not finish its signed identity hello in time.",
+                    this.#validateAuthenticatedPeer(ctx, identity, address),
+            },
         );
         await withDeadline(
             stream.recv.readToEnd(0),
@@ -1367,15 +1408,33 @@ export class IrohNetwork implements P2pTransport {
         return identity;
     }
 
-    async #validateAuthenticatedPeer(identity: P2pPeerIdentity, endpointId: string): Promise<void> {
+    async #validateAuthenticatedPeer(
+        ctx: Context | undefined,
+        identity: P2pPeerIdentity,
+        endpointId: string,
+    ): Promise<void> {
         if (identity.instanceId === this.#identity.instanceId) {
             throw new Error("A P2P transport address cannot identify this Rig instance as a peer.");
         }
-        await this.#validatePeer?.(identity, endpointId);
+        if (this.#validatePeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("Iroh peer validation requires an operation context.");
+            }
+            await this.#validatePeer(ctx, identity, endpointId);
+        }
     }
 
-    async #commitAuthenticatedPeer(identity: P2pPeerIdentity, endpointId: string): Promise<void> {
-        await this.#commitPeer?.(identity, endpointId);
+    async #commitAuthenticatedPeer(
+        ctx: Context | undefined,
+        identity: P2pPeerIdentity,
+        endpointId: string,
+    ): Promise<void> {
+        if (this.#commitPeer !== undefined) {
+            if (ctx === undefined) {
+                throw new Error("Iroh peer commit requires an operation context.");
+            }
+            await this.#commitPeer(ctx, identity, endpointId);
+        }
     }
 
     #rememberPeer(endpointId: string, identity: P2pPeerIdentity): void {
@@ -1392,6 +1451,14 @@ export class IrohNetwork implements P2pTransport {
             ...(previous?.rttMs === undefined ? {} : { rttMs: previous.rttMs }),
             status: previous?.status ?? "connecting",
         });
+    }
+
+    async #withPeerOperation<Result>(
+        operation: "address-refresh" | "handshake",
+        work: (ctx: Context | undefined) => Result | PromiseLike<Result>,
+    ): Promise<Awaited<Result>> {
+        if (this.#runPeerOperation === undefined) return await work(undefined);
+        return await this.#runPeerOperation(operation, work);
     }
 
     #endpointForPeer(peerId: string): string {

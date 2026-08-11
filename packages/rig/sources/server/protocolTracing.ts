@@ -1,11 +1,7 @@
-const LONG_RUNNING_PROTOCOL_ROUTES = new Set([
-    "global-events-stream",
-    "live-events-stream",
-    "stream",
-]);
-
-/** Long-lived event streams have no useful request duration and must not occupy trace storage. */
-export function shouldTraceProtocolRoute(routeName: string): boolean {
-    const operation = routeName.startsWith("peer.") ? routeName.slice("peer.".length) : routeName;
-    return !LONG_RUNNING_PROTOCOL_ROUTES.has(operation);
+/**
+ * Protocol handlers return after a stream's finite bootstrap and do not await the connection
+ * lifetime. Tracing every handler therefore records setup work without retaining a span for SSE.
+ */
+export function shouldTraceProtocolRoute(_routeName: string): boolean {
+    return true;
 }

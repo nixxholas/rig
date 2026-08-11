@@ -22,6 +22,7 @@ const USAGE = `Usage:
   pnpm release beta
   pnpm release rig-connect <version>
   pnpm release happy-plugins <version>
+  pnpm release happy-providers <version>
 
 Examples:
   pnpm release minor            a release with new features in it
@@ -30,6 +31,7 @@ Examples:
   pnpm release 0.4.0            that same choice, spelled out
   pnpm release rig-connect patch
   pnpm release happy-plugins patch
+  pnpm release happy-providers patch
 
 Rig is still on 0.x, so it does not take a major release yet. Until it promises
 compatibility, a minor is how a feature ships and a patch is how a fix does.`;
@@ -39,7 +41,8 @@ async function release(): Promise<void> {
     const explicitPackage =
         arguments_[0] === "rig" ||
         arguments_[0] === "rig-connect" ||
-        arguments_[0] === "happy-plugins";
+        arguments_[0] === "happy-plugins" ||
+        arguments_[0] === "happy-providers";
     const releasePackage = resolveReleasePackage(explicitPackage ? arguments_.shift() : undefined);
     const releaseInput = arguments_[0];
     if (releaseInput === "--help" || releaseInput === "-h") {
@@ -107,35 +110,44 @@ async function release(): Promise<void> {
         }
         console.log(`Resuming the local ${releaseTag} release commit.`);
     }
-    if (releasePackage.key === "rig-connect" && !retryingRelease) {
-        console.log("Checking the published rig-connect version...");
-        const latest = runCommand(
-            "pnpm",
-            ["view", initialManifest.name, "dist-tags.latest", "--json"],
-            { captureOutput: true },
-        ).stdout;
-        const isTaggedUnpublishedVersion = (version: string): boolean => {
-            const tag = `${releasePackage.tagPrefix}${version}`;
-            const tagExists =
-                runCommand("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], {
-                    allowFailure: true,
-                    captureOutput: true,
-                }).status === 0;
-            return (
-                tagExists &&
-                runCommand("git", ["merge-base", "--is-ancestor", tag, "HEAD"], {
-                    allowFailure: true,
-                    captureOutput: true,
-                }).status === 0
-            );
-        };
-        assertRegistryLatestMatchesManifest(initialManifest, latest, {
-            isTaggedUnpublishedVersion,
-        });
-        if (JSON.parse(latest) !== initialManifest.version) {
-            console.log(
-                `Recovering after tagged releases through ${releaseTag} were not published.`,
-            );
+    if (
+        (releasePackage.key === "rig-connect" || releasePackage.key === "happy-providers") &&
+        !retryingRelease
+    ) {
+        const initialHappyProvidersRelease =
+            releasePackage.key === "happy-providers" && initialManifest.version === "0.0.0";
+        if (initialHappyProvidersRelease) {
+            console.log("Preparing the first published happy-providers version.");
+        } else {
+            console.log(`Checking the published ${releasePackage.key} version...`);
+            const latest = runCommand(
+                "pnpm",
+                ["view", initialManifest.name, "dist-tags.latest", "--json"],
+                { captureOutput: true },
+            ).stdout;
+            const isTaggedUnpublishedVersion = (version: string): boolean => {
+                const tag = `${releasePackage.tagPrefix}${version}`;
+                const tagExists =
+                    runCommand("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`], {
+                        allowFailure: true,
+                        captureOutput: true,
+                    }).status === 0;
+                return (
+                    tagExists &&
+                    runCommand("git", ["merge-base", "--is-ancestor", tag, "HEAD"], {
+                        allowFailure: true,
+                        captureOutput: true,
+                    }).status === 0
+                );
+            };
+            assertRegistryLatestMatchesManifest(initialManifest, latest, {
+                isTaggedUnpublishedVersion,
+            });
+            if (JSON.parse(latest) !== initialManifest.version) {
+                console.log(
+                    `Recovering after tagged releases through ${releaseTag} were not published.`,
+                );
+            }
         }
     }
 

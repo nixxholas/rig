@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@slopus/rig-providers";
+import type { SessionEvent } from "@slopus/happy-providers";
 
 import type { ExecutorSelection } from "@/ExecutorModelProfile.js";
 

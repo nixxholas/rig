@@ -1109,7 +1109,14 @@ export interface BaseSessionEvent<TType extends string, TData> {
  * client that has not learned it yet.
  */
 export type InterpretedSessionEvent =
-    | BaseSessionEvent<"session_updated", { mutationId?: MutationId; session: ProtocolSession }>
+    | BaseSessionEvent<
+          "session_updated",
+          {
+              appendedContextMessage?: SystemMessage;
+              mutationId?: MutationId;
+              session: ProtocolSession;
+          }
+      >
     | BaseSessionEvent<"session_activity_changed", { activity: SessionActivity }>
     | BaseSessionEvent<"session_archived", { archived: boolean; mutationId?: MutationId }>
     | BaseSessionEvent<"session_git_changed", { git: GitChangeSnapshot }>

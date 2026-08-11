@@ -297,7 +297,7 @@ export type {
     ProviderUsage,
     ProviderUsageCredits,
     ProviderUsageWindow,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
@@ -607,7 +607,6 @@ export {
     SESSION_DRAFT_MAX_CLOCK_SKEW_MS,
     SESSION_DRAFT_MAX_LENGTH,
     SESSION_TRANSCRIPT_NOTICE_LIMIT,
-    SESSION_BOOTSTRAP_TURN_LIMIT,
     SESSION_STREAM_TURN_LIMIT,
     moveSessionRequestSchema,
     submitContextMessageRequestSchema,

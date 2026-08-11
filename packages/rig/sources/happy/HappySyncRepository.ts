@@ -3,6 +3,12 @@ import {
     happyOutboxEnqueue,
     HappySyncOutboxFullError,
 } from "../persistence/happy/happyOutboxEnqueue.js";
+import { happyOutboxEnqueueInitialBackfill } from "../persistence/happy/happyOutboxEnqueueInitialBackfill.js";
+import {
+    happyProjectionEnqueue,
+    type HappyProjectionEnqueueResult,
+} from "../persistence/happy/happyProjectionEnqueue.js";
+import { happyProjectionStallGap } from "../persistence/happy/happyProjectionStallGap.js";
 import { happySessionAdvanceRemoteSequence } from "../persistence/happy/happySessionAdvanceRemoteSequence.js";
 import {
     happySessionEnsure,
@@ -69,6 +75,44 @@ export class HappySyncRepository {
             maxPendingMessages: this.#maxPendingMessagesPerSession,
             messages,
             now: this.#now,
+            sessionId,
+        });
+    }
+
+    async enqueueInitialBackfill(
+        ctx: Context,
+        sessionId: string,
+        messages: readonly HappySessionProtocolMessage[],
+        projectedEventId?: string,
+    ): Promise<void> {
+        await happyOutboxEnqueueInitialBackfill(withDatabase(ctx, this.#database), {
+            maxPendingMessages: this.#maxPendingMessagesPerSession,
+            messages,
+            now: this.#now,
+            ...(projectedEventId === undefined ? {} : { projectedEventId }),
+            sessionId,
+        });
+    }
+
+    async enqueueProjection(
+        ctx: Context,
+        sessionId: string,
+        eventId: string,
+        messages: readonly HappySessionProtocolMessage[],
+    ): Promise<HappyProjectionEnqueueResult> {
+        return await happyProjectionEnqueue(withDatabase(ctx, this.#database), {
+            eventId,
+            maxPendingMessages: this.#maxPendingMessagesPerSession,
+            messages,
+            now: this.#now,
+            sessionId,
+        });
+    }
+
+    async stallProjectionGap(ctx: Context, sessionId: string, reason: string): Promise<void> {
+        await happyProjectionStallGap(withDatabase(ctx, this.#database), {
+            now: this.#now(),
+            reason,
             sessionId,
         });
     }

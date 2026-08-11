@@ -1,4 +1,5 @@
 import { createTestRootContext } from "../testing/createTestRootContext.js";
+import type { Span, Tracer } from "@opentelemetry/api";
 import { describe, expect, it, vi } from "vitest";
 
 import { createP2pInstanceIdentity } from "../p2p/P2pIdentity.js";
@@ -149,9 +150,62 @@ describe("P2pCredentialReplicator", () => {
             path: "/inference-credentials",
         });
 
-        replicator.peerChanged(ctx, remote.instanceId);
-        await replicator.ensure(ctx, remote.instanceId);
+        await replicator.peerChanged(ctx, remote.instanceId);
         expect(fetch).toHaveBeenCalledTimes(2);
+        await replicator.close(ctx);
+    });
+
+    it("keeps peer-change and startup contexts alive until their synchronization settles", async () => {
+        const local = createP2pInstanceIdentity(
+            "alocalinstance00000000001",
+            new Uint8Array(32).fill(1),
+        );
+        const remote = createP2pInstanceIdentity(
+            "aremoteinstance0000000001",
+            new Uint8Array(32).fill(2),
+        );
+        const releases: (() => void)[] = [];
+        const fetch = vi.fn(async () => {
+            await new Promise<void>((resolve) => releases.push(resolve));
+            return response(200, { changed: true, version: 1 });
+        });
+        const store = new P2pCredentialStore({
+            database: {
+                query: <T>() => [] as T,
+                transaction: <T>() => false as T,
+            },
+            identity: local,
+        });
+        const replicator = new P2pCredentialReplicator({
+            listPeers: () => [{ instanceId: remote.instanceId, publicKey: remote.publicKey }],
+            network: { fetch } as unknown as P2pNetwork,
+            snapshot: () => snapshot(local, "secret", 1),
+            store,
+        });
+        const ended: string[] = [];
+        const operationCtx = createTestRootContext(lifecycleTracer(ended));
+
+        const firstPeerChanged = operationCtx.span("test.p2p.peer_changed.first", (ctx) =>
+            replicator.peerChanged(ctx, remote.instanceId),
+        );
+        const secondPeerChanged = operationCtx.span("test.p2p.peer_changed.second", (ctx) =>
+            replicator.peerChanged(ctx, remote.instanceId),
+        );
+        await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+        expect(ended).not.toContain("test.p2p.peer_changed.first");
+        expect(ended).not.toContain("test.p2p.peer_changed.second");
+        releases.shift()?.();
+        await Promise.all([firstPeerChanged, secondPeerChanged]);
+        expect(ended).toContain("test.p2p.peer_changed.first");
+        expect(ended).toContain("test.p2p.peer_changed.second");
+
+        const syncAll = operationCtx.span("test.p2p.sync_all", (ctx) => replicator.syncAll(ctx));
+        await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+        expect(ended).not.toContain("test.p2p.sync_all");
+        releases.shift()?.();
+        await syncAll;
+        expect(ended).toContain("test.p2p.sync_all");
+
         await replicator.close(ctx);
     });
 
@@ -269,4 +323,29 @@ function response(status: number, body: unknown) {
         },
         transport: "iroh" as const,
     };
+}
+
+function lifecycleTracer(ended: string[]): Tracer {
+    return {
+        startSpan(name: string) {
+            const span: Span = {
+                addEvent: () => span,
+                addLink: () => span,
+                addLinks: () => span,
+                end: () => ended.push(name),
+                isRecording: () => true,
+                recordException: () => undefined,
+                setAttribute: () => span,
+                setAttributes: () => span,
+                setStatus: () => span,
+                spanContext: () => ({
+                    spanId: "2".repeat(16),
+                    traceFlags: 1,
+                    traceId: "1".repeat(32),
+                }),
+                updateName: () => span,
+            };
+            return span;
+        },
+    } as unknown as Tracer;
 }

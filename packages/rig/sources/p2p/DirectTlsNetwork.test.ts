@@ -2,6 +2,7 @@ import { connect, createServer } from "node:net";
 import { once } from "node:events";
 import { Transform } from "node:stream";
 
+import type { Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
 import { createTestRootContext } from "../testing/createTestRootContext.js";
@@ -12,6 +13,77 @@ import { DirectTlsNetwork } from "./DirectTlsNetwork.js";
 const ctx = createTestRootContext();
 
 describe("direct TLS P2P transport", () => {
+    it("uses one finite operation context for validation and commit on every repeated authentication", async () => {
+        const [clientPort, serverPort] = await Promise.all([reservePort(), reservePort()]);
+        const clientIdentity = createP2pInstanceIdentity();
+        const serverIdentity = createP2pInstanceIdentity();
+        const clientAddress = `127.0.0.1:${String(clientPort)}`;
+        const serverAddress = `127.0.0.1:${String(serverPort)}`;
+        const operations: Context[] = [];
+        const validated: Context[] = [];
+        const committed: Context[] = [];
+        const server = await DirectTlsNetwork.create({
+            config: { listen: serverAddress },
+            identity: serverIdentity,
+            peers: [
+                {
+                    bindings: [],
+                    connections: { direct: { address: clientAddress } },
+                    instanceId: clientIdentity.instanceId,
+                    name: "Client",
+                    publicKey: clientIdentity.publicKey,
+                },
+            ],
+            serveRequest: async () => response("ok"),
+            startPings: false,
+        });
+        const client = await DirectTlsNetwork.create({
+            commitPeer: async (ctx) => {
+                committed.push(ctx);
+            },
+            config: { listen: clientAddress },
+            identity: clientIdentity,
+            peers: [
+                {
+                    bindings: [],
+                    connections: { direct: { address: serverAddress } },
+                    instanceId: serverIdentity.instanceId,
+                    name: "Server",
+                    publicKey: serverIdentity.publicKey,
+                },
+            ],
+            runPeerOperation: async <Result>(
+                _operation: "handshake",
+                work: (ctx: Context) => Result | PromiseLike<Result>,
+            ): Promise<Awaited<Result>> => {
+                const operationCtx = ctx.named(`direct-handshake-${String(operations.length)}`);
+                operations.push(operationCtx);
+                return await work(operationCtx);
+            },
+            startPings: false,
+            validatePeer: async (ctx) => {
+                validated.push(ctx);
+            },
+        });
+        try {
+            for (let index = 0; index < 2; index += 1) {
+                const result = await client.fetch(
+                    ctx,
+                    serverIdentity.instanceId,
+                    { body: new Uint8Array(), headers: {}, method: "GET", path: "/health" },
+                    new AbortController().signal,
+                );
+                await collect(result.body);
+            }
+
+            expect(operations).toHaveLength(2);
+            expect(validated).toEqual(operations);
+            expect(committed).toEqual(operations);
+        } finally {
+            await Promise.all([client.close(), server.close()]);
+        }
+    });
+
     it("authenticates both stable identities and forwards streaming HTTP in either direction", async () => {
         const [firstPort, secondPort] = await Promise.all([reservePort(), reservePort()]);
         const firstIdentity = createP2pInstanceIdentity(

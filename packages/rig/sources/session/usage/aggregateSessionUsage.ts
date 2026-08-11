@@ -55,17 +55,26 @@ export function aggregateSessionUsage(
             continue;
         }
 
-        if (
-            event.type === "session_rewound" ||
-            (event.type === "session_configuration_changed" &&
-                // Reasoning and fast mode changes keep the same model and the same context, so
-                // only an actual model change restarts attribution.
-                event.data.changed.includes("model"))
-        ) {
+        if (event.type === "session_rewound") {
             activeModel = {
                 modelId: event.data.snapshot.modelId,
                 providerId: event.data.snapshot.providerId,
                 requestedModelId: event.data.snapshot.modelId,
+            };
+            currentContext = undefined;
+            continue;
+        }
+
+        if (
+            event.type === "session_configuration_changed" &&
+            // Reasoning and fast mode changes keep the same model and the same context, so
+            // only an actual model change restarts attribution.
+            event.data.changed.includes("model")
+        ) {
+            activeModel = {
+                modelId: event.data.modelId,
+                providerId: event.data.providerId,
+                requestedModelId: event.data.modelId,
             };
             currentContext = undefined;
             continue;

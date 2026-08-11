@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GrokProvider } from "@slopus/rig-providers";
+import { GrokProvider } from "@slopus/happy-providers";
 
 import { grokExecution } from "./grokExecution.js";
 

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { createClient, type Client, type InArgs } from "@libsql/client";
+import { sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AgentMessage, CompactionMessage, UserMessage } from "../../agent/types.js";
@@ -27,11 +28,100 @@ import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { GitCommandRunner } from "../../git/types.js";
 import { GitCredentialBroker } from "../../git/GitCredentialBroker.js";
 import { RigProfileStore } from "../../profiles/index.js";
+import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
+import { querySessionRestore } from "../../persistence/session/querySessionRestore.js";
+import { inTx } from "../../persistence/inTx.js";
 
 const execFile = promisify(execFileCallback);
 const ctx = createTestRootContext();
 
 describe("PersistentSessionStore", () => {
+    it("starts stale tool-result retention after opening without delaying the open", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        let store: PersistentSessionStore | undefined;
+        try {
+            store = await PersistentSessionStore.open(ctx, {
+                databasePath,
+                now: () => 1,
+            });
+            const state = sessionState({ unsortedSince: 1 });
+            const message: AgentMessage = {
+                blocks: [
+                    {
+                        display: "Read a large file.",
+                        rendered: [{ text: "large-output", type: "text" }],
+                        toolCallId: "call-1",
+                        toolName: "Read",
+                        type: "tool_result",
+                    },
+                ],
+                id: "result-1",
+                role: "agent",
+            };
+            await store.saveSession(ctx, state);
+            await store.upsertMessage(ctx, state.id, {
+                isPartial: false,
+                message,
+                position: 0,
+                runId: "run-1",
+            });
+            await store.close(ctx);
+
+            store = await PersistentSessionStore.open(ctx, {
+                databasePath,
+                now: () => 1_000,
+                toolResultRetentionMs: 100,
+            });
+
+            await vi.waitFor(async () => {
+                const page = await store?.loadTranscriptPage(ctx, state.id, 1);
+                expect(page?.messages).toEqual([
+                    {
+                        ...message,
+                        blocks: [{ ...message.blocks[0], rendered: [] }],
+                    },
+                ]);
+            });
+        } finally {
+            await store?.close(ctx);
+            await cleanup();
+        }
+    });
+
+    it("does not reschedule an in-flight tool-result sweep after shutdown stops maintenance", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        let store: PersistentSessionStore | undefined;
+        const entered = deferred<void>();
+        const release = deferred<void>();
+        const prune = vi
+            .spyOn(PersistentSessionStore.prototype, "pruneStaleToolResults")
+            .mockImplementation(async () => {
+                entered.resolve();
+                await release.promise;
+                return true;
+            });
+        try {
+            store = await PersistentSessionStore.open(ctx, {
+                databasePath,
+                now: () => 1_000,
+                toolResultRetentionMs: 100,
+            });
+            await entered.promise;
+
+            const stopping = store.prepareForShutdown(ctx, "shutdown");
+            release.resolve();
+            await stopping;
+            await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+            expect(prune).toHaveBeenCalledOnce();
+        } finally {
+            prune.mockRestore();
+            release.resolve();
+            await store?.close(ctx);
+            await cleanup();
+        }
+    });
+
     it("persists a remote human profile on sessions and injects its Git identity into every runtime", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const localInstanceId = "alocalprofiletest000000001";
@@ -794,7 +884,16 @@ describe("PersistentSessionStore", () => {
                 for (let index = 0; index < 5_000; index += 1) {
                     lastEventId = createId();
                     await transaction.execute({
-                        args: [sessionId, lastEventId, 1_700_000_000_000 + index, "{}"],
+                        args: [
+                            sessionId,
+                            lastEventId,
+                            1_700_000_000_000 + index,
+                            index === 4_500
+                                ? JSON.stringify({
+                                      legacySnapshot: "x".repeat(5 * 1_024 * 1_024),
+                                  })
+                                : "{}",
+                        ],
                         sql: "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, 'session_updated', ?, ?)",
                     });
                 }
@@ -816,7 +915,8 @@ describe("PersistentSessionStore", () => {
             });
             try {
                 const restored = await restoredStore.get(ctx, sessionId);
-                expect(restored?.events.all()).toHaveLength(4_096);
+                expect(restored?.events.all()).toHaveLength(499);
+                expect(JSON.stringify(restored?.events.all())).not.toContain("legacySnapshot");
                 expect(restored?.events.lastEventId()).toBe(lastEventId);
                 expect((await restored?.transcriptWindow(ctx))?.turns).toEqual([
                     expect.objectContaining({
@@ -833,6 +933,108 @@ describe("PersistentSessionStore", () => {
             }
         } finally {
             await rm(directory, { force: true, recursive: true });
+        }
+    });
+
+    it("restores legacy state events without materializing their embedded conversation", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const marker = "legacy-conversation-payload-".repeat(200_000);
+        try {
+            const store = await PersistentSessionStore.open(ctx, { databasePath });
+            const session = await store.create(ctx, { cwd: "/tmp/rig-legacy-state-event" });
+            const sessionId = session.id;
+            const snapshot = session.snapshot();
+            await store.close(ctx);
+
+            const database = openTestDatabase(databasePath);
+            const previous = (await queryTestRow<{ last_event_id: string }>(
+                database,
+                "SELECT last_event_id FROM sessions WHERE id = ?",
+                [sessionId],
+            ))!;
+            const eventId = createEventIdFactory({ after: previous.last_event_id })();
+            const embedded = textUserMessage("legacy-embedded-message", marker);
+            await insertSessionEvent(database, sessionId, eventId, "session_updated", {
+                session: {
+                    ...snapshot,
+                    snapshot: {
+                        ...snapshot.snapshot,
+                        contextMessages: [embedded],
+                        messages: [embedded],
+                    },
+                },
+            });
+            await database.execute({
+                args: [eventId, sessionId],
+                sql: "UPDATE sessions SET last_event_id = ? WHERE id = ?",
+            });
+            expect(
+                await queryTestRow<{ bytes: number }>(
+                    database,
+                    "SELECT length(data_json) AS bytes FROM session_events WHERE event_id = ?",
+                    [eventId],
+                ),
+            ).toMatchObject({ bytes: expect.any(Number) });
+            await database.close();
+
+            const restoredStore = await PersistentSessionStore.open(ctx, { databasePath });
+            try {
+                const restored = await restoredStore.get(ctx, sessionId);
+                const event = restored?.events.all().find((candidate) => candidate.id === eventId);
+                expect(event).toBeUndefined();
+                expect(restored?.events.lastEventId()).toBe(eventId);
+            } finally {
+                await restoredStore.close(ctx);
+            }
+
+            const unchanged = openTestDatabase(databasePath);
+            try {
+                expect(
+                    await queryTestRow<{ present: number }>(
+                        unchanged,
+                        "SELECT instr(data_json, 'legacy-conversation-payload') > 0 AS present FROM session_events WHERE event_id = ?",
+                        [eventId],
+                    ),
+                ).toEqual({ present: 1 });
+            } finally {
+                await unchanged.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
+    it("reads a session restore while another WAL connection holds the writer reservation", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        let opened: Awaited<ReturnType<typeof openSessionDatabase>> | undefined;
+        let blocker: Client | undefined;
+        let writer: Awaited<ReturnType<Client["transaction"]>> | undefined;
+        try {
+            const store = await PersistentSessionStore.open(ctx, { databasePath });
+            const session = await store.create(ctx, { cwd: "/tmp/rig-concurrent-reader" });
+            const sessionId = session.id;
+            await store.close(ctx);
+
+            opened = await openSessionDatabase(ctx, databasePath);
+            blocker = openTestDatabase(databasePath);
+            writer = await blocker.transaction("write");
+            await writer.execute("UPDATE projects SET updated_at_ms = updated_at_ms + 1");
+
+            await expect(querySessionRestore(opened.ctx, sessionId)).resolves.toMatchObject({
+                restore: { id: sessionId },
+            });
+            await opened.client.execute("PRAGMA busy_timeout = 10");
+            await expect(
+                inTx(opened.ctx, "rig.sql.test.writer_reservation", async (ctx) => {
+                    await ctx.tx.run(sql`UPDATE projects SET updated_at_ms = updated_at_ms + 1`);
+                }),
+            ).rejects.toThrow(/BEGIN IMMEDIATE/);
+        } finally {
+            await writer?.rollback();
+            await writer?.close();
+            await blocker?.close();
+            await opened?.database.close(opened.ctx);
+            await cleanup();
         }
     });
 

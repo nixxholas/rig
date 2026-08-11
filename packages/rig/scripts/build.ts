@@ -8,7 +8,7 @@ import { build } from "esbuild";
 const execFileAsync = promisify(execFile);
 
 /** The workspace packages Rig bundles from their built output rather than from their sources. */
-const internalPackages = ["rig-execution", "rig-providers"];
+const internalPackages = ["rig-execution"];
 
 /** When a directory tree was last written, or nothing when it does not exist. */
 async function newestModifiedTime(directory: string): Promise<number | undefined> {
@@ -46,6 +46,7 @@ const externalPackages = [
     "@mongodb-js/zstd",
     "@number0/iroh",
     "@pydantic/monty",
+    "@slopus/happy-providers",
     "@slopus/ghostty-wasm",
     "@vscode/ripgrep",
     "bufferutil",

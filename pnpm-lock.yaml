@@ -91,15 +91,15 @@ importers:
       '@earendil-works/pi-tui':
         specifier: ^0.80.3
         version: 0.80.3
+      '@slopus/happy-providers':
+        specifier: workspace:*
+        version: link:../happy-providers
       '@slopus/rig-execution':
         specifier: workspace:*
         version: link:../rig-execution
       '@slopus/rig-gym':
         specifier: workspace:*
         version: link:../gym
-      '@slopus/rig-providers':
-        specifier: workspace:*
-        version: link:../rig-providers
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -131,6 +131,77 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
+
+  packages/happy-providers:
+    dependencies:
+      '@anthropic-ai/bedrock-sdk':
+        specifier: 0.32.0
+        version: 0.32.0(zod@4.4.3)
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: ^0.3.226
+        version: 0.3.226(@anthropic-ai/sdk@0.110.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk':
+        specifier: 0.110.0
+        version: 0.110.0(zod@4.4.3)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@4.4.3)
+      '@sinclair/typebox':
+        specifier: ^0.34.49
+        version: 0.34.49
+      deunicode:
+        specifier: 1.0.7
+        version: 1.0.7
+      openai:
+        specifier: 6.46.0
+        version: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      undici:
+        specifier: ^8.8.0
+        version: 8.8.0
+      wink-porter2-stemmer:
+        specifier: 2.0.1
+        version: 2.0.1
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.10
+        version: 24.13.2
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
+      tsc-alias:
+        specifier: ^1.8.16
+        version: 1.9.1
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
+    optionalDependencies:
+      '@anthropic-ai/claude-agent-sdk-darwin-arm64':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-darwin-x64':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-arm64':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-x64':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-x64-musl':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-win32-arm64':
+        specifier: ^0.3.226
+        version: 0.3.226
+      '@anthropic-ai/claude-agent-sdk-win32-x64':
+        specifier: ^0.3.226
+        version: 0.3.226
 
   packages/happy-worklets:
     dependencies:
@@ -222,6 +293,9 @@ importers:
       '@slopus/ghostty-wasm':
         specifier: 1.3.6
         version: 1.3.6
+      '@slopus/happy-providers':
+        specifier: workspace:*
+        version: link:../happy-providers
       '@slopus/murmur':
         specifier: 0.4.2
         version: 0.4.2
@@ -262,9 +336,6 @@ importers:
       '@slopus/rig-execution':
         specifier: workspace:*
         version: link:../rig-execution
-      '@slopus/rig-providers':
-        specifier: workspace:*
-        version: link:../rig-providers
       '@types/dockerode':
         specifier: ^4.0.1
         version: 4.0.1
@@ -439,9 +510,9 @@ importers:
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49
-      '@slopus/rig-providers':
+      '@slopus/happy-providers':
         specifier: workspace:*
-        version: link:../rig-providers
+        version: link:../happy-providers
     devDependencies:
       '@types/node':
         specifier: ^24.0.10
@@ -455,77 +526,6 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
-
-  packages/rig-providers:
-    dependencies:
-      '@anthropic-ai/bedrock-sdk':
-        specifier: 0.32.0
-        version: 0.32.0(zod@4.4.3)
-      '@anthropic-ai/claude-agent-sdk':
-        specifier: ^0.3.226
-        version: 0.3.226(@anthropic-ai/sdk@0.110.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
-      '@anthropic-ai/sdk':
-        specifier: 0.110.0
-        version: 0.110.0(zod@4.4.3)
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@4.4.3)
-      '@sinclair/typebox':
-        specifier: ^0.34.49
-        version: 0.34.49
-      deunicode:
-        specifier: 1.0.7
-        version: 1.0.7
-      openai:
-        specifier: 6.46.0
-        version: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
-      undici:
-        specifier: ^8.8.0
-        version: 8.8.0
-      wink-porter2-stemmer:
-        specifier: 2.0.1
-        version: 2.0.1
-    devDependencies:
-      '@types/node':
-        specifier: ^24.0.10
-        version: 24.13.2
-      '@types/ws':
-        specifier: 8.18.1
-        version: 8.18.1
-      tsc-alias:
-        specifier: ^1.8.16
-        version: 1.9.1
-      typescript:
-        specifier: ^7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: ^3.2.4
-        version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
-    optionalDependencies:
-      '@anthropic-ai/claude-agent-sdk-darwin-arm64':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-darwin-x64':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-linux-arm64':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-linux-x64':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-linux-x64-musl':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-win32-arm64':
-        specifier: ^0.3.226
-        version: 0.3.226
-      '@anthropic-ai/claude-agent-sdk-win32-x64':
-        specifier: ^0.3.226
-        version: 0.3.226
 
 packages:
 

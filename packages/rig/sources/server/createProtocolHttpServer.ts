@@ -210,7 +210,7 @@ import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
 import { parseGlobalEventCursor } from "../global-event/parseGlobalEventCursor.js";
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
 import { selectRecentSessionEvents } from "../session/selectRecentSessionEvents.js";
-import { SESSION_BOOTSTRAP_TURN_LIMIT, SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
+import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { parseTimelineRequest } from "./parseTimelineRequest.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
@@ -233,7 +233,7 @@ import { readGlobalSecurityMd } from "../config/readGlobalSecurityMd.js";
 import { writeGlobalSecurityMd } from "../config/writeGlobalSecurityMd.js";
 import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderQuota } from "@slopus/happy-providers";
 import {
     environmentSecretRegistrationSchema,
     environmentSecretUpdateSchema,
@@ -6576,9 +6576,9 @@ function writeSseEvent(response: ServerResponse, event: SessionEvent): void {
  * failing the stream.
  */
 function parseTurnLimit(value: string | null): number {
-    if (value === null) return SESSION_BOOTSTRAP_TURN_LIMIT;
+    if (value === null) return SESSION_STREAM_TURN_LIMIT;
     const parsed = Number(value);
-    if (!Number.isInteger(parsed) || parsed < 1) return SESSION_BOOTSTRAP_TURN_LIMIT;
+    if (!Number.isInteger(parsed) || parsed < 1) return SESSION_STREAM_TURN_LIMIT;
     return Math.min(parsed, SESSION_STREAM_TURN_LIMIT);
 }
 

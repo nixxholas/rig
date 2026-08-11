@@ -592,7 +592,33 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         }
 
         if (event.type === "session_updated") {
-            this.#replaceSession({ ...event.data.session, lastEventId: event.id });
+            const current = event.data.session;
+            const loaded = this.#session.snapshot;
+            const contextMessages =
+                event.data.appendedContextMessage === undefined
+                    ? loaded.contextMessages
+                    : appendUniqueMessage(
+                          loaded.contextMessages ?? loaded.messages,
+                          event.data.appendedContextMessage,
+                      );
+            this.#replaceSession({
+                ...current,
+                lastEventId: event.id,
+                snapshot: {
+                    ...current.snapshot,
+                    messages: loaded.messages,
+                    queue: loaded.queue,
+                    tools: loaded.tools,
+                    ...(contextMessages === undefined ? {} : { contextMessages }),
+                    ...(loaded.instructions === undefined
+                        ? {}
+                        : { instructions: loaded.instructions }),
+                    ...(loaded.lastRunId === undefined ? {} : { lastRunId: loaded.lastRunId }),
+                    ...(current.systemPrompt === undefined
+                        ? {}
+                        : { systemPrompt: current.systemPrompt }),
+                },
+            });
             return;
         }
 
@@ -747,13 +773,19 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
 
         if (event.type === "session_configuration_changed") {
             this.#modelId = event.data.modelId;
-            this.#providerId = event.data.snapshot.providerId;
+            this.#providerId = event.data.providerId;
             this.#models =
                 this.#modelCatalog?.providers.find(
                     (provider) => provider.providerId === this.#providerId,
                 )?.models ?? this.#models;
+            const { effort: _effort, serviceTier: _serviceTier, ...session } = this.#session;
+            const {
+                effort: _snapshotEffort,
+                serviceTier: _snapshotServiceTier,
+                ...snapshot
+            } = this.#session.snapshot;
             this.#session = {
-                ...this.#session,
+                ...session,
                 ...(event.data.effort !== undefined ? { effort: event.data.effort } : {}),
                 // Only an actual model change releases the lock; a reasoning or fast mode change
                 // leaves whatever the user pinned in place.
@@ -762,11 +794,17 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                     : this.#session.modelLocked,
                 modelId: event.data.modelId,
                 models: this.#models,
-                providerId: event.data.snapshot.providerId,
+                providerId: event.data.providerId,
             };
-            // The snapshot carries the authoritative fast mode, so applying it settles that field
-            // and reapplies whatever local intent the user is still waiting on.
-            this.#applyAuthoritativeSnapshot(event.data.snapshot);
+            // Configuration events carry only configuration. Keep the already loaded bounded
+            // transcript instead of duplicating it into every durable model or effort change.
+            this.#applyAuthoritativeSnapshot({
+                ...snapshot,
+                ...(event.data.effort === undefined ? {} : { effort: event.data.effort }),
+                modelId: event.data.modelId,
+                providerId: event.data.providerId,
+                ...(event.data.serviceTier === null ? {} : { serviceTier: event.data.serviceTier }),
+            });
             return;
         }
 

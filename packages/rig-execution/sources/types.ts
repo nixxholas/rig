@@ -11,7 +11,7 @@ import type {
     SessionAssistantMessage,
     SessionProviderError,
     SessionToolResultMessage,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 export type ProfileProviderType = "bedrock" | "claude" | "codex" | "grok";
 export interface ProfilePromptContext {

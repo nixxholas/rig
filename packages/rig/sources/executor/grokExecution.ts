@@ -1,4 +1,4 @@
-import { GrokApiKeyCredential, GrokProvider, GrokSessionCredential } from "@slopus/rig-providers";
+import { GrokApiKeyCredential, GrokProvider, GrokSessionCredential } from "@slopus/happy-providers";
 import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
 import type { ConfigGrokProvider } from "../config/types.js";

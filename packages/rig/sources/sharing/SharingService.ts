@@ -74,7 +74,7 @@ interface SharingFolderService {
         contacts: readonly string[],
     ): Promise<FolderShareStatus>;
     drain(ctx: Context): Promise<void>;
-    foldersChanged(ctx: Context): void;
+    foldersChanged(ctx: Context): Promise<void>;
     recover(ctx: Context): Promise<void>;
     statuses(ctx: Context): Promise<FolderShareStatus[]>;
 }
@@ -134,7 +134,7 @@ export interface SharingServiceContract {
         folderId: string,
         contacts: readonly string[],
     ): Promise<FolderShareStatus>;
-    foldersChanged(ctx: Context): void;
+    foldersChanged(ctx: Context): Promise<void>;
     rejectContact(ctx: Context, requestId: string): Promise<void>;
     removeContact(ctx: Context, identity: string): Promise<void>;
     requestContact(
@@ -234,46 +234,49 @@ export class SharingService implements SharingServiceContract {
         if (this.#closing) throw new Error("Sharing is closing.");
         if (this.#started) return;
         this.#started = true;
-        this.#sync = withWorkerContext("sharing-synchronize", (ctx) => this.#synchronize(ctx));
+        this.#sync = this.#synchronize();
     }
 
-    async #synchronize(ctx: Context): Promise<void> {
+    async #synchronize(): Promise<void> {
         try {
-            await this.#folderSharing?.recover(ctx);
+            await withWorkerContext("sharing-recover", async (ctx) => {
+                await this.#folderSharing?.recover(ctx);
+            });
         } catch (error: unknown) {
             if (this.#abort.signal.aborted) return;
-            this.#setConnection(ctx, "disconnected");
+            await this.#setConnectionFromWorker("disconnected");
             this.#onError(error);
         }
         let retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
         while (!this.#abort.signal.aborted) {
             try {
-                await this.#client.synchronize({ signal: this.#abort.signal });
+                await withWorkerContext("sharing-synchronize", async () => {
+                    await this.#client.synchronize({ signal: this.#abort.signal });
+                });
                 await this.#client.sync({
                     abort: this.#abort.signal,
-                    onConnected: () => {
-                        retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
-                        this.#setConnection(ctx, "connected");
-                        this.#folderSharing?.foldersChanged(ctx);
-                    },
+                    onConnected: () =>
+                        withWorkerContext("sharing-connected", async (ctx) => {
+                            retryMilliseconds = SYNC_RETRY_INITIAL_MILLISECONDS;
+                            this.#setConnection(ctx, "connected");
+                            await this.#folderSharing?.foldersChanged(ctx);
+                        }),
                     onContactAdded: () => this.#scheduleChanged(),
                     onContactRemoved: () => this.#scheduleChanged(),
                     onContactRequested: () => this.#scheduleChanged(),
-                    onDisconnected: () => {
-                        this.#setConnection(ctx, "disconnected");
-                    },
+                    onDisconnected: () => this.#setConnectionFromWorker("disconnected"),
                     onUpdates: () => undefined,
                 });
                 if (this.#abort.signal.aborted) return;
                 throw new Error("Murmur synchronization stopped unexpectedly.");
             } catch (error: unknown) {
                 if (this.#abort.signal.aborted) return;
-                this.#setConnection(ctx, "disconnected");
+                await this.#setConnectionFromWorker("disconnected");
                 this.#onError(error);
             }
             await this.#waitForSyncRetry(retryMilliseconds);
             retryMilliseconds = Math.min(SYNC_RETRY_MAXIMUM_MILLISECONDS, retryMilliseconds * 2);
-            if (!this.#abort.signal.aborted) this.#setConnection(ctx, "connecting");
+            if (!this.#abort.signal.aborted) await this.#setConnectionFromWorker("connecting");
         }
     }
 
@@ -339,8 +342,8 @@ export class SharingService implements SharingServiceContract {
         return this.#run(ctx, (ctx) => folderSharing.create(ctx, folderId, contacts));
     }
 
-    foldersChanged(ctx: Context): void {
-        void this.#folderSharing?.foldersChanged(ctx);
+    async foldersChanged(ctx: Context): Promise<void> {
+        await this.#folderSharing?.foldersChanged(ctx);
     }
 
     async requestContact(
@@ -489,6 +492,12 @@ export class SharingService implements SharingServiceContract {
         if (this.#connection === connection) return;
         this.#connection = connection;
         this.#changed(ctx);
+    }
+
+    async #setConnectionFromWorker(connection: SharingConnection): Promise<void> {
+        await withWorkerContext(`sharing-${connection}`, (ctx) => {
+            this.#setConnection(ctx, connection);
+        });
     }
 
     #scheduleChanged(): void {

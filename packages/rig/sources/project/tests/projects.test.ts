@@ -1026,6 +1026,24 @@ describe("projects", () => {
             },
             state: "succeeded",
         });
+        const transferEvent = transfer.session.events
+            .all()
+            .findLast(
+                (event) =>
+                    event.type === "session_updated" &&
+                    event.data.appendedContextMessage !== undefined,
+            );
+        expect(transferEvent?.type).toBe("session_updated");
+        if (transferEvent?.type !== "session_updated") {
+            throw new Error("Expected the workspace transfer state event.");
+        }
+        expect(transferEvent.data.session.snapshot.messages).toEqual([]);
+        expect(transferEvent.data.session.snapshot.contextMessages).toBeUndefined();
+        expect(transferEvent.data.appendedContextMessage).toMatchObject({
+            internal: true,
+            role: "system",
+        });
+        expect(JSON.stringify(transferEvent).length).toBeLessThan(32 * 1_024);
         await expect(readFile(join(transfer.target.path, "committed.txt"), "utf8")).resolves.toBe(
             "committed\n",
         );

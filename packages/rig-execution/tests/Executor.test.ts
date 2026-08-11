@@ -6,7 +6,7 @@ import {
     type SessionEvent,
     type SessionOptions,
     type SessionRunRequest,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 

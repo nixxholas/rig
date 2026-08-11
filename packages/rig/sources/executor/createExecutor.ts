@@ -1,6 +1,6 @@
 import { release } from "node:os";
 
-import type { ProviderUsage } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/happy-providers";
 import {
     Executor,
     modelOpenaiGpt56Luna,

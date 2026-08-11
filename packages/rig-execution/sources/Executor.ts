@@ -8,7 +8,7 @@ import {
     type SessionContext,
     type SessionMessage,
     type SessionModelConfiguration,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 import type { ExecutorEvent } from "@/ExecutorEvent.js";
 import type {
@@ -419,7 +419,7 @@ export class Executor {
         context: SessionContext,
         contextInstructions: string | undefined,
         systemPrompt: string | undefined,
-        tools: readonly import("@slopus/rig-providers").SessionTool[],
+        tools: readonly import("@slopus/happy-providers").SessionTool[],
     ) {
         if (this.forceClosed) throw new Error("The executor is closed.");
         const clientTools = filterProviderCompatibleSessionTools(tools);

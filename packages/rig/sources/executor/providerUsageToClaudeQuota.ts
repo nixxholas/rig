@@ -3,7 +3,7 @@ import {
     type ProviderQuota,
     type ProviderQuotaWindow,
     type ProviderUsage,
-} from "@slopus/rig-providers";
+} from "@slopus/happy-providers";
 
 /**
  * Narrows a full Claude usage reading to the two windows a quota display

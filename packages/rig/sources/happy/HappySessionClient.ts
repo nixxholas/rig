@@ -160,22 +160,35 @@ export class HappySessionClient {
         this.kick(ctx);
     }
 
-    kick(ctx: Context): void {
+    kick(_ctx: Context): void {
+        this.#startAutonomousSync();
+    }
+
+    start(_ctx: Context): void {
+        if (this.#closed || this.#started) return;
+        this.#started = true;
+        this.#startAutonomousSync();
+    }
+
+    #kick(): void {
         if (this.#closed) return;
         if (this.#syncPromise !== undefined) {
             this.#needsAnotherSync = true;
             return;
         }
         this.#clearRetry();
-        this.#syncPromise = this.#runSyncLoop(ctx).finally(() => {
+        this.#syncPromise = this.#runSyncLoop().finally(() => {
             this.#syncPromise = undefined;
         });
     }
 
-    start(ctx: Context): void {
-        if (this.#closed || this.#started) return;
-        this.#started = true;
-        this.kick(ctx);
+    #startAutonomousSync(): void {
+        if (this.#closed) return;
+        if (this.#syncPromise !== undefined) {
+            this.#needsAnotherSync = true;
+            return;
+        }
+        void this.#kickAndWait().catch(rethrowDatabaseFailure);
     }
 
     async waitForRemoteSession(
@@ -198,23 +211,31 @@ export class HappySessionClient {
         });
     }
 
-    async #runSyncLoop(ctx: Context): Promise<void> {
+    async #runSyncLoop(): Promise<void> {
         do {
             this.#needsAnotherSync = false;
-            try {
-                const state = await this.#ensureRemoteSession(ctx);
-                if (state === undefined || this.#closed) return;
-                this.#ensureSocket(state.remoteSessionId!);
-                await this.#flushOutbox(ctx, state);
-                if (!this.#archiving) await this.#fetchIncoming(ctx, state);
-                await this.#syncMetadata(ctx, state);
-                this.#sendKeepAlive(state.remoteSessionId!);
-                await this.#syncAgentState(ctx, state);
-            } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
-                this.#scheduleRetry();
-                return;
-            }
+            const completed = await withWorkerContext(
+                "happy-session-sync",
+                async (ctx) => {
+                    try {
+                        const state = await this.#ensureRemoteSession(ctx);
+                        if (state === undefined || this.#closed) return true;
+                        this.#ensureSocket(state.remoteSessionId!);
+                        await this.#flushOutbox(ctx, state);
+                        if (!this.#archiving) await this.#fetchIncoming(ctx, state);
+                        await this.#syncMetadata(ctx, state);
+                        this.#sendKeepAlive(state.remoteSessionId!);
+                        await this.#syncAgentState(ctx, state);
+                        return true;
+                    } catch (error) {
+                        if (isDatabaseFailure(error)) throw error;
+                        this.#scheduleRetry();
+                        return false;
+                    }
+                },
+                { sessionId: this.#session.id },
+            );
+            if (!completed) return;
         } while (this.#needsAnotherSync && !this.#closed);
     }
 
@@ -385,7 +406,11 @@ export class HappySessionClient {
             if (!this.#pendingAttachments.has(message.id)) {
                 this.#pendingAttachments.set(
                     message.id,
-                    this.#downloadAttachment(ctx, state, incoming).catch(() => undefined),
+                    withWorkerContext(
+                        "happy-attachment-download",
+                        (downloadCtx) => this.#downloadAttachment(downloadCtx, state, incoming),
+                        { messageId: message.id, sessionId: this.#session.id },
+                    ).catch(() => undefined),
                 );
             }
             return false;
@@ -815,8 +840,7 @@ export class HappySessionClient {
 
     async #finishArchive(ctx: Context): Promise<void> {
         try {
-            this.kick(ctx);
-            await this.#syncPromise;
+            await this.#kickAndWait();
             await this.#sendSessionEnd(ctx);
             const remoteSessionId = (await this.#repository.getSession(ctx, this.#session.id))
                 ?.remoteSessionId;
@@ -863,8 +887,8 @@ export class HappySessionClient {
         return response;
     }
 
-    async #kickAndWait(ctx: Context): Promise<void> {
-        this.kick(ctx);
+    async #kickAndWait(_ctx?: Context): Promise<void> {
+        this.#kick();
         await this.#syncPromise;
     }
 
