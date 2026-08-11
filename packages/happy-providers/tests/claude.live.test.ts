@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { createServer } from "node:http";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
@@ -92,7 +94,7 @@ describe.skipIf(!live)("Claude live session", () => {
             });
             try {
                 await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: {
                             instructions: "",
                             messages: [
@@ -184,7 +186,7 @@ describe.skipIf(!live)("Claude live session", () => {
             });
             try {
                 const first = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: {
                             instructions,
                             messages: firstMessages,
@@ -194,7 +196,7 @@ describe.skipIf(!live)("Claude live session", () => {
                 expect(textFromSessionEvents(first).trim()).toBe("FIRST RIG_CLAUDE_SKILL");
 
                 const switched = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         model: "sonnet[1m]",
                         context: {
                             instructions,
@@ -204,7 +206,7 @@ describe.skipIf(!live)("Claude live session", () => {
                 );
                 expect(textFromSessionEvents(switched).trim()).toBe("SWITCHED");
 
-                const compacted = await session.compact({
+                const compacted = await session.compact(testContext, {
                     instructions: "Preserve the exact markers RIG_CLAUDE_SKILL and SWITCHED.",
                     context: {
                         instructions,
@@ -216,7 +218,7 @@ describe.skipIf(!live)("Claude live session", () => {
                     expect(compacted.summary).toContain("RIG_CLAUDE_SKILL");
                     expect(compacted.summary).toContain("SWITCHED");
                     const continued = await collectSessionEvents(
-                        session.run({
+                        session.run(testContext, {
                             context: {
                                 instructions,
                                 messages: [
@@ -253,7 +255,7 @@ describe.skipIf(!live)("Claude live session", () => {
             model: "sonnet[1m]",
         });
         try {
-            const compacted = await session.compact({
+            const compacted = await session.compact(testContext, {
                 context: {
                     instructions: "Preserve conversation facts accurately.",
                     messages: [

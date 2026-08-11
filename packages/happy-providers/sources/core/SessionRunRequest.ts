@@ -20,7 +20,6 @@ export interface SessionStructuredOutput {
 export interface SessionRunRequest {
     /** Complete rebuilt conversation context for this inference turn. */
     context: SessionContext;
-    abort?: AbortSignal;
     model?: string;
     effort?: SessionReasoningEffort;
     serviceTier?: SessionServiceTier;

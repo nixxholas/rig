@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
@@ -44,7 +46,7 @@ describeLive("CodexProvider live", () => {
             });
             try {
                 const events = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: {
                             instructions: "",
                             messages: [
@@ -104,7 +106,7 @@ describeLive("CodexProvider live", () => {
             });
             try {
                 const events = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: {
                             instructions: "",
                             messages: [
@@ -166,7 +168,7 @@ describeLive("CodexProvider live", () => {
                     },
                 ];
                 const first = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: { instructions: "", messages: firstMessages },
                         effort: "low",
                         model: "gpt-5.6-sol",
@@ -184,13 +186,13 @@ describeLive("CodexProvider live", () => {
                     },
                 ];
                 const second = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: { instructions: "", messages: secondMessages },
                         effort: "low",
                         model: "gpt-5.6-sol",
                     }),
                 );
-                const compacted = await session.compact({
+                const compacted = await session.compact(testContext, {
                     context: {
                         instructions: "You are a concise coding assistant.",
                         messages: [
@@ -210,7 +212,7 @@ describeLive("CodexProvider live", () => {
                 expect(compacted.context.messages.at(-1)).toEqual(compacted.compaction);
 
                 const switched = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: {
                             instructions: "",
                             messages: [

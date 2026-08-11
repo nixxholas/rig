@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -187,7 +189,7 @@ describe("Claude provider golden", () => {
             expect(switched.text).toBe(golden.turns[3].text);
 
             const compactInstructions = golden.turns[4].prompt.replace(/^\/compact\s*/u, "");
-            const compacted = await session.compact({
+            const compacted = await session.compact(testContext, {
                 context: {
                     instructions: createClaudeTestInstructions(golden.scenario.switchedModel, {
                         cwd,
@@ -281,7 +283,7 @@ async function run(
     message: SessionAssistantMessage;
 }> {
     const events: SessionEvent[] = [];
-    for await (const event of session.run({
+    for await (const event of session.run(testContext, {
         context: { instructions, messages },
         ...(model === undefined ? {} : { model }),
     })) {

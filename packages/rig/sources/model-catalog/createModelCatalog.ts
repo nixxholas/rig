@@ -58,6 +58,7 @@ export function createModelCatalog(
         allowEmptyModels: true,
         env,
         providers: executorProviders,
+        runtimeContext: ctx,
     });
     const definitionsById = new Map(
         (executorResult.executor?.providers ?? []).map((provider) => [provider.id, provider]),

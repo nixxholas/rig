@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -77,7 +79,7 @@ describe("Codex ChatGPT unauthorized recovery", () => {
                 instructions: "instructions",
             });
             const events = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

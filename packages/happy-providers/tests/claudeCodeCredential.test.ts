@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,7 +90,7 @@ async function captureChildEnvironment(
     });
 
     try {
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

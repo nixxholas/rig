@@ -1,3 +1,5 @@
+import { testContext, testContextWith } from "../testContext.js";
+
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { Type } from "@sinclair/typebox";
@@ -53,7 +55,7 @@ describe("Grok compaction behavior", () => {
             },
         });
 
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             model: "grok-switched",
             context: {
                 instructions: "",
@@ -71,7 +73,7 @@ describe("Grok compaction behavior", () => {
         })) {
             // Drain the response.
         }
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: "Base prompt.",
                 messages: [
@@ -118,7 +120,7 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         const runEvents = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -131,7 +133,7 @@ describe("Grok compaction behavior", () => {
         })) {
             runEvents.push(event);
         }
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -170,8 +172,7 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
         const controller = new AbortController();
         const events = [];
-        for await (const event of session.run({
-            abort: controller.signal,
+        for await (const event of session.run(testContextWith(controller.signal), {
             context: {
                 instructions: "",
                 messages: [
@@ -207,7 +208,7 @@ describe("Grok compaction behavior", () => {
         });
         const session = await createSession(endpoint);
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -239,7 +240,7 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         await expect(
-            session.compact({
+            session.compact(testContext, {
                 context: {
                     instructions: "System prompt.",
                     messages: [original],
@@ -250,7 +251,7 @@ describe("Grok compaction behavior", () => {
             kind: "invalid_summary",
             message: "Grok returned three compaction summaries shorter than 500 characters.",
         });
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -303,7 +304,7 @@ describe("Grok compaction behavior", () => {
         });
         const session = await createSession(endpoint);
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -335,7 +336,7 @@ describe("Grok compaction behavior", () => {
         });
         const session = await createSession(endpoint);
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -368,7 +369,7 @@ describe("Grok compaction behavior", () => {
         });
         const session = await createSession(endpoint);
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -393,7 +394,7 @@ describe("Grok compaction behavior", () => {
             completeText(response, `<summary>${"valid summary ".repeat(50)}</summary>`);
         });
         const session = await createSession(endpoint);
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             instructions: "Preserve the database migration decision.",
             context: {
                 instructions: "System prompt.",
@@ -448,7 +449,7 @@ describe("Grok compaction behavior", () => {
         });
         const session = await createSession(endpoint);
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -490,12 +491,11 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
         const controller = new AbortController();
 
-        const compaction = session.compact({
+        const compaction = session.compact(testContextWith(controller.signal), {
             context: {
                 instructions: "System prompt.",
                 messages: [original],
             },
-            signal: controller.signal,
         });
         await started;
         controller.abort();
@@ -507,7 +507,7 @@ describe("Grok compaction behavior", () => {
                 messages: [original],
             },
         });
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -598,17 +598,17 @@ describe("Grok compaction behavior", () => {
             content: [{ type: "text" as const, text: "README contents" }],
         };
 
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: { instructions: "", messages: [firstUser] },
         })) {
             // Drain.
         }
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: { instructions: "", messages: [firstUser, toolAssistant, toolResult] },
         })) {
             // Drain.
         }
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

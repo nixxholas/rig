@@ -1,3 +1,5 @@
+import { testContext, testContextWith } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import { ResponsesSession } from "@/protocol/responses/ResponsesSession.js";
@@ -11,7 +13,7 @@ describe("SessionCompaction", () => {
             instructions: "System prompt.",
         });
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "System prompt.",
                 messages: [
@@ -49,8 +51,7 @@ describe("SessionCompaction", () => {
         controller.abort();
 
         await expect(
-            session.compact({
-                signal: controller.signal,
+            session.compact(testContextWith(controller.signal), {
                 context: {
                     instructions: context.instructions,
                     messages: context.messages,

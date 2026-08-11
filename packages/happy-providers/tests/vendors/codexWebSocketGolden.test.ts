@@ -1,3 +1,5 @@
+import { testContext, testContextWith } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 
 import { WebSocketError } from "openai/resources/responses/internal-base";
@@ -562,7 +564,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
                 tools: codexCliTools(model),
             });
 
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: withCodexSkills(
@@ -672,7 +674,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
 
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -686,7 +688,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -728,12 +730,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
             content: [{ type: "text" as const, text: "first" }],
         };
         await drain(
-            session.run({ context: { instructions: "", messages: [first] }, effort: "low" }),
+            session.run(testContext, {
+                context: { instructions: "", messages: [first] },
+                effort: "low",
+            }),
         );
         websocket.missingPreviousResponseFailures = 1;
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -780,7 +785,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.closeBeforeSendOnce = true;
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -818,7 +823,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.internalErrorFailures = 1;
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -863,7 +868,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             content: [{ type: "text" as const, text: "first" }],
         };
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
@@ -871,7 +876,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         websocket.instances[0]!.closeWithoutEvent();
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -917,7 +922,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             content: [{ type: "text" as const, text: "first" }],
         };
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
@@ -926,7 +931,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.instances[0]!.closeWithoutEvent();
         websocket.closedConnectionsOnCreate = 1;
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -977,7 +982,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             content: [{ type: "text" as const, text: "first" }],
         };
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
@@ -1001,7 +1006,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         expect(() => websocket.instances[0]!.emitError(connectionLimit)).not.toThrow();
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1037,7 +1042,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             content: [{ type: "text" as const, text: "first" }],
         };
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
@@ -1045,7 +1050,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         now.mockReturnValue(startedAt + 56 * 60 * 1000);
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1086,7 +1091,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
 
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1100,7 +1105,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1140,7 +1145,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
 
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1155,7 +1160,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1207,7 +1212,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1222,7 +1227,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1244,7 +1249,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
                 model: "gpt-5.6-sol",
             }),
         );
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: prompt.instructions,
                 messages: [
@@ -1270,7 +1275,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         expect(compacted.status).toBe("completed");
         if (compacted.status !== "completed") expect.fail("Expected completed compaction.");
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -1346,7 +1351,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1395,7 +1400,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1444,7 +1449,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1458,7 +1463,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1504,7 +1509,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1539,7 +1544,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             content: [{ type: "text" as const, text: "use exec" }],
         };
         const first = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: { instructions: "", messages: [user] },
             effort: "low",
         })) {
@@ -1560,7 +1565,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         expect(first.at(-1)).toMatchObject({ type: "done", state: "tool_call" });
 
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1618,7 +1623,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
 
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1632,7 +1637,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1667,7 +1672,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1681,7 +1686,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1727,7 +1732,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const restored = `restored-${"x".repeat(980_000)}`;
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1776,10 +1781,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             vendor: { provider: "codex" as const, type: "custom_tool_call" as const },
         };
         await drain(
-            session.run({ context: { instructions: "", messages: [user] }, effort: "low" }),
+            session.run(testContext, {
+                context: { instructions: "", messages: [user] },
+                effort: "low",
+            }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1833,7 +1841,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1848,7 +1856,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         );
         websocket.beforeOutputFailures = 1;
 
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: prompt.instructions,
                 messages: [
@@ -1892,7 +1900,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
-        const compacting = session.compact({
+        const compacting = session.compact(testContextWith(controller.signal), {
             context: {
                 instructions: prompt.instructions,
                 messages: [
@@ -1902,7 +1910,6 @@ describe("Codex CLI mode WebSocket goldens", () => {
                     },
                 ],
             },
-            signal: controller.signal,
         });
         setTimeout(() => controller.abort(), 10);
 
@@ -1944,7 +1951,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: sol.instructions,
                     messages: [
@@ -1962,7 +1969,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: legacy.instructions,
                     messages: [
@@ -2021,7 +2028,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: prompt.instructions,
                 messages: [
@@ -2056,7 +2063,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2073,7 +2080,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         // The caller has since finished that turn's tools and owns history the session never saw.
         // Compacting the session's own lagging copy would summarize a conversation whose tool call
         // never got an answer.
-        await session.compact({
+        await session.compact(testContext, {
             context: {
                 instructions: prompt.instructions,
                 messages: [
@@ -2125,12 +2132,12 @@ describe("Codex CLI mode WebSocket goldens", () => {
             },
         ];
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: { instructions: "", messages: originalHistory },
                 effort: "low",
             }),
         );
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: prompt.instructions,
                 messages: originalHistory,
@@ -2140,7 +2147,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         if (compacted.status !== "completed") expect.fail("Expected completed compaction.");
 
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2177,7 +2184,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
 
         // The caller's history is authoritative even when compaction reorders it.
-        await session.compact({
+        await session.compact(testContext, {
             context: {
                 instructions: prompt.instructions,
                 messages: [
@@ -2212,7 +2219,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
-        await session.compact({
+        await session.compact(testContext, {
             context: withCodexSkills(
                 {
                     instructions: prompt.instructions,
@@ -2254,7 +2261,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2290,7 +2297,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2304,7 +2311,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2338,8 +2345,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const controller = new AbortController();
         const firstEvents = [];
-        for await (const event of session.run({
-            abort: controller.signal,
+        for await (const event of session.run(testContextWith(controller.signal), {
             context: {
                 instructions: "",
                 messages: [
@@ -2355,7 +2361,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             if (event.type === "text_delta") controller.abort();
         }
         await drain(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2389,8 +2395,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
-        for await (const event of session.run({
-            abort: controller.signal,
+        for await (const event of session.run(testContextWith(controller.signal), {
             context: {
                 instructions: "",
                 messages: [
@@ -2407,7 +2412,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         }
 
         const recoveryEvents = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2436,8 +2441,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const controller = new AbortController();
         const aborted = session
-            .run({
-                abort: controller.signal,
+            .run(testContextWith(controller.signal), {
                 context: {
                     instructions: "",
                     messages: [
@@ -2458,7 +2462,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         await aborted.return?.();
 
         const recoveryEvents = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2486,7 +2490,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2515,7 +2519,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2545,7 +2549,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -2577,8 +2581,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
-        for await (const event of session.run({
-            abort: controller.signal,
+        for await (const event of session.run(testContextWith(controller.signal), {
             context: {
                 instructions: "",
                 messages: [

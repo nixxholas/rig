@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
@@ -138,7 +140,7 @@ describe("CodexProvider credential behavior", () => {
                     userAgent: "rig-test",
                 });
                 const events = [];
-                for await (const event of session.run({
+                for await (const event of session.run(testContext, {
                     context: {
                         instructions: codex_coding_agent_instructions,
                         messages: [
@@ -222,7 +224,7 @@ describe("CodexProvider credential behavior", () => {
                 userAgent: "rig-test",
             });
             const events = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -305,7 +307,7 @@ describe("CodexProvider credential behavior", () => {
                 userAgent: "rig-test",
             });
             const events = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -380,7 +382,7 @@ describe("CodexProvider credential behavior", () => {
                 userAgent: "rig-test",
             });
             const events = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -513,7 +515,7 @@ describe("CodexProvider credential behavior", () => {
                         },
                     ],
                 });
-                for await (const event of session.run({
+                for await (const event of session.run(testContext, {
                     context: {
                         instructions: codex_coding_agent_instructions,
                         messages: withCodexSkills(
@@ -603,7 +605,7 @@ describe("CodexProvider credential behavior", () => {
                 instructions: "instructions",
             });
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -616,7 +618,7 @@ describe("CodexProvider credential behavior", () => {
                 }),
             );
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -636,7 +638,7 @@ describe("CodexProvider credential behavior", () => {
                     },
                 }),
             );
-            const compacted = await session.compact({
+            const compacted = await session.compact(testContext, {
                 context: {
                     instructions: "",
                     messages: [

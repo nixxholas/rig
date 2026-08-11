@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 
@@ -169,7 +171,7 @@ describe("Grok CLI compaction golden trace", () => {
                 instructions: context.instructions,
                 tools: grok_4_5_tools,
             });
-            const result = await session.compact({
+            const result = await session.compact(testContext, {
                 context: {
                     instructions: context.instructions,
                     messages: context.messages,
@@ -202,7 +204,7 @@ describe("Grok CLI compaction golden trace", () => {
             );
             expect(messageContentText(reminder.content)).toContain("<system-reminder>");
 
-            for await (const _event of session.run({
+            for await (const _event of session.run(testContext, {
                 context: {
                     instructions: result.context.instructions,
                     messages: [

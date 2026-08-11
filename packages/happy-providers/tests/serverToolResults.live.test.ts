@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import type { SessionEvent } from "@/core/SessionEvent.js";
@@ -68,7 +70,7 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
                 tools: grok_server_tools.filter((tool) => tool.name === "web_search"),
             });
             const events = await collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -153,7 +155,7 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
             let events: SessionEvent[];
             try {
                 events = await collectSessionEvents(
-                    session.run({
+                    session.run(testContext, {
                         context: {
                             instructions: "",
                             messages: [
@@ -224,7 +226,7 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
                 tools: [{ name: "web_search", server: { type: "web_search" } }],
             });
             const events = await collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [

@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 import { Type } from "@sinclair/typebox";
 
@@ -31,7 +33,7 @@ describeLive("GrokProvider live", () => {
             tools: [],
         });
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -71,7 +73,7 @@ describeLive("GrokProvider live", () => {
             tools: [],
         });
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -122,7 +124,10 @@ describeLive("GrokProvider live", () => {
             ],
         };
         const first = await collectSessionEvents(
-            session.run({ context: { instructions: "", messages: [user] }, effort: "low" }),
+            session.run(testContext, {
+                context: { instructions: "", messages: [user] },
+                effort: "low",
+            }),
         );
         expect(first.at(-1)).toMatchObject({ type: "done", state: "tool_call" });
         const assistant = assistantMessageFromEvents(first);
@@ -137,7 +142,7 @@ describeLive("GrokProvider live", () => {
         ).toBe(true);
 
         const second = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -189,7 +194,7 @@ describeLive("GrokProvider live", () => {
             },
         ];
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "You are a concise coding assistant.",
                     messages,
@@ -197,7 +202,7 @@ describeLive("GrokProvider live", () => {
                 effort: "low",
             }),
         );
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: "You are a concise coding assistant.",
                 messages,
@@ -238,7 +243,7 @@ describeLive("GrokProvider live", () => {
             tools: grok_server_tools,
         });
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

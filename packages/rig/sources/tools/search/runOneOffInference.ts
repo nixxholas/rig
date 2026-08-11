@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { createId } from "@paralleldrive/cuid2";
 import type { BaseProvider, SessionEvent, SessionTool } from "@slopus/happy-providers";
+import { withLifetime, type Context } from "@steve.kite/stdlib";
 
 import type { OneOffInferenceRoute } from "./OneOffInferenceRoute.js";
 
@@ -29,15 +30,18 @@ export interface OneOffInferenceResult {
  * hands the model a real error it can act on, and it can simply search again if the failure was a
  * passing one.
  */
-export async function runOneOffInference(options: {
-    instructions: string;
-    onEvent?: (event: SessionEvent) => void;
-    prompt: string;
-    route: OneOffInferenceRoute;
-    signal?: AbortSignal;
-    timeoutMs?: number;
-    tools?: readonly SessionTool[];
-}): Promise<OneOffInferenceResult> {
+export async function runOneOffInference(
+    ctx: Context,
+    options: {
+        instructions: string;
+        onEvent?: (event: SessionEvent) => void;
+        prompt: string;
+        route: OneOffInferenceRoute;
+        signal?: AbortSignal;
+        timeoutMs?: number;
+        tools?: readonly SessionTool[];
+    },
+): Promise<OneOffInferenceResult> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_ONE_OFF_INFERENCE_TIMEOUT_MS;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
         throw new Error("One-off inference timeout must be a positive number of milliseconds.");
@@ -72,8 +76,7 @@ export async function runOneOffInference(options: {
     let text = "";
     try {
         const consume = async (): Promise<OneOffInferenceResult> => {
-            for await (const event of session.run({
-                abort: controller.signal,
+            for await (const event of session.run(withLifetime(ctx, controller.signal), {
                 context: {
                     instructions: options.instructions,
                     messages: [

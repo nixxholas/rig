@@ -22,7 +22,8 @@
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.49",
-        "@slopus/happy-providers": "0.0.4"
+        "@slopus/happy-providers": "workspace:*",
+        "@steve.kite/stdlib": "0.0.6"
     },
     "devDependencies": {
         "@types/node": "^24.0.10",

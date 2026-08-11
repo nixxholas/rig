@@ -12,7 +12,6 @@ export interface SessionCompactionOptions {
     readonly instructions?: string;
     /** Complete context to compact, including its root instructions and messages. */
     readonly context: SessionContext;
-    readonly signal?: AbortSignal;
 }
 
 export interface CompletedSessionCompaction {

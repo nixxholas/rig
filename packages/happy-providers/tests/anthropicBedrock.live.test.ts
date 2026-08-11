@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import { AnthropicBedrockProvider } from "@/vendors/bedrock/AnthropicBedrockProvider.js";
@@ -26,7 +28,7 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
 
         try {
             const events = await collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     effort: "low",
                     context: {
                         instructions: "",
@@ -68,7 +70,7 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
         });
 
         try {
-            const compaction = await session.compact({
+            const compaction = await session.compact(testContext, {
                 context: {
                     instructions: "You are a helpful assistant.",
                     messages: [
@@ -111,7 +113,7 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
             }
 
             const events = await collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     effort: "low",
                     context: {
                         instructions: "",

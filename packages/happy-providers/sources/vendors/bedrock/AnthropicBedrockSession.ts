@@ -33,6 +33,7 @@ import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
 import { requestAnthropicBedrockCompaction } from "@/vendors/bedrock/impl/requestAnthropicBedrockCompaction.js";
 import { resolveAnthropicBedrockModelId } from "@/vendors/bedrock/impl/resolveAnthropicBedrockModelId.js";
 import { resolveClaudeTools } from "@/vendors/claude/impl/resolveClaudeTools.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export type AnthropicBedrockClient = CreatedAnthropicBedrockClient;
 
@@ -94,17 +95,18 @@ export class AnthropicBedrockSession extends BaseSession {
         this.context = { instructions: options.instructions, messages: [] };
     }
 
-    run(request: SessionRunRequest): SessionStream {
-        if (request.abort?.aborted) return emptyStream();
-        return this.streamRun(request);
+    run(ctx: Context, request: SessionRunRequest): SessionStream {
+        if (ctx.lifetime?.aborted) return emptyStream();
+        return this.streamRun(ctx, request);
     }
 
-    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
+    async compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
         const original: SessionContext = {
             instructions: options.context.instructions,
             messages: [...options.context.messages],
         };
-        if (options.signal?.aborted) return { status: "cancelled", context: original };
+        const signal = ctx.lifetime;
+        if (signal?.aborted) return { status: "cancelled", context: original };
         const model = options.model ?? this.activeModel ?? this.model;
         if (model === undefined) {
             throw new Error("A model is required for Anthropic Bedrock compaction.");
@@ -121,9 +123,9 @@ export class AnthropicBedrockSession extends BaseSession {
                     tools: [],
                     ...(this.activeEffort === undefined ? {} : { effort: this.activeEffort }),
                 }),
-                ...(options.signal === undefined ? {} : { signal: options.signal }),
+                ...(signal === undefined ? {} : { signal }),
             });
-            if (options.signal?.aborted) return { status: "cancelled", context: original };
+            if (signal?.aborted) return { status: "cancelled", context: original };
             if (native.block === undefined) {
                 return {
                     status: "failed",
@@ -151,7 +153,7 @@ export class AnthropicBedrockSession extends BaseSession {
                 context: this.context,
             };
         } catch (error) {
-            if (options.signal?.aborted) return { status: "cancelled", context: original };
+            if (signal?.aborted) return { status: "cancelled", context: original };
             return {
                 status: "failed",
                 kind: "inference_error",
@@ -164,7 +166,11 @@ export class AnthropicBedrockSession extends BaseSession {
         this.connection.close();
     }
 
-    private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
+    private async *streamRun(
+        ctx: Context,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
+        const signal = ctx.lifetime;
         const model = request.model ?? this.activeModel ?? this.model;
         if (model === undefined) {
             throw new Error("A model is required for Anthropic Bedrock inference.");
@@ -181,7 +187,7 @@ export class AnthropicBedrockSession extends BaseSession {
             context: this.context,
             model,
             ...(effort === undefined ? {} : { effort }),
-            ...(request.abort === undefined ? {} : { signal: request.abort }),
+            ...(signal === undefined ? {} : { signal }),
             ...(request.structuredOutput === undefined
                 ? {}
                 : { structuredOutput: request.structuredOutput }),

@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
@@ -140,7 +142,7 @@ describe("provider structured output", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -251,7 +253,7 @@ describe("provider structured output", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

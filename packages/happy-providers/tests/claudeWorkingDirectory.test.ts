@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
@@ -33,7 +35,7 @@ describe("Claude working directory", () => {
         });
 
         try {
-            for await (const _event of session.run({
+            for await (const _event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

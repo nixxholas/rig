@@ -45,6 +45,7 @@ import {
     toClaudeSdkOptions,
 } from "@/vendors/claude/impl/toClaudeSdkOptions.js";
 import { toClaudeRetryEvent } from "@/vendors/claude/impl/toClaudeRetryEvent.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export type ClaudeSdkQuery = typeof defaultClaudeSdkQuery;
 
@@ -133,17 +134,18 @@ export class ClaudeSession extends BaseSession {
         }
     }
 
-    run(request: SessionRunRequest): SessionStream {
-        if (request.abort?.aborted) return emptyStream();
-        return this.streamRun(request);
+    run(ctx: Context, request: SessionRunRequest): SessionStream {
+        if (ctx.lifetime?.aborted) return emptyStream();
+        return this.streamRun(ctx, request);
     }
 
-    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
+    async compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
         const original: SessionContext = {
             instructions: options.context.instructions,
             messages: [...options.context.messages],
         };
-        const { instructions, signal } = options;
+        const { instructions } = options;
+        const signal = ctx.lifetime;
         if (signal?.aborted) return { status: "cancelled", context: original };
         const requestedModel = options.model ?? this.activeModel ?? this.model;
         const model =
@@ -232,7 +234,11 @@ export class ClaudeSession extends BaseSession {
         this.closeActiveQuery();
     }
 
-    private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
+    private async *streamRun(
+        ctx: Context,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
+        const signal = ctx.lifetime;
         const requestedModel = request.model ?? this.activeModel ?? this.model;
         const model =
             requestedModel === undefined ? undefined : resolveClaudeModelId(requestedModel);
@@ -255,7 +261,7 @@ export class ClaudeSession extends BaseSession {
                 context: this.context,
                 model,
                 ...(effort === undefined ? {} : { effort }),
-                ...(request.abort === undefined ? {} : { abort: request.abort }),
+                ...(signal === undefined ? {} : { abort: signal }),
                 ...(request.structuredOutput === undefined
                     ? {}
                     : { structuredOutput: request.structuredOutput }),
@@ -298,9 +304,9 @@ export class ClaudeSession extends BaseSession {
                         reason: "Claude's response was interrupted by a server error.",
                     };
                     try {
-                        await this.retryWait(completedMidResponseAttempts, request.abort);
+                        await this.retryWait(completedMidResponseAttempts, signal);
                     } catch (delayError) {
-                        if (request.abort?.aborted) {
+                        if (signal?.aborted) {
                             yield { type: "done", state: "cancelled" };
                             return;
                         }
@@ -328,9 +334,9 @@ export class ClaudeSession extends BaseSession {
                         reason: error.message,
                     };
                     try {
-                        await this.retryWait(emptyResponseRetries, request.abort);
+                        await this.retryWait(emptyResponseRetries, signal);
                     } catch (delayError) {
-                        if (request.abort?.aborted) {
+                        if (signal?.aborted) {
                             yield { type: "done", state: "cancelled" };
                             return;
                         }

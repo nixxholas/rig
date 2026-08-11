@@ -60,7 +60,7 @@ filesystem, and networking APIs, so it won't run in browsers, bundlers targeting
 runtimes, or React Native. The package manifest sets `browser` to `false` on purpose.
 
 ```sh
-pnpm add @slopus/happy-providers
+pnpm add @slopus/happy-providers @steve.kite/stdlib
 ```
 
 If your application defines tools, add TypeBox as a direct dependency too — tool parameters are
@@ -85,7 +85,9 @@ import {
     type SessionAssistantMessage,
     type SessionMessage,
 } from "@slopus/happy-providers";
+import { createRootContext, withLifetime } from "@steve.kite/stdlib";
 
+const ctx = createRootContext().named("provider-session");
 const credential = await CodexSessionCredential.tryLoad();
 if (credential === null) {
     throw new Error("Sign in with Codex before starting a session.");
@@ -109,7 +111,7 @@ async function ask(content: string): Promise<string> {
 
     let response = "";
     const assistant = new SessionAssistantMessageAccumulator();
-    for await (const event of session.run({ context: { instructions, messages } })) {
+    for await (const event of session.run(ctx, { context: { instructions, messages } })) {
         assistant.add(event);
         if (event.type === "text_delta") response += event.delta;
         if (event.type === "done" && event.state === "error") {
@@ -184,15 +186,15 @@ You supply the instructions and tools yourself. The vendor prompts and tool desc
 find reproduced in this source tree are reference data for protocol tests, and they are
 intentionally not exported.
 
-Each `run()` then takes the complete transcript plus anything you want to vary per turn: model,
-reasoning effort, priority service tier, structured output schema, and an abort signal:
+Each `run()` takes a stdlib context first, then the complete transcript plus anything you want to
+vary per turn: model, reasoning effort, priority service tier, and structured output schema.
+Cancellation travels through `ctx.lifetime`; use `withLifetime` to attach an operation signal:
 
 ```ts
-const stream = session.run({
+const stream = session.run(withLifetime(ctx, abortController.signal), {
     context: { instructions, messages },
     model: "gpt-5.6-sol",
     effort: "high",
-    abort: abortController.signal,
 });
 ```
 
@@ -286,10 +288,9 @@ context using its native compaction protocol. Compaction is explicit — the lib
 behind your back:
 
 ```ts
-const compacted = await session.compact({
+const compacted = await session.compact(withLifetime(ctx, abortController.signal), {
     context: { instructions, messages },
     instructions: "Preserve decisions, unfinished work, and exact identifiers.",
-    signal: abortController.signal,
 });
 
 if (compacted.status === "completed") {
@@ -361,11 +362,11 @@ next operation.
 
 ```ts
 // Correct: turns on one session are sequential.
-for await (const event of session.run({ context: { instructions, messages } })) {
+for await (const event of session.run(ctx, { context: { instructions, messages } })) {
     // Consume every event.
 }
 
-const compacted = await session.compact({ context: { instructions, messages } });
+const compacted = await session.compact(ctx, { context: { instructions, messages } });
 ```
 
 Independent sessions run concurrently just fine — use one session per conversation or branch:
@@ -375,14 +376,14 @@ const first = await provider.session("conversation-1", firstOptions);
 const second = await provider.session("conversation-2", secondOptions);
 
 const runFirst = async () => {
-    for await (const event of first.run({
+    for await (const event of first.run(ctx, {
         context: { instructions: firstInstructions, messages: firstMessages },
     })) {
         // Consume the first conversation's events.
     }
 };
 const runSecond = async () => {
-    for await (const event of second.run({
+    for await (const event of second.run(ctx, {
         context: { instructions: secondInstructions, messages: secondMessages },
     })) {
         // Consume the second conversation's events.
@@ -413,7 +414,7 @@ const branch = await provider.session("conversation-1-branch-1", {
     modelConfigurations,
 });
 
-for await (const event of branch.run({
+for await (const event of branch.run(ctx, {
     context: { instructions, messages: branchMessages },
     model,
     effort,
@@ -469,7 +470,7 @@ out the rewound output:
 import { committedSessionEvents, type SessionEvent } from "@slopus/happy-providers";
 
 const streamed: SessionEvent[] = [];
-for await (const event of session.run({ context: { instructions, messages } })) {
+for await (const event of session.run(ctx, { context: { instructions, messages } })) {
     streamed.push(event);
 }
 
@@ -616,8 +617,8 @@ What `provider.session(id, options)` returns:
 abstract class BaseSession {
     readonly id: string;
 
-    abstract run(request: SessionRunRequest): SessionStream;
-    abstract compact(options: SessionCompactionOptions): Promise<SessionCompaction>;
+    abstract run(ctx: Context, request: SessionRunRequest): SessionStream;
+    abstract compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction>;
     abstract destroy(): void | Promise<void>;
 }
 ```
@@ -656,7 +657,6 @@ What one `run()` takes:
 interface SessionRunRequest {
     /** Complete rebuilt conversation context for this inference turn. */
     context: SessionContext;
-    abort?: AbortSignal;
     model?: string;
     effort?: SessionReasoningEffort;
     serviceTier?: SessionServiceTier;
@@ -910,7 +910,7 @@ The exported accumulator implements those rules and the outer retry rollback bou
 ```ts
 const assistant = new SessionAssistantMessageAccumulator();
 
-for await (const event of session.run({ context: { instructions, messages } })) {
+for await (const event of session.run(ctx, { context: { instructions, messages } })) {
     assistant.add(event);
 }
 
@@ -949,7 +949,7 @@ turn is `input`; cache columns are already included:
 
 ```ts
 let lastUsage: SessionUsage | undefined;
-for await (const event of session.run({ context: { instructions, messages } })) {
+for await (const event of session.run(ctx, { context: { instructions, messages } })) {
     if (event.type === "token_usage") lastUsage = event.usage;
 }
 
@@ -963,7 +963,7 @@ count; its returned usage comes from the provider.
 
 ### `SessionCompaction`
 
-What `compact(options)` takes and resolves to:
+What `compact(ctx, options)` takes and resolves to:
 
 ```ts
 interface SessionCompactionOptions {
@@ -973,7 +973,6 @@ interface SessionCompactionOptions {
     readonly instructions?: string;
     /** Complete context to compact, including its root instructions and messages. */
     readonly context: SessionContext;
-    readonly signal?: AbortSignal;
 }
 
 type SessionCompaction =

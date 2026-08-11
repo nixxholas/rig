@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { createServer, type IncomingMessage } from "node:http";
 
 import { describe, expect, it } from "vitest";
@@ -56,7 +58,7 @@ async function runOnce(options: {
         tools: [],
     });
     try {
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

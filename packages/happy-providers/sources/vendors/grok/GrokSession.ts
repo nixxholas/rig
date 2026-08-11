@@ -45,6 +45,7 @@ import { resolveGrokModelConfiguration } from "@/vendors/grok/impl/resolveGrokMo
 import { resolveGrokModelId } from "@/vendors/grok/impl/resolveGrokModelId.js";
 import { stripGrokContextImages } from "@/vendors/grok/impl/stripGrokContextImages.js";
 import { GrokSessionCredential } from "@/vendors/grok/GrokSessionCredential.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface GrokSessionOptions extends SessionOptions, InferenceRetryOptions {
     credential: GrokCredential;
@@ -98,12 +99,12 @@ export class GrokSession extends BaseSession {
         });
     }
 
-    run(request: SessionRunRequest): SessionStream {
-        return this.streamRun(request);
+    run(ctx: Context, request: SessionRunRequest): SessionStream {
+        return this.streamRun(ctx, request);
     }
 
-    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
-        const { signal } = options;
+    async compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
+        const signal = ctx.lifetime;
         const context: SessionContext = {
             instructions: options.context.instructions,
             messages: [...options.context.messages],
@@ -243,8 +244,11 @@ export class GrokSession extends BaseSession {
         this.connection.close();
     }
 
-    private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
-        const { abort } = request;
+    private async *streamRun(
+        ctx: Context,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
+        const abort = ctx.lifetime;
         const previousUserQueries = countGrokUserQueries(this.context.messages);
         const messages = [...request.context.messages];
         const nextUserQueries = countGrokUserQueries(messages);

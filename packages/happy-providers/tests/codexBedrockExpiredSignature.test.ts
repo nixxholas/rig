@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { createServer } from "node:http";
 
 import { describe, expect, it } from "vitest";
@@ -72,7 +74,7 @@ async function runOnce(status: number, body: string): Promise<string | undefined
 
     try {
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

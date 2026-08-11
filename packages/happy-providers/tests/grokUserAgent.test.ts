@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { describe, expect, it, vi } from "vitest";
@@ -50,7 +52,7 @@ describe("Grok user agent", () => {
 
         try {
             const events: SessionEvent[] = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -150,7 +152,7 @@ describe("Grok user agent", () => {
 
         try {
             const events: SessionEvent[] = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -224,7 +226,7 @@ async function runOnce(options: {
         tools: [],
     });
     try {
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

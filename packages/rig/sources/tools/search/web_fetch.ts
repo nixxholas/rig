@@ -9,6 +9,7 @@ import { getUrlMarkdownContent } from "./webFetch/getUrlMarkdownContent.js";
 import { isPreapprovedWebFetchUrl } from "./webFetch/isPreapprovedWebFetchUrl.js";
 import { makeWebFetchModelPrompt } from "./webFetch/makeWebFetchModelPrompt.js";
 import type { WebFetchResponse } from "./webFetch/types.js";
+import type { Context } from "@steve.kite/stdlib";
 
 const MAX_WEB_FETCH_MARKDOWN_LENGTH = 100_000;
 
@@ -27,6 +28,7 @@ export function createWebFetchTool(
         fetchPage?: (url: string, signal?: AbortSignal) => Promise<WebFetchResponse>;
         now?: () => number;
         summarize?: (
+            ctx: Context,
             prompt: string,
             markdown: string,
             route: OneOffInferenceRoute | undefined,
@@ -91,6 +93,7 @@ Call web_fetch again with the redirect URL to continue.`;
                 response.content.length < MAX_WEB_FETCH_MARKDOWN_LENGTH
                     ? response.content
                     : await summarize(
+                          execution.ctx,
                           prompt,
                           response.content,
                           route,
@@ -117,6 +120,7 @@ Call web_fetch again with the redirect URL to continue.`;
 }
 
 async function summarizeFetchedPage(
+    ctx: Context,
     prompt: string,
     markdown: string,
     route: OneOffInferenceRoute | undefined,
@@ -132,7 +136,7 @@ async function summarizeFetchedPage(
         markdown.length > MAX_WEB_FETCH_MARKDOWN_LENGTH
             ? `${markdown.slice(0, MAX_WEB_FETCH_MARKDOWN_LENGTH)}\n\n[Content truncated due to length...]`
             : markdown;
-    const result = await runOneOffInference({
+    const result = await runOneOffInference(ctx, {
         instructions:
             "Answer one question about a page already downloaded for you. Do not perform any other task.",
         prompt: makeWebFetchModelPrompt(truncated, prompt, isPreapprovedDomain),

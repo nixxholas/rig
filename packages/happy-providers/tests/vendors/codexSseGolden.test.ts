@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
@@ -56,7 +58,7 @@ describe("Codex SSE goldens", () => {
                 tools: codexCliTools(model),
             });
             const events = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: withCodexSkills(
@@ -160,7 +162,7 @@ describe("Codex SSE goldens", () => {
                 tools: codexCliTools("gpt-5.6-sol"),
             });
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -174,7 +176,7 @@ describe("Codex SSE goldens", () => {
                     model: "gpt-5.6-sol",
                 }),
             );
-            const compacted = await session.compact({
+            const compacted = await session.compact(testContext, {
                 context: {
                     instructions: prompt.instructions,
                     messages: [
@@ -191,7 +193,7 @@ describe("Codex SSE goldens", () => {
             });
             if (compacted.status !== "completed") expect.fail("Compaction was cancelled.");
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -272,7 +274,7 @@ describe("Codex SSE goldens", () => {
                 instructions: "instructions",
             });
 
-            const result = await session.compact({
+            const result = await session.compact(testContext, {
                 context: {
                     instructions: "instructions",
                     messages: [
@@ -358,7 +360,7 @@ describe("Codex SSE goldens", () => {
                     content: [{ type: "text" as const, text: "retain this request" }],
                 },
             ];
-            const compacted = await session.compact({
+            const compacted = await session.compact(testContext, {
                 context: {
                     instructions: "instructions",
                     messages: initialMessages,
@@ -417,7 +419,7 @@ describe("Codex SSE goldens", () => {
                 },
             });
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -435,7 +437,7 @@ describe("Codex SSE goldens", () => {
                 }),
             );
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -506,10 +508,13 @@ describe("Codex SSE goldens", () => {
                 content: [{ type: "text" as const, text: "first" }],
             };
             await drain(
-                session.run({ context: { instructions: "", messages: [user] }, effort: "low" }),
+                session.run(testContext, {
+                    context: { instructions: "", messages: [user] },
+                    effort: "low",
+                }),
             );
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -524,7 +529,7 @@ describe("Codex SSE goldens", () => {
                 }),
             );
             await drain(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [

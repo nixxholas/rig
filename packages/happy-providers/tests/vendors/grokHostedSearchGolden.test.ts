@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 
@@ -1023,7 +1025,7 @@ async function captureRequest(options: {
             instructions: "System prompt.",
             tools: [readFileTool, ...(options.serverTools ?? [])],
         });
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1038,7 +1040,7 @@ async function captureRequest(options: {
         }
         if (options.compaction === true) {
             capturedBody = undefined;
-            const compacted = await session.compact({
+            const compacted = await session.compact(testContext, {
                 context: {
                     instructions: "System prompt.",
                     messages: [

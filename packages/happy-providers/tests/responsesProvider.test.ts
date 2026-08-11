@@ -1,3 +1,5 @@
+import { testContext, testContextWith } from "./testContext.js";
+
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
@@ -63,7 +65,7 @@ describe("ResponsesProvider", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "Be concise.",
                     messages: [
@@ -126,7 +128,7 @@ describe("ResponsesProvider", () => {
         });
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -181,7 +183,7 @@ describe("ResponsesProvider", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "Be concise.",
                     messages: [
@@ -221,7 +223,7 @@ describe("ResponsesProvider", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "Be concise.",
                     messages: [
@@ -313,7 +315,7 @@ describe("ResponsesProvider", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "Be concise.",
                     messages: [
@@ -420,7 +422,7 @@ describe("ResponsesProvider", () => {
         });
 
         await expect(
-            session.compact({
+            session.compact(testContext, {
                 context: {
                     instructions: "Preserve state.",
                     messages: [
@@ -475,8 +477,7 @@ describe("ResponsesProvider", () => {
         controller.abort();
         const events = [];
 
-        for await (const event of session.run({
-            abort: controller.signal,
+        for await (const event of session.run(testContextWith(controller.signal), {
             context: {
                 instructions: "",
                 messages: [

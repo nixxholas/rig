@@ -26,6 +26,7 @@ import { classifyResponsesError } from "@/protocol/responses/classifyResponsesEr
 import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { toOpenAIResponseInput } from "@/protocol/responses/toOpenAIResponseInput.js";
 import { toSessionUsage } from "@/protocol/responses/toSessionUsage.js";
+import type { Context } from "@steve.kite/stdlib";
 
 export interface ResponsesSessionOptions extends SessionOptions, InferenceRetryOptions {
     apiKey: string;
@@ -67,18 +68,18 @@ export class ResponsesSession extends BaseSession {
         this.retryWait = options.waitForInferenceRetry ?? waitForInferenceRetry;
     }
 
-    run(request: SessionRunRequest): SessionStream {
-        if (request.abort?.aborted) {
+    run(ctx: Context, request: SessionRunRequest): SessionStream {
+        if (ctx.lifetime?.aborted) {
             // A pre-aborted generic protocol run never starts. The outer agent loop owns
             // cancellation presentation, so there is intentionally no synthetic terminal event.
             return emptySessionStream();
         }
 
-        return this.streamRun(request);
+        return this.streamRun(ctx, request);
     }
 
-    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
-        const { signal } = options;
+    async compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
+        const signal = ctx.lifetime;
         const context: SessionContext = {
             instructions: options.context.instructions,
             messages: [...options.context.messages],
@@ -156,8 +157,11 @@ export class ResponsesSession extends BaseSession {
 
     destroy(): void {}
 
-    private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
-        const { abort } = request;
+    private async *streamRun(
+        ctx: Context,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
+        const abort = ctx.lifetime;
         this.context = {
             instructions: request.context.instructions ?? this.context.instructions,
             messages: [...request.context.messages],

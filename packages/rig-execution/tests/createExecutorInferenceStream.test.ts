@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
@@ -10,12 +12,13 @@ describe("createExecutorInferenceStream", () => {
         let received: unknown;
         const schema = Type.Object({ result: Type.String() });
         const executor = {
-            run: async function* (request: unknown) {
+            run: async function* (_ctx: unknown, request: unknown) {
                 received = request;
                 yield { type: "done", state: "normal" } as const;
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -43,12 +46,13 @@ describe("createExecutorInferenceStream", () => {
         let received: unknown;
         const executor = {
             type: "codex",
-            run: async function* (request: unknown) {
+            run: async function* (_ctx: unknown, request: unknown) {
                 received = request;
                 yield { type: "done", state: "normal" } as const;
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: {
                 messages: [
                     {
@@ -109,6 +113,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -147,6 +152,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -185,6 +191,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -242,6 +249,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -313,6 +321,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -358,6 +367,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -398,6 +408,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({
@@ -484,6 +495,7 @@ describe("createExecutorInferenceStream", () => {
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({
+            ctx: testContext,
             context: { messages: [] },
             executor,
             model: defineModel({

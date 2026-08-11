@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
@@ -97,7 +99,7 @@ describe("Claude retry contract", () => {
         });
         sessions.push(session);
         return collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

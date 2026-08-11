@@ -1,3 +1,5 @@
+import { testContext, testContextWith } from "./testContext.js";
+
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 
@@ -31,7 +33,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -81,7 +83,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -157,7 +159,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -222,7 +224,7 @@ describe("ClaudeSession", () => {
 
         await expect(
             collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -319,7 +321,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -401,7 +403,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -456,7 +458,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -506,7 +508,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -554,7 +556,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -623,7 +625,7 @@ describe("ClaudeSession", () => {
         });
 
         const first = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -647,7 +649,7 @@ describe("ClaudeSession", () => {
         });
 
         const second = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -710,7 +712,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -723,7 +725,7 @@ describe("ClaudeSession", () => {
             }),
         );
         const continued = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -784,7 +786,7 @@ describe("ClaudeSession", () => {
 
         await expect(
             collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -801,7 +803,7 @@ describe("ClaudeSession", () => {
         );
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -869,7 +871,7 @@ describe("ClaudeSession", () => {
 
         await expect(
             collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -886,7 +888,7 @@ describe("ClaudeSession", () => {
         );
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -967,7 +969,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1072,8 +1074,7 @@ describe("ClaudeSession", () => {
 
         await expect(
             collectSessionEvents(
-                session.run({
-                    abort: abortController.signal,
+                session.run(testContextWith(abortController.signal), {
                     context: {
                         instructions: "",
                         messages: [
@@ -1132,8 +1133,7 @@ describe("ClaudeSession", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
-                abort: controller.signal,
+            session.run(testContextWith(controller.signal), {
                 context: {
                     instructions: "",
                     messages: [
@@ -1177,8 +1177,7 @@ describe("ClaudeSession", () => {
         });
         const controller = new AbortController();
         const eventsPromise = collectSessionEvents(
-            session.run({
-                abort: controller.signal,
+            session.run(testContextWith(controller.signal), {
                 context: {
                     instructions: "",
                     messages: [
@@ -1231,8 +1230,7 @@ describe("ClaudeSession", () => {
         });
         const controller = new AbortController();
         const firstRun = collectSessionEvents(
-            session.run({
-                abort: controller.signal,
+            session.run(testContextWith(controller.signal), {
                 context: {
                     instructions: "",
                     messages: [
@@ -1249,7 +1247,7 @@ describe("ClaudeSession", () => {
         controller.abort();
         await expect(firstRun).resolves.toContainEqual({ type: "block_reset" });
         const secondRun = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1296,8 +1294,7 @@ describe("ClaudeSession", () => {
         await expect(
             settlesBeforeNextTurn(
                 collectSessionEvents(
-                    session.run({
-                        abort: controller.signal,
+                    session.run(testContextWith(controller.signal), {
                         context: {
                             instructions: "",
                             messages: [
@@ -1345,7 +1342,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1487,8 +1484,7 @@ describe("ClaudeSession", () => {
         const addAbortListener = vi.spyOn(abortController.signal, "addEventListener");
         const removeAbortListener = vi.spyOn(abortController.signal, "removeEventListener");
         const first = await collectSessionEvents(
-            session.run({
-                abort: abortController.signal,
+            session.run(testContextWith(abortController.signal), {
                 context: {
                     instructions: "Rig system instructions.",
                     messages: [
@@ -1502,7 +1498,7 @@ describe("ClaudeSession", () => {
             }),
         );
         const switched = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 model: "sonnet[1m]",
                 context: {
                     instructions: "Rig system instructions.",
@@ -1546,8 +1542,8 @@ describe("ClaudeSession", () => {
                 },
             ],
         };
-        const compacted = await session.compact({ context: compactionContext });
-        const customCompacted = await session.compact({
+        const compacted = await session.compact(testContext, { context: compactionContext });
+        const customCompacted = await session.compact(testContext, {
             context: compactionContext,
             instructions: "Keep CUSTOM_MARKER.",
         });
@@ -1658,7 +1654,7 @@ describe("ClaudeSession", () => {
             tools: [],
         });
 
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: "Rig system instructions.",
                 messages: [
@@ -1741,14 +1737,14 @@ describe("ClaudeSession", () => {
             tools: [],
         });
 
-        const compacted = await session.compact({
+        const compacted = await session.compact(testContext, {
             context: {
                 instructions: "Rig system instructions.",
                 messages: compactedPrefix,
             },
         });
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "Rig system instructions.",
                     messages: [
@@ -1823,7 +1819,7 @@ describe("ClaudeSession", () => {
 
         await expect(
             collectSessionEvents(
-                session.run({
+                session.run(testContext, {
                     context: {
                         instructions: "",
                         messages: [
@@ -1842,7 +1838,7 @@ describe("ClaudeSession", () => {
         // The caller compacted while the tool ran, so the history behind the pending tool result
         // is no longer the history the live query holds.
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1905,7 +1901,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1920,7 +1916,7 @@ describe("ClaudeSession", () => {
         // The executor round trip decorates the assistant it replays with fields Claude never
         // sent back, so wire identity - not raw equality - has to drive the decision.
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1967,7 +1963,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1980,7 +1976,7 @@ describe("ClaudeSession", () => {
             }),
         );
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2030,7 +2026,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2045,7 +2041,7 @@ describe("ClaudeSession", () => {
         // Only the final message reaches a live query, so a notice appended beside the next
         // prompt would be silently dropped if the session continued here.
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2094,7 +2090,7 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2107,7 +2103,7 @@ describe("ClaudeSession", () => {
             }),
         );
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -2162,10 +2158,10 @@ describe("ClaudeSession", () => {
                 },
             ],
         };
-        await collectSessionEvents(session.run({ context: firstTurn }));
+        await collectSessionEvents(session.run(testContext, { context: firstTurn }));
         // Clearing rewinds behind an answer the live query still holds, so the identical prompt
         // must not resume that conversation.
-        await collectSessionEvents(session.run({ context: firstTurn }));
+        await collectSessionEvents(session.run(testContext, { context: firstTurn }));
 
         expect(query).toHaveBeenCalledTimes(2);
     });

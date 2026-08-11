@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
@@ -74,7 +76,7 @@ describe("Grok SSE goldens", () => {
                     instructions: grok_4_5_system_prompt,
                     tools: capturedTools,
                 });
-                for await (const event of session.run({
+                for await (const event of session.run(testContext, {
                     context: {
                         instructions: grok_4_5_system_prompt,
                         messages: [

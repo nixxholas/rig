@@ -72,7 +72,7 @@ ${selection.availability}`,
             const route = selection.selectRoute(input.provider_id);
             let usedSearch = false;
             const resultPayloads: string[] = [];
-            const result = await runOneOffInference({
+            const result = await runOneOffInference(execution.ctx, {
                 instructions:
                     "Use the provider's web search before answering. Return a compact factual answer with markdown source links.",
                 onEvent: (event) => {

@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import { ResponsesProvider } from "@/protocol/responses/ResponsesProvider.js";
@@ -26,7 +28,7 @@ describeLive("ResponsesProvider through OpenRouter", () => {
             tools: [],
         });
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

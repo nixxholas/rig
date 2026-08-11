@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { Type } from "@sinclair/typebox";
@@ -126,10 +128,12 @@ describe("Codex server tools", () => {
     // compaction sample that calls a tool counting as a tool call rather than as provider work.
     it("declares no server search while compacting, even when handed one", async () => {
         const declared = await declaredTools(codex_server_tools, async (session) => {
-            await session.compact({ context: { instructions: "", messages: [] } }).catch(() => {
-                // The stub server does not return a real compaction item; the request it was sent
-                // is the whole subject here.
-            });
+            await session
+                .compact(testContext, { context: { instructions: "", messages: [] } })
+                .catch(() => {
+                    // The stub server does not return a real compaction item; the request it was sent
+                    // is the whole subject here.
+                });
         });
 
         expect(declared.some((tool) => tool.type === "web_search")).toBe(false);
@@ -146,9 +150,11 @@ describe("Codex server tools", () => {
                 },
             ],
             async (session) => {
-                await session.compact({ context: { instructions: "", messages: [] } }).catch(() => {
-                    // The stub server does not return a real compaction item.
-                });
+                await session
+                    .compact(testContext, { context: { instructions: "", messages: [] } })
+                    .catch(() => {
+                        // The stub server does not return a real compaction item.
+                    });
             },
         );
 
@@ -256,7 +262,7 @@ describe("Codex server tools", () => {
                 userAgent: "rig-test",
             });
             const events: SessionEvent[] = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -363,7 +369,7 @@ describe("Codex server tools", () => {
                 userAgent: "rig-test",
             });
             const events: SessionEvent[] = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -454,7 +460,7 @@ async function declaredTools(
             transport: "sse",
             userAgent: "rig-test",
         });
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

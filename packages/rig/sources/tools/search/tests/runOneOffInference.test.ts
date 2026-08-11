@@ -9,6 +9,9 @@ import type {
 import { builtinModelProfiles } from "@slopus/rig-execution";
 
 import { runOneOffInference } from "../runOneOffInference.js";
+import { createTestRootContext } from "../../../testing/createTestRootContext.js";
+
+const testContext = createTestRootContext().named("one-off-inference-test");
 
 describe("runOneOffInference", () => {
     it("opens one direct provider session, consumes it, and destroys it", async () => {
@@ -21,7 +24,7 @@ describe("runOneOffInference", () => {
         const native = fakeProvider(session);
         const profile = builtinModelProfiles("codex", "codex")[0]!;
 
-        const result = await runOneOffInference({
+        const result = await runOneOffInference(testContext, {
             instructions: "Answer one bounded question.",
             prompt: "Summarize this.",
             route: {
@@ -45,6 +48,7 @@ describe("runOneOffInference", () => {
             tools: [{ name: "web_search", server: { type: "web_search" } }],
         });
         expect(session.run).toHaveBeenCalledWith(
+            expect.any(Object),
             expect.objectContaining({
                 context: {
                     instructions: "Answer one bounded question.",
@@ -70,7 +74,7 @@ describe("runOneOffInference", () => {
         const profile = builtinModelProfiles("codex", "codex")[0]!;
 
         await expect(
-            runOneOffInference({
+            runOneOffInference(testContext, {
                 instructions: "Search once.",
                 prompt: "Find Rig.",
                 route: {
@@ -93,7 +97,7 @@ describe("runOneOffInference", () => {
         const profile = builtinModelProfiles("codex", "codex")[0]!;
 
         await expect(
-            runOneOffInference({
+            runOneOffInference(testContext, {
                 instructions: "Search once.",
                 prompt: "Find Rig.",
                 route: {
@@ -117,7 +121,7 @@ describe("runOneOffInference", () => {
         const native = fakeProvider(session);
         const profile = builtinModelProfiles("codex", "codex")[0]!;
 
-        await runOneOffInference({
+        await runOneOffInference(testContext, {
             instructions: "Search once.",
             prompt: "Find Rig.",
             route: {
@@ -148,7 +152,7 @@ function fakeSession(events: readonly SessionEvent[]) {
     return {
         compact: vi.fn(),
         destroy: vi.fn(),
-        run: vi.fn((_request: SessionRunRequest) => ({
+        run: vi.fn((_ctx: unknown, _request: SessionRunRequest) => ({
             async *[Symbol.asyncIterator]() {
                 for (const event of events) yield event;
             },
@@ -163,7 +167,7 @@ function sessionThatHangsAfter(events: readonly SessionEvent[]) {
     return {
         compact: vi.fn(),
         destroy: vi.fn(),
-        run: vi.fn((_request: SessionRunRequest) => ({
+        run: vi.fn((_ctx: unknown, _request: SessionRunRequest) => ({
             async *[Symbol.asyncIterator]() {
                 for (const event of events) yield event;
                 await new Promise<never>(() => {});

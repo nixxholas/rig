@@ -65,6 +65,7 @@ import {
     context_checkpoint_summary_prefix,
 } from "@/vendors/codex/prompts/context_checkpoint_compaction_instructions.js";
 import type { CodexTransport } from "@/vendors/codex/impl/codexConstants.js";
+import type { Context } from "@steve.kite/stdlib";
 
 const CODEX_COMPACTION_MAX_RETRIES = 2;
 const CODEX_TOOL_SEARCH_MAX_ROUNDS = 4;
@@ -165,13 +166,13 @@ export class CodexSession extends BaseSession {
         return this.#resolveInferenceMaxRetries();
     }
 
-    run(request: SessionRunRequest): SessionStream {
-        if (request.abort?.aborted) return cancelledStream();
-        return this.streamRun(request);
+    run(ctx: Context, request: SessionRunRequest): SessionStream {
+        if (ctx.lifetime?.aborted) return cancelledStream();
+        return this.streamRun(ctx, request);
     }
 
-    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
-        const { signal } = options;
+    async compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
+        const signal = ctx.lifetime;
         if (signal?.aborted) return { status: "cancelled", context: options.context };
         const requestedModel = options.model ?? this.activeModel ?? this.model;
         const model =
@@ -472,7 +473,11 @@ export class CodexSession extends BaseSession {
         }
     }
 
-    private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
+    private async *streamRun(
+        ctx: Context,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
+        const signal = ctx.lifetime;
         const requestedModel = request.model ?? this.activeModel;
         const model =
             requestedModel === undefined
@@ -539,19 +544,19 @@ export class CodexSession extends BaseSession {
                           model,
                           request: payload,
                           tools: turnTools,
-                          ...(request.abort === undefined ? {} : { signal: request.abort }),
+                          ...(signal === undefined ? {} : { signal }),
                       })
                     : this.websocketConnection.stream({
                           request: payload,
                           tools: turnTools,
-                          ...(request.abort === undefined ? {} : { signal: request.abort }),
+                          ...(signal === undefined ? {} : { signal }),
                       });
                 const mapped = mapOpenAIResponseStream(responseStream, {
                     failureMessage: `${model} failed to generate a response.`,
                     serverToolNames,
                     requireTerminalEvent: true,
                     vendor: "codex",
-                    ...(request.abort === undefined ? {} : { signal: request.abort }),
+                    ...(signal === undefined ? {} : { signal }),
                 });
                 let result: Awaited<ReturnType<typeof mapped.next>>["value"] | undefined;
                 let terminal: Extract<SessionEvent, { type: "done" }> | undefined;
@@ -583,7 +588,7 @@ export class CodexSession extends BaseSession {
                     yield event;
                 }
 
-                if (request.abort?.aborted && terminal === undefined) {
+                if (signal?.aborted && terminal === undefined) {
                     if (!useSse) this.websocketConnection.reset("request aborted");
                     yield { type: "block_reset" };
                     yield { type: "done", state: "cancelled" };
@@ -656,7 +661,7 @@ export class CodexSession extends BaseSession {
                 if (!useSse) this.websocketConnection.reset("stream did not complete");
                 yield { type: "block_reset" };
                 for (const event of attemptUsage) yield event;
-                if (request.abort?.aborted) {
+                if (signal?.aborted) {
                     yield { type: "done", state: "cancelled" };
                     return;
                 }
@@ -703,12 +708,12 @@ export class CodexSession extends BaseSession {
                     };
                     try {
                         if (isEmptyResponseError(error)) {
-                            await this.#emptyResponseRetryWait(transportRetries, request.abort);
+                            await this.#emptyResponseRetryWait(transportRetries, signal);
                         } else {
-                            await waitForCodexRetry(transportRetries, error, request.abort);
+                            await waitForCodexRetry(transportRetries, error, signal);
                         }
                     } catch (delayError) {
-                        if (request.abort?.aborted) {
+                        if (signal?.aborted) {
                             yield { type: "done", state: "cancelled" };
                             return;
                         }
@@ -731,7 +736,7 @@ export class CodexSession extends BaseSession {
                         attempt: reportedAttempt,
                         reason: `WebSocket retries exhausted; falling back to SSE: ${displayMessage}`,
                     };
-                    if (request.abort?.aborted) {
+                    if (signal?.aborted) {
                         yield { type: "done", state: "cancelled" };
                         return;
                     }

@@ -1,3 +1,6 @@
+import { testContext } from "./testContext.js";
+
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 import {
     BaseProvider,
     BaseSession,
@@ -76,7 +79,7 @@ describe("Executor", () => {
 
         expect(
             await collect(
-                executor.run({
+                executor.run(testContext, {
                     context: { messages: [] },
                     effort: "high",
                     tools: [tool("extra")],
@@ -90,7 +93,7 @@ describe("Executor", () => {
             tokens: { input: 0, output: 0 },
         });
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 tools: [tool("extra")],
                 selection: { modelId: "openai/terra", providerId: "codex" },
@@ -201,7 +204,7 @@ describe("Executor", () => {
         );
 
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
                 tools: [
@@ -246,14 +249,14 @@ describe("Executor", () => {
         );
 
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 contextInstructions: "First context",
                 selection: { modelId: "openai/sol", providerId: "codex" },
             }),
         );
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 contextInstructions: "Second context",
                 selection: { modelId: "openai/sol", providerId: "codex" },
@@ -280,14 +283,14 @@ describe("Executor", () => {
         );
 
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
                 tools: [tool("read")],
             }),
         );
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
                 tools: [tool("write")],
@@ -330,7 +333,7 @@ describe("Executor", () => {
 
         for (const parameters of [first, reordered]) {
             await collect(
-                executor.run({
+                executor.run(testContext, {
                     context: { messages: [] },
                     selection: { modelId: "openai/sol", providerId: "codex" },
                     tools: [{ ...tool("read"), parameters: parameters as never }],
@@ -355,7 +358,7 @@ describe("Executor", () => {
         );
 
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 contextInstructions: "AGENTS instructions",
                 selection: { modelId: "openai/sol", providerId: "codex" },
@@ -388,7 +391,10 @@ describe("Executor", () => {
             selection: { modelId: "openai/sol", providerId: "codex" },
         };
 
-        await Promise.all([collect(executor.run(request)), collect(executor.run(request))]);
+        await Promise.all([
+            collect(executor.run(testContext, request)),
+            collect(executor.run(testContext, request)),
+        ]);
 
         expect(native.sessions).toHaveLength(1);
     });
@@ -410,13 +416,13 @@ describe("Executor", () => {
                 super(id);
             }
 
-            override async compact(): Promise<SessionCompaction> {
+            override async compact(_ctx: RuntimeContext): Promise<SessionCompaction> {
                 throw new Error("Not used");
             }
 
             override destroy(): void {}
 
-            override async *run(): AsyncGenerator<SessionEvent> {
+            override async *run(_ctx: RuntimeContext): AsyncGenerator<SessionEvent> {
                 startedInferences += 1;
                 activeInferences += 1;
                 maximumActiveInferences = Math.max(maximumActiveInferences, activeInferences);
@@ -457,9 +463,9 @@ describe("Executor", () => {
             selection: { modelId: "openai/sol", providerId: "codex" },
         };
 
-        const first = collect(executor.run(request));
+        const first = collect(executor.run(testContext, request));
         await firstStarted;
-        const second = collect(executor.run(request));
+        const second = collect(executor.run(testContext, request));
         await Promise.resolve();
         expect(startedInferences).toBe(1);
         releaseFirst();
@@ -494,7 +500,7 @@ describe("Executor", () => {
         );
 
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
             }),
@@ -525,14 +531,14 @@ describe("Executor", () => {
             { environment: TEST_ENVIRONMENT },
         );
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
             }),
         );
 
         const events = await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "anthropic/sonnet", providerId: "claude" },
             }),
@@ -547,7 +553,7 @@ describe("Executor", () => {
 
         await executor.reset({ modelId: "anthropic/sonnet", providerId: "claude" });
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "anthropic/sonnet", providerId: "claude" },
             }),
@@ -573,7 +579,7 @@ describe("Executor", () => {
             { environment: TEST_ENVIRONMENT },
         );
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
             }),
@@ -581,7 +587,7 @@ describe("Executor", () => {
 
         const isolated = executor.isolate("title");
         await collect(
-            isolated.run({
+            isolated.run(testContext, {
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
             }),
@@ -613,7 +619,7 @@ describe("Executor", () => {
         );
         const isolated = executor.isolate("title");
         const running = collect(
-            isolated.run({
+            isolated.run(testContext, {
                 abort: AbortSignal.abort(),
                 context: { messages: [] },
                 selection: { modelId: "openai/sol", providerId: "codex" },
@@ -641,7 +647,7 @@ describe("Executor", () => {
             { environment: TEST_ENVIRONMENT },
         );
         await collect(
-            executor.run({
+            executor.run(testContext, {
                 context: {
                     messages: [{ role: "user", content: [{ type: "text", text: "Do the work." }] }],
                 },
@@ -740,7 +746,7 @@ class AnsweringSession extends BaseSession {
         super(id);
     }
 
-    override async compact(): Promise<SessionCompaction> {
+    override async compact(_ctx: RuntimeContext): Promise<SessionCompaction> {
         throw new Error("Bounded questions never compact.");
     }
 
@@ -748,7 +754,10 @@ class AnsweringSession extends BaseSession {
         this.destroyed = true;
     }
 
-    override async *run(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
+    override async *run(
+        _ctx: RuntimeContext,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
         this.requests.push(request);
         if (this.answer.length > 0) yield { type: "text_delta", delta: this.answer };
         yield this.terminal;
@@ -778,7 +787,10 @@ class RecordingSession extends BaseSession {
         super(id);
     }
 
-    override async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
+    override async compact(
+        _ctx: RuntimeContext,
+        options: SessionCompactionOptions,
+    ): Promise<SessionCompaction> {
         this.compactions.push(options);
         const preservedMessages = options.context.messages;
         return {
@@ -798,7 +810,10 @@ class RecordingSession extends BaseSession {
 
     override destroy(): void {}
 
-    override async *run(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
+    override async *run(
+        _ctx: RuntimeContext,
+        request: SessionRunRequest,
+    ): AsyncGenerator<SessionEvent> {
         this.requests.push(request);
         yield { type: "done", state: "normal", tokens: { input: 0, output: 0 } };
     }
@@ -830,7 +845,7 @@ class ForceCloseSession extends BaseSession {
         });
     }
 
-    override async compact(): Promise<SessionCompaction> {
+    override async compact(_ctx: RuntimeContext): Promise<SessionCompaction> {
         throw new Error("Not used");
     }
 
@@ -839,7 +854,7 @@ class ForceCloseSession extends BaseSession {
         this.#stop?.();
     }
 
-    override async *run(): AsyncGenerator<SessionEvent> {
+    override async *run(_ctx: RuntimeContext): AsyncGenerator<SessionEvent> {
         this.running = true;
         await this.#stopped;
         yield { type: "done", state: "cancelled" };

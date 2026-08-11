@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
@@ -141,7 +143,7 @@ async function withServer(
         await scenario({
             run: async (session, messages) => {
                 const events: SessionEvent[] = [];
-                for await (const event of session.run({
+                for await (const event of session.run(testContext, {
                     context: {
                         instructions: "You are a careful engineer.",
                         messages,

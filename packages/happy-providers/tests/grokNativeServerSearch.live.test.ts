@@ -1,3 +1,5 @@
+import { testContext } from "./testContext.js";
+
 import { describe, expect, it } from "vitest";
 
 import type { SessionEvent } from "@/core/SessionEvent.js";
@@ -39,7 +41,7 @@ describeLive("Grok native server search live", () => {
             tools: grok_server_tools.filter((tool) => tool.name === "web_search"),
         });
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -81,7 +83,7 @@ describeLive("Grok native server search live", () => {
             tools: grok_server_tools.filter((tool) => tool.name === "x_search"),
         });
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

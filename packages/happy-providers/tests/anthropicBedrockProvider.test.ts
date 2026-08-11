@@ -1,3 +1,5 @@
+import { testContext, testContextWith } from "./testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 
@@ -189,7 +191,7 @@ describe("AnthropicBedrockProvider", () => {
             tools: [],
         });
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "system",
                 messages: [
@@ -272,7 +274,7 @@ describe("AnthropicBedrockProvider", () => {
             },
         ]);
 
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "system",
                 messages: [
@@ -320,7 +322,7 @@ describe("AnthropicBedrockProvider", () => {
             ],
         });
 
-        await session.compact({
+        await session.compact(testContext, {
             context: {
                 instructions: "system",
                 messages: [
@@ -425,7 +427,7 @@ describe("AnthropicBedrockProvider", () => {
             tools: [],
         });
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "system",
                 messages: [
@@ -517,7 +519,7 @@ describe("AnthropicBedrockProvider", () => {
             tools: [],
         });
 
-        const result = await session.compact({
+        const result = await session.compact(testContext, {
             context: {
                 instructions: "system",
                 messages: [
@@ -619,7 +621,7 @@ describe("AnthropicBedrockProvider", () => {
             tools: [],
         });
 
-        for await (const _event of session.run({
+        for await (const _event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -828,7 +830,7 @@ describe("AnthropicBedrockProvider", () => {
 
         try {
             const events: SessionEvent[] = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1004,7 +1006,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1069,7 +1071,7 @@ describe("AnthropicBedrockProvider", () => {
         ]);
         expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         await expect(
-            session.compact({
+            session.compact(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -1115,7 +1117,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1277,7 +1279,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1352,7 +1354,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1407,7 +1409,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1488,7 +1490,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1540,7 +1542,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1598,7 +1600,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [
@@ -1657,8 +1659,7 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const events: SessionEvent[] = [];
-        for await (const event of session.run({
-            abort: controller.signal,
+        for await (const event of session.run(testContextWith(controller.signal), {
             context: {
                 instructions: "",
                 messages: [
@@ -1864,7 +1865,7 @@ describe("AnthropicBedrockProvider", () => {
 
         try {
             const events: SessionEvent[] = [];
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

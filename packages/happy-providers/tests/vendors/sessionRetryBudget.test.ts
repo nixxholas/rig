@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { createServer, type Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -86,7 +88,7 @@ describe("session retry budget", () => {
         });
         const events: SessionEvent[] = [];
         try {
-            for await (const event of session.run({
+            for await (const event of session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

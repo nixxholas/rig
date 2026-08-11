@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 
@@ -223,7 +225,7 @@ describe("Codex usage exhaustion", () => {
 
         const events: SessionEvent[] = [];
         const startedAt = Date.now();
-        for await (const event of session.run({
+        for await (const event of session.run(testContext, {
             context: {
                 instructions: "",
                 messages: [

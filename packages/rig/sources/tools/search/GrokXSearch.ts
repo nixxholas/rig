@@ -70,7 +70,7 @@ ${selection.availability}`,
             const route = selection.selectRoute(input.provider_id);
             let searchedX = false;
             const providerResults: string[] = [];
-            const response = await runOneOffInference({
+            const response = await runOneOffInference(execution.ctx, {
                 instructions:
                     "Use x_search to inspect posts on X. Return a concise synthesis and link every post you rely on.",
                 onEvent: (event) => {

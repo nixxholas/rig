@@ -6,6 +6,7 @@ import {
     type SessionReasoningEffort,
     type SessionTool,
 } from "@slopus/happy-providers";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 import { createInferenceStream } from "@/createInferenceStream.js";
 import { parseOpenAIToolArguments } from "@/parseOpenAIToolArguments.js";
@@ -25,6 +26,7 @@ import type {
 } from "@/types.js";
 
 export function createExecutorInferenceStream(options: {
+    ctx: RuntimeContext;
     context: Context;
     executor: Executor;
     model: Model;
@@ -35,6 +37,7 @@ export function createExecutorInferenceStream(options: {
 }
 
 async function* streamExecutorInference(options: {
+    ctx: RuntimeContext;
     context: Context;
     executor: Executor;
     model: Model;
@@ -64,7 +67,7 @@ async function* streamExecutorInference(options: {
                 options.executor.type === "codex" && options.model.id.startsWith("openai/"),
         });
         const events = toSessionEvents(
-            options.executor.run({
+            options.executor.run(options.ctx, {
                 context: { messages: toSessionMessages(options.context.messages) },
                 tools: sessionTools,
                 ...(options.streamOptions?.signal === undefined

@@ -67,7 +67,7 @@ ${selection.availability}`,
             const route = selection.selectRoute(input.provider_id);
             let searchCalls = 0;
             const resultFragments: string[] = [];
-            const response = await runOneOffInference({
+            const response = await runOneOffInference(execution.ctx, {
                 instructions:
                     "Use web_search to research published pages. Do not use X search. Return a concise answer with markdown links.",
                 onEvent: (event) => {

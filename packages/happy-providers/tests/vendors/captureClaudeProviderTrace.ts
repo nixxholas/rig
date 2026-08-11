@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { testContext } from "../testContext.js";
+
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
@@ -175,7 +177,7 @@ try {
     const compactInstructions =
         "Preserve PROVIDER_SKILL_MARKER, PROVIDER_TOOL_MARKER, SECOND, and SWITCHED exactly.";
     const exchangeStart = exchanges.length;
-    const compacted = await session.compact({
+    const compacted = await session.compact(testContext, {
         context: {
             instructions: createClaudeTestInstructions(switchedModel, {
                 cwd,
@@ -249,7 +251,7 @@ async function captureTurn(
 ): Promise<CapturedRun> {
     const exchangeStart = exchanges.length;
     const events: SessionEvent[] = [];
-    for await (const event of session.run({
+    for await (const event of session.run(testContext, {
         context: {
             instructions: createClaudeTestInstructions(model ?? initialModel, {
                 cwd,

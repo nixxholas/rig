@@ -73,7 +73,7 @@ ${selection.availability}`,
         execute: async (input, _context, execution): Promise<BedrockSearchResult> => {
             const route = selection.selectRoute(input.provider_id);
             let usedSearch = false;
-            const result = await runOneOffInference({
+            const result = await runOneOffInference(execution.ctx, {
                 instructions:
                     "Search the web before answering. Return a compact factual answer and cite every source you used.",
                 onEvent: (event) => {

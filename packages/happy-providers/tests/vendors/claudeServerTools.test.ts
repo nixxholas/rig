@@ -1,3 +1,5 @@
+import { testContext } from "../testContext.js";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
@@ -78,7 +80,7 @@ describe("Claude server tools", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [
@@ -139,7 +141,7 @@ describe("Claude server tools", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({
+            session.run(testContext, {
                 context: {
                     instructions: "",
                     messages: [

@@ -76,7 +76,7 @@ ${selection.availability}`,
             const route = selection.selectRoute(input.provider_id);
             let searched = false;
             const providerSources = new Map<string, { title: string; url: string }>();
-            const result = await runOneOffInference({
+            const result = await runOneOffInference(execution.ctx, {
                 instructions:
                     "Perform exactly one web research task. Use WebSearch before answering and cite every source.",
                 onEvent: (event) => {

@@ -18,14 +18,16 @@ import {
     type SessionEvent,
     type SessionMessage,
 } from "@slopus/happy-providers";
+import type { Context } from "@steve.kite/stdlib";
 
 async function runTurn(
+    ctx: Context,
     session: BaseSession,
     instructions: string,
     messages: readonly SessionMessage[],
 ): Promise<SessionAssistantMessage> {
     const streamed: SessionEvent[] = [];
-    for await (const event of session.run({ context: { instructions, messages } })) {
+    for await (const event of session.run(ctx, { context: { instructions, messages } })) {
         streamed.push(event);
     }
 
@@ -133,7 +135,7 @@ Compaction updates the session's provider-native continuation state and hands yo
 replacement transcript to adopt.
 
 ```ts
-const result = await session.compact({
+const result = await session.compact(ctx, {
     context: { instructions, messages },
     instructions: "Preserve decisions, unfinished work, and exact identifiers.",
 });
