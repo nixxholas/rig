@@ -505,7 +505,7 @@ function testProvider(inferenceGate?: Promise<void>, partialAtStart = false) {
     return defineProvider({
         id: "test",
         models: [model],
-        stream(_model, _context, options) {
+        stream(_ctx, _model, _context, options) {
             const message = assistantMessage(model.id);
             if (partialAtStart && options?.sessionId?.endsWith(":title") === true) {
                 return createInferenceStream(async function* () {
