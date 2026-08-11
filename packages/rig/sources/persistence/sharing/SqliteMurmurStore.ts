@@ -9,7 +9,7 @@ import {
     type StoreTransaction,
 } from "@slopus/murmur";
 import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
-import type { Context } from "@steve.kite/stdlib";
+import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { withWorkerContext } from "../../observability/daemonContext.js";
 
 import { asyncLock, type AsyncLock } from "../../concurrency/index.js";
@@ -198,12 +198,13 @@ export class SqliteMurmurStore implements MurmurStore {
 
     #run<Result>(operation: (database: Client) => Promise<Result>): Promise<Result> {
         if (this.#lifecycle !== "open") return Promise.reject(new Error("Murmur store is closed"));
-        return withWorkerContext("murmur-store-operation", (ctx) =>
-            this.#lock.runInLock(ctx, async () => {
-                await this.#ready;
-                return await operation(this.#client);
-            }),
-        );
+        // Murmur has no caller Context in its public API. Each admission needs a fresh untraced
+        // context so reentry blocking does not mistake ordinary concurrent calls for recursion.
+        const ctx = createRootContext().named("murmur-store-operation");
+        return this.#lock.runInLock(ctx, async () => {
+            await this.#ready;
+            return await operation(this.#client);
+        });
     }
 }
 

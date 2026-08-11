@@ -4,6 +4,10 @@ export async function raceWithAbort<T>(
     promise: Promise<T>,
     signal: AbortSignal | undefined,
 ): Promise<T | typeof ABORTED_BY_SIGNAL> {
+    // The operation may have started before its caller discovers that the signal is already
+    // aborted. Always observe its rejection before either early return so that losing work cannot
+    // escape as an unhandled rejection.
+    void promise.catch(() => undefined);
     if (signal === undefined) return promise;
     if (signal.aborted) return ABORTED_BY_SIGNAL;
 
@@ -11,10 +15,6 @@ export async function raceWithAbort<T>(
     const aborted = new Promise<typeof ABORTED_BY_SIGNAL>((resolve) => {
         resolveAbort = () => resolve(ABORTED_BY_SIGNAL);
     });
-    // The provider may reject after the abort wins the race. Observe that loser explicitly so
-    // cancellation does not leak an unhandled rejection while preserving the original promise's
-    // rejection for callers when it wins.
-    void promise.catch(() => undefined);
     signal.addEventListener("abort", resolveAbort, { once: true });
     try {
         return await Promise.race([promise, aborted]);

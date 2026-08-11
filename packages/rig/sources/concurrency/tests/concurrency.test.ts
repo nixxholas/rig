@@ -10,6 +10,7 @@ import {
     forever,
     gracefulShutdown,
     isAbortedError,
+    isAsyncLockReentryError,
     retry,
 } from "../index.js";
 
@@ -55,6 +56,12 @@ describe("asyncLock", () => {
                 lock.runInLock(lockCtx, async () => Promise.resolve()),
             ),
         ).rejects.toThrow("AsyncLock reentry is blocked");
+    });
+
+    it("recognizes only the stdlib blocked-reentry error at recovery boundaries", () => {
+        expect(isAsyncLockReentryError(new Error("AsyncLock reentry is blocked"))).toBe(true);
+        expect(isAsyncLockReentryError(new Error("another lock failure"))).toBe(false);
+        expect(isAsyncLockReentryError("AsyncLock reentry is blocked")).toBe(false);
     });
 });
 

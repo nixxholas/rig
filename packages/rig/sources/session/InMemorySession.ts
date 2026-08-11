@@ -239,7 +239,11 @@ import { isSessionTransactionPostCommitError } from "./SessionTransactionContext
 import { isTransientInferenceSessionEvent } from "./impl/isTransientInferenceSessionEvent.js";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
 import { providerUsageToClaudeQuota } from "../executor/providerUsageToClaudeQuota.js";
-import { asyncLock, type AsyncLock } from "../concurrency/index.js";
+import {
+    asyncLock,
+    isAsyncLockReentryError,
+    type AsyncLock,
+} from "../concurrency/index.js";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { summarizeDockerExecution } from "../execution/index.js";
@@ -5525,28 +5529,41 @@ export class InMemorySession {
         return undefined;
     }
 
-    waitForRun(ctx: Context, runId: string): Promise<SessionRunCompletion> {
+    async waitForRun(ctx: Context, runId: string): Promise<SessionRunCompletion> {
         const completed = this.#completionForRun(runId);
-        if (completed !== undefined) {
-            return Promise.resolve(completed);
+        const completion =
+            completed ??
+            (await new Promise<SessionRunCompletion>((resolve) => {
+                const unsubscribe = this.events.subscribe((event) => {
+                    if (
+                        (event.type !== "run_finished" && event.type !== "run_error") ||
+                        event.data.runId !== runId
+                    ) {
+                        return;
+                    }
+                    unsubscribe();
+                    resolve(
+                        event.type === "run_error"
+                            ? { errorMessage: event.data.errorMessage, status: "error" }
+                            : completionFromRunFinished(event),
+                    );
+                });
+            }));
+        let ownsCommitLock = false;
+        try {
+            await ctx.span("rig.session.wait_for_run_commit", (waitCtx) =>
+                this.#commitEventLock.runInLock(waitCtx, async () => {}),
+            );
+        } catch (error) {
+            if (!isAsyncLockReentryError(error)) throw error;
+            ownsCommitLock = true;
         }
-
-        return new Promise((resolve) => {
-            const unsubscribe = this.events.subscribe((event) => {
-                if (
-                    (event.type !== "run_finished" && event.type !== "run_error") ||
-                    event.data.runId !== runId
-                ) {
-                    return;
-                }
-                unsubscribe();
-                resolve(
-                    event.type === "run_error"
-                        ? { errorMessage: event.data.errorMessage, status: "error" }
-                        : completionFromRunFinished(event),
-                );
-            });
-        });
+        // A waiter called from the commit callback is already at the terminal boundary. Waiting
+        // for its own queue drain would recurse through the same work and stall permanently.
+        if (ownsCommitLock) return completion;
+        const draining = this.#draining;
+        if (draining !== undefined) await draining;
+        return completion;
     }
 
     externalToolCalls(options: { status?: ExternalToolCall["status"] } = {}): ExternalToolCall[] {
@@ -8380,6 +8397,7 @@ export class InMemorySession {
         // settlement is retried after that gate opens, so do not start a generation from a stale
         // synchronous snapshot.
         if (
+            this.#workspaceScope() !== undefined &&
             this.#workspaceRunReadiness !== undefined &&
             this.#queue.length > 0 &&
             !this.#workspaceReleaseMetadataBarrier

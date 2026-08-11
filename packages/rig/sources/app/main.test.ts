@@ -14,7 +14,10 @@ vi.mock("./runApp.js", () => ({ runApp: vi.fn() }));
 vi.mock("./runDesktop.js", () => ({ runDesktop: vi.fn() }));
 vi.mock("./runExec.js", () => ({ runExec: vi.fn() }));
 vi.mock("../readPackageVersion.js", () => ({ readPackageVersion: vi.fn(() => "1.2.3") }));
-vi.mock("../server/index.js", () => ({ runLocalProtocolServer: vi.fn() }));
+vi.mock(import("../server/index.js"), async (importOriginal) => ({
+    ...(await importOriginal()),
+    runLocalProtocolServer: vi.fn(),
+}));
 vi.mock("../happy/index.js", () => ({ runHappyAuthCommand: vi.fn() }));
 vi.mock("./runRigInspection.js", () => ({
     rigInspectionExitCode: vi.fn(() => 0),
