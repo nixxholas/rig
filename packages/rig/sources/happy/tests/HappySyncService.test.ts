@@ -82,7 +82,7 @@ describe("HappySyncService machine spawning", () => {
             configuration,
             createSession: (requestCtx, id, sessionRequest) =>
                 store.createWithId(requestCtx, id, sessionRequest),
-            databasePath,
+            database: store.database,
             fetch: request,
             modelCatalog,
             socketFactory: (_url, options) => {
@@ -176,7 +176,7 @@ describe("HappySyncService machine spawning", () => {
             },
             createSession: (requestCtx, id, sessionRequest) =>
                 store.createWithId(requestCtx, id, sessionRequest),
-            databasePath,
+            database: store.database,
             fetch: request,
             modelCatalog: { ...validCatalog, defaultModelId: "missing-model" },
             socketFactory: () => new FakeSocket(),
@@ -237,10 +237,10 @@ describe("HappySyncService daemon restart", () => {
             }
             return new Response("Not found", { status: 404 });
         });
-        const createService = () =>
+        const createService = (store: PersistentSessionStore) =>
             HappySyncService.open(ctx, {
                 configuration,
-                databasePath,
+                database: store.database,
                 fetch: request,
                 socketFactory: () => new FakeSocket(),
             });
@@ -253,7 +253,7 @@ describe("HappySyncService daemon restart", () => {
             clientSubmissionId: "gap-history",
             text: "Establish the projection cursor.",
         });
-        const firstService = await createService();
+        const firstService = await createService(firstStore);
         await firstService.attach(ctx, session);
         await waitFor(() => posted.includes("rig:gap-history"));
         await firstService.close(ctx);
@@ -302,7 +302,7 @@ describe("HappySyncService daemon restart", () => {
         });
         const restored = await restartedStore.get(ctx, session.id);
         if (restored === undefined) throw new Error("Expected the session to restore.");
-        const restartedService = await createService();
+        const restartedService = await createService(restartedStore);
         const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
         try {
             await restartedService.attach(ctx, restored);
@@ -358,7 +358,7 @@ describe("HappySyncService daemon restart", () => {
                 imported: false,
                 serverUrl: "https://happy.example",
             },
-            databasePath,
+            database: store.database,
             fetch: request,
             socketFactory: () => {
                 const socket = new FakeSocket();
@@ -431,7 +431,7 @@ describe("HappySyncService daemon restart", () => {
                 imported: false,
                 serverUrl: "https://happy.example",
             },
-            databasePath,
+            database: store.database,
             fetch: async () => new Response("Unexpected network request", { status: 500 }),
             socketFactory: () => {
                 const socket = new FakeSocket();
@@ -498,10 +498,10 @@ describe("HappySyncService daemon restart", () => {
             }
             return new Response("Not found", { status: 404 });
         });
-        const createService = async () =>
+        const createService = async (store: PersistentSessionStore) =>
             await HappySyncService.open(ctx, {
                 configuration,
-                databasePath,
+                database: store.database,
                 fetch: request,
                 socketFactory: () => {
                     const socket = new FakeSocket();
@@ -521,7 +521,7 @@ describe("HappySyncService daemon restart", () => {
         // A live-only cursor may be newer than the last durable event. Happy projection progress
         // must anchor to the durable event log rather than treating this draft as its source.
         await session.setDraft(ctx, { draft: "Not a durable Happy projection event." });
-        const firstService = await createService();
+        const firstService = await createService(firstStore);
         let restartedService: HappySyncService | undefined;
         let restartedStore: PersistentSessionStore | undefined;
 
@@ -535,7 +535,7 @@ describe("HappySyncService daemon restart", () => {
                 databasePath,
                 modelCatalog: catalog(),
             });
-            restartedService = await createService();
+            restartedService = await createService(restartedStore);
             const restored = await restartedStore.get(ctx, session.id);
             if (restored === undefined) throw new Error("Expected the session to be restored.");
             await restartedService.attach(ctx, restored);
@@ -611,10 +611,10 @@ describe("HappySyncService daemon restart", () => {
             }
             return new Response("Not found", { status: 404 });
         });
-        const createService = () =>
+        const createService = (store: PersistentSessionStore) =>
             HappySyncService.open(ctx, {
                 configuration,
-                databasePath,
+                database: store.database,
                 fetch: request,
                 maxPendingMessagesPerSession: 1,
                 socketFactory: () => new FakeSocket(),
@@ -628,7 +628,7 @@ describe("HappySyncService daemon restart", () => {
             clientSubmissionId: "historical-message",
             text: "Already synchronized.",
         });
-        const firstService = await createService();
+        const firstService = await createService(firstStore);
         let restartedStore: PersistentSessionStore | undefined;
         let restartedService: HappySyncService | undefined;
         try {
@@ -677,7 +677,7 @@ describe("HappySyncService daemon restart", () => {
             });
             const restored = await restartedStore.get(ctx, session.id);
             if (restored === undefined) throw new Error("Expected the session to restore.");
-            restartedService = await createService();
+            restartedService = await createService(restartedStore);
             await restartedService.attach(ctx, restored);
             await waitFor(() => postedLocalIds.includes("rig:missed-message"));
 
@@ -734,10 +734,10 @@ describe("HappySyncService daemon restart", () => {
             }
             return new Response("Not found", { status: 404 });
         });
-        const createService = async () =>
+        const createService = async (store: PersistentSessionStore) =>
             await HappySyncService.open(ctx, {
                 configuration,
-                databasePath,
+                database: store.database,
                 fetch: request,
                 socketFactory: () => {
                     const socket = new FakeSocket();
@@ -750,7 +750,7 @@ describe("HappySyncService daemon restart", () => {
             modelCatalog: catalog(),
         });
         const session = await firstStore.create(ctx, { cwd: directory });
-        const firstService = await createService();
+        const firstService = await createService(firstStore);
         let restartedService: HappySyncService | undefined;
         let restartedStore: PersistentSessionStore | undefined;
 
@@ -764,7 +764,7 @@ describe("HappySyncService daemon restart", () => {
                 databasePath,
                 modelCatalog: catalog(),
             });
-            restartedService = await createService();
+            restartedService = await createService(restartedStore);
             await restartedService.start(ctx);
 
             expect(sockets).toHaveLength(1);
@@ -814,10 +814,10 @@ describe("HappySyncService daemon restart", () => {
             if (url.pathname.endsWith("/archive")) return Response.json({ success: true });
             return new Response("Not found", { status: 404 });
         });
-        const createService = async () =>
+        const createService = async (store: PersistentSessionStore) =>
             await HappySyncService.open(ctx, {
                 configuration,
-                databasePath,
+                database: store.database,
                 fetch: request,
                 socketFactory: () => {
                     const socket = new FakeSocket();
@@ -831,7 +831,7 @@ describe("HappySyncService daemon restart", () => {
         });
         const archived = await firstStore.create(ctx, { cwd: directory });
         const live = await firstStore.create(ctx, { cwd: directory });
-        const firstService = await createService();
+        const firstService = await createService(firstStore);
         let restartedService: HappySyncService | undefined;
         let restartedStore: PersistentSessionStore | undefined;
 
@@ -849,7 +849,7 @@ describe("HappySyncService daemon restart", () => {
                 databasePath,
                 modelCatalog: catalog(),
             });
-            restartedService = await createService();
+            restartedService = await createService(restartedStore);
             await restartedService.start(ctx);
 
             expect(sockets).toHaveLength(2);
@@ -913,10 +913,10 @@ describe("HappySyncService session archival", () => {
             }
             return new Response("Not found", { status: 404 });
         });
-        const createService = async () =>
+        const createService = async (store: PersistentSessionStore) =>
             await HappySyncService.open(ctx, {
                 configuration,
-                databasePath,
+                database: store.database,
                 fetch: request,
                 modelCatalog: catalog(),
                 socketFactory: () => {
@@ -925,7 +925,7 @@ describe("HappySyncService session archival", () => {
                     return socket;
                 },
             });
-        const service = await createService();
+        const service = await createService(store);
         let restartedService: HappySyncService | undefined;
         const session = await store.create(ctx, { cwd: directory });
 
@@ -1004,7 +1004,7 @@ describe("HappySyncService session archival", () => {
             expect(sockets[0]?.connected).toBe(false);
 
             await service.close(ctx);
-            restartedService = await createService();
+            restartedService = await createService(store);
             await session.setArchived(ctx, true);
             const restartedArchiveEvent = session.events.since(undefined)?.at(-1);
             if (restartedArchiveEvent === undefined) {

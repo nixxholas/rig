@@ -37,15 +37,18 @@ export class HappySyncRepository {
     readonly #database: SessionDatabase;
     readonly #maxPendingMessagesPerSession: number;
     readonly #now: () => number;
+    readonly #ownsDatabase: boolean;
 
     private constructor(
         database: SessionDatabase,
         now: () => number,
         maxPendingMessagesPerSession: number,
+        ownsDatabase: boolean,
     ) {
         this.#database = database;
         this.#maxPendingMessagesPerSession = maxPendingMessagesPerSession;
         this.#now = now;
+        this.#ownsDatabase = ownsDatabase;
     }
 
     static async open(
@@ -55,7 +58,15 @@ export class HappySyncRepository {
         maxPendingMessagesPerSession = MAX_PENDING_MESSAGES_PER_SESSION,
     ): Promise<HappySyncRepository> {
         const opened = await openSessionDatabase(ctx, databasePath);
-        return new HappySyncRepository(opened.database, now, maxPendingMessagesPerSession);
+        return new HappySyncRepository(opened.database, now, maxPendingMessagesPerSession, true);
+    }
+
+    static using(
+        database: SessionDatabase,
+        now: () => number = Date.now,
+        maxPendingMessagesPerSession = MAX_PENDING_MESSAGES_PER_SESSION,
+    ): HappySyncRepository {
+        return new HappySyncRepository(database, now, maxPendingMessagesPerSession, false);
     }
 
     async acknowledge(ctx: Context, sessionId: string, localIds: readonly string[]): Promise<void> {
@@ -63,6 +74,7 @@ export class HappySyncRepository {
     }
 
     async close(ctx: Context): Promise<void> {
+        if (!this.#ownsDatabase) return;
         await this.#database.close(withDatabase(ctx, this.#database));
     }
 

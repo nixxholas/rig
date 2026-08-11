@@ -308,6 +308,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #unsortedSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     readonly #toolResultRetentionMs: number | undefined;
     #toolResultSweepCursor: SessionToolResultPruneCursor | undefined;
+
+    /** Shared database owner for daemon services that participate in session persistence. */
+    get database(): SessionDatabase {
+        return this.#database;
+    }
     #toolResultSweepTimer: ReturnType<typeof setInterval> | undefined;
     #toolResultSweepFollowup: ReturnType<typeof setImmediate> | undefined;
     #toolResultSweepStopped = true;

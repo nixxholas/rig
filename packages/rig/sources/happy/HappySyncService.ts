@@ -22,6 +22,7 @@ import { handleHappySpawnSession } from "./handleHappySpawnSession.js";
 import type { HappyConnectionConfiguration, HappySessionProtocolMessage } from "./types.js";
 import type { Context } from "@steve.kite/stdlib";
 import { withWorkerContext } from "../observability/index.js";
+import type { SessionDatabase } from "../persistence/database/SessionDatabase.js";
 
 const MAX_BACKFILLED_MESSAGES = 10_000;
 const MAX_MAPPED_EVENTS = 4_096;
@@ -35,7 +36,7 @@ export interface HappySyncServiceOptions {
         id: string,
         request: CreateSessionRequest,
     ) => InMemorySession | Promise<InMemorySession>;
-    databasePath: string;
+    database: SessionDatabase;
     fetch?: typeof fetch;
     getSubagents?: (
         ctx: Context,
@@ -120,18 +121,13 @@ export class HappySyncService {
     }
 
     static async open(ctx: Context, options: HappySyncServiceOptions): Promise<HappySyncService> {
-        const repository = await HappySyncRepository.open(
-            ctx,
-            options.databasePath,
+        const repository = HappySyncRepository.using(
+            options.database,
             Date.now,
             options.maxPendingMessagesPerSession,
         );
-        try {
-            return new HappySyncService(options, repository);
-        } catch (error) {
-            await repository.close(ctx);
-            throw error;
-        }
+        void ctx;
+        return new HappySyncService(options, repository);
     }
 
     async attach(ctx: Context, session: InMemorySession): Promise<void> {

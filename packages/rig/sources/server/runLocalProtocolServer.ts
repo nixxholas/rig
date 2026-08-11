@@ -1248,7 +1248,7 @@ async function runOwnedLocalProtocolServer(
                                                                 ),
                                                         ),
                                                     ),
-                                                databasePath: paths.databasePath,
+                                                database: store!.database,
                                                 getSubagents: async (ctx, sessionId) =>
                                                     (await store?.listSubagents(ctx, sessionId)) ??
                                                     [],
@@ -1470,7 +1470,7 @@ async function runOwnedLocalProtocolServer(
                                                               ),
                                                       ),
                                                   ),
-                                              databasePath: paths.databasePath,
+                                              database: store!.database,
                                               getSubagents: async (ctx, sessionId) =>
                                                   (await store?.listSubagents(ctx, sessionId)) ??
                                                   [],
