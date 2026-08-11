@@ -20,6 +20,7 @@ export const codexSpawnAgentTool = defineTool({
     description: `Allowed provider/model pairs (the current Codex provider is inherited):
 - current Codex provider + \`openai/gpt-5.6-sol\`
 - current Codex provider + \`openai/gpt-5.6-terra\`
+- current Codex provider + \`openai/gpt-5.6-luna\`
 Prefer this native tool for GPT models because it preserves Codex's encrypted collaboration transport.
 
 Spawn a background subagent for a concrete, bounded task. The new agent shares the workspace and reports back when it finishes.`,

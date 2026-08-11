@@ -10,9 +10,8 @@ afterEach(async () => {
 });
 
 describe("Codex encrypted collaboration", () => {
-    it("delivers spawn_agent ciphertext through the child agent envelope", async () => {
+    it("delivers spawn_agent ciphertext to a Luna child through the agent envelope", async () => {
         const ciphertext = "opaque-native-spawn-ciphertext";
-        let parentSessionId: string | undefined;
         let childReceivedEncryptedMessage = false;
         const gym = await createGym({
             homeFiles: {
@@ -25,16 +24,14 @@ describe("Codex encrypted collaboration", () => {
                 }),
             },
             inference(request) {
-                const sessionId = request.options.sessionId;
-                if (sessionId?.endsWith(":title") === true) {
+                if (request.options.sessionId?.endsWith(":title") === true) {
                     return { content: [{ text: "Encrypted delegation", type: "text" }] };
                 }
-                parentSessionId ??= sessionId;
-
-                if (sessionId !== parentSessionId) {
-                    const encryptedMessage = request.context.messages
-                        .filter((message) => message.role === "user")
-                        .at(-1)?.encryptedAgentMessage;
+                const encryptedMessage = request.context.messages
+                    .filter((message) => message.role === "user")
+                    .at(-1)?.encryptedAgentMessage;
+                if (encryptedMessage !== undefined) {
+                    expect(request.modelId).toBe("openai/gpt-5.6-luna");
                     expect(encryptedMessage?.encryptedContent).toBe(ciphertext);
                     expect(encryptedMessage?.header).toContain("Message Type: NEW_TASK");
                     expect(
@@ -54,8 +51,8 @@ describe("Codex encrypted collaboration", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: ciphertext,
-                                    model: "openai/gpt-5.6-sol",
-                                    reasoning_effort: "medium",
+                                    model: "openai/gpt-5.6-luna",
+                                    reasoning_effort: "max",
                                     task_name: "encrypted_audit",
                                 },
                                 id: "spawn-encrypted-audit",

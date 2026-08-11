@@ -919,17 +919,6 @@ describe("AgentSessionManager", () => {
         expect(createSubagent).not.toHaveBeenCalled();
         expect(child.submit).not.toHaveBeenCalled();
 
-        await expect(
-            manager.spawn(ctx, parent.id, {
-                encryptedPrompt: "opaque-luna-ciphertext",
-                description: "Unsupported V1 model",
-                modelId: "openai/gpt-5.6-luna",
-                prompt: "",
-                taskName: "unsupported_luna",
-            }),
-        ).rejects.toThrow("Native encrypted collaboration only works within the current");
-        expect(createSubagent).not.toHaveBeenCalled();
-
         parentTransportScope.mockReturnValue(undefined);
         await expect(
             manager.spawn(ctx, parent.id, {

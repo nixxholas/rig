@@ -35,6 +35,6 @@ describe("createEncryptedAgentTransportScope", () => {
         expect(eastScope).toBeUndefined();
         expect(
             createEncryptedAgentTransportScope(cloud, modelFor(cloud, modelOpenaiGpt56Luna.id)),
-        ).toBeUndefined();
+        ).toBe("codex");
     });
 });

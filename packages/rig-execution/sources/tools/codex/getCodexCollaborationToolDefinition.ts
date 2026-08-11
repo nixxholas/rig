@@ -83,6 +83,7 @@ Send a follow-up task to an existing non-root target agent and trigger a turn if
         Allowed provider/model pairs (the current Codex provider is inherited):
 - current Codex provider + \`openai/gpt-5.6-sol\`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.
 - current Codex provider + \`openai/gpt-5.6-terra\`: Balanced agentic coding model for everyday work. Reasoning efforts: low, medium (default), high, xhigh, max, ultra. Service tiers: priority.
+- current Codex provider + \`openai/gpt-5.6-luna\`: GPT-5.6 Luna. Reasoning efforts: off, low, medium (default), high, xhigh, max.
 Prefer this native tool for GPT models because it preserves Codex's encrypted collaboration transport.
         Spawns an agent to work on the specified task. If your current task is \`/root/task1\` and you spawn_agent with task_name "task_3" the agent will have canonical task name \`/root/task1/task_3\`.
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.

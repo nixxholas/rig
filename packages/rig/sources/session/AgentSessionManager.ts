@@ -17,7 +17,7 @@ import {
     type AgentTreeUsage,
 } from "../agent/index.js";
 import { DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS } from "../agent/context/subagentWaitTimeouts.js";
-import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
+import { isCodexEncryptedAgentTransportModel } from "../agent/tools/codex/isCodexEncryptedAgentTransportModel.js";
 import type {
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
@@ -966,17 +966,17 @@ export class AgentSessionManager {
                 resolveEffectiveChild();
             // A scope is the provider that issued it — `createEncryptedAgentTransportScope`
             // returns that provider's own id — so equal ids mean the same provider and therefore
-            // the same type. That leaves only the model to check: the parent holds a scope at all
-            // only when it is a Codex collaboration model, and the child has to be one too for the
-            // ciphertext to be readable where it lands. If that scope ever regains structure this
-            // comparison silently refuses every native spawn, which is what the two-account test
-            // beside this one is for.
+            // the same type. That leaves only the model's transport compatibility to check. This
+            // deliberately differs from the tool generation it speaks as a parent: Luna exposes
+            // v1 tools but can receive an encrypted v2 agent message as a child. If the scope ever
+            // regains structure this comparison silently refuses every native spawn, which is what
+            // the two-account test beside this one is for.
             const parentScope = parent.encryptedAgentTransportScope();
             if (
                 parentScope === undefined ||
                 effectiveProviderId !== parentScope ||
                 effectiveModelId === undefined ||
-                !isCodexV2CollaborationModel(effectiveModelId)
+                !isCodexEncryptedAgentTransportModel(effectiveModelId)
             ) {
                 throw new Error(
                     "Native encrypted collaboration only works within the current compatible provider and region. Use `rig.spawn_agent` and provide the task normally when selecting or crossing a model, provider, or region.",
