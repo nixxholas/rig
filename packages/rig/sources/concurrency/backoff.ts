@@ -1,8 +1,4 @@
-import {
-    backoff as retryWithBackoff,
-    createRootContext,
-    withLifetime,
-} from "@steve.kite/stdlib";
+import { backoff as retryWithBackoff, createRootContext, withLifetime } from "@steve.kite/stdlib";
 
 export interface BackoffOptions {
     initialDelay?: number;
@@ -22,17 +18,16 @@ export async function backoff<T>(
         options.signal === undefined
             ? createRootContext()
             : withLifetime(createRootContext(), options.signal);
-    return await retryWithBackoff(
-        ctx,
-        async (_ctx, attempt) => await work(attempt),
-        {
-            ...(options.initialDelay === undefined ? {} : { initialDelay: options.initialDelay }),
-            ...(options.maxDelay === undefined ? {} : { maxDelay: options.maxDelay }),
-            ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
-            ...(options.now === undefined ? {} : { now: options.now }),
-            ...(options.onError === undefined
-                ? {}
-                : { onError: (_ctx: unknown, error: unknown, attempt: number) => options.onError!(error, attempt) }),
-        },
-    );
+    return await retryWithBackoff(ctx, async (_ctx, attempt) => await work(attempt), {
+        ...(options.initialDelay === undefined ? {} : { initialDelay: options.initialDelay }),
+        ...(options.maxDelay === undefined ? {} : { maxDelay: options.maxDelay }),
+        ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.onError === undefined
+            ? {}
+            : {
+                  onError: (_ctx: unknown, error: unknown, attempt: number) =>
+                      options.onError!(error, attempt),
+              }),
+    });
 }
