@@ -176,10 +176,15 @@ jobs:
               env:
                   # Keep Sandbox Runtime's home-directory mask away from the checkout.
                   HOME: ${{ runner.temp }}/rig-test-home
+                  PROVIDERS_CHANGED: ${{ steps.changed.outputs.providers }}
               run: |
                   mkdir -p "$HOME"
                   pnpm run test:scripts
-                  pnpm --recursive --filter './packages/**' --filter '!@slopus/rig-dev' --filter '!@slopus/rig-gym-tests' run test
+                  if [[ "$PROVIDERS_CHANGED" == "true" ]]; then
+                      pnpm --recursive --filter './packages/**' --filter '!@slopus/rig-dev' --filter '!@slopus/rig-gym-tests' run test
+                  else
+                      pnpm --recursive --filter './packages/**' --filter '!@slopus/rig-dev' --filter '!@slopus/rig-gym-tests' --filter '!@slopus/happy-providers' run test
+                  fi
 
             - name: Publish the canary builds
               env:

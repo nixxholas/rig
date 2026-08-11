@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { resolveReleasePackage } from "./resolveReleasePackage.js";
@@ -9,6 +10,14 @@ describe("resolveReleasePackage", () => {
 
         assert.equal(target.key, "rig");
         assert.equal(target.tagPrefix, "v");
+        assert.deepEqual(target.testArguments, [["run", "test:release"]]);
+        const rootManifest = JSON.parse(
+            readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+        ) as { scripts: Record<string, string> };
+        assert.match(
+            rootManifest.scripts["test:release"] ?? "",
+            /--filter '!@slopus\/happy-providers'/u,
+        );
     });
 
     it("gives rig-connect its own tag namespace and package directory", () => {
