@@ -1,5 +1,5 @@
 {
-    "name": "happy-agent-base",
+    "name": "@slopus/happy-agent-base",
     "version": "0.0.0",
     "description": "Shared foundations for Happy coding agents.",
     "license": "MIT",

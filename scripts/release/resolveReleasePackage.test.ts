@@ -33,6 +33,17 @@ describe("resolveReleasePackage", () => {
         assert.match(target.directory, /packages\/rig-connect\/?$/u);
     });
 
+    it("validates only happy-agent-base for its local and remote releases", () => {
+        const target = resolveReleasePackage("happy-agent-base");
+
+        assert.equal(target.key, "happy-agent-base");
+        assert.equal(target.tagPrefix, "happy-agent-base-v");
+        assert.match(target.directory, /packages\/happy-agent-base\/?$/u);
+        assert.deepEqual(target.buildArguments, ["--filter", "@slopus/happy-agent-base", "build"]);
+        assert.deepEqual(target.checkArguments, ["--filter", "@slopus/happy-agent-base", "check"]);
+        assert.deepEqual(target.testArguments, [["--filter", "@slopus/happy-agent-base", "test"]]);
+    });
+
     it("gives happy-plugins its own tag namespace and package directory", () => {
         const target = resolveReleasePackage("happy-plugins");
 

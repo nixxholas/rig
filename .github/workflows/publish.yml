@@ -7,12 +7,13 @@ on:
         tags:
             - "v*"
             - "rig-connect-v*"
+            - "happy-agent-base-v*"
             - "happy-plugins-v*"
             - "happy-providers-v*"
     workflow_dispatch:
 
 env:
-    RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || startsWith(github.ref_name, 'happy-plugins-v') && 'happy-plugins' || startsWith(github.ref_name, 'happy-providers-v') && 'happy-providers' || 'rig' }}
+    RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || startsWith(github.ref_name, 'happy-agent-base-v') && 'happy-agent-base' || startsWith(github.ref_name, 'happy-plugins-v') && 'happy-plugins' || startsWith(github.ref_name, 'happy-providers-v') && 'happy-providers' || 'rig' }}
 
 permissions:
     contents: read
@@ -88,6 +89,7 @@ jobs:
               run: |
                   case "$RELEASE_PACKAGE" in
                       rig-connect) pnpm --filter @slopus/rig-connect build ;;
+                      happy-agent-base) pnpm --filter @slopus/happy-agent-base build ;;
                       happy-plugins) pnpm --filter happy-plugins build ;;
                       happy-providers) pnpm --filter @slopus/happy-providers build ;;
                       *) pnpm run build ;;

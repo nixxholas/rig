@@ -3,6 +3,16 @@ import { fileURLToPath } from "node:url";
 import type { ReleasePackage, ReleasePackageKey } from "./ReleasePackage.js";
 
 const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
+    "happy-agent-base": {
+        buildArguments: ["--filter", "@slopus/happy-agent-base", "build"],
+        checkArguments: ["--filter", "@slopus/happy-agent-base", "check"],
+        commitPrefix: "Release happy-agent-base v",
+        directory: fileURLToPath(new URL("../../packages/happy-agent-base/", import.meta.url)),
+        key: "happy-agent-base",
+        manifestPath: "packages/happy-agent-base/package.json",
+        tagPrefix: "happy-agent-base-v",
+        testArguments: [["--filter", "@slopus/happy-agent-base", "test"]],
+    },
     "happy-providers": {
         buildArguments: ["--filter", "@slopus/happy-providers", "build"],
         checkArguments: ["--filter", "@slopus/happy-providers", "check"],
@@ -59,11 +69,12 @@ export function resolveReleasePackage(value: string | undefined): ReleasePackage
     if (
         key !== "rig" &&
         key !== "rig-connect" &&
+        key !== "happy-agent-base" &&
         key !== "happy-plugins" &&
         key !== "happy-providers"
     ) {
         throw new Error(
-            `Unknown release package ${key}. Expected rig, rig-connect, happy-plugins, or happy-providers.`,
+            `Unknown release package ${key}. Expected rig, rig-connect, happy-agent-base, happy-plugins, or happy-providers.`,
         );
     }
     return PACKAGES[key];

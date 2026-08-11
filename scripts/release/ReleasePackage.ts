@@ -1,4 +1,9 @@
-export type ReleasePackageKey = "rig" | "rig-connect" | "happy-plugins" | "happy-providers";
+export type ReleasePackageKey =
+    | "rig"
+    | "rig-connect"
+    | "happy-agent-base"
+    | "happy-plugins"
+    | "happy-providers";
 
 export interface ReleasePackage {
     buildArguments: readonly string[];

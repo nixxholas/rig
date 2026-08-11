@@ -21,6 +21,7 @@ const USAGE = `Usage:
   pnpm release <version>
   pnpm release beta
   pnpm release rig-connect <version>
+  pnpm release happy-agent-base <version>
   pnpm release happy-plugins <version>
   pnpm release happy-providers <version>
 
@@ -30,6 +31,7 @@ Examples:
   pnpm release beta             the next quick beta, with typechecks but no tests
   pnpm release 0.4.0            that same choice, spelled out
   pnpm release rig-connect patch
+  pnpm release happy-agent-base patch
   pnpm release happy-plugins patch
   pnpm release happy-providers patch
 
@@ -41,6 +43,7 @@ async function release(): Promise<void> {
     const explicitPackage =
         arguments_[0] === "rig" ||
         arguments_[0] === "rig-connect" ||
+        arguments_[0] === "happy-agent-base" ||
         arguments_[0] === "happy-plugins" ||
         arguments_[0] === "happy-providers";
     const releasePackage = resolveReleasePackage(explicitPackage ? arguments_.shift() : undefined);
@@ -111,7 +114,9 @@ async function release(): Promise<void> {
         console.log(`Resuming the local ${releaseTag} release commit.`);
     }
     if (
-        (releasePackage.key === "rig-connect" || releasePackage.key === "happy-providers") &&
+        (releasePackage.key === "rig-connect" ||
+            releasePackage.key === "happy-agent-base" ||
+            releasePackage.key === "happy-providers") &&
         !retryingRelease
     ) {
         const initialHappyProvidersRelease =
