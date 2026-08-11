@@ -2,9 +2,11 @@ export type ReleasePackageKey = "rig" | "rig-connect" | "happy-plugins" | "happy
 
 export interface ReleasePackage {
     buildArguments: readonly string[];
+    checkArguments: readonly string[];
     commitPrefix: string;
     directory: string;
     key: ReleasePackageKey;
     manifestPath: string;
     tagPrefix: string;
+    testArguments: readonly (readonly string[])[];
 }

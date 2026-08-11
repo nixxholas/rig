@@ -35,6 +35,11 @@ describe("resolveReleasePackage", () => {
         assert.equal(target.tagPrefix, "happy-providers-v");
         assert.match(target.directory, /packages\/happy-providers\/?$/u);
         assert.deepEqual(target.buildArguments, ["--filter", "@slopus/happy-providers", "build"]);
+        assert.deepEqual(target.checkArguments, ["--filter", "@slopus/happy-providers", "check"]);
+        assert.deepEqual(target.testArguments, [
+            ["run", "test:scripts"],
+            ["--filter", "@slopus/happy-providers", "test"],
+        ]);
     });
 
     it("rejects a target that could publish an unintended workspace package", () => {

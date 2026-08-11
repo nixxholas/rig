@@ -73,7 +73,7 @@ jobs:
               run: pnpm exec tsx scripts/validateReleaseTag.ts
 
             - name: Run type checks
-              run: pnpm run check
+              run: pnpm exec tsx scripts/runReleasePackageValidation.ts check
 
             - name: Run tests
               if: ${{ !contains(github.ref_name, '-beta.') }}
@@ -82,8 +82,7 @@ jobs:
                   HOME: ${{ runner.temp }}/rig-test-home
               run: |
                   mkdir -p "$HOME"
-                  pnpm run test:scripts
-                  pnpm --recursive --workspace-concurrency=1 --filter './packages/**' --filter '!@slopus/rig-dev' run test
+                  pnpm exec tsx scripts/runReleasePackageValidation.ts test
 
             - name: Build the package
               run: |

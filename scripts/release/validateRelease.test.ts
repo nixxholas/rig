@@ -7,11 +7,16 @@ import { validateRelease } from "./validateRelease.js";
 
 const RELEASE_PACKAGE: ReleasePackage = {
     buildArguments: ["--filter", "happy-plugins", "build"],
+    checkArguments: ["--filter", "happy-plugins", "check"],
     commitPrefix: "Release happy-plugins v",
     directory: "/workspace/packages/happy-plugins",
     key: "happy-plugins",
     manifestPath: "packages/happy-plugins/package.json",
     tagPrefix: "happy-plugins-v",
+    testArguments: [
+        ["run", "test:scripts"],
+        ["--filter", "happy-plugins", "test"],
+    ],
 };
 
 test("synchronizes the frozen workspace install before release validation", () => {
@@ -34,11 +39,15 @@ test("synchronizes the frozen workspace install before release validation", () =
                 command: "pnpm",
             },
             {
-                arguments_: ["run", "check"],
+                arguments_: ["--filter", "happy-plugins", "check"],
                 command: "pnpm",
             },
             {
-                arguments_: ["run", "test:release"],
+                arguments_: ["run", "test:scripts"],
+                command: "pnpm",
+            },
+            {
+                arguments_: ["--filter", "happy-plugins", "test"],
                 command: "pnpm",
             },
             {
@@ -49,6 +58,7 @@ test("synchronizes the frozen workspace install before release validation", () =
     );
     assert.equal(commands[0]?.environment?.CI, "true");
     assert.deepEqual(commands[2]?.environment, createReleaseTestEnvironment());
+    assert.deepEqual(commands[3]?.environment, createReleaseTestEnvironment());
 });
 
 test("a beta release typechecks and builds without running tests", () => {
@@ -61,7 +71,7 @@ test("a beta release typechecks and builds without running tests", () => {
 
     assert.deepEqual(commands, [
         { arguments_: ["install", "--frozen-lockfile"], command: "pnpm" },
-        { arguments_: ["run", "check"], command: "pnpm" },
+        { arguments_: ["--filter", "happy-plugins", "check"], command: "pnpm" },
         { arguments_: ["--filter", "happy-plugins", "build"], command: "pnpm" },
     ]);
 });

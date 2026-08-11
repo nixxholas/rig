@@ -1,6 +1,6 @@
-import { createReleaseTestEnvironment } from "./createReleaseTestEnvironment.js";
 import type { ReleasePackage } from "./ReleasePackage.js";
 import { runCommand } from "./runCommand.js";
+import { runReleasePackageValidation } from "./runReleasePackageValidation.js";
 
 export function validateRelease(
     releasePackage: ReleasePackage,
@@ -10,11 +10,9 @@ export function validateRelease(
     run("pnpm", ["install", "--frozen-lockfile"], {
         environment: { ...process.env, CI: "true" },
     });
-    run("pnpm", ["run", "check"]);
+    runReleasePackageValidation(releasePackage, "check", run);
     if (options.tests !== false) {
-        run("pnpm", ["run", "test:release"], {
-            environment: createReleaseTestEnvironment(),
-        });
+        runReleasePackageValidation(releasePackage, "test", run);
     }
     run("pnpm", releasePackage.buildArguments);
 }
