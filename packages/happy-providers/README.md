@@ -586,30 +586,46 @@ the common `{ credential, model, userAgent }` constructor shape accepts it direc
 
 ## Session types in detail
 
-A complete tour of the objects you exchange with a session. Everything here is exported from the
-package root.
+A complete tour of the objects you exchange with a session, shown as their real TypeScript
+definitions. Everything here is exported from the package root.
 
 ### `BaseSession`
 
-What `provider.session(id, options)` returns. It carries the caller-supplied `id` and three
-operations:
+What `provider.session(id, options)` returns:
 
-- `run(request)` — streams one inference turn as a `SessionStream`.
-- `compact(options?)` — asks the provider for a shorter replacement context; resolves to a
-  `SessionCompaction`.
-- `destroy()` — releases connections and any other session resources. Always call it when the
-  conversation is over.
+```ts
+abstract class BaseSession {
+    readonly id: string;
+
+    abstract run(request: SessionRunRequest): SessionStream;
+    abstract compact(options?: SessionCompactionOptions): Promise<SessionCompaction>;
+    abstract destroy(): void | Promise<void>;
+}
+```
+
+`run()` streams one inference turn, `compact()` asks the provider for a shorter replacement
+context, and `destroy()` releases connections and other session resources — always call it when
+the conversation is over.
 
 ### `SessionOptions`
 
 The immutable, model-visible configuration a session is created with:
 
-- `instructions` — your complete system instructions.
-- `tools` — the `SessionTool` array the model sees.
-- `inferenceMaxRetries` — a retry budget for this session alone, overriding the provider's. Zero
-  means a failure is reported the moment it happens.
-- `modelConfigurations` — alternate `{ instructions, tools }` pairs keyed by model ID, for
-  sessions that switch between models whose model-visible configuration differs.
+```ts
+interface SessionOptions {
+    readonly instructions: string;
+    readonly tools?: readonly SessionTool[];
+    /** Retry budget for this session alone, overriding the provider's. Zero disables retries. */
+    readonly inferenceMaxRetries?: number;
+    /** Alternate model-visible configurations for sessions that switch models. */
+    readonly modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
+}
+
+interface SessionModelConfiguration {
+    readonly instructions: string;
+    readonly tools?: readonly SessionTool[];
+}
+```
 
 There are no initial messages here on purpose — history always arrives with each `run()`.
 
@@ -617,140 +633,349 @@ There are no initial messages here on purpose — history always arrives with ea
 
 What one `run()` takes:
 
-- `context.messages` — the complete rebuilt conversation history for this turn.
-- `model` — the model for this turn, when it differs from the provider default.
-- `effort` — reasoning effort: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, or
-  `"max"`. Providers map it onto whatever their protocol supports.
-- `serviceTier` — `"priority"` requests priority processing where the vendor offers it.
-- `structuredOutput` — a `{ name, schema }` pair (TypeBox schema) when the response must conform
-  to a JSON schema.
-- `abort` — an `AbortSignal` for cancelling the turn.
+```ts
+interface SessionRunRequest {
+    /** Complete rebuilt conversation history for this inference turn. */
+    context: {
+        readonly messages: readonly SessionMessage[];
+    };
+    abort?: AbortSignal;
+    model?: string;
+    effort?: SessionReasoningEffort;
+    serviceTier?: SessionServiceTier;
+    structuredOutput?: SessionStructuredOutput;
+}
+
+type SessionReasoningEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+type SessionServiceTier = "priority";
+
+interface SessionStructuredOutput {
+    name: string;
+    schema: TSchema; // a TypeBox schema
+}
+```
+
+Providers map `effort` onto whatever their protocol supports, and `serviceTier: "priority"`
+requests priority processing where the vendor offers it.
 
 ### `SessionMessage` — the transcript
 
-The transcript you own is an array of these six message shapes, discriminated by `role`:
+The transcript you own is an array of six message shapes, discriminated by `role`:
 
-**`role: "user"`** — a user turn. `content` is the text; `input` optionally replaces it with
-ordered multimodal parts (`{ type: "text", text }` and `{ type: "image", data, mimeType }`).
-`contextOnly: true` marks background context that does not establish a provider turn boundary.
+```ts
+type SessionMessage =
+    | SessionSystemMessage
+    | SessionUserMessage
+    | SessionAgentMessage
+    | SessionAssistantMessage
+    | SessionToolResultMessage
+    | SessionCompactionMessage;
+```
 
-**`role: "assistant"`** — a model turn, and the shape with the most to preserve:
+A user turn. `input`, when present, replaces `content` with ordered multimodal parts:
 
-- `content` — the visible response text.
-- `reasoning` — ordered reasoning blocks, each `{ text, signature?, redacted? }`. Anthropic signs
-  the text of its thinking blocks, so a signature replayed beside different text is rejected —
-  keep block and signature together, untouched.
-- `encryptedReasoning` — the opaque encrypted-reasoning payload from Responses-compatible
-  backends. Store it byte-for-byte.
-- `toolCalls` — the completed client tool calls emitted with this message (see `SessionToolCall`).
-- `responseItems` — ordered, opaque Responses output items. Providers replay these to reproduce
-  commentary, reasoning, and parallel tool calls without flattening or reordering. Opaque; store
-  unchanged.
+```ts
+interface SessionUserMessage {
+    readonly role: "user";
+    readonly content: string;
+    /** Background context that does not establish a provider turn boundary. */
+    readonly contextOnly?: true;
+    readonly input?: SessionInputContent;
+}
 
-**`role: "tool"`** — your answer to a tool call: `callId` ties it to the call, `content` (or
-multimodal `input`) carries the result, `isError: true` reports a failed invocation, and `vendor`
-echoes back the opaque metadata that arrived with the call.
+type SessionInputContent = readonly (SessionTextContent | SessionImageContent)[];
 
-**`role: "system"`** — a system notice injected into the conversation; `content` is a string or a
-list of strings.
+interface SessionTextContent {
+    readonly type: "text";
+    readonly text: string;
+}
 
-**`role: "agent"`** — an opaque provider-native message exchanged between collaborating Codex
-agents: `author`, `recipient`, `header`, and `encryptedContent`, plus `agentMessageTriggerTurn`
-when the message establishes a new inference turn boundary. Preserve it as-is.
+interface SessionImageContent {
+    readonly type: "image";
+    readonly data: string;
+    readonly mimeType: string;
+}
+```
 
-**`role: "compaction"`** — the checkpoint a native compaction produced: `content` (the summary
-text, possibly `null`), `encryptedContent` (the opaque payload, possibly `null`), and `vendor`
-metadata. It sits in the transcript where the compacted history used to be; never edit it.
+A model turn — the shape with the most to preserve. Anthropic signs the text of its thinking
+blocks, so a signature replayed beside different text is rejected: keep each reasoning block and
+its signature together, untouched. `encryptedReasoning` and `responseItems` are opaque; store
+them byte-for-byte:
 
-### `SessionToolCall`
+```ts
+interface SessionAssistantMessage {
+    readonly role: "assistant";
+    readonly content: string;
+    /** Opaque encrypted reasoning from a Responses-compatible backend. */
+    readonly encryptedReasoning?: string;
+    /** Ordered reasoning blocks retained as caller-owned history. */
+    readonly reasoning?: readonly SessionReasoning[];
+    /** Completed client tool calls emitted alongside this message. */
+    readonly toolCalls?: readonly SessionToolCall[];
+    /** Ordered, opaque Responses output items, replayed without flattening or reordering. */
+    readonly responseItems?: readonly string[];
+}
 
-One completed client tool call: `callId`, `name`, optional `namespace`, `arguments` as the raw
-JSON string the model produced, `incomplete: true` when the provider stopped before the call
-became executable (do not run it), and opaque `vendor` metadata to persist and echo back on the
-result.
+interface SessionReasoning {
+    readonly text: string;
+    readonly signature?: string;
+    /** Reasoning the vendor withheld, where the signature is the whole payload. */
+    readonly redacted?: boolean;
+}
+
+interface SessionToolCall {
+    readonly callId: string;
+    readonly name: string;
+    readonly namespace?: string;
+    /** The raw argument JSON exactly as the model produced it. */
+    readonly arguments: string;
+    /** The provider stopped before this call became executable — do not run it. */
+    readonly incomplete?: boolean;
+    /** Opaque provider metadata; echo it back on the tool result. */
+    readonly vendor?: any;
+}
+```
+
+Your answer to a tool call, tied back by `callId`:
+
+```ts
+interface SessionToolResultMessage {
+    readonly role: "tool";
+    readonly callId: string;
+    readonly content: string;
+    /** Whether the caller reported that the tool invocation failed. */
+    readonly isError?: boolean;
+    /** Ordered multimodal content. When present, providers use this instead of content. */
+    readonly input?: SessionInputContent;
+    /** The opaque metadata that arrived with the call, echoed back. */
+    readonly vendor?: any;
+}
+```
+
+The remaining three shapes — a system notice, an opaque Codex agent-to-agent message, and the
+checkpoint a native compaction produced (it sits where the compacted history used to be; never
+edit it):
+
+```ts
+interface SessionSystemMessage {
+    readonly role: "system";
+    readonly content: string | readonly string[];
+}
+
+interface SessionAgentMessage {
+    readonly role: "agent";
+    readonly author: string;
+    readonly recipient: string;
+    readonly header: string;
+    readonly encryptedContent: string;
+    /** Whether this message establishes the boundary for a new inference turn. */
+    readonly agentMessageTriggerTurn?: boolean;
+}
+
+interface SessionCompactionMessage {
+    readonly role: "compaction";
+    /** Provider-returned summary text, including null when the provider returned no text. */
+    readonly content: string | null;
+    /** Provider-returned encrypted compaction payload, including null when absent. */
+    readonly encryptedContent: string | null;
+    /** Additional opaque provider metadata required to replay the checkpoint natively. */
+    readonly vendor?: any;
+}
+```
 
 ### `SessionTool`
 
 A tool definition, as covered in the [Tools section](#tools-you-run-them-not-the-library):
-`name`, `description`, and TypeBox `parameters`, plus optional `namespace` and
-`namespaceDescription` for namespaced tools, `server` for provider-owned tools, `deferLoading` to
-expose the tool through native tool discovery, `grammar` for OpenAI-style Lark-grammar tools
-(ignored by providers that don't support them), and opaque `vendor` metadata.
+
+```ts
+interface SessionTool {
+    readonly name: string;
+    readonly namespace?: string;
+    /** Description of the containing namespace, when this tool is namespaced. */
+    readonly namespaceDescription?: string;
+    /**
+     * Exact native descriptor for a call the provider owns and settles inside its response.
+     * Absence means the caller owns execution.
+     */
+    readonly server?: { readonly type: string; readonly [key: string]: unknown };
+    readonly description?: string;
+    readonly parameters?: TSchema; // a TypeBox schema
+    /** Provider-neutral request to expose this tool through native tool discovery. */
+    readonly deferLoading?: boolean;
+    /** Opaque provider metadata persisted with this tool definition. */
+    readonly vendor?: any;
+    /** OpenAI-style Lark grammar; ignored by providers that do not support grammar tools. */
+    readonly grammar?: SessionToolLarkGrammar;
+}
+
+interface SessionToolLarkGrammar {
+    readonly type: "lark";
+    readonly grammar: string;
+}
+```
 
 ### `SessionEvent` — the stream
 
-`run()` yields a `SessionStream`, an `AsyncIterable<SessionEvent>`. The events, by group:
+`run()` yields a `SessionStream = AsyncIterable<SessionEvent>`. The full union:
 
-**Blocks** — `block_start`, `block_stop`, `block_reset` bracket tentative output so
-provider-owned retries can rewind it; see
-[the retries section](#retries-happen-inside-the-session).
+```ts
+type SessionEvent =
+    // Blocks bracket tentative output so provider-owned retries can rewind it.
+    | { type: "block_start" }
+    | { type: "block_stop" }
+    | { type: "block_reset" }
+    // Content.
+    | { type: "text_delta"; delta: string }
+    | { type: "reasoning_delta"; delta: string }
+    | { type: "encrypted_reasoning"; content: string }
+    | { type: "response_items"; items: readonly string[] }
+    // Tool calls. `server: true` marks a provider-owned call the client never executes.
+    | { type: "toolcall_start"; callId: string; name: string; namespace?: string; server?: true; vendor?: any }
+    | { type: "toolcall_delta"; callId: string; delta: string }
+    | { type: "toolcall_end"; callId: string; arguments: string; incomplete?: boolean }
+    // Server-tool results settle inside the same response, streamed beside the call.
+    | { type: "toolcall_result_start"; callId: string }
+    | { type: "toolcall_result_delta"; callId: string; delta: string }
+    | { type: "toolcall_result_end"; callId: string; result: string; incomplete?: boolean }
+    // Progress.
+    | { type: "retrying"; attempt: number; reason: string }
+    | { type: "token_usage"; usage: SessionCacheUsage }
+    // Exactly one done event ends every started stream.
+    | { type: "done"; state: "cancelled" }
+    | { type: "done"; state: "normal"; endTurn?: boolean }
+    | { type: "done"; state: "tool_call" }
+    | { type: "done"; state: "length" }
+    | { type: "done"; state: "error"; kind: SessionErrorKind; message: string; providerError?: SessionProviderError };
 
-**Content** — `text_delta` and `reasoning_delta` carry incremental text; `encrypted_reasoning`
-delivers the opaque reasoning payload to persist; `response_items` delivers the opaque Responses
-output items to persist.
+type SessionErrorKind = "internal_error" | "context_overflow" | "billing_error" | "unknown";
 
-**Client tool calls** — `toolcall_start` (with `callId`, `name`, optional `namespace` and
-`vendor`), `toolcall_delta` streaming the argument JSON, and `toolcall_end` with the final
-`arguments` and an `incomplete` flag when the provider stopped early.
+type SessionStream = AsyncIterable<SessionEvent>;
+```
 
-**Server tool calls** — `toolcall_start` arrives with `server: true`, and the provider-owned
-result streams beside it as `toolcall_result_start` / `toolcall_result_delta` /
-`toolcall_result_end`. Ordinary tools never emit result events — you answer those with a tool
-message; server tools settle inside the same response.
-
-**Progress** — `retrying { attempt, reason }` reports a provider-owned retry;
-`token_usage { usage }` reports a `SessionCacheUsage`.
-
-**Termination** — exactly one `done` event ends every started stream, with one of five states:
-
-- `"normal"` — the model finished its answer; `endTurn` marks an explicit end of turn.
-- `"tool_call"` — the model stopped to wait for your tool results.
-- `"length"` — the response hit a length limit.
-- `"cancelled"` — the run was aborted.
-- `"error"` — the run failed terminally, with a `kind` (`"internal_error"`,
-  `"context_overflow"`, `"billing_error"`, or `"unknown"`), a human-readable `message`, and a
-  `providerError` when the failure was classified (see `SessionProviderError`).
+The `done` states: `"normal"` means the model finished its answer (`endTurn` marks an explicit
+end of turn), `"tool_call"` means it stopped to wait for your tool results, `"length"` means the
+response hit a length limit, `"cancelled"` means the run was aborted, and `"error"` is terminal.
+Ordinary tools never emit `toolcall_result_*` events — you answer those with a `role: "tool"`
+message; only server tools stream their results here.
 
 The helpers `isSessionDoneEvent()` and `isSessionErrorDone()` narrow events, and
 `committedSessionEvents()` filters a collected stream down to what survived block rewinds.
 
 ### `SessionCacheUsage`
 
-Token accounting for one attempt: `input`, `output`, `cacheRead`, `cacheWrite`, and
-`totalTokens`. Cache reads are the payoff of prompt-cache continuity — a healthy continuation
-shows most of its input arriving as `cacheRead`.
+Token accounting for one attempt:
+
+```ts
+interface SessionCacheUsage {
+    readonly input: number;
+    readonly output: number;
+    readonly cacheRead: number;
+    readonly cacheWrite: number;
+    readonly totalTokens: number;
+}
+```
+
+Cache reads are the payoff of prompt-cache continuity — a healthy continuation shows most of its
+input arriving as `cacheRead`.
 
 ### `SessionCompaction`
 
-What `compact(options)` resolves to. The options are `model`, provider-native `instructions` for
-what to retain, the selected `context`, an `inputTokens` estimate, and an abort `signal`. The
-result is one of three statuses:
+What `compact(options)` takes and resolves to:
 
-- `"completed"` — carries the complete replacement `context` to adopt, plus how it was built: a
-  plain-text `summary` (providers without native compaction), an opaque `compaction` checkpoint
-  message (native compaction), optional `encryptedReasoning` emitted while summarizing,
-  `preservedMessages` retained alongside the summary, and the `usage` it cost.
-- `"cancelled"` — the original context is still active; nothing changed.
-- `"failed"` — same, plus a `kind` (`"inference_error"`, `"invalid_summary"`, or `"tool_call"`)
-  and a human-readable `message`.
+```ts
+interface SessionCompactionOptions {
+    /** Model selected by the caller for this compaction. */
+    readonly model?: string;
+    /** Provider-native instructions describing what the compaction should retain. */
+    readonly instructions?: string;
+    /** Rebuilt conversation prefix selected by the caller for this compaction. */
+    readonly context?: {
+        readonly messages: readonly SessionMessage[];
+    };
+    /** Best available count of input tokens in the selected context. */
+    readonly inputTokens?: number;
+    readonly signal?: AbortSignal;
+}
+
+type SessionCompaction =
+    | CompletedSessionCompaction
+    | CancelledSessionCompaction
+    | FailedSessionCompaction;
+
+interface CompletedSessionCompaction {
+    readonly status: "completed";
+    /** Plain-text summary produced by providers without native compaction. */
+    readonly summary?: string;
+    /** Opaque checkpoint produced by provider-native compaction. */
+    readonly compaction?: SessionCompactionMessage;
+    /** Opaque reasoning item emitted while producing the summary, when supported. */
+    readonly encryptedReasoning?: string;
+    /** Original messages intentionally retained alongside the summary. */
+    readonly preservedMessages: readonly SessionMessage[];
+    readonly usage: SessionCacheUsage;
+    /** Complete replacement context — adopt this as your new transcript. */
+    readonly context: SessionContext;
+}
+
+interface CancelledSessionCompaction {
+    readonly status: "cancelled";
+    /** Original context left active because compaction did not complete. */
+    readonly context: SessionContext;
+}
+
+interface FailedSessionCompaction {
+    readonly status: "failed";
+    readonly kind: "inference_error" | "invalid_summary" | "tool_call";
+    readonly message: string;
+    /** Original context left active because compaction did not complete. */
+    readonly context: SessionContext;
+}
+
+interface SessionContext {
+    readonly instructions: string;
+    readonly messages: readonly SessionMessage[];
+}
+```
+
+On `"cancelled"` and `"failed"` nothing changed — the original context is still active.
 
 ### `SessionProviderError`
 
 The typed classification attached to a terminal error `done` event when the failure was
-recognized:
+recognized. It is defined as a TypeBox schema (exported as `sessionProviderErrorSchema` for
+runtime validation); the derived type:
 
-- `authentication` — the credential was rejected.
-- `out_of_tokens` — the account's quota is exhausted; `resetAt` says when it returns, when known.
-- `rate_limit` — too many requests; `resetAt` says when to come back, when known.
-- `server_overloaded` — the backend is shedding load.
-- `internal_server_error` — the backend failed.
-- `empty_response` — the provider returned nothing usable.
-- `unclassified` — we don't know how to recover from this; the human-readable message on the
-  `done` event is the best available explanation.
+```ts
+type SessionProviderError =
+    | { type: "authentication"; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "out_of_tokens"; resetAt?: number; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "rate_limit"; resetAt?: number; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "server_overloaded"; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "internal_server_error"; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "empty_response"; diagnostics?: SessionProviderErrorDiagnostics }
+    | { type: "unclassified"; diagnostics?: SessionProviderErrorDiagnostics };
 
-Every case may carry bounded `diagnostics` — `status`, `code`, `errorType`, `requestId`,
-`responseId`, `attempts`, `retryDirective`, and a truncated `upstreamMessage` — sized for logs,
-never a raw upstream dump.
+interface SessionProviderErrorDiagnostics {
+    attempts?: number;
+    code?: string;
+    errorType?: string;
+    requestId?: string;
+    responseId?: string;
+    retryDirective?: boolean;
+    status?: number; // HTTP status
+    upstreamMessage?: string; // truncated, bounded
+}
+```
+
+What each case means: `authentication` — the credential was rejected; `out_of_tokens` — the
+account's quota is exhausted, with `resetAt` saying when it returns when known; `rate_limit` —
+too many requests, `resetAt` again when known; `server_overloaded` — the backend is shedding
+load; `internal_server_error` — the backend failed; `empty_response` — the provider returned
+nothing usable; `unclassified` — we don't know how to recover from this, and the human-readable
+message on the `done` event is the best available explanation.
+
+Diagnostics are bounded and sized for logs — never a raw upstream dump.
 
 ## License
 
