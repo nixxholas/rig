@@ -45,7 +45,10 @@ describe("projectClientTranscript", () => {
                         },
                     ],
                     id: "agent",
-                    responseItems: [huge],
+                    sessionMessage: {
+                        role: "assistant",
+                        content: [{ type: "reasoning", reasoning: huge }],
+                    },
                     role: "agent",
                 },
             ],

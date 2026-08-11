@@ -1,6 +1,5 @@
 import { estimateMessagesTokens } from "./estimateMessagesTokens.js";
 import { requestProviderCompaction } from "./requestProviderCompaction.js";
-import { resolveCompactionInputTokens } from "./resolveCompactionInputTokens.js";
 import { resolveAutoCompactThreshold } from "./resolveAutoCompactThreshold.js";
 import type { CompactionMessage, Message } from "../types.js";
 import type {
@@ -65,7 +64,6 @@ export async function compactConversation(options: {
     const providerContext = await options.createProviderContext(options.messages);
     const summary = await requestProviderCompaction({
         context: providerContext,
-        inputTokens: resolveCompactionInputTokens(estimatedTokensBefore, options.reportedTokens),
         provider: options.provider,
         model: options.model,
         now: options.now,

@@ -112,7 +112,6 @@ describe("createGymProvider", () => {
         await expect(
             provider.compact?.({
                 context: { messages: [{ role: "user", content: "old", timestamp: 1 }] },
-                inputTokens: 100,
                 model: gymModel,
             }),
         ).resolves.toMatchObject({

@@ -44,7 +44,6 @@ describe("requestProviderCompaction", () => {
 
         const result = await requestProviderCompaction({
             context: compactionContext(),
-            inputTokens: 1_000,
             model,
             now: () => 4,
             provider,
@@ -68,7 +67,6 @@ describe("requestProviderCompaction", () => {
         await expect(
             requestProviderCompaction({
                 context: compactionContext(),
-                inputTokens: 1_000,
                 model,
                 now: () => 4,
                 provider,
@@ -104,7 +102,6 @@ describe("requestProviderCompaction", () => {
             await expect(
                 requestProviderCompaction({
                     context,
-                    inputTokens: 1_000,
                     model,
                     now: () => 1,
                     provider,

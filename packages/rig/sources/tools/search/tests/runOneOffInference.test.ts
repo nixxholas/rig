@@ -15,7 +15,7 @@ describe("runOneOffInference", () => {
         const events: SessionEvent[] = [
             { type: "text_delta", delta: "Direct " },
             { type: "text_delta", delta: "answer" },
-            { type: "done", state: "normal" },
+            { type: "done", state: "normal", tokens: { input: 0, output: 0 } },
         ];
         const session = fakeSession(events);
         const native = fakeProvider(session);
@@ -46,7 +46,15 @@ describe("runOneOffInference", () => {
         });
         expect(session.run).toHaveBeenCalledWith(
             expect.objectContaining({
-                context: { messages: [{ role: "user", content: "Summarize this." }] },
+                context: {
+                    instructions: "Answer one bounded question.",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "Summarize this." }],
+                        },
+                    ],
+                },
                 model: profile.id,
             }),
         );
@@ -56,7 +64,7 @@ describe("runOneOffInference", () => {
     it("returns as soon as the provider emits done even if its stream never closes", async () => {
         const session = sessionThatHangsAfter([
             { type: "text_delta", delta: "Finished" },
-            { type: "done", state: "normal" },
+            { type: "done", state: "normal", tokens: { input: 0, output: 0 } },
         ]);
         const native = fakeProvider(session);
         const profile = builtinModelProfiles("codex", "codex")[0]!;
@@ -103,7 +111,9 @@ describe("runOneOffInference", () => {
     });
 
     it("keeps the native session id bounded even when the configured provider id is long", async () => {
-        const session = fakeSession([{ type: "done", state: "normal" }]);
+        const session = fakeSession([
+            { type: "done", state: "normal", tokens: { input: 0, output: 0 } },
+        ]);
         const native = fakeProvider(session);
         const profile = builtinModelProfiles("codex", "codex")[0]!;
 

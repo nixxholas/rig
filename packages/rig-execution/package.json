@@ -22,7 +22,7 @@
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.49",
-        "@slopus/happy-providers": "0.0.1"
+        "@slopus/happy-providers": "0.0.4"
     },
     "devDependencies": {
         "@types/node": "^24.0.10",

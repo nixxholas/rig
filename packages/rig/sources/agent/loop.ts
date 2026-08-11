@@ -1438,9 +1438,9 @@ function toProviderMessagesFromAgentMessage(
                       usage: zeroUsage(),
                       stopReason,
                       timestamp: options.now(),
-                      ...(message.responseItems === undefined
+                      ...(message.sessionMessage === undefined
                           ? {}
-                          : { responseItems: message.responseItems }),
+                          : { sessionMessage: message.sessionMessage }),
                   },
               ]
             : []),

@@ -7,6 +7,7 @@ import { networkToolPermission } from "../../runtime/networkToolPermission.js";
 import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
 import { searchProviderSelection } from "./searchProviderSelection.js";
+import { sessionOutputText } from "./sessionOutputText.js";
 
 const grokXSearchQueryArguments = Type.Object(
     {
@@ -74,7 +75,9 @@ ${selection.availability}`,
                     "Use x_search to inspect posts on X. Return a concise synthesis and link every post you rely on.",
                 onEvent: (event) => {
                     if (event.type === "toolcall_start" && event.server === true) searchedX = true;
-                    if (event.type === "toolcall_result_end") providerResults.push(event.result);
+                    if (event.type === "toolcall_result_end") {
+                        providerResults.push(sessionOutputText(event.content));
+                    }
                 },
                 prompt: grokXPrompt(input),
                 route,

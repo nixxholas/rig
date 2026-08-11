@@ -45,7 +45,10 @@ describe("toSessionMessages", () => {
                 },
             ]),
         ).toMatchObject([
-            { role: "assistant", toolCalls: [{ callId: "provider-call-id" }] },
+            {
+                role: "assistant",
+                content: [{ type: "tool_call", callId: "provider-call-id" }],
+            },
             { role: "tool", callId: "provider-call-id" },
         ]);
     });
@@ -88,11 +91,48 @@ describe("toSessionMessages", () => {
 
         expect(message).toMatchObject({
             role: "assistant",
-            content: "Done.",
-            reasoning: [
-                { text: "Unsigned reasoning." },
-                { text: "Signed reasoning.", signature: "signature" },
+            content: [
+                { type: "reasoning", text: "Unsigned reasoning." },
+                { type: "reasoning", text: "Signed reasoning.", reasoning: "signature" },
+                { type: "text", text: "Done." },
             ],
         });
     });
+
+    it("replays an exact accumulated provider message without flattening its blocks", () => {
+        const sessionMessage = {
+            role: "assistant" as const,
+            content: [
+                { type: "reasoning" as const, text: "Think.", reasoning: "opaque" },
+                { type: "text" as const, text: "Done." },
+                {
+                    type: "tool_result" as const,
+                    callId: "server-call",
+                    content: [{ type: "text" as const, text: "provider result" }],
+                },
+            ],
+        };
+
+        const [message] = toSessionMessages([
+            {
+                ...providerAssistantMessage(),
+                sessionMessage,
+            },
+        ]);
+
+        expect(message).toBe(sessionMessage);
+    });
 });
+
+function providerAssistantMessage() {
+    return {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "Done." }],
+        api: "rig",
+        provider: "test",
+        model: "test-model",
+        usage: zeroUsage,
+        stopReason: "stop" as const,
+        timestamp: 0,
+    };
+}

@@ -1,5 +1,4 @@
 import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
 import type { SessionTool } from "@slopus/happy-providers";
 
 import { defineTool } from "../../agent/types.js";
@@ -74,13 +73,11 @@ ${selection.availability}`,
         execute: async (input, _context, execution): Promise<BedrockSearchResult> => {
             const route = selection.selectRoute(input.provider_id);
             let usedSearch = false;
-            const responseItems: string[] = [];
             const result = await runOneOffInference({
                 instructions:
                     "Search the web before answering. Return a compact factual answer and cite every source you used.",
                 onEvent: (event) => {
                     if (event.type === "toolcall_start" && event.server === true) usedSearch = true;
-                    if (event.type === "response_items") responseItems.push(...event.items);
                 },
                 prompt: bedrockPrompt(input),
                 route,
@@ -92,7 +89,7 @@ ${selection.availability}`,
             }
             return {
                 answer: result.text,
-                citations: bedrockCitations(responseItems, result.text),
+                citations: bedrockCitations(result.text),
                 durationMs: result.durationMs,
                 query: input.query,
             };
@@ -123,27 +120,8 @@ function bedrockPrompt(input: Static<typeof bedrockSearchQueryArguments>): strin
     return `Research this query and answer it: ${input.query}`;
 }
 
-/**
- * Bedrock reports its sources as `url_citation` annotations on the answer text, so they are read
- * back out of the provider's own response items rather than scraped from prose. Links the model
- * wrote inline are picked up too, since a cited source is worth keeping either way.
- */
-function bedrockCitations(
-    responseItems: readonly string[],
-    text: string,
-): { title: string; url: string }[] {
+function bedrockCitations(text: string): { title: string; url: string }[] {
     const citations = new Map<string, { title: string; url: string }>();
-    for (const serialized of responseItems) {
-        let item: unknown;
-        try {
-            item = JSON.parse(serialized);
-        } catch {
-            continue;
-        }
-        for (const annotation of messageAnnotations(item)) {
-            citations.set(annotation.url, annotation);
-        }
-    }
     for (const match of text.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gu)) {
         const [, title, url] = match;
         if (title !== undefined && url !== undefined && !citations.has(url)) {
@@ -151,31 +129,4 @@ function bedrockCitations(
         }
     }
     return [...citations.values()];
-}
-
-const urlCitationAnnotation = Type.Object({
-    type: Type.Literal("url_citation"),
-    title: Type.Optional(Type.String()),
-    url: Type.String(),
-});
-
-const annotatedMessageItem = Type.Object({
-    type: Type.Literal("message"),
-    content: Type.Array(
-        Type.Object({
-            annotations: Type.Optional(Type.Array(Type.Unknown())),
-        }),
-    ),
-});
-
-function messageAnnotations(item: unknown): { title: string; url: string }[] {
-    if (!Value.Check(annotatedMessageItem, item)) return [];
-    const annotations: { title: string; url: string }[] = [];
-    for (const block of item.content) {
-        for (const annotation of block.annotations ?? []) {
-            if (!Value.Check(urlCitationAnnotation, annotation)) continue;
-            annotations.push({ title: annotation.title ?? annotation.url, url: annotation.url });
-        }
-    }
-    return annotations;
 }

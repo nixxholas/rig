@@ -138,8 +138,6 @@ export interface AssistantMessage {
     /** Context window occupied immediately after this inference. */
     contextTokens?: number;
     responseModel?: string;
-    /** Ordered opaque provider output items required for native continuation. */
-    responseItems?: readonly string[];
     endTurn?: boolean;
     usage: Usage;
     stopReason: StopReason;
@@ -362,7 +360,6 @@ export interface Provider {
     forceClose?(): Promise<void> | void;
     compact?(options: {
         context: Context;
-        inputTokens?: number;
         instructions?: string;
         model: Model;
         signal?: AbortSignal;
@@ -415,7 +412,6 @@ export function defineProvider(provider: {
     reset?(): Promise<void> | void;
     compact?(options: {
         context: Context;
-        inputTokens?: number;
         instructions?: string;
         model: Model;
         signal?: AbortSignal;

@@ -28,7 +28,7 @@ export function assistantMessageToAgentMessage(
         providerId: attribution.providerId,
         requestedModelId: attribution.requestedModelId,
         ...(message.responseModel === undefined ? {} : { responseModel: message.responseModel }),
-        ...(message.responseItems === undefined ? {} : { responseItems: message.responseItems }),
+        ...(message.sessionMessage === undefined ? {} : { sessionMessage: message.sessionMessage }),
     };
 }
 

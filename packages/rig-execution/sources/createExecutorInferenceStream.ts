@@ -2,6 +2,7 @@ import type { Executor } from "@/Executor.js";
 import type { ExecutorEvent } from "@/ExecutorEvent.js";
 import {
     extractProviderErrorDiagnostics,
+    SessionAssistantMessageAccumulator,
     type SessionReasoningEffort,
     type SessionTool,
 } from "@slopus/happy-providers";
@@ -45,14 +46,12 @@ async function* streamExecutorInference(options: {
     let activeTextIndex: number | undefined;
     let activeThinkingIndex: number | undefined;
     let blockCheckpoint: AssistantMessage | undefined;
+    const sessionMessage = new SessionAssistantMessageAccumulator();
     const activeTools = new Map<string, number>();
     const ignoredProviderCalls = new Set<string>();
-    const responseItems: string[] = [];
-
     const snapshot = () => ({
         ...partial,
         content: partial.content.map((content) => ({ ...content })),
-        ...(responseItems.length === 0 ? {} : { responseItems: [...responseItems] }),
     });
     yield { type: "start", partial: snapshot() };
 
@@ -90,6 +89,7 @@ async function* streamExecutorInference(options: {
         );
 
         for await (const event of events) {
+            sessionMessage.add(event);
             if (event.type === "block_start") {
                 blockCheckpoint = snapshot();
                 yield { type: "block_start" };
@@ -101,7 +101,6 @@ async function* streamExecutorInference(options: {
                 activeTextIndex = undefined;
                 activeThinkingIndex = undefined;
                 activeTools.clear();
-                responseItems.splice(0, responseItems.length, ...(partial.responseItems ?? []));
                 blockCheckpoint = undefined;
                 yield { type: "block_reset", partial: snapshot() };
                 continue;
@@ -119,16 +118,18 @@ async function* streamExecutorInference(options: {
                 };
                 continue;
             }
+            if (event.type === "text_start") {
+                activeTextIndex = partial.content.length;
+                partial.content = [...partial.content, { type: "text", text: "" }];
+                yield {
+                    type: "text_start",
+                    contentIndex: activeTextIndex,
+                    partial: snapshot(),
+                };
+                continue;
+            }
             if (event.type === "text_delta") {
-                if (activeTextIndex === undefined) {
-                    activeTextIndex = partial.content.length;
-                    partial.content = [...partial.content, { type: "text", text: "" }];
-                    yield {
-                        type: "text_start",
-                        contentIndex: activeTextIndex,
-                        partial: snapshot(),
-                    };
-                }
+                if (activeTextIndex === undefined) continue;
                 const content = partial.content[activeTextIndex];
                 if (content?.type !== "text") continue;
                 partial.content = replaceContent(partial.content, activeTextIndex, {
@@ -143,16 +144,32 @@ async function* streamExecutorInference(options: {
                 };
                 continue;
             }
+            if (event.type === "text_end") {
+                if (activeTextIndex === undefined) continue;
+                const contentIndex = activeTextIndex;
+                const content = partial.content[contentIndex];
+                activeTextIndex = undefined;
+                if (content?.type !== "text") continue;
+                yield {
+                    type: "text_end",
+                    contentIndex,
+                    content: content.text,
+                    partial: snapshot(),
+                };
+                continue;
+            }
+            if (event.type === "reasoning_start") {
+                activeThinkingIndex = partial.content.length;
+                partial.content = [...partial.content, { type: "thinking", thinking: "" }];
+                yield {
+                    type: "thinking_start",
+                    contentIndex: activeThinkingIndex,
+                    partial: snapshot(),
+                };
+                continue;
+            }
             if (event.type === "reasoning_delta") {
-                if (activeThinkingIndex === undefined) {
-                    activeThinkingIndex = partial.content.length;
-                    partial.content = [...partial.content, { type: "thinking", thinking: "" }];
-                    yield {
-                        type: "thinking_start",
-                        contentIndex: activeThinkingIndex,
-                        partial: snapshot(),
-                    };
-                }
+                if (activeThinkingIndex === undefined) continue;
                 const content = partial.content[activeThinkingIndex];
                 if (content?.type !== "thinking") continue;
                 partial.content = replaceContent(partial.content, activeThinkingIndex, {
@@ -167,26 +184,24 @@ async function* streamExecutorInference(options: {
                 };
                 continue;
             }
-            if (event.type === "encrypted_reasoning") {
-                if (activeThinkingIndex === undefined) {
-                    activeThinkingIndex = partial.content.length;
-                    partial.content = [
-                        ...partial.content,
-                        { type: "thinking", thinking: "", encrypted: event.content },
-                    ];
-                } else {
-                    const content = partial.content[activeThinkingIndex];
-                    if (content?.type === "thinking") {
-                        partial.content = replaceContent(partial.content, activeThinkingIndex, {
-                            ...content,
-                            encrypted: event.content,
-                        });
-                    }
+            if (event.type === "reasoning_end") {
+                if (activeThinkingIndex === undefined) continue;
+                const contentIndex = activeThinkingIndex;
+                const content = partial.content[contentIndex];
+                activeThinkingIndex = undefined;
+                if (content?.type !== "thinking") continue;
+                if (event.reasoning !== undefined) {
+                    partial.content = replaceContent(partial.content, contentIndex, {
+                        ...content,
+                        encrypted: event.reasoning,
+                    });
                 }
-                continue;
-            }
-            if (event.type === "response_items") {
-                responseItems.splice(0, responseItems.length, ...event.items);
+                yield {
+                    type: "thinking_end",
+                    contentIndex,
+                    content: content.thinking,
+                    partial: snapshot(),
+                };
                 continue;
             }
             if (event.type === "toolcall_start") {
@@ -263,32 +278,12 @@ async function* streamExecutorInference(options: {
             if (event.type !== "done") continue;
 
             terminal = true;
-            if (activeTextIndex !== undefined) {
-                const content = partial.content[activeTextIndex];
-                if (content?.type === "text") {
-                    yield {
-                        type: "text_end",
-                        contentIndex: activeTextIndex,
-                        content: content.text,
-                        partial: snapshot(),
-                    };
-                }
-            }
-            if (activeThinkingIndex !== undefined) {
-                const content = partial.content[activeThinkingIndex];
-                if (content?.type === "thinking") {
-                    yield {
-                        type: "thinking_end",
-                        contentIndex: activeThinkingIndex,
-                        content: content.thinking,
-                        partial: snapshot(),
-                    };
-                }
-            }
-
+            const completedSessionMessage = sessionMessage.message();
             partial = {
                 ...partial,
-                ...(responseItems.length === 0 ? {} : { responseItems: [...responseItems] }),
+                ...(completedSessionMessage === undefined
+                    ? {}
+                    : { sessionMessage: completedSessionMessage }),
                 ...(event.state === "normal" && event.endTurn !== undefined
                     ? { endTurn: event.endTurn }
                     : {}),
@@ -408,7 +403,7 @@ export function toRigProviderSessionTools(
                 name: tool.name,
                 description: tool.description,
                 parameters: tool.parameters,
-                ...(tool.deferLoading === undefined ? {} : { deferLoading: tool.deferLoading }),
+                ...(tool.deferLoading === undefined ? {} : { defer: tool.deferLoading }),
                 ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
                 ...(tool.namespaceDescription === undefined
                     ? {}

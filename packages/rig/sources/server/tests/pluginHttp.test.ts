@@ -1,6 +1,7 @@
 import { request as requestHttp } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -30,6 +31,9 @@ const TEST_MODEL = defineModel({
     name: "Test model",
     thinkingLevels: ["off"],
 });
+const TEST_SCRATCH_DIRECTORY = fileURLToPath(
+    new URL("../../../../../.context/rig-tests/", import.meta.url),
+);
 
 afterEach(async () => {
     await Promise.all(
@@ -61,80 +65,87 @@ describe("plugin HTTP protocol", () => {
     });
 
     it("serves authenticated generation-bound icons through a real manager and filesystem", async () => {
-        const root = await mkdtemp(join(process.cwd(), ".plugin-http-"));
-        const directory = join(root, "plugins");
-        const plugin = join(directory, "clock");
-        await mkdir(join(plugin, "skills", "clock"), { recursive: true });
-        await Promise.all([
-            writeFile(
-                join(plugin, "happy.plugin.json"),
-                `${JSON.stringify({
-                    author: "Happy",
-                    category: "utilities",
-                    description: "A clock.",
-                    icon: "icon.png",
-                    name: "Clock",
-                    skills: "skills",
-                })}\n`,
-            ),
-            writeFile(join(plugin, "icon.png"), PNG),
-            writeFile(
-                join(plugin, "skills", "clock", "SKILL.md"),
-                "---\nname: clock\ndescription: Reads time\n---\n# Clock\n",
-            ),
-        ]);
-        const ctx = createTestRootContext();
-        const store = await InMemorySessionStore.open(ctx, {
-            modelCatalog: {
-                defaultModelId: TEST_MODEL.id,
-                defaultProviderId: "test",
-                models: [TEST_MODEL],
-                providers: [{ models: [TEST_MODEL], providerId: "test" }],
-            },
-        });
-        const manager = new PluginManager({
-            daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
-            directory,
-            mcpRegistry: new PluginMcpRegistry(),
-            store,
-        });
-        const server = await createProtocolHttpServer(createTestRootContext(), {
-            plugins: manager,
-            token: "secret",
-        });
-        servers.push(server);
+        await mkdir(TEST_SCRATCH_DIRECTORY, { recursive: true });
+        const root = await mkdtemp(join(TEST_SCRATCH_DIRECTORY, "plugin-http-"));
         try {
-            const port = await listen(server);
-            const listed = (await requestJson(port, "/plugins")) as {
-                plugins: { icon: { generation: string } }[];
-            };
-            const generation = listed.plugins[0]!.icon.generation;
-            const path = `/plugins/clock/generations/${generation}/icon`;
-            expect((await request(port, { path, token: "wrong" })).status).toBe(401);
-            await expect(request(port, { path })).resolves.toMatchObject({
-                body: PNG.toString("utf8"),
-                status: 200,
-            });
-            expect(
-                (
-                    await request(port, {
-                        path: `/plugins/missing/generations/${generation}/icon`,
-                    })
-                ).status,
-            ).toBe(404);
-
-            await writeFile(join(plugin, "icon.png"), Buffer.from("not a png"));
-            const unavailable = await request(port, { path });
-            expect(unavailable.status).toBe(422);
-            expect(JSON.parse(unavailable.body)).toEqual({
-                error: {
-                    code: "icon_unavailable",
-                    message: "The plugin icon is unavailable.",
+            const directory = join(root, "plugins");
+            const plugin = join(directory, "clock");
+            await mkdir(join(plugin, "skills", "clock"), { recursive: true });
+            await Promise.all([
+                writeFile(
+                    join(plugin, "happy.plugin.json"),
+                    `${JSON.stringify({
+                        author: "Happy",
+                        category: "utilities",
+                        description: "A clock.",
+                        icon: "icon.png",
+                        name: "Clock",
+                        skills: "skills",
+                    })}\n`,
+                ),
+                writeFile(join(plugin, "icon.png"), PNG),
+                writeFile(
+                    join(plugin, "skills", "clock", "SKILL.md"),
+                    "---\nname: clock\ndescription: Reads time\n---\n# Clock\n",
+                ),
+            ]);
+            const ctx = createTestRootContext();
+            const store = await InMemorySessionStore.open(ctx, {
+                modelCatalog: {
+                    defaultModelId: TEST_MODEL.id,
+                    defaultProviderId: "test",
+                    models: [TEST_MODEL],
+                    providers: [{ models: [TEST_MODEL], providerId: "test" }],
                 },
             });
+            try {
+                const manager = new PluginManager({
+                    daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
+                    directory,
+                    mcpRegistry: new PluginMcpRegistry(),
+                    store,
+                });
+                try {
+                    const server = await createProtocolHttpServer(createTestRootContext(), {
+                        plugins: manager,
+                        token: "secret",
+                    });
+                    servers.push(server);
+                    const port = await listen(server);
+                    const listed = (await requestJson(port, "/plugins")) as {
+                        plugins: { icon: { generation: string } }[];
+                    };
+                    const generation = listed.plugins[0]!.icon.generation;
+                    const path = `/plugins/clock/generations/${generation}/icon`;
+                    expect((await request(port, { path, token: "wrong" })).status).toBe(401);
+                    await expect(request(port, { path })).resolves.toMatchObject({
+                        body: PNG.toString("utf8"),
+                        status: 200,
+                    });
+                    expect(
+                        (
+                            await request(port, {
+                                path: `/plugins/missing/generations/${generation}/icon`,
+                            })
+                        ).status,
+                    ).toBe(404);
+
+                    await writeFile(join(plugin, "icon.png"), Buffer.from("not a png"));
+                    const unavailable = await request(port, { path });
+                    expect(unavailable.status).toBe(422);
+                    expect(JSON.parse(unavailable.body)).toEqual({
+                        error: {
+                            code: "icon_unavailable",
+                            message: "The plugin icon is unavailable.",
+                        },
+                    });
+                } finally {
+                    await manager.close(ctx);
+                }
+            } finally {
+                await store.close(ctx);
+            }
         } finally {
-            await manager.close(ctx);
-            await store.close(ctx);
             await rm(root, { force: true, recursive: true });
         }
     });

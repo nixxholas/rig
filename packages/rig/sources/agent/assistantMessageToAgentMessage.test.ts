@@ -115,6 +115,30 @@ describe("assistantMessageToAgentMessage", () => {
         ]);
     });
 
+    it("retains exact ordered provider blocks for the next session run", () => {
+        const sessionMessage = {
+            role: "assistant" as const,
+            content: [
+                { type: "reasoning" as const, text: "Think.", reasoning: "opaque" },
+                { type: "text" as const, text: "Done." },
+            ],
+        };
+        const message = assistantMessageToAgentMessage(
+            { ...providerMessage(), sessionMessage },
+            "rig-message-1",
+            { providerId: "codex", requestedModelId: modelOpenaiGpt56Sol.id },
+        );
+
+        expect(message.sessionMessage).toBe(sessionMessage);
+        expect(
+            toProviderMessages([message], {
+                model: modelOpenaiGpt56Sol,
+                now: () => 2,
+                providerId: "codex",
+            }),
+        ).toMatchObject([{ sessionMessage }]);
+    });
+
     it("replays durable inference errors as model-readable untrusted context", () => {
         expect(
             toProviderMessages(

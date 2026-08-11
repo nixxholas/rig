@@ -16,7 +16,6 @@ export async function requestProviderCompaction(options: {
     provider: Provider;
     model: Model;
     context: Context;
-    inputTokens: number;
     signal?: AbortSignal;
     now: () => number;
 }): Promise<ProviderCompaction> {
@@ -27,7 +26,6 @@ export async function requestProviderCompaction(options: {
     }
     const result = await options.provider.compact({
         context: options.context,
-        inputTokens: options.inputTokens,
         model: options.model,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
     });

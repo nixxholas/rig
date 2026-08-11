@@ -5,6 +5,7 @@ import {
     type BaseProvider,
     type BaseSession,
     type SessionCompaction,
+    type SessionAssistantBlock,
     type SessionContext,
     type SessionMessage,
     type SessionModelConfiguration,
@@ -28,6 +29,7 @@ import { toSessionMessages } from "@/toSessionMessages.js";
 import type { ExecutorEnvironment } from "@/prompts/ExecutorEnvironment.js";
 import { assembleSystemPrompt } from "@/prompts/assembleSystemPrompt.js";
 import type {
+    AssistantContent,
     AssistantMessage,
     CompactionResult,
     Context,
@@ -199,7 +201,15 @@ export class Executor {
         try {
             let text = "";
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: options.prompt }] },
+                context: {
+                    instructions: options.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: options.prompt }],
+                        },
+                    ],
+                },
                 effort: "off",
                 model: profile.id,
                 ...(options.signal === undefined ? {} : { abort: options.signal }),
@@ -284,7 +294,7 @@ export class Executor {
 
             yield* resolution.session.run({
                 ...(request.abort === undefined ? {} : { abort: request.abort }),
-                context: { messages: request.context.messages },
+                context: resolution.context,
                 ...(request.effort === undefined ? {} : { effort: request.effort }),
                 model: profile.id,
                 ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
@@ -299,7 +309,6 @@ export class Executor {
 
     async compact(options: {
         context: Context;
-        inputTokens?: number;
         instructions?: string;
         model: Model;
         signal?: AbortSignal;
@@ -308,35 +317,25 @@ export class Executor {
         try {
             const sourceContext = options.context;
             const profile = this.profile({ modelId: options.model.id, providerId: this.id });
+            const contextInstructions = sourceContext.systemPrompt ?? "";
+            const systemPrompt = sourceContext.systemPromptOverride;
+            const tools = toRigProviderSessionTools(sourceContext.tools ?? [], {
+                lockCodexCollaboration:
+                    profile.providerType === "codex" && profile.id.startsWith("openai/"),
+            });
+            const instructions = assembleSystemPrompt({
+                contextInstructions,
+                environment: this.environment,
+                identity: this.identity,
+                profile,
+                profiles: this.profiles,
+                ...(systemPrompt === undefined ? {} : { systemPrompt }),
+            });
+            const context: SessionContext = {
+                instructions,
+                messages: toSessionMessages(sourceContext.messages),
+            };
             const active = await this.serializeSessionResolution(async () => {
-                if (
-                    this.active !== undefined &&
-                    areProviderModelsCompatible(
-                        toCompatibilitySelection(this.active.profile),
-                        toCompatibilitySelection(profile),
-                    )
-                ) {
-                    this.active.profile = profile;
-                    return this.active;
-                }
-                const contextInstructions = sourceContext.systemPrompt ?? "";
-                const systemPrompt = sourceContext.systemPromptOverride;
-                const tools = toRigProviderSessionTools(sourceContext.tools ?? [], {
-                    lockCodexCollaboration:
-                        profile.providerType === "codex" && profile.id.startsWith("openai/"),
-                });
-                const instructions = assembleSystemPrompt({
-                    contextInstructions,
-                    environment: this.environment,
-                    identity: this.identity,
-                    profile,
-                    profiles: this.profiles,
-                    ...(systemPrompt === undefined ? {} : { systemPrompt }),
-                });
-                const context: SessionContext = {
-                    instructions,
-                    messages: toSessionMessages(sourceContext.messages),
-                };
                 const resolved = await this.resolveSession(
                     profile,
                     context,
@@ -348,8 +347,7 @@ export class Executor {
                 return resolved;
             });
             const result = await active.session.compact({
-                context: { messages: toSessionMessages(options.context.messages) },
-                ...(options.inputTokens === undefined ? {} : { inputTokens: options.inputTokens }),
+                context,
                 ...(options.instructions === undefined
                     ? {}
                     : { instructions: options.instructions }),
@@ -571,13 +569,14 @@ function toExecutionCompactionResult(
     result: SessionCompaction,
     sourceContext: Context,
 ): CompactionResult {
+    if (result.status === "failed") return { ...result, context: sourceContext };
     const context = {
         ...sourceContext,
         messages: result.context.messages.map((message) =>
             sessionMessageToExecutionMessage(message, latestTimestamp(sourceContext.messages)),
         ),
     };
-    if (result.status !== "completed") return { ...result, context };
+    if (result.status === "cancelled") return { ...result, context };
     return {
         status: "completed",
         context,
@@ -606,8 +605,7 @@ function sessionMessageToExecutionMessage(
     if (message.role === "system") {
         return {
             role: "system",
-            content:
-                typeof message.content === "string" ? message.content : message.content.join("\n"),
+            content: message.content.map((block) => block.text).join("\n"),
             timestamp,
         };
     }
@@ -637,20 +635,20 @@ function sessionMessageToExecutionMessage(
         };
     }
     if (message.role === "user") {
+        const content = message.content.map((part) =>
+            part.type === "text"
+                ? { type: "text" as const, text: part.text }
+                : {
+                      type: "image" as const,
+                      data: part.data,
+                      mimeType: part.mimeType,
+                  },
+        );
         return {
             role: "user",
-            content:
-                message.input === undefined
-                    ? message.content
-                    : message.input.map((part) =>
-                          part.type === "text"
-                              ? { type: "text" as const, text: part.text }
-                              : {
-                                    type: "image" as const,
-                                    data: part.data,
-                                    mimeType: part.mimeType,
-                                },
-                      ),
+            content: content.every((part) => part.type === "text")
+                ? content.map((part) => part.text).join("")
+                : content,
             timestamp,
         };
     }
@@ -660,7 +658,7 @@ function sessionMessageToExecutionMessage(
             toolCallId: message.callId,
             providerToolCallId: message.callId,
             toolName: "",
-            content: message.input?.map((part) =>
+            content: message.content.map((part) =>
                 part.type === "text"
                     ? { type: "text" as const, text: part.text }
                     : {
@@ -668,7 +666,7 @@ function sessionMessageToExecutionMessage(
                           data: part.data,
                           mimeType: part.mimeType,
                       },
-            ) ?? [{ type: "text", text: message.content }],
+            ),
             isError: message.isError === true,
             ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
             sessionMessage: message,
@@ -677,31 +675,10 @@ function sessionMessageToExecutionMessage(
     }
     const assistant: AssistantMessage = {
         role: "assistant",
-        content: [
-            ...(message.reasoning ?? []).map((reasoning) => ({
-                type: "thinking" as const,
-                thinking: reasoning.text,
-                ...(reasoning.signature === undefined ? {} : { encrypted: reasoning.signature }),
-                ...(reasoning.redacted === undefined ? {} : { redacted: reasoning.redacted }),
-            })),
-            ...(message.content.length === 0
-                ? []
-                : [{ type: "text" as const, text: message.content }]),
-            ...(message.toolCalls ?? []).map((call) => ({
-                type: "toolCall" as const,
-                id: call.callId,
-                providerToolCallId: call.callId,
-                name: call.name,
-                ...(call.namespace === undefined ? {} : { namespace: call.namespace }),
-                arguments: parseCompactionToolArguments(call.arguments),
-                ...(call.incomplete === undefined ? {} : { incomplete: call.incomplete }),
-                ...(call.vendor === undefined ? {} : { vendor: call.vendor }),
-            })),
-        ],
+        content: message.content.flatMap(sessionAssistantBlockToExecutionContent),
         api: "compaction",
         provider: "compaction",
         model: "compaction",
-        ...(message.responseItems === undefined ? {} : { responseItems: message.responseItems }),
         usage: {
             input: 0,
             output: 0,
@@ -715,6 +692,32 @@ function sessionMessageToExecutionMessage(
         timestamp,
     };
     return assistant;
+}
+
+function sessionAssistantBlockToExecutionContent(block: SessionAssistantBlock): AssistantContent[] {
+    if (block.type === "text") return [{ type: "text", text: block.text }];
+    if (block.type === "reasoning") {
+        return [
+            {
+                type: "thinking",
+                thinking: block.text ?? "",
+                ...(block.reasoning === undefined ? {} : { encrypted: block.reasoning }),
+            },
+        ];
+    }
+    if (block.type === "tool_result") return [];
+    return [
+        {
+            type: "toolCall",
+            id: block.callId,
+            providerToolCallId: block.callId,
+            name: block.name,
+            ...(block.namespace === undefined ? {} : { namespace: block.namespace }),
+            arguments: parseCompactionToolArguments(block.arguments),
+            ...(block.incomplete === undefined ? {} : { incomplete: block.incomplete }),
+            ...(block.vendor === undefined ? {} : { vendor: block.vendor }),
+        },
+    ];
 }
 
 function parseCompactionToolArguments(argumentsJson: string): Record<string, unknown> {

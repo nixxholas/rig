@@ -43,7 +43,7 @@ describe("toRigProviderSessionTools", () => {
 
         expect(tool).toMatchObject({
             name: "rare_tool",
-            deferLoading: true,
+            defer: true,
         });
     });
 

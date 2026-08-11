@@ -7,6 +7,7 @@ import { networkToolPermission } from "../../runtime/networkToolPermission.js";
 import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
 import { searchProviderSelection } from "./searchProviderSelection.js";
+import { sessionOutputText } from "./sessionOutputText.js";
 
 const claudeSearchQueryArguments = Type.Object(
     {
@@ -81,7 +82,10 @@ ${selection.availability}`,
                 onEvent: (event) => {
                     if (event.type === "toolcall_start" && event.server === true) searched = true;
                     if (event.type === "toolcall_result_end") {
-                        collectClaudeResultSources(event.result, providerSources);
+                        collectClaudeResultSources(
+                            sessionOutputText(event.content),
+                            providerSources,
+                        );
                     }
                 },
                 prompt: claudePrompt(input),

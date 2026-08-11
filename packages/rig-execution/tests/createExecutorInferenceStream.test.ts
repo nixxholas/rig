@@ -216,8 +216,12 @@ describe("createExecutorInferenceStream", () => {
         const executor = {
             run: async function* () {
                 yield { type: "block_start" } as const;
+                yield { type: "reasoning_start" } as const;
                 yield { type: "reasoning_delta", delta: "considering" } as const;
+                yield { type: "reasoning_end" } as const;
+                yield { type: "text_start" } as const;
                 yield { type: "text_delta", delta: "tentative" } as const;
+                yield { type: "text_end" } as const;
                 yield {
                     type: "toolcall_start",
                     callId: "tentative-tool",
@@ -257,8 +261,10 @@ describe("createExecutorInferenceStream", () => {
             "block_start",
             "thinking_start",
             "thinking_delta",
+            "thinking_end",
             "text_start",
             "text_delta",
+            "text_end",
             "toolcall_start",
             "toolcall_delta",
             "toolcall_end",
@@ -284,6 +290,58 @@ describe("createExecutorInferenceStream", () => {
         await expect(stream.result()).resolves.toMatchObject({
             content: [],
             stopReason: "aborted",
+        });
+    });
+
+    it("keeps ordered provider text and reasoning blocks distinct", async () => {
+        const executor = {
+            run: async function* () {
+                yield { type: "text_start" } as const;
+                yield { type: "text_delta", delta: "first" } as const;
+                yield { type: "text_end" } as const;
+                yield { type: "reasoning_start" } as const;
+                yield { type: "reasoning_delta", delta: "middle" } as const;
+                yield { type: "reasoning_end", reasoning: "opaque" } as const;
+                yield { type: "text_start" } as const;
+                yield { type: "text_delta", delta: "last" } as const;
+                yield { type: "text_end" } as const;
+                yield {
+                    type: "done",
+                    state: "normal",
+                    tokens: { input: 3, output: 4 },
+                } as const;
+            },
+        } as unknown as Executor;
+        const stream = createExecutorInferenceStream({
+            context: { messages: [] },
+            executor,
+            model: defineModel({
+                id: "openai/test",
+                name: "Test",
+                thinkingLevels: ["off"],
+                defaultThinkingLevel: "off",
+            }),
+            providerId: "codex",
+        });
+
+        for await (const _event of stream) {
+            // Consume the stream as the agent loop does.
+        }
+
+        await expect(stream.result()).resolves.toMatchObject({
+            content: [
+                { type: "text", text: "first" },
+                { type: "thinking", thinking: "middle", encrypted: "opaque" },
+                { type: "text", text: "last" },
+            ],
+            sessionMessage: {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "first" },
+                    { type: "reasoning", text: "middle", reasoning: "opaque" },
+                    { type: "text", text: "last" },
+                ],
+            },
         });
     });
 
@@ -364,6 +422,17 @@ describe("createExecutorInferenceStream", () => {
                     namespace: "collaboration",
                 },
             ],
+            sessionMessage: {
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool_call",
+                        callId: "spawn-call",
+                        name: "spawn_agent",
+                        namespace: "collaboration",
+                    },
+                ],
+            },
             stopReason: "toolUse",
         });
     });
@@ -397,10 +466,21 @@ describe("createExecutorInferenceStream", () => {
                 yield {
                     type: "toolcall_result_end",
                     callId: "x-1",
-                    result: '[{"type":"url","url":"https://x.com/a"}]',
+                    content: [
+                        {
+                            type: "text",
+                            text: '[{"type":"url","url":"https://x.com/a"}]',
+                        },
+                    ],
                 };
+                yield { type: "text_start" } as const;
                 yield { type: "text_delta", delta: "People are talking about it." };
-                yield { type: "done", state: "normal" } as const;
+                yield { type: "text_end" } as const;
+                yield {
+                    type: "done",
+                    state: "normal",
+                    tokens: { input: 0, output: 0 },
+                } as const;
             },
         } as unknown as Executor;
         const stream = createExecutorInferenceStream({

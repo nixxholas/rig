@@ -75,7 +75,13 @@ export async function runOneOffInference(options: {
             for await (const event of session.run({
                 abort: controller.signal,
                 context: {
-                    messages: [{ role: "user", content: options.prompt }],
+                    instructions: options.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: options.prompt }],
+                        },
+                    ],
                 },
                 ...(options.route.profile.defaultEffort === undefined
                     ? {}

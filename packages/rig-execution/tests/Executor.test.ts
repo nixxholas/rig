@@ -42,9 +42,17 @@ describe("Executor", () => {
             }),
         ).resolves.toMatchObject({ status: "completed" });
         expect(native.sessions).toHaveLength(1);
-        expect(native.sessions[0]?.compactions).toEqual([
+        expect(native.sessions.at(-1)?.compactions).toEqual([
             {
-                context: { messages: [{ role: "user", content: "Restored history." }] },
+                context: {
+                    instructions: expect.any(String),
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "Restored history." }],
+                        },
+                    ],
+                },
                 model: "openai/sol",
             },
         ]);
@@ -76,7 +84,11 @@ describe("Executor", () => {
                     contextInstructions: "Dynamic instructions",
                 }),
             ),
-        ).toContainEqual({ type: "done", state: "normal" });
+        ).toContainEqual({
+            type: "done",
+            state: "normal",
+            tokens: { input: 0, output: 0 },
+        });
         await collect(
             executor.run({
                 context: { messages: [] },
@@ -145,7 +157,6 @@ describe("Executor", () => {
         await expect(
             executor.compact({
                 context: compactContext,
-                inputTokens: 60_000,
                 instructions: "Keep decisions.",
                 model: profile("codex", "codex", "openai/terra", "Terra").model,
             }),
@@ -159,12 +170,17 @@ describe("Executor", () => {
                 ],
             },
         });
-        expect(native.sessions[0]?.compactions).toEqual([
+        expect(native.sessions.at(-1)?.compactions).toEqual([
             {
                 context: {
-                    messages: [{ role: "user", content: "Selected prefix." }],
+                    instructions: expect.any(String),
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "Selected prefix." }],
+                        },
+                    ],
                 },
-                inputTokens: 60_000,
                 instructions: "Keep decisions.",
                 model: "openai/terra",
             },
@@ -409,7 +425,7 @@ describe("Executor", () => {
                         resolveFirstStarted();
                         await firstGate;
                     }
-                    yield { type: "done", state: "normal" };
+                    yield { type: "done", state: "normal", tokens: { input: 0, output: 0 } };
                 } finally {
                     activeInferences -= 1;
                 }
@@ -626,7 +642,9 @@ describe("Executor", () => {
         );
         await collect(
             executor.run({
-                context: { messages: [{ role: "user", content: "Do the work." }] },
+                context: {
+                    messages: [{ role: "user", content: [{ type: "text", text: "Do the work." }] }],
+                },
                 selection: { modelId: "openai/sol", providerId: "codex" },
             }),
         );
@@ -645,7 +663,7 @@ describe("Executor", () => {
         expect(native.sessions[1]?.id).toBe("conversation:title");
         expect(native.sessions[1]?.destroyed).toBe(true);
         expect(native.sessions[1]?.requests[0]?.context.messages).toEqual([
-            { role: "user", content: "User: Name this chat." },
+            { role: "user", content: [{ type: "text", text: "User: Name this chat." }] },
         ]);
         // Nothing of the agent's own prompt or conversation went along, and its session survived.
         expect(JSON.stringify(native.options[1])).not.toContain("Sol");
@@ -695,6 +713,7 @@ class AnsweringProvider extends BaseProvider {
         private readonly answer: string,
         private readonly terminal: Extract<SessionEvent, { type: "done" }> = {
             state: "normal",
+            tokens: { input: 0, output: 0 },
             type: "done",
         },
     ) {
@@ -759,17 +778,20 @@ class RecordingSession extends BaseSession {
         super(id);
     }
 
-    override async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
+    override async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
         this.compactions.push(options);
-        const preservedMessages = options.context?.messages ?? [];
+        const preservedMessages = options.context.messages;
         return {
             status: "completed",
             summary: "summary",
             preservedMessages,
             usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
             context: {
-                instructions: "",
-                messages: [...preservedMessages, { role: "user", content: "summary" }],
+                instructions: options.context.instructions,
+                messages: [
+                    ...preservedMessages,
+                    { role: "user", content: [{ type: "text", text: "summary" }] },
+                ],
             },
         };
     }
@@ -778,7 +800,7 @@ class RecordingSession extends BaseSession {
 
     override async *run(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
         this.requests.push(request);
-        yield { type: "done", state: "normal" };
+        yield { type: "done", state: "normal", tokens: { input: 0, output: 0 } };
     }
 }
 

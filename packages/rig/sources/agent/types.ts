@@ -8,6 +8,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type { AgentContext } from "./context/AgentContext.js";
 import type {
     Message as ProviderMessage,
+    AssistantMessage as ProviderAssistantMessage,
     Model,
     Provider,
     ProviderError,
@@ -216,8 +217,8 @@ export interface AgentMessage {
     providerId?: string;
     requestedModelId?: string;
     responseModel?: string;
-    /** Ordered opaque provider output items required for native continuation. */
-    responseItems?: readonly string[];
+    /** Exact ordered provider blocks retained for replay. */
+    sessionMessage?: NonNullable<ProviderAssistantMessage["sessionMessage"]>;
     /** Durable model context that must never be presented as transcript content. */
     internal?: true;
 }

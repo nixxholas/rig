@@ -7,6 +7,7 @@ import { networkToolPermission } from "../../runtime/networkToolPermission.js";
 import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
 import { searchProviderSelection } from "./searchProviderSelection.js";
+import { sessionOutputText } from "./sessionOutputText.js";
 
 const grokWebSearchQueryArguments = Type.Object(
     {
@@ -71,7 +72,9 @@ ${selection.availability}`,
                     "Use web_search to research published pages. Do not use X search. Return a concise answer with markdown links.",
                 onEvent: (event) => {
                     if (event.type === "toolcall_start" && event.server === true) searchCalls += 1;
-                    if (event.type === "toolcall_result_end") resultFragments.push(event.result);
+                    if (event.type === "toolcall_result_end") {
+                        resultFragments.push(sessionOutputText(event.content));
+                    }
                 },
                 prompt: grokWebPrompt(input),
                 route,

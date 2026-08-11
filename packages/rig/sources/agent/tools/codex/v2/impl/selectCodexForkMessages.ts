@@ -1,7 +1,5 @@
 import type { AgentMessage, Message } from "../../../../types.js";
 import { isExcludedFromModelContext } from "../../../../isExcludedFromModelContext.js";
-import { selectCodexFinalAnswerBlocks } from "./selectCodexFinalAnswerBlocks.js";
-import { selectCodexFinalAnswerItems } from "./selectCodexFinalAnswerItems.js";
 
 export function selectCodexForkMessages(
     messages: readonly Message[],
@@ -30,10 +28,10 @@ export function selectCodexForkMessages(
         }
         if (message.role === "compaction") return [message];
         if (message.role === "error") return isExcludedFromModelContext(message) ? [] : [message];
-        const responseItems = selectCodexFinalAnswerItems(message.responseItems);
-        const blocks = selectCodexFinalAnswerBlocks(responseItems);
+        const blocks = message.blocks.filter((block) => block.type === "text");
         if (blocks.length === 0) return [];
-        const forked = { ...message, blocks, responseItems } satisfies AgentMessage;
+        const forked = { ...message, blocks } satisfies AgentMessage;
+        delete forked.sessionMessage;
         // The checkpoint covers the original prefix, not this projected fork context.
         delete forked.contextTokens;
         return [forked];

@@ -7,6 +7,7 @@ import { networkToolPermission } from "../../runtime/networkToolPermission.js";
 import type { SearchProviderRoutes } from "./OneOffInferenceRoute.js";
 import { runOneOffInference } from "./runOneOffInference.js";
 import { searchProviderSelection } from "./searchProviderSelection.js";
+import { sessionOutputText } from "./sessionOutputText.js";
 
 const codexSearchQueryArguments = Type.Object(
     {
@@ -76,7 +77,9 @@ ${selection.availability}`,
                     "Use the provider's web search before answering. Return a compact factual answer with markdown source links.",
                 onEvent: (event) => {
                     if (event.type === "toolcall_start" && event.server === true) usedSearch = true;
-                    if (event.type === "toolcall_result_end") resultPayloads.push(event.result);
+                    if (event.type === "toolcall_result_end") {
+                        resultPayloads.push(sessionOutputText(event.content));
+                    }
                 },
                 prompt: codexPrompt(input),
                 route,

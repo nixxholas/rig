@@ -4,7 +4,7 @@ import type { Message } from "../../types.js";
 import { selectCodexForkMessages } from "../../tools/codex/v2/impl/selectCodexForkMessages.js";
 
 describe("selectCodexForkMessages", () => {
-    it("keeps human turns and final answers without leaking tool or agent traffic", () => {
+    it("keeps human turns and assistant text without leaking tool or agent traffic", () => {
         const messages: Message[] = [
             { role: "user", id: "u1", blocks: [{ type: "text", text: "human task" }] },
             {
@@ -15,11 +15,6 @@ describe("selectCodexForkMessages", () => {
                     { type: "text", text: "Checking. final answer" },
                 ],
                 contextTokens: 331_600,
-                responseItems: [
-                    '{"type":"reasoning","encrypted_content":"secret"}',
-                    '{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking. "}]}',
-                    '{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"final answer"}]}',
-                ],
             },
             {
                 role: "agent",
@@ -31,9 +26,6 @@ describe("selectCodexForkMessages", () => {
                         name: "exec_command",
                         arguments: {},
                     },
-                ],
-                responseItems: [
-                    '{"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"{}"}',
                 ],
             },
             {
@@ -63,16 +55,13 @@ describe("selectCodexForkMessages", () => {
             {
                 role: "agent",
                 id: "thinking",
-                blocks: [{ type: "text", text: "final answer" }],
-                responseItems: [
-                    '{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"final answer"}]}',
-                ],
+                blocks: [{ type: "text", text: "Checking. final answer" }],
             },
         ]);
         expect(selectCodexForkMessages(forked, undefined)).toEqual(forked);
     });
 
-    it("drops assistant text when no phase-bearing final answer is available", () => {
+    it("keeps caller-visible assistant text without provider-native phase metadata", () => {
         const messages: Message[] = [
             { role: "user", id: "u1", blocks: [{ type: "text", text: "human task" }] },
             {
@@ -84,13 +73,10 @@ describe("selectCodexForkMessages", () => {
                 role: "agent",
                 id: "commentary",
                 blocks: [{ type: "text", text: "Checking." }],
-                responseItems: [
-                    '{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking."}]}',
-                ],
             },
         ];
 
-        expect(selectCodexForkMessages(messages, undefined)).toEqual([messages[0]]);
+        expect(selectCodexForkMessages(messages, undefined)).toEqual(messages);
     });
 
     it("counts triggering agent traffic but not queued messages toward a last-turn fork", () => {

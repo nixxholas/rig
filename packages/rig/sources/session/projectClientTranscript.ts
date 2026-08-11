@@ -68,7 +68,7 @@ function projectMessageRecord<
 function projectClientMessage(message: Message): Message {
     switch (message.role) {
         case "agent": {
-            const { responseItems: _responseItems, ...visible } = message;
+            const { sessionMessage: _sessionMessage, ...visible } = message;
             return { ...visible, blocks: visible.blocks.map(projectClientAgentBlock) };
         }
         case "compaction": {
