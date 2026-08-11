@@ -74,6 +74,24 @@ describe("InMemorySession metadata settlement", () => {
         );
     });
 
+    it("titles the first message when its managed workspace is already ready", async () => {
+        const inheritedTitles: string[] = [];
+        const harness = createHarness({
+            inheritedTitles,
+            workspaceId: "workspace-1",
+            workspaceRunReadiness: () => ({ state: "ready" }),
+        });
+
+        const submitted = await harness.session.submit(ctx, {
+            text: "Name this already ready workspace.",
+        });
+        await harness.session.waitForRun(ctx, submitted.runId);
+        await vi.waitFor(() => expect(harness.session.snapshot().titleStatus).toBe("ready"));
+
+        expect(harness.inferenceKinds.slice(0, 2)).toEqual(["metadata", "agent"]);
+        expect(inheritedTitles).toEqual(["Delayed session metadata"]);
+    });
+
     it("finishes restored first-message naming before releasing a ready workspace run", async () => {
         const waiting = createHarness({
             workspaceId: "workspace-1",

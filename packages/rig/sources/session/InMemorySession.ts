@@ -8196,10 +8196,15 @@ export class InMemorySession {
                 continue;
             }
 
+            if (this.#workspaceScope() !== undefined) {
+                this.#workspaceReleaseMetadataBarrier = true;
+            }
             if (this.#workspaceReleaseMetadataBarrier) {
-                // First-message naming is part of the workspace preparation barrier. Once an
-                // initializing checkout becomes ready, finish any available metadata inference
-                // before the real agent starts so naming cannot race work inside the folder.
+                // First-message naming is part of the workspace preparation barrier. Once the
+                // checkout is ready, finish any available metadata inference before the real
+                // agent starts so naming cannot race work inside the folder. This applies equally
+                // when the first readiness probe says ready and when an initializing checkout
+                // becomes ready later.
                 await this.#restartMetadataSettlement();
                 if ((await this.#currentWorkspaceRunReadiness()).state !== "ready") continue;
                 if (this.#queue[0]?.runId !== queued.runId) continue;
@@ -8370,7 +8375,11 @@ export class InMemorySession {
         // Runtime readiness is asynchronous; queue startup is the authoritative gate. Metadata
         // settlement is retried after that gate opens, so do not start a generation from a stale
         // synchronous snapshot.
-        if (this.#workspaceRunReadiness !== undefined && !this.#workspaceReleaseMetadataBarrier) {
+        if (
+            this.#workspaceRunReadiness !== undefined &&
+            this.#queue.length > 0 &&
+            !this.#workspaceReleaseMetadataBarrier
+        ) {
             return undefined;
         }
         const submittedRunIds = new Set(
