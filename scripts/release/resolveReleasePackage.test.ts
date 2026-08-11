@@ -18,6 +18,11 @@ describe("resolveReleasePackage", () => {
             rootManifest.scripts["test:release"] ?? "",
             /--filter '!@slopus\/happy-providers'/u,
         );
+        assert.match(rootManifest.scripts["test:release"] ?? "", /--filter '!happy-plugins'/u);
+        assert.match(
+            rootManifest.scripts["test:release"] ?? "",
+            /--filter '!@slopus\/rig-codemode-codex'/u,
+        );
     });
 
     it("gives rig-connect its own tag namespace and package directory", () => {

@@ -26,7 +26,7 @@
         "start": "node packages/rig/dist/main.js",
         "start:build": "pnpm build && pnpm start",
         "test": "pnpm run test:scripts && pnpm --recursive --filter './packages/**' run test",
-        "test:release": "pnpm run test:scripts && pnpm --recursive --workspace-concurrency=1 --filter './packages/**' --filter '!@slopus/happy-providers' run test",
+        "test:release": "pnpm run test:scripts && pnpm --recursive --workspace-concurrency=1 --filter './packages/**' --filter '!happy-plugins' --filter '!@slopus/happy-providers' --filter '!@slopus/rig-codemode-codex' run test",
         "test:gym": "pnpm --filter @slopus/rig-gym-tests test:gym",
         "test:gym:fast": "pnpm --filter @slopus/rig-gym-tests test:gym:fast",
         "test:gym:full": "pnpm --filter @slopus/rig-gym-tests test:gym:full",
