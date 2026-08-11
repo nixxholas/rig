@@ -111,6 +111,16 @@ ad hoc validation.
 
 A file should hold one coherent piece of behavior. Most product code lands at one function per file; keep small helpers alongside the thing they serve rather than splitting every function out on principle. Match the surrounding package — `happy-providers` deliberately keeps larger files and documents why.
 
+## Context and lifetimes
+
+`Context` is an immutable carrier for cross-cutting execution state. This includes the current database scope and, while a transaction is active, the transaction available through `ctx.tx`. Never mutate a context in place. Derive another context with its namespace or `with...` helper, such as `withTransaction`, and pass the derived context through the work that should see that value.
+
+Initialize the application with one root context, then create a new named context at every independently owned lifetime. A context name describes the conceptual point where that lifetime was created and who owns it, such as an API request, worker, connection, or process; it is not merely the name of the next low-level function. Bounded operations owned by that lifetime remain on its context and may create ordinary child spans.
+
+Do not let a short-lived caller own work that can outlive it. If an HTTP request, route, tool call, or other operation starts an independent service, actor-like loop, or process, start that work in its own named context derived from the application root. Keep only caller-owned work—such as waiting for startup or collecting the first few seconds of output—inside the caller's context. The independent work's lifetime and internal operations use its own context. Later external interactions with it, such as polling, writing input, or stopping it, use the context of the caller performing that interaction.
+
+A background process started by a tool call is the canonical example: the tool's initial bounded wait belongs to the tool or turn context, while the process lifetime belongs to a separate named process context. The process must not retain the completed tool, turn, or HTTP request context.
+
 ## Change discipline
 
 Treat behavior that crosses the TUI, protocol, daemon, persistence, and provider layers as one end-to-end contract. Trace the full path before editing, keep stable run, message, tool-call, and event identities across asynchronous boundaries, and test delayed, duplicated, reordered, rejected, and already-applied outcomes. Model multi-step asynchronous behavior with explicit states and terminal transitions instead of accumulating loosely related booleans and best-effort callbacks.
