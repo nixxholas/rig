@@ -28,6 +28,7 @@ import { createP2pInstanceIdentity, type P2pPeerIdentity } from "./P2pIdentity.j
 import { P2pPeerTrustStore } from "./P2pPeerTrustStore.js";
 
 const ctx = createTestRootContext();
+const LIVE = process.env.RIG_LIVE_TEST === "1";
 const runTestPeerOperation = async <Result>(
     _operation: "address-refresh" | "handshake",
     work: (operationCtx: Context) => Result | PromiseLike<Result>,
@@ -45,7 +46,7 @@ afterEach(async () => {
     );
 });
 
-describe("IrohNetwork", () => {
+describe.skipIf(!LIVE)("IrohNetwork", () => {
     it("uses one bounded operation context for trust validation and commit", async () => {
         const clientKey = SecretKey.generate();
         const serverKey = SecretKey.generate();
