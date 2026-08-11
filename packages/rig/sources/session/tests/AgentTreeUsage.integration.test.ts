@@ -283,7 +283,7 @@ function inferenceFixture() {
     const provider = defineProvider({
         id: "codex",
         models: [model],
-        stream(_model, _context, options) {
+        stream(_ctx, _model, _context, options) {
             const metadata = options?.sessionId?.endsWith(":title") === true;
             const message = assistantMessage(
                 model.id,

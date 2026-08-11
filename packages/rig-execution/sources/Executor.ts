@@ -10,11 +10,7 @@ import {
     type SessionMessage,
     type SessionModelConfiguration,
 } from "@slopus/happy-providers";
-import {
-    createRootContext,
-    withLifetime,
-    type Context as RuntimeContext,
-} from "@steve.kite/stdlib";
+import { withLifetime, type Context as RuntimeContext } from "@steve.kite/stdlib";
 
 import type { ExecutorEvent } from "@/ExecutorEvent.js";
 import type {
@@ -53,7 +49,6 @@ export class Executor {
     readonly providers: readonly ExecutorProvider[];
     readonly profiles: readonly ExecutorModelProfile[];
     private selectedProviderId: string;
-    private readonly runtimeContext: RuntimeContext;
     private active:
         | {
               contextInstructions: string | undefined;
@@ -77,11 +72,8 @@ export class Executor {
         options: {
             environment?: ExecutorEnvironment;
             identity?: Identity;
-            runtimeContext?: RuntimeContext;
         } = {},
     ) {
-        this.runtimeContext =
-            options.runtimeContext ?? createRootContext().named("rig-execution-provider");
         this.environment = options.environment ?? {
             osVersion: release(),
             platform: process.platform,
@@ -167,7 +159,6 @@ export class Executor {
             {
                 environment: this.environment,
                 identity: this.identity,
-                runtimeContext: this.runtimeContext,
             },
         );
         isolated.selectProvider(this.selectedProviderId);
@@ -205,7 +196,7 @@ export class Executor {
      * inference nor disturbs the history that session has cached. The provider is resolved through
      * the same path agent inference uses, so it carries the same credentials and configuration.
      */
-    async rawQuery(options: RawQueryOptions): Promise<string> {
+    async rawQuery(ctx: RuntimeContext, options: RawQueryOptions): Promise<string> {
         if (this.forceClosed) throw new Error("The executor is closed.");
         const profile = this.profile({ modelId: options.model.id, providerId: this.id });
         const provider = this.providersById.get(profile.providerId)!;
@@ -217,9 +208,7 @@ export class Executor {
         try {
             let text = "";
             const operationCtx =
-                options.signal === undefined
-                    ? this.runtimeContext
-                    : withLifetime(this.runtimeContext, options.signal);
+                options.signal === undefined ? ctx : withLifetime(ctx, options.signal);
             for await (const event of session.run(operationCtx, {
                 context: {
                     instructions: options.instructions,
@@ -249,11 +238,16 @@ export class Executor {
         }
     }
 
-    stream(model: Model, context: Context, streamOptions?: StreamOptions): InferenceStream {
+    stream(
+        ctx: RuntimeContext,
+        model: Model,
+        context: Context,
+        streamOptions?: StreamOptions,
+    ): InferenceStream {
         const selection = { modelId: model.id, providerId: this.id };
         this.profile(selection);
         return createExecutorInferenceStream({
-            ctx: this.runtimeContext,
+            ctx,
             context,
             executor: this,
             model,
@@ -328,12 +322,15 @@ export class Executor {
         }
     }
 
-    async compact(options: {
-        context: Context;
-        instructions?: string;
-        model: Model;
-        signal?: AbortSignal;
-    }): Promise<CompactionResult> {
+    async compact(
+        ctx: RuntimeContext,
+        options: {
+            context: Context;
+            instructions?: string;
+            model: Model;
+            signal?: AbortSignal;
+        },
+    ): Promise<CompactionResult> {
         const releaseInference = await this.acquireInference();
         try {
             const sourceContext = options.context;
@@ -368,9 +365,7 @@ export class Executor {
                 return resolved;
             });
             const operationCtx =
-                options.signal === undefined
-                    ? this.runtimeContext
-                    : withLifetime(this.runtimeContext, options.signal);
+                options.signal === undefined ? ctx : withLifetime(ctx, options.signal);
             const result = await active.session.compact(operationCtx, {
                 context,
                 ...(options.instructions === undefined

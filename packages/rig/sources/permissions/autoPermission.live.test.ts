@@ -372,9 +372,14 @@ function capturingProvider(provider: Provider, captured: Context[]): Provider {
     return new Proxy(provider, {
         get(target, property, receiver) {
             if (property !== "stream") return Reflect.get(target, property, receiver);
-            return (model: Parameters<Provider["stream"]>[0], context: Context, options: never) => {
+            return (
+                ctx: Parameters<Provider["stream"]>[0],
+                model: Parameters<Provider["stream"]>[1],
+                context: Context,
+                options: never,
+            ) => {
                 captured.push(context);
-                return provider.stream(model, context, options);
+                return provider.stream(ctx, model, context, options);
             };
         },
     });

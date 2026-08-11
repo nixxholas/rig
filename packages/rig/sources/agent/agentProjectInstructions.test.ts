@@ -54,7 +54,7 @@ function createRecordingProvider(): {
     const provider = defineProvider({
         id: "codex",
         models: [model],
-        stream(_model, context) {
+        stream(_ctx, _model, context) {
             contexts.push(context);
             systemPrompts.push(context.systemPrompt);
             return streamFor({

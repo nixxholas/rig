@@ -12,6 +12,7 @@ import type {
     SessionProviderError,
     SessionToolResultMessage,
 } from "@slopus/happy-providers";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 export type ProfileProviderType = "bedrock" | "claude" | "codex" | "grok";
 export interface ProfilePromptContext {
@@ -358,12 +359,15 @@ export interface Provider {
      * stream does not cooperate with its abort signal.
      */
     forceClose?(): Promise<void> | void;
-    compact?(options: {
-        context: Context;
-        instructions?: string;
-        model: Model;
-        signal?: AbortSignal;
-    }): Promise<CompactionResult>;
+    compact?(
+        ctx: RuntimeContext,
+        options: {
+            context: Context;
+            instructions?: string;
+            model: Model;
+            signal?: AbortSignal;
+        },
+    ): Promise<CompactionResult>;
     close?(): Promise<void> | void;
     /**
      * Answers one bounded question on the bare provider, below the coding agent.
@@ -373,8 +377,9 @@ export interface Provider {
      * question, and asking it through a coding agent is what made it fail. The answer is the
      * response text; a provider failure throws that failure rather than an empty answer.
      */
-    rawQuery(options: RawQueryOptions): Promise<string>;
+    rawQuery(ctx: RuntimeContext, options: RawQueryOptions): Promise<string>;
     stream<TThinkingLevel extends string>(
+        ctx: RuntimeContext,
         model: Model<TThinkingLevel>,
         context: Context,
         options?: StreamOptions<TThinkingLevel>,
@@ -410,15 +415,19 @@ export function defineProvider(provider: {
         context: ProfilePromptContext,
     ) => ProfilePromptContext | Promise<ProfilePromptContext>;
     reset?(): Promise<void> | void;
-    compact?(options: {
-        context: Context;
-        instructions?: string;
-        model: Model;
-        signal?: AbortSignal;
-    }): Promise<CompactionResult>;
+    compact?(
+        ctx: RuntimeContext,
+        options: {
+            context: Context;
+            instructions?: string;
+            model: Model;
+            signal?: AbortSignal;
+        },
+    ): Promise<CompactionResult>;
     close?(): Promise<void> | void;
-    rawQuery?(options: RawQueryOptions): Promise<string>;
+    rawQuery?(ctx: RuntimeContext, options: RawQueryOptions): Promise<string>;
     stream<TThinkingLevel extends string>(
+        ctx: RuntimeContext,
         model: Model<TThinkingLevel>,
         context: Context,
         options?: StreamOptions<TThinkingLevel>,
@@ -430,7 +439,7 @@ export function defineProvider(provider: {
         type: undefined,
         // A provider that owns no vendor session of its own answers a bounded question through
         // the stream it already implements.
-        rawQuery: (options) => rawQueryFromStream(defined, options),
+        rawQuery: (ctx, options) => rawQueryFromStream(ctx, defined, options),
         ...provider,
     };
     return defined;

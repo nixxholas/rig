@@ -78,7 +78,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 return {
                     async *[Symbol.asyncIterator]() {
                         started.resolve();
@@ -149,7 +149,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 runSignal = options?.signal;
                 const message = assistantMessage("The run survived.", model.id);
@@ -207,7 +207,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 runSignal = options?.signal;
                 return {
@@ -571,7 +571,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
@@ -644,7 +644,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 return abortableStream(options?.signal, started.resolve);
             },
@@ -706,7 +706,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
@@ -797,7 +797,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
@@ -858,7 +858,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
@@ -950,7 +950,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 return abortableStream(options?.signal, started.resolve);
@@ -1013,7 +1013,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 streams += 1;
                 return streams === 1
@@ -1095,7 +1095,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 return abortableStream(options?.signal, started.resolve);
             },
         });
@@ -1143,7 +1143,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            compact: async ({ context }) => ({
+            compact: async (_ctx, { context }) => ({
                 status: "completed",
                 context: {
                     ...context,
@@ -1164,7 +1164,7 @@ describe("InMemorySession abort", () => {
                     totalTokens: 0,
                 },
             }),
-            stream: (_model, _context, options) => {
+            stream: (_ctx, _model, _context, options) => {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 return responseStream("Earlier answer");
             },
@@ -1251,13 +1251,13 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            compact: async ({ context }) => ({
+            compact: async (_ctx, { context }) => ({
                 status: "failed",
                 kind: "inference_error",
                 message: failure,
                 context,
             }),
-            stream: (_model, _context, options) => {
+            stream: (_ctx, _model, _context, options) => {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 return responseStream("Earlier answer");
             },
@@ -1317,7 +1317,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            compact: async ({ context, signal }) => {
+            compact: async (_ctx, { context, signal }) => {
                 compactStartedResolve?.();
                 if (signal?.aborted !== true) {
                     await new Promise<void>((resolve) =>
@@ -1326,7 +1326,7 @@ describe("InMemorySession abort", () => {
                 }
                 return { status: "cancelled", context };
             },
-            stream: (_model, _context, options) => {
+            stream: (_ctx, _model, _context, options) => {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 return responseStream("Earlier answer");
             },
@@ -1403,7 +1403,7 @@ describe("InMemorySession abort", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 const partial = assistantMessage("Visible before interruption.", model.id);
                 return {

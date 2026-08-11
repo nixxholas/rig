@@ -560,16 +560,16 @@ function createHarness(
     const provider = defineProvider({
         id: "test",
         models: [model],
-        stream(_model, context, streamOptions: StreamOptions = {}) {
+        stream(runtimeCtx, _model, context, streamOptions: StreamOptions = {}) {
             if (streamOptions.sessionId?.endsWith(":title")) {
                 inferenceKinds.push("metadata");
                 metadataContexts.push(context);
-                if (streamOptions.signal !== undefined) metadataSignals.push(streamOptions.signal);
+                if (runtimeCtx.lifetime !== undefined) metadataSignals.push(runtimeCtx.lifetime);
                 metadataResponses += 1;
                 return createInferenceStream(async function* () {
                     if (options.afterMetadataAbort !== undefined) {
                         await new Promise<void>((resolve) => {
-                            const signal = streamOptions.signal;
+                            const signal = runtimeCtx.lifetime;
                             if (signal?.aborted === true) {
                                 resolve();
                                 return;

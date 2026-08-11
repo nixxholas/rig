@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { modelAnthropicSonnet5, modelOpenaiGpt56Sol } from "@slopus/rig-execution";
 import { Executor } from "@slopus/rig-execution";
 import { bedrockExecution } from "./bedrockExecution.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
 import { readBedrockBearerToken } from "./readBedrockBearerToken.js";
 import { resolveBedrockRegion } from "./resolveBedrockRegion.js";
 import type { AssistantMessage, Model, TextContent } from "@slopus/rig-execution";
@@ -26,6 +27,7 @@ function textFromAssistantMessage(message: AssistantMessage): string {
 async function expectOkFromModel(model: Model, thinking = "off"): Promise<void> {
     const provider = new Executor([bedrockExecution({ env: process.env })]);
     const stream = provider.stream(
+        createTestRootContext().named("bedrock-live-test"),
         model,
         {
             messages: [

@@ -4,6 +4,9 @@ import { createInferenceStream } from "@slopus/rig-execution";
 import { defineModel, defineProvider, type AssistantMessage } from "@slopus/rig-execution";
 import type { DebugLog } from "./DebugLog.js";
 import { createDebugProvider } from "./createDebugProvider.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext().named("debug-provider-test");
 
 describe("createDebugProvider", () => {
     it("keeps inference running when debug records cannot be written", async () => {
@@ -55,7 +58,7 @@ describe("createDebugProvider", () => {
             source: "agent",
         });
 
-        const stream = debugProvider.stream(model, { messages: [] });
+        const stream = debugProvider.stream(ctx, model, { messages: [] });
         const events = [];
         for await (const event of stream) events.push(event);
 
@@ -130,10 +133,10 @@ describe("createDebugProvider", () => {
             messages: [{ role: "user" as const, content: "original", timestamp: 1 }],
         };
 
-        await expect(debugProvider.compact?.({ context, model })).resolves.toMatchObject({
+        await expect(debugProvider.compact?.(ctx, { context, model })).resolves.toMatchObject({
             status: "completed",
             context: { messages: [{ role: "user", content: "summary" }] },
         });
-        expect(compact).toHaveBeenCalledWith({ context, model });
+        expect(compact).toHaveBeenCalledWith(ctx, { context, model });
     });
 });

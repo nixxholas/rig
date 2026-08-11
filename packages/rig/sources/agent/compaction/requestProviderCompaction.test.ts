@@ -8,7 +8,9 @@ import {
     type Context,
 } from "@slopus/rig-execution";
 import { requestProviderCompaction } from "./requestProviderCompaction.js";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
+const ctx = createTestRootContext().named("provider-compaction-test");
 const model = defineModel({
     id: "openai/test",
     name: "Test",
@@ -42,7 +44,7 @@ describe("requestProviderCompaction", () => {
             },
         });
 
-        const result = await requestProviderCompaction({
+        const result = await requestProviderCompaction(ctx, {
             context: compactionContext(),
             model,
             now: () => 4,
@@ -65,7 +67,7 @@ describe("requestProviderCompaction", () => {
         });
 
         await expect(
-            requestProviderCompaction({
+            requestProviderCompaction(ctx, {
                 context: compactionContext(),
                 model,
                 now: () => 4,
@@ -100,7 +102,7 @@ describe("requestProviderCompaction", () => {
             });
 
             await expect(
-                requestProviderCompaction({
+                requestProviderCompaction(ctx, {
                     context,
                     model,
                     now: () => 1,

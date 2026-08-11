@@ -8445,7 +8445,7 @@ export class InMemorySession {
         try {
             await this.#append(ctx, "session_title_changed", { status: this.#titleStatus });
             pendingPersistenceCheckpoint = undefined;
-            const metadata = await generateSessionMetadata({
+            const metadata = await generateSessionMetadata(ctx, {
                 ...(this.#title === undefined ? {} : { currentTitle: this.#title }),
                 modelId: this.#modelId,
                 now: this.#now,

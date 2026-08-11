@@ -10,6 +10,7 @@ import type {
     ServiceTier,
     Usage,
 } from "@slopus/rig-execution";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 export interface CompactConversationResult {
     compacted: boolean;
@@ -21,24 +22,27 @@ export interface CompactConversationResult {
     retainedMessageCount: number;
 }
 
-export async function compactConversation(options: {
-    provider: Provider;
-    model: Model;
-    messages: readonly Message[];
-    createProviderContext: (messages: readonly Message[]) => Promise<Context>;
-    idFactory: () => string;
-    now: () => number;
-    reportedTokens?: number;
-    force: boolean;
-    onCompactionStart?: (event: {
-        compactionId: string;
-        estimatedTokensBefore: number;
-    }) => void | Promise<void>;
-    signal?: AbortSignal;
-    serviceTier?: ServiceTier;
-    startDate?: string;
-    thinking?: string;
-}): Promise<CompactConversationResult> {
+export async function compactConversation(
+    ctx: RuntimeContext,
+    options: {
+        provider: Provider;
+        model: Model;
+        messages: readonly Message[];
+        createProviderContext: (messages: readonly Message[]) => Promise<Context>;
+        idFactory: () => string;
+        now: () => number;
+        reportedTokens?: number;
+        force: boolean;
+        onCompactionStart?: (event: {
+            compactionId: string;
+            estimatedTokensBefore: number;
+        }) => void | Promise<void>;
+        signal?: AbortSignal;
+        serviceTier?: ServiceTier;
+        startDate?: string;
+        thinking?: string;
+    },
+): Promise<CompactConversationResult> {
     const estimatedTokensBefore = estimateMessagesTokens(options.messages);
     const tokensBefore = Math.max(estimatedTokensBefore, options.reportedTokens ?? 0);
     if (!options.force && tokensBefore < resolveAutoCompactThreshold(options.model)) {
@@ -62,7 +66,7 @@ export async function compactConversation(options: {
     const compactionId = options.idFactory();
     await options.onCompactionStart?.({ compactionId, estimatedTokensBefore });
     const providerContext = await options.createProviderContext(options.messages);
-    const summary = await requestProviderCompaction({
+    const summary = await requestProviderCompaction(ctx, {
         context: providerContext,
         provider: options.provider,
         model: options.model,

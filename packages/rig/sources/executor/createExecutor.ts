@@ -18,7 +18,6 @@ import { codexExecution } from "./codexExecution.js";
 import { grokExecution } from "./grokExecution.js";
 import { filterConfiguredProviderModels } from "./filterConfiguredProviderModels.js";
 import { providerCredentialEnvironment } from "./providerCredentialEnvironment.js";
-import type { Context } from "@steve.kite/stdlib";
 
 export interface CreateExecutorOptions {
     agentContext: AgentContext;
@@ -29,7 +28,6 @@ export interface CreateExecutorOptions {
     /** Receives account usage a provider reports while it is already answering. */
     onAccountUsage?: (usage: ProviderUsage) => void;
     providers: ConfigProviders;
-    runtimeContext?: Context;
     resolveInferenceMaxRetries?: () => number;
     sessionId?: string;
 }
@@ -98,9 +96,6 @@ export function createExecutor(options: CreateExecutorOptions): CreateExecutorRe
                           shell: options.env.SHELL ?? "",
                       },
                       ...(options.identity === undefined ? {} : { identity: options.identity }),
-                      ...(options.runtimeContext === undefined
-                          ? {}
-                          : { runtimeContext: options.runtimeContext }),
                   }),
               }),
         missingCredentials,

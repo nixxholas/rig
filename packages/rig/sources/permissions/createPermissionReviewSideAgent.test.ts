@@ -5,6 +5,7 @@ import {
     defineProvider,
     type Context,
     type Model,
+    type Provider,
     type StreamOptions,
 } from "@slopus/rig-execution";
 import { Agent } from "../agent/Agent.js";
@@ -30,12 +31,13 @@ describe("createPermissionReviewSideAgent", () => {
             ...recorded.provider,
             reviewerModel,
             stream<TThinkingLevel extends string>(
+                runtimeCtx: Parameters<Provider["stream"]>[0],
                 model: Model<TThinkingLevel>,
                 context: Context,
                 options?: StreamOptions<TThinkingLevel>,
             ) {
                 requestedModels.push(model.id);
-                return recorded.provider.stream(model, context, options);
+                return recorded.provider.stream(runtimeCtx, model, context, options);
             },
         };
 
@@ -313,7 +315,7 @@ function recordingProvider(
     const provider = defineProvider({
         id: "codex",
         models: [model],
-        stream(_model, context) {
+        stream(_ctx, _model, context) {
             requests.push(context);
             const call = requests.length;
             const denied = JSON.stringify(context.messages).includes("PROHIBITED");

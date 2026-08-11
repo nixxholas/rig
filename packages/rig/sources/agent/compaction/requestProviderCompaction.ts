@@ -1,4 +1,5 @@
 import type { Context, Model, Provider, Usage } from "@slopus/rig-execution";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 /**
  * What a provider gives back when it compacts a conversation.
@@ -12,19 +13,22 @@ export interface ProviderCompaction {
     usage: Usage;
 }
 
-export async function requestProviderCompaction(options: {
-    provider: Provider;
-    model: Model;
-    context: Context;
-    signal?: AbortSignal;
-    now: () => number;
-}): Promise<ProviderCompaction> {
+export async function requestProviderCompaction(
+    ctx: RuntimeContext,
+    options: {
+        provider: Provider;
+        model: Model;
+        context: Context;
+        signal?: AbortSignal;
+        now: () => number;
+    },
+): Promise<ProviderCompaction> {
     if (options.provider.compact === undefined) {
         throw new Error(
             `Provider '${options.provider.id}' does not support conversation compaction.`,
         );
     }
-    const result = await options.provider.compact({
+    const result = await options.provider.compact(ctx, {
         context: options.context,
         model: options.model,
         ...(options.signal === undefined ? {} : { signal: options.signal }),

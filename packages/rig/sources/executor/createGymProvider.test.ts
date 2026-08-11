@@ -2,6 +2,9 @@ import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 
 import { createGymProvider, gymModel } from "./createGymProvider.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext().named("gym-provider-test");
 
 describe("createGymProvider", () => {
     it("normalizes a host response into provider streaming events", async () => {
@@ -31,6 +34,7 @@ describe("createGymProvider", () => {
             });
             expect(provider.serviceTiers).toEqual(["fast"]);
             const stream = provider.stream(
+                ctx,
                 gymModel,
                 { messages: [{ content: "Hi", role: "user", timestamp: 1 }] },
                 { sessionId: "session-1", thinking: "off" },
@@ -73,7 +77,7 @@ describe("createGymProvider", () => {
             const provider = createGymProvider({
                 endpoint: `http://127.0.0.1:${address.port}`,
             });
-            const stream = provider.stream(gymModel, { messages: [] });
+            const stream = provider.stream(ctx, gymModel, { messages: [] });
             await expect(stream.result()).rejects.toThrow("HTTP 429: scripted overload");
         } finally {
             server.close();
@@ -110,7 +114,7 @@ describe("createGymProvider", () => {
         });
 
         await expect(
-            provider.compact?.({
+            provider.compact?.(ctx, {
                 context: { messages: [{ role: "user", content: "old", timestamp: 1 }] },
                 model: gymModel,
             }),
@@ -150,6 +154,7 @@ describe("createGymProvider", () => {
 
         await provider
             .stream(
+                ctx,
                 gymModel,
                 {
                     messages: [],

@@ -849,7 +849,7 @@ export class Agent {
     ): Promise<CompactConversationResult> {
         return runCompactionWithEvents({
             compact: (onCompactionStart) =>
-                compactConversation({
+                compactConversation(ctx, {
                     provider: options.provider ?? this.provider,
                     model: this.#model,
                     messages: options.messages,

@@ -37,7 +37,7 @@ describe("Executor", () => {
         );
 
         await expect(
-            executor.compact({
+            executor.compact(testContext, {
                 context: {
                     messages: [{ role: "user", content: "Restored history.", timestamp: 1 }],
                 },
@@ -45,6 +45,7 @@ describe("Executor", () => {
             }),
         ).resolves.toMatchObject({ status: "completed" });
         expect(native.sessions).toHaveLength(1);
+        expect(native.sessions.at(-1)?.compactionContexts).toEqual([testContext]);
         expect(native.sessions.at(-1)?.compactions).toEqual([
             {
                 context: {
@@ -59,6 +60,26 @@ describe("Executor", () => {
                 model: "openai/sol",
             },
         ]);
+    });
+
+    it("propagates the caller context through the high-level stream", async () => {
+        const native = new RecordingProvider();
+        const model = profile("codex", "codex", "openai/sol", "Sol").model;
+        const executor = new Executor(
+            [{ id: "codex", native, profiles: [profile("codex", "codex", model.id, model.name)] }],
+            { environment: TEST_ENVIRONMENT },
+        );
+        const turnCtx = testContext;
+
+        const stream = executor.stream(turnCtx, model, {
+            messages: [{ role: "user", content: "Do the work.", timestamp: 1 }],
+        });
+        for await (const _event of stream) {
+            // Drain the normalized provider stream.
+        }
+        await stream.result();
+
+        expect(native.sessions.at(-1)?.runContexts).toEqual([turnCtx]);
     });
 
     it("assembles prompts and preserves caller-owned tools while continuing compatible models", async () => {
@@ -158,7 +179,7 @@ describe("Executor", () => {
             messages: [{ role: "user" as const, content: "Selected prefix.", timestamp: 1 }],
         };
         await expect(
-            executor.compact({
+            executor.compact(testContext, {
                 context: compactContext,
                 instructions: "Keep decisions.",
                 model: profile("codex", "codex", "openai/terra", "Terra").model,
@@ -655,7 +676,7 @@ describe("Executor", () => {
             }),
         );
 
-        const answer = await executor.rawQuery({
+        const answer = await executor.rawQuery(testContext, {
             instructions: "Name this chat.",
             model: profile("codex", "codex", "openai/sol", "Sol").model,
             prompt: "User: Name this chat.",
@@ -667,6 +688,7 @@ describe("Executor", () => {
         expect(native.options).toHaveLength(2);
         expect(native.options[1]).toEqual({ instructions: "Name this chat.", tools: [] });
         expect(native.sessions[1]?.id).toBe("conversation:title");
+        expect(native.sessions[1]?.runContexts).toEqual([testContext]);
         expect(native.sessions[1]?.destroyed).toBe(true);
         expect(native.sessions[1]?.requests[0]?.context.messages).toEqual([
             { role: "user", content: [{ type: "text", text: "User: Name this chat." }] },
@@ -697,7 +719,7 @@ describe("Executor", () => {
         );
 
         await expect(
-            executor.rawQuery({
+            executor.rawQuery(testContext, {
                 instructions: "Name this chat.",
                 model: profile("codex", "codex", "openai/sol", "Sol").model,
                 prompt: "User: Name this chat.",
@@ -737,6 +759,7 @@ class AnsweringProvider extends BaseProvider {
 class AnsweringSession extends BaseSession {
     destroyed = false;
     readonly requests: SessionRunRequest[] = [];
+    readonly runContexts: RuntimeContext[] = [];
 
     constructor(
         id: string,
@@ -755,9 +778,10 @@ class AnsweringSession extends BaseSession {
     }
 
     override async *run(
-        _ctx: RuntimeContext,
+        ctx: RuntimeContext,
         request: SessionRunRequest,
     ): AsyncGenerator<SessionEvent> {
+        this.runContexts.push(ctx);
         this.requests.push(request);
         if (this.answer.length > 0) yield { type: "text_delta", delta: this.answer };
         yield this.terminal;
@@ -780,7 +804,9 @@ class RecordingProvider extends BaseProvider {
 }
 
 class RecordingSession extends BaseSession {
+    readonly compactionContexts: RuntimeContext[] = [];
     readonly compactions: SessionCompactionOptions[] = [];
+    readonly runContexts: RuntimeContext[] = [];
     readonly requests: SessionRunRequest[] = [];
 
     constructor(id: string) {
@@ -788,9 +814,10 @@ class RecordingSession extends BaseSession {
     }
 
     override async compact(
-        _ctx: RuntimeContext,
+        ctx: RuntimeContext,
         options: SessionCompactionOptions,
     ): Promise<SessionCompaction> {
+        this.compactionContexts.push(ctx);
         this.compactions.push(options);
         const preservedMessages = options.context.messages;
         return {
@@ -811,9 +838,10 @@ class RecordingSession extends BaseSession {
     override destroy(): void {}
 
     override async *run(
-        _ctx: RuntimeContext,
+        ctx: RuntimeContext,
         request: SessionRunRequest,
     ): AsyncGenerator<SessionEvent> {
+        this.runContexts.push(ctx);
         this.requests.push(request);
         yield { type: "done", state: "normal", tokens: { input: 0, output: 0 } };
     }

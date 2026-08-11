@@ -68,7 +68,7 @@ describe("InMemorySession reset", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 return abortableStream(options?.signal, started.resolve);
             },
         });

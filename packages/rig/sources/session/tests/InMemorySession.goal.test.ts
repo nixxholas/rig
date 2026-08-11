@@ -89,7 +89,7 @@ describe("InMemorySession goals", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor(
                     assistantMessage([{ type: "text", text: "No findings." }], "stop"),

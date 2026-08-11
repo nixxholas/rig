@@ -34,8 +34,8 @@ export function createDebugProvider(
         ...(provider.serviceTiers === undefined ? {} : { serviceTiers: provider.serviceTiers }),
         ...(compact === undefined
             ? {}
-            : { compact: (compactionOptions) => compact(compactionOptions) }),
-        stream(model, context, streamOptions = {}) {
+            : { compact: (ctx, compactionOptions) => compact(ctx, compactionOptions) }),
+        stream(ctx, model, context, streamOptions = {}) {
             const inferenceId = `${options.source}-${String(++inference).padStart(4, "0")}`;
             return createInferenceStream(async function* () {
                 try {
@@ -50,7 +50,7 @@ export function createDebugProvider(
                             source: options.source,
                         })
                         .catch(() => undefined);
-                    const stream = provider.stream(model, context, streamOptions);
+                    const stream = provider.stream(ctx, model, context, streamOptions);
                     for await (const event of stream) {
                         await options.log
                             .record("inference-event", {

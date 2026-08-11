@@ -418,7 +418,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) => completedCompaction(context, "summary"),
+            compact: async (_ctx, { context }) => completedCompaction(context, "summary"),
             stream() {
                 return streamFor(stoppedMessage(model.id));
             },
@@ -490,7 +490,7 @@ describe("Agent", () => {
             id: "custom-bedrock",
             type: "claude",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor({
                     role: "assistant",
@@ -554,7 +554,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor({
                     role: "assistant",
@@ -602,7 +602,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor(stoppedMessage(model.id));
             },
@@ -652,7 +652,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor({
                     role: "assistant",
@@ -865,7 +865,7 @@ describe("Agent", () => {
             id: "codex",
             models: [firstModel, secondModel],
             serviceTiers: ["fast"],
-            stream(model, _context, options) {
+            stream(_ctx, model, _context, options) {
                 streamOptions.push(options);
                 return streamFor({
                     role: "assistant",
@@ -916,9 +916,9 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) =>
+            compact: async (_ctx, { context }) =>
                 completedCompaction(context, "Earlier work was summarized."),
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor({
                     role: "assistant",
@@ -999,7 +999,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async (options) => {
+            compact: async (_ctx, options) => {
                 compactions += 1;
                 return {
                     status: "failed",
@@ -1075,9 +1075,9 @@ describe("Agent", () => {
             const provider = defineProvider({
                 id: "codex",
                 models: [model],
-                compact: async ({ context }) =>
+                compact: async (_ctx, { context }) =>
                     completedCompaction(context, "Earlier work was summarized."),
-                stream(_model, context) {
+                stream(_ctx, _model, context) {
                     contexts.push(context);
                     if (contexts.length === 1) {
                         return streamFor({
@@ -1167,9 +1167,9 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) =>
+            compact: async (_ctx, { context }) =>
                 completedCompaction(context, "Earlier work was summarized."),
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 if (contexts.length === 1) {
                     return streamFor({
@@ -1337,7 +1337,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 requestCount += 1;
                 contexts.push(context);
                 const message: AssistantMessage = {
@@ -1426,7 +1426,7 @@ describe("Agent", () => {
             id: "codex",
             models: [model],
             serviceTiers: ["fast"],
-            compact: async ({ context }) => completedCompaction(context, "Brief."),
+            compact: async (_ctx, { context }) => completedCompaction(context, "Brief."),
             stream() {
                 return streamFor({
                     role: "assistant",
@@ -1524,14 +1524,14 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) => {
+            compact: async (_ctx, { context }) => {
                 if (!steeredDuringCompaction) {
                     steeredDuringCompaction = true;
                     void agent.steer("stale compaction steering");
                 }
                 return completedCompaction(context, "Brief.");
             },
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 normalContexts.push(context);
                 return streamFor({
                     role: "assistant",
@@ -1571,7 +1571,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) => ({
+            compact: async (_ctx, { context }) => ({
                 status: "failed",
                 kind: "inference_error",
                 message: "summary failed",
@@ -1731,7 +1731,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 requestCount += 1;
                 if (requestCount === 1) {
@@ -1865,7 +1865,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 if (contexts.length === 1) {
                     return streamFor({
@@ -2155,7 +2155,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor({
                     role: "assistant",
@@ -2332,7 +2332,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 contexts.push(context);
                 if (contexts.length === 1) {
                     const message: AssistantMessage = {
@@ -2532,7 +2532,7 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) => {
+            compact: async (_ctx, { context }) => {
                 started.resolve();
                 await release.promise;
                 return completedCompaction(context, "summary");

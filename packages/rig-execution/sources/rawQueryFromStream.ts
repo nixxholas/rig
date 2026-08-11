@@ -1,4 +1,5 @@
 import type { Provider, RawQueryOptions } from "@/types.js";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
 
 /**
  * Answers a bounded question through a provider's ordinary stream.
@@ -9,10 +10,12 @@ import type { Provider, RawQueryOptions } from "@/types.js";
  * failure it was rather than returned as an empty answer.
  */
 export async function rawQueryFromStream(
+    ctx: RuntimeContext,
     provider: Pick<Provider, "stream">,
     options: RawQueryOptions,
 ): Promise<string> {
     const stream = provider.stream(
+        ctx,
         options.model,
         {
             systemPromptOverride: options.instructions,

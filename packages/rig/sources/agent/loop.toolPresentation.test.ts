@@ -144,11 +144,11 @@ describe("agent loop tool presentations", () => {
                 thinkingLevels: ["off"],
                 defaultThinkingLevel: "off",
             });
-            const contexts: Parameters<ReturnType<typeof defineProvider>["stream"]>[1][] = [];
+            const contexts: Parameters<ReturnType<typeof defineProvider>["stream"]>[2][] = [];
             const provider = defineProvider({
                 id: "mock",
                 models: [model],
-                stream(_model, context) {
+                stream(_ctx, _model, context) {
                     contexts.push(context);
                     const message =
                         contexts.length === 1

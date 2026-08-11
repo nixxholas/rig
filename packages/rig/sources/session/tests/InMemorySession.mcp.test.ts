@@ -32,7 +32,7 @@ describe("InMemorySession MCP permissions", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (!options?.sessionId?.endsWith(":title")) {
                     toolCatalogs.push(context.tools?.map((tool) => tool.name) ?? []);
                 }
@@ -199,7 +199,7 @@ describe("InMemorySession MCP permissions", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (options?.sessionId?.endsWith(":title")) return responseStream();
                 toolCatalogs.push(context.tools?.map((tool) => tool.name) ?? []);
                 inference += 1;

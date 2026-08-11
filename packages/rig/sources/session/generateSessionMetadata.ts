@@ -4,6 +4,7 @@ import type { Model, Provider } from "@slopus/rig-execution";
 import { providerModelFamily } from "@slopus/happy-providers";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
+import { withLifetime, type Context as RuntimeContext } from "@steve.kite/stdlib";
 
 const MAX_TITLE_CHARS = 80;
 const MAX_TITLE_WORDS = 6;
@@ -35,20 +36,24 @@ export const SESSION_METADATA_SCHEMA = Type.Object(
 
 export type GeneratedSessionMetadata = Static<typeof SESSION_METADATA_SCHEMA>;
 
-export async function generateSessionMetadata(options: {
-    currentTitle?: string;
-    /** Model the session itself is running, which decides what may name it. */
-    modelId: string;
-    now?: () => number;
-    provider: Provider;
-    sessionId: string;
-    signal?: AbortSignal;
-    startDate?: string;
-    transcript: string;
-}): Promise<GeneratedSessionMetadata> {
+export async function generateSessionMetadata(
+    ctx: RuntimeContext,
+    options: {
+        currentTitle?: string;
+        /** Model the session itself is running, which decides what may name it. */
+        modelId: string;
+        now?: () => number;
+        provider: Provider;
+        sessionId: string;
+        signal?: AbortSignal;
+        startDate?: string;
+        transcript: string;
+    },
+): Promise<GeneratedSessionMetadata> {
     const now = options.now ?? Date.now;
     const model = selectMetadataModel(options.provider, options.modelId);
-    const answered = options.provider.rawQuery({
+    const operationCtx = options.signal === undefined ? ctx : withLifetime(ctx, options.signal);
+    const answered = options.provider.rawQuery(operationCtx, {
         instructions: METADATA_PROMPT,
         model,
         prompt: [
@@ -59,7 +64,6 @@ export async function generateSessionMetadata(options: {
         ].join("\n"),
         // Naming a chat is its own one-shot conversation, not a turn of the session's.
         sessionId: `${options.sessionId}:title`,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
         startDate: options.startDate ?? toLocalDate(now()),
     });
     const result = await raceWithAbort(answered, options.signal);

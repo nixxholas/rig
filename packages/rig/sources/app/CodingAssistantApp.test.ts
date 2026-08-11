@@ -3940,7 +3940,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) => completedCompaction(context),
+            compact: async (_ctx, { context }) => completedCompaction(context),
             stream() {
                 return streamText("unused");
             },
@@ -4006,7 +4006,7 @@ describe("CodingAssistantApp", () => {
             const provider = defineProvider({
                 id: "codex",
                 models: [model],
-                compact: async ({ context }) => {
+                compact: async (_ctx, { context }) => {
                     started.resolve();
                     await release.promise;
                     return completedCompaction(context);
@@ -4077,7 +4077,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            compact: async ({ context }) => {
+            compact: async (_ctx, { context }) => {
                 requests += 1;
                 started.resolve();
                 await release.promise;
@@ -4580,7 +4580,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText("skill used");
             },
@@ -4890,7 +4890,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 return streamAbortAfterSignal(options?.signal, started.resolve);
             },
         });
@@ -4943,7 +4943,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return contexts.length === 1 ? gate.stream() : streamText("done");
             },
@@ -4998,7 +4998,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 requests += 1;
                 return streamAbortAfterSignal(options?.signal, started.resolve);
             },
@@ -5198,7 +5198,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText("unused");
             },
@@ -5251,7 +5251,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText("image restored");
             },
@@ -5315,7 +5315,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText("unused");
             },
@@ -5615,7 +5615,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText("unused");
             },
@@ -6489,7 +6489,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText("hello from agent");
             },
@@ -6713,7 +6713,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 streamCalls += 1;
                 if (streamCalls === 1) {
@@ -6798,7 +6798,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 streamCalls += 1;
                 if (streamCalls === 1) {
@@ -8370,7 +8370,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 streamCalls += 1;
                 if (streamCalls === 1) {
                     return streamMessage({
@@ -9451,7 +9451,7 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamText(`answer ${contexts.length}`);
             },

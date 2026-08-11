@@ -4,7 +4,9 @@ import { compactConversation } from "./compactConversation.js";
 import { toProviderMessages } from "../loop.js";
 import type { Message } from "../types.js";
 import { defineModel, defineProvider, type Context } from "@slopus/rig-execution";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 
+const ctx = createTestRootContext().named("compact-conversation-test");
 const model = defineModel({
     id: "openai/test",
     name: "Test",
@@ -32,7 +34,7 @@ describe("compactConversation", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            compact: async (options) => ({
+            compact: async (_ctx, options) => ({
                 status: "completed",
                 summary: "Different optional metadata.",
                 usage: zeroUsage(),
@@ -46,7 +48,7 @@ describe("compactConversation", () => {
             }),
         });
 
-        const result = await compactConversation({
+        const result = await compactConversation(ctx, {
             provider,
             model,
             messages: source,
@@ -136,7 +138,7 @@ describe("compactConversation", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            compact(options) {
+            compact(_ctx, options) {
                 compactedContext = options.context;
                 return Promise.resolve({
                     status: "completed",
@@ -168,7 +170,7 @@ describe("compactConversation", () => {
             }),
         });
 
-        const result = await compactConversation({
+        const result = await compactConversation(ctx, {
             provider,
             model,
             messages: source,
@@ -295,7 +297,7 @@ describe("compactConversation", () => {
         const provider = defineProvider({
             id: "test",
             models: [model],
-            compact: async (options) => ({
+            compact: async (_ctx, options) => ({
                 status: "completed",
                 usage: zeroUsage(),
                 context: { ...options.context, messages: replacement },
@@ -305,7 +307,7 @@ describe("compactConversation", () => {
             }),
         });
 
-        const result = await compactConversation({
+        const result = await compactConversation(ctx, {
             provider,
             model,
             messages: source,

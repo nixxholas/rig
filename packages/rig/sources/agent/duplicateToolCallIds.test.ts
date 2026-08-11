@@ -29,7 +29,7 @@ describe("provider tool call identifiers", () => {
         const provider = defineProvider({
             id: "mock",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 iteration += 1;
                 return streamFor(

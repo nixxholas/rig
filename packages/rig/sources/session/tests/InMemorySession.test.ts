@@ -1577,7 +1577,7 @@ function createRunningNotificationSession(): {
     const provider = defineProvider({
         id: "test",
         models: [model],
-        stream(_model, _context, options) {
+        stream(_ctx, _model, _context, options) {
             return abortableNotificationStream(options?.signal, markStarted);
         },
     });

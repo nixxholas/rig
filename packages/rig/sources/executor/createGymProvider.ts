@@ -1,5 +1,6 @@
 import type { ProviderUsage } from "@slopus/happy-providers";
 import { createInferenceStream } from "@slopus/rig-execution";
+import { withLifetime } from "@steve.kite/stdlib";
 import type { GymInferenceRequest, GymInferenceResponse } from "./gym-types.js";
 import {
     defineModel,
@@ -60,7 +61,8 @@ export function createGymProvider(options: CreateGymProviderOptions) {
         reset() {
             providerSessionGeneration += 1;
         },
-        async compact({ context, model, signal }) {
+        async compact(ctx, { context, model, signal }) {
+            const operationCtx = signal === undefined ? ctx : withLifetime(ctx, signal);
             const response = await request(options.endpoint, {
                 body: JSON.stringify({
                     context,
@@ -76,7 +78,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                         : { authorization: `Bearer ${options.token}` }),
                 },
                 method: "POST",
-                ...(signal === undefined ? {} : { signal }),
+                ...(operationCtx.lifetime === undefined ? {} : { signal: operationCtx.lifetime }),
             });
             if (!response.ok) {
                 const detail = (await response.text()).trim();
@@ -108,8 +110,18 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                 usage: reply.usage ?? zeroUsage(),
             };
         },
-        stream(model, context, streamOptions = {}) {
+        stream(ctx, model, context, streamOptions = {}) {
             return createInferenceStream(async function* () {
+                const operationCtx =
+                    streamOptions.signal === undefined
+                        ? ctx
+                        : withLifetime(ctx, streamOptions.signal);
+                const operationOptions: StreamOptions = {
+                    ...streamOptions,
+                    ...(operationCtx.lifetime === undefined
+                        ? {}
+                        : { signal: operationCtx.lifetime }),
+                };
                 const runtimeModel = `# Runtime model\nModel ID: ${model.id}\nProvider ID: ${providerId}`;
                 const preparedContext =
                     options.prepareContext === undefined
@@ -141,7 +153,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                     body: JSON.stringify({
                         context: preparedContext,
                         modelId: model.id,
-                        options: streamOptions,
+                        options: operationOptions,
                         providerSessionGeneration,
                         providerId,
                     } satisfies GymInferenceRequest),
@@ -152,7 +164,9 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                             : { authorization: `Bearer ${options.token}` }),
                     },
                     method: "POST",
-                    ...(streamOptions.signal === undefined ? {} : { signal: streamOptions.signal }),
+                    ...(operationCtx.lifetime === undefined
+                        ? {}
+                        : { signal: operationCtx.lifetime }),
                 });
                 if (!response.ok) {
                     const detail = (await response.text()).trim();
@@ -168,7 +182,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                     options.onAccountUsage?.({ ...reply.accountUsage, providerId });
                 }
                 if (reply.delayMs !== undefined) {
-                    await delay(reply.delayMs, streamOptions);
+                    await delay(reply.delayMs, operationOptions);
                 }
                 const stopReason =
                     reply.stopReason ??
@@ -204,7 +218,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                         reason: retry.reason,
                     };
                     if (retry.delayMs !== undefined) {
-                        await delay(retry.delayMs, streamOptions);
+                        await delay(retry.delayMs, operationOptions);
                     }
                 }
 
@@ -222,13 +236,13 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                         reply.textDeltaChunkSize,
                         reply.textDeltaDelayMs,
                         reply.toolCallDeltaDelayMs,
-                        streamOptions,
+                        operationOptions,
                     );
                     if (stopped) break;
                 }
 
                 if (reply.completionDelayMs !== undefined && reply.completionDelayMs > 0) {
-                    await delay(reply.completionDelayMs, streamOptions);
+                    await delay(reply.completionDelayMs, operationOptions);
                 }
 
                 if (stopReason === "error" || stopReason === "aborted") {

@@ -1081,7 +1081,7 @@ describe("projects", () => {
         const provider = defineProvider({
             id: "codex",
             models: [modelOpenaiGpt56Sol],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) {
                     return transferResponseStream(
                         "<title>Transfer test</title>\n<recap>Transfer test.</recap>",
@@ -1164,7 +1164,7 @@ describe("projects", () => {
         const provider = defineProvider({
             id: "codex",
             models: [modelOpenaiGpt56Sol],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) {
                     return transferResponseStream(
                         "<title>Transfer test</title>\n<recap>Transfer test.</recap>",
@@ -1351,7 +1351,7 @@ describe("projects", () => {
         const provider = defineProvider({
             id: "codex",
             models: [modelOpenaiGpt56Sol],
-            stream(_model, _context, options) {
+            stream(_ctx, _model, _context, options) {
                 if (options?.sessionId?.endsWith(":title")) {
                     return transferResponseStream(
                         "<title>Transfer test</title>\n<recap>Transfer test.</recap>",
@@ -2143,7 +2143,7 @@ describe("projects", () => {
         const provider = defineProvider({
             id: "codex",
             models: [modelOpenaiGpt56Sol],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (!options?.sessionId?.endsWith(":title")) {
                     const message = context.messages.findLast(
                         (candidate) => candidate.role === "user",
@@ -2302,7 +2302,7 @@ describe("projects", () => {
         const provider = defineProvider({
             id: "codex",
             models: [modelOpenaiGpt56Sol],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 if (!options?.sessionId?.endsWith(":title")) {
                     const message = context.messages.findLast(
                         (candidate) => candidate.role === "user",

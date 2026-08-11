@@ -34,7 +34,7 @@ describe("agent loop live", () => {
         const provider = defineProvider({
             id: "mock",
             models: [model],
-            stream(_model, context, options) {
+            stream(_ctx, _model, context, options) {
                 contexts.push(context);
                 if (options !== undefined) {
                     streamOptions.push(options);
@@ -260,7 +260,7 @@ describe("agent loop live", () => {
         const provider = defineProvider({
             id: "mock",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return streamFor(
                     contexts.length === 1
@@ -339,7 +339,7 @@ describe("agent loop live", () => {
         const provider = defineProvider({
             id: "mock",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
 
                 if (contexts.length === 1) {
@@ -491,7 +491,7 @@ describe("agent loop live", () => {
         const provider = defineProvider({
             id: "mock",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return contexts.length === 1
                     ? streamFor(
@@ -638,7 +638,7 @@ describe("agent loop live", () => {
         const provider = defineProvider({
             id: "mock",
             models: [model],
-            stream(_model, context) {
+            stream(_ctx, _model, context) {
                 contexts.push(context);
                 return contexts.length === 1
                     ? streamFor(

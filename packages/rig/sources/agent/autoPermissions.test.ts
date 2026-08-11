@@ -420,12 +420,13 @@ describe("Auto permissions", () => {
         const observed = {
             ...provider,
             stream(
-                model: Parameters<Provider["stream"]>[0],
+                runtimeCtx: Parameters<Provider["stream"]>[0],
+                model: Parameters<Provider["stream"]>[1],
                 context: Context,
                 streamOptions?: never,
             ) {
                 if (isPermissionReviewRequest(context)) reviewerRequests.push(context);
-                return provider.stream(model, context, streamOptions);
+                return provider.stream(runtimeCtx, model, context, streamOptions);
             },
         };
         const agent = new Agent({
@@ -1013,7 +1014,7 @@ function autoReviewProvider(
     return defineProvider({
         id: "codex",
         models: [model],
-        stream(_model, context) {
+        stream(_ctx, _model, context) {
             if (isPermissionReviewRequest(context)) {
                 return streamFor(
                     assistantMessage({
@@ -1073,7 +1074,7 @@ function reviewerOnlyProvider(decision: "allow" | "deny", calls: string[], close
         close,
         id: "codex",
         models: [model],
-        stream(_model, context) {
+        stream(_ctx, _model, context) {
             if (!isPermissionReviewRequest(context)) {
                 throw new Error("The reviewer provider received agent inference.");
             }
@@ -1109,7 +1110,7 @@ function compromisedSessionInputReviewProvider() {
     return defineProvider({
         id: "codex",
         models: [model],
-        stream(_model, context) {
+        stream(_ctx, _model, context) {
             if (isPermissionReviewRequest(context)) {
                 return streamFor(
                     assistantMessage({

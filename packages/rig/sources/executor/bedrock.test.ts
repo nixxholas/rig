@@ -13,6 +13,9 @@ import {
 import { bedrockExecution } from "./bedrockExecution.js";
 import { getBedrockModelRoute } from "./getBedrockModelRoute.js";
 import { resolveBedrockModelTransport } from "./resolveBedrockModelTransport.js";
+import { createTestRootContext } from "../testing/createTestRootContext.js";
+
+const ctx = createTestRootContext().named("bedrock-provider-test");
 
 describe("Amazon Bedrock provider", () => {
     it("requires the Bedrock bearer token", () => {
@@ -95,7 +98,7 @@ describe("Amazon Bedrock provider", () => {
 
         try {
             const message = await provider
-                .stream(modelOpenaiGpt56Sol, {
+                .stream(ctx, modelOpenaiGpt56Sol, {
                     messages: [{ role: "user", content: "Reply with ok.", timestamp: 1 }],
                     tools: [
                         {
@@ -176,7 +179,7 @@ describe("Amazon Bedrock provider", () => {
 
         try {
             const message = await provider
-                .stream(modelAnthropicOpus48, {
+                .stream(ctx, modelAnthropicOpus48, {
                     messages: [{ role: "user", content: "Reply with ok.", timestamp: 1 }],
                 })
                 .result();
@@ -249,7 +252,7 @@ describe("Amazon Bedrock provider", () => {
 
         try {
             const message = await provider
-                .stream(modelAnthropicOpus48, {
+                .stream(ctx, modelAnthropicOpus48, {
                     messages: [{ role: "user", content: "Reply with ok.", timestamp: 1 }],
                 })
                 .result();

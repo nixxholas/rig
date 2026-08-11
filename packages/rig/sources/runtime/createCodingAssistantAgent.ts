@@ -262,7 +262,6 @@ export function createCodingAssistantAgent(
                     ? {}
                     : { onAccountUsage: options.onAccountUsage }),
                 providers: options.providers ?? DEFAULT_RIG_CONFIG.providers,
-                runtimeContext: options.ctx,
                 ...(options.resolveInferenceMaxRetries === undefined
                     ? {}
                     : {

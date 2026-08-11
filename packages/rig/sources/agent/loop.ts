@@ -385,6 +385,7 @@ export async function runAgentLoop(
                 resolveModelImageProfile(model),
             );
             const stream = options.provider.stream(
+                ctx,
                 model,
                 toProviderContext(providerPrompt, preparedProviderMessages, providerTools),
                 toStreamOptions(options, startDate),

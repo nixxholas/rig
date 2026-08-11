@@ -7,7 +7,11 @@ import {
     type AssistantMessage,
     type RawQueryOptions,
 } from "@slopus/rig-execution";
+import type { Context as RuntimeContext } from "@steve.kite/stdlib";
+import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import { generateSessionMetadata, parseSessionMetadata } from "../generateSessionMetadata.js";
+
+const ctx = createTestRootContext().named("generate-session-metadata-test");
 
 function assistantMessage(text: string, model: string, provider: string): AssistantMessage {
     return {
@@ -78,13 +82,13 @@ describe("parseSessionMetadata", () => {
                     throw new Error("Naming a chat must not run coding-agent inference.");
                 },
             }),
-            rawQuery: async (options: RawQueryOptions) => {
+            rawQuery: async (_ctx: RuntimeContext, options: RawQueryOptions) => {
                 observed = options;
                 return "<title>Stable session date</title><recap>The stored session date was forwarded.</recap>";
             },
         };
 
-        await generateSessionMetadata({
+        await generateSessionMetadata(ctx, {
             modelId: model.id,
             provider,
             sessionId: "session-1",
@@ -133,13 +137,13 @@ describe("parseSessionMetadata", () => {
                     throw new Error("Naming a chat must not run coding-agent inference.");
                 },
             }),
-            rawQuery: async (options: RawQueryOptions) => {
+            rawQuery: async (_ctx: RuntimeContext, options: RawQueryOptions) => {
                 observed.push(options.model.id);
                 return "<title>Metadata stays in family</title><recap>The title model matched the session family.</recap>";
             },
         };
 
-        await generateSessionMetadata({
+        await generateSessionMetadata(ctx, {
             modelId: "anthropic/fable-5",
             provider,
             sessionId: "session-1",
@@ -175,7 +179,7 @@ describe("parseSessionMetadata", () => {
         });
 
         await expect(
-            generateSessionMetadata({
+            generateSessionMetadata(ctx, {
                 modelId: model.id,
                 provider,
                 sessionId: "session-1",
@@ -202,7 +206,7 @@ describe("parseSessionMetadata", () => {
             rawQuery: () => new Promise<string>(() => {}),
         };
         const controller = new AbortController();
-        const metadata = generateSessionMetadata({
+        const metadata = generateSessionMetadata(ctx, {
             modelId: model.id,
             provider,
             sessionId: "session-1",
