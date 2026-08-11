@@ -2985,9 +2985,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (session.isSubagent()) return;
         for (const sessionId of await queryAgentTreeSessionIds(ctx, session.id)) {
             if (sessionId === session.id) continue;
-            if (this.#cachedSession(sessionId) !== undefined) continue;
+            const cached = this.#cachedSession(sessionId);
+            if (cached !== undefined) {
+                this.#agentManager.retainLoadedSubagent(cached);
+                continue;
+            }
             const child = await this.#loadSession(ctx, sessionId);
-            if (child !== undefined) this.#cacheSession(child);
+            if (child !== undefined) {
+                this.#cacheSession(child);
+                this.#agentManager.retainLoadedSubagent(child);
+            }
         }
     }
 

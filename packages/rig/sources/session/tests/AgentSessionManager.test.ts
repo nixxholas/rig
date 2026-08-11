@@ -1472,9 +1472,10 @@ describe("AgentSessionManager", () => {
         expect(() => manager.inspect("root-1", "child-1")).toThrow(
             "Subagent 'child-1' was not found.",
         );
-        expect(() => manager.inspect("root-1", "inspect_code")).toThrow(
-            "Subagent 'inspect_code' was not found.",
-        );
+        expect(manager.inspect("root-1", "inspect_code")).toMatchObject({
+            agentId: "agent-2",
+            status: "completed",
+        });
         status = "error";
         expect(manager.inspect("root-1", "/root/inspect_code")).toMatchObject({
             output: "The child provider rejected the request.",

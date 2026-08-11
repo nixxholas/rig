@@ -1,5 +1,12 @@
 export { AbortedError, isAbortedError, throwIfAborted } from "./AbortedError.js";
-export { asyncLock, asyncQueue, type AsyncLock, type AsyncQueue } from "@steve.kite/stdlib";
+export {
+    asyncLock,
+    asyncQueue,
+    mapAsyncLock,
+    type AsyncLock,
+    type AsyncQueue,
+    type MapAsyncLock,
+} from "@steve.kite/stdlib";
 export { isAsyncLockReentryError } from "./isAsyncLockReentryError.js";
 export { backoff, type BackoffOptions } from "./backoff.js";
 export { delay } from "./delay.js";

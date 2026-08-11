@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Span, Tracer } from "@opentelemetry/api";
 
 import { createEventIdFactory, type SessionEvent } from "../../protocol/index.js";
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
@@ -147,6 +148,61 @@ describe("SessionEventLog", () => {
         expect(persisted).toEqual([first.id, second.id]);
         expect(log.all().map((next) => next.id)).toEqual([first.id, second.id]);
         expect(observed).toEqual([first.id, second.id]);
+    });
+
+    it("does not hold the state lock while an external subscriber is still running", async () => {
+        let releaseFirst!: () => void;
+        let markFirstStarted!: () => void;
+        const firstNotification = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        const firstStarted = new Promise<void>((resolve) => {
+            markFirstStarted = resolve;
+        });
+        const spans = spanLifecycleTracer();
+        const tracedCtx = createTestRootContext(spans.tracer);
+        const observed: string[] = [];
+        const first = event(FIRST);
+        const second = event(DURABLE);
+        const log = new SessionEventLog();
+        log.subscribe(async (next) => {
+            observed.push(next.id);
+            if (next.id !== first.id) return;
+            markFirstStarted();
+            await firstNotification;
+        });
+
+        const firstAppend = log.append(tracedCtx, first);
+        await firstStarted;
+        const secondAppend = log.append(tracedCtx, second);
+
+        await expect(
+            waitForEventsWithoutStateLock(log, [first, second], spans.active),
+        ).resolves.toBeUndefined();
+        expect(spans.active()).not.toContain("asyncLock.wait");
+
+        releaseFirst();
+        await Promise.all([firstAppend, secondAppend]);
+        expect(observed).toEqual([first.id, second.id]);
+    });
+
+    it("lets a subscriber append and await another event without locking itself", async () => {
+        const spans = spanLifecycleTracer();
+        const tracedCtx = createTestRootContext(spans.tracer);
+        const observed: string[] = [];
+        const first = event(FIRST);
+        const second = event(DURABLE);
+        const log = new SessionEventLog();
+        log.subscribe(async (next) => {
+            observed.push(next.id);
+            if (next.id === first.id) await log.append(tracedCtx, second);
+        });
+
+        await expect(log.append(tracedCtx, first)).resolves.toBe(first);
+
+        expect(log.all()).toEqual([first, second]);
+        expect(observed).toEqual([first.id, second.id]);
+        expect(spans.active()).not.toContain("asyncLock.wait");
     });
 
     it("offers reducers one allocation-free read-only view of a long log", async () => {
@@ -494,4 +550,41 @@ function blockResetEvent(id: string): SessionEvent {
         sessionId: "session-1",
         type: "agent_event",
     };
+}
+
+function spanLifecycleTracer(): {
+    active(): string[];
+    tracer: Tracer;
+} {
+    const active = new Map<string, number>();
+    return {
+        active: () =>
+            [...active].flatMap(([name, count]) => Array.from({ length: count }, () => name)),
+        tracer: {
+            startSpan: (name: string) => {
+                active.set(name, (active.get(name) ?? 0) + 1);
+                return {
+                    end: () => {
+                        const remaining = (active.get(name) ?? 1) - 1;
+                        if (remaining === 0) active.delete(name);
+                        else active.set(name, remaining);
+                    },
+                    recordException: () => undefined,
+                    setStatus: () => undefined,
+                } as unknown as Span;
+            },
+        } as Tracer,
+    };
+}
+
+async function waitForEventsWithoutStateLock(
+    log: SessionEventLog,
+    events: readonly SessionEvent[],
+    activeSpans: () => string[],
+): Promise<void> {
+    try {
+        await vi.waitFor(() => expect(log.all()).toEqual(events), { timeout: 200 });
+    } catch {
+        throw new Error(`Event state timed out; active spans: ${activeSpans().join(", ")}`);
+    }
 }

@@ -1,5 +1,6 @@
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import type { Context } from "@steve.kite/stdlib";
+import type { Span, Tracer } from "@opentelemetry/api";
 
 const ctx = createTestRootContext();
 import { describe, expect, it, vi } from "vitest";
@@ -1380,6 +1381,73 @@ describe("InMemorySession", () => {
         }
     });
 
+    it("releases each session mutation lock before cross-session post-commit observers run", async () => {
+        const spans = spanLifecycleTracer();
+        const opened = await openSessionDatabase(createTestRootContext(spans.tracer), ":memory:");
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/cross-session-post-commit",
+            name: "Cross-session post commit",
+            thinkingLevels: ["off"],
+        });
+        const modelCatalog = {
+            defaultModelId: model.id,
+            defaultProviderId: "test",
+            models: [model],
+            providers: [{ models: [model], providerId: "test" }],
+        } satisfies ModelCatalog;
+        const persistence = {
+            saveSession: async () => undefined,
+            transaction: <T>(_ctx: Context, body: (bodyCtx: Context) => T | Promise<T>) =>
+                runSessionTransaction(opened.ctx, body),
+        } as unknown as InMemorySessionPersistence;
+        let left!: InMemorySession;
+        let right!: InMemorySession;
+
+        try {
+            left = await InMemorySession.open(opened.ctx, {
+                createEventId: createEventIdFactory(),
+                emitCreatedEvent: false,
+                modelCatalog,
+                onAppendEvent: async (_eventCtx, event) => {
+                    if (event.type !== "session_created") return;
+                    await deferSessionTransactionCommit(async () => {
+                        await right.setDraft(opened.ctx, { draft: "written by left" });
+                    });
+                },
+                persistence,
+                request: { cwd: "/tmp/rig-cross-session-left", modelId: model.id },
+            });
+            right = await InMemorySession.open(opened.ctx, {
+                createEventId: createEventIdFactory(),
+                emitCreatedEvent: false,
+                modelCatalog,
+                onAppendEvent: async (_eventCtx, event) => {
+                    if (
+                        event.type !== "session_draft_changed" ||
+                        event.data.draft !== "written by left"
+                    ) {
+                        return;
+                    }
+                    await deferSessionTransactionCommit(async () => {
+                        await left.setDraft(opened.ctx, { draft: "written by right" });
+                    });
+                },
+                persistence,
+                request: { cwd: "/tmp/rig-cross-session-right", modelId: model.id },
+            });
+
+            await expect(
+                completesBeforeLockWait(left.emitCreatedEvent(opened.ctx), spans.active),
+            ).resolves.toBeUndefined();
+            expect(left.snapshot().draft).toBe("written by right");
+            expect(right.snapshot().draft).toBe("written by left");
+            expect(spans.started().filter((name) => name === "asyncLock.wait")).toEqual([]);
+        } finally {
+            await opened.database.close(opened.ctx);
+        }
+    });
+
     it("holds a structured question until the user answers it", async () => {
         const store = await InMemorySessionStore.open(ctx);
         const session = await store.create(ctx, { cwd: "/tmp/rig-session-test" });
@@ -1646,4 +1714,56 @@ function abortableNotificationStream(
             throw new Error("aborted");
         },
     };
+}
+
+function spanLifecycleTracer(): {
+    active(): string[];
+    started(): string[];
+    tracer: Tracer;
+} {
+    const active = new Map<string, number>();
+    const started: string[] = [];
+    return {
+        active: () =>
+            [...active].flatMap(([name, count]) => Array.from({ length: count }, () => name)),
+        started: () => [...started],
+        tracer: {
+            startSpan: (name: string) => {
+                started.push(name);
+                active.set(name, (active.get(name) ?? 0) + 1);
+                return {
+                    end: () => {
+                        const remaining = (active.get(name) ?? 1) - 1;
+                        if (remaining === 0) active.delete(name);
+                        else active.set(name, remaining);
+                    },
+                    recordException: () => undefined,
+                    setStatus: () => undefined,
+                } as unknown as Span;
+            },
+        } as Tracer,
+    };
+}
+
+async function completesBeforeLockWait(
+    operation: Promise<unknown>,
+    activeSpans: () => string[],
+): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([
+            operation,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(() => {
+                    reject(
+                        new Error(
+                            `Session mutation timed out; active spans: ${activeSpans().join(", ")}`,
+                        ),
+                    );
+                }, 250);
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
 }

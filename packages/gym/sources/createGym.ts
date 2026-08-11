@@ -85,6 +85,7 @@ export async function createGym(options: GymOptions): Promise<Gym> {
     const profileId = containerName.slice(-8);
     profileGymTiming(profileId, "fixtures", createStartedAt);
     const localRunnerArguments = [
+        "--experimental-transform-types",
         "--import",
         join(repositoryRoot, "packages/gym/sources/registerTypeScriptSourceHooks.mjs"),
         join(repositoryRoot, "packages/rig/sources/main.ts"),

@@ -137,6 +137,7 @@ export class AgentSessionManager {
     readonly #lastSuccessfulProviderByModel = new Map<string, string>();
     readonly #latestBackgroundRunBySession = new Map<string, string>();
     readonly #pendingBackgroundRuns = new Map<string, string>();
+    readonly #retainedTrees = new WeakMap<InMemorySession, Map<string, InMemorySession>>();
     readonly #slotReservations = new Map<string, number>();
     readonly #stoppedExplicitly = new Set<string>();
     readonly #taskDrain: TaskDrain | undefined;
@@ -174,11 +175,29 @@ export class AgentSessionManager {
     }
 
     recordChanged(child: InMemorySession): void {
+        this.retainLoadedSubagent(child);
         let parent = this.#parentFor(child);
         while (parent !== undefined) {
             parent.recordSubagentChanged(child.subagentSummary());
             parent = this.#parentFor(parent);
         }
+    }
+
+    /**
+     * Keep reusable descendants alive for exactly as long as their loaded root session. Persistent
+     * stores otherwise cache sessions weakly, which can make a stopped child disappear between an
+     * abort and the model's next follow-up tool call.
+     */
+    retainLoadedSubagent(child: InMemorySession): void {
+        if (!child.isSubagent()) return;
+        const root = this.#repository.get(child.agentMetadata().rootSessionId);
+        if (root === undefined) return;
+        let retained = this.#retainedTrees.get(root);
+        if (retained === undefined) {
+            retained = new Map();
+            this.#retainedTrees.set(root, retained);
+        }
+        retained.set(child.id, child);
     }
 
     recordSuccessfulProvider(modelId: string, providerId: string): void {
@@ -827,6 +846,9 @@ export class AgentSessionManager {
                 this.recordChanged(child);
             }),
         );
+        const root = this.#rootFor(parentSessionId);
+        const retained = this.#retainedTrees.get(root);
+        for (const child of descendants) retained?.delete(child.id);
         return descendants.length;
     }
 
@@ -1599,10 +1621,14 @@ export class AgentSessionManager {
             (session) => session.agentIdentity?.().agentId === target,
         );
         if (agentIdMatch !== undefined) return agentIdMatch;
-        const matches = subagents.filter((session) => this.#pathFor(session) === target);
+        const matches = subagents.filter(
+            (session) =>
+                this.#pathFor(session) === target ||
+                (target.includes("/") === false && session.agentMetadata().taskName === target),
+        );
         if (matches.length === 0) throw new Error(`Subagent '${target}' was not found.`);
         if (matches.length > 1) {
-            throw new Error(`Subagent path '${target}' is ambiguous. Use its Agent ID.`);
+            throw new Error(`Subagent target '${target}' is ambiguous. Use its Agent ID.`);
         }
         return matches[0] as InMemorySession;
     }

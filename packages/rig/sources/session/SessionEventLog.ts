@@ -92,11 +92,11 @@ export class SessionEventLog {
         this.#onAppend = options.onAppend;
     }
 
-    append(ctx: Context, event: SessionEvent): Promise<SessionEvent> {
-        return this.#appendLock.runInLock(ctx, async (ctx) => {
+    async append(ctx: Context, event: SessionEvent): Promise<SessionEvent> {
+        const notify = await this.#appendLock.runInLock(ctx, async (lockedCtx) => {
             // The durable hook runs before any in-memory projection changes. A rejected
             // persistence write therefore leaves the log, cursors, and notifications untouched.
-            if (this.#onAppend !== undefined) await this.#onAppend(ctx, event);
+            if (this.#onAppend !== undefined) await this.#onAppend(lockedCtx, event);
             if (!isLiveOnlySessionEvent(event)) {
                 this.#eventIndexes.set(event.id, this.#nextEventIndex);
                 this.#nextEventIndex += 1;
@@ -123,7 +123,7 @@ export class SessionEventLog {
             if (affectsSessionUsage(event)) this.#usageRevision += 1;
             this.#lastEventId = event.id;
             const listeners = [...this.#listeners];
-            const notify: SessionEventNotification = () => {
+            return (): void | Promise<void> => {
                 let pending: Promise<void> | undefined;
                 for (const listener of listeners) {
                     if (pending !== undefined) {
@@ -152,15 +152,21 @@ export class SessionEventLog {
                 }
                 return pending;
             };
-            if (this.#deferNotification === undefined) {
-                const pending = notify();
-                if (pending !== undefined) await pending;
-            } else {
-                const scheduled = this.#deferNotification(ctx, notify);
-                if (scheduled !== undefined) await scheduled;
-            }
-            return event;
         });
+
+        // Subscribers are external observers. Invoke them only after the durable event and
+        // in-memory projection have released the state lock. Do not serialize observer completion:
+        // a listener may append and await another event on this same log.
+        const deliver = async () => {
+            await notify();
+        };
+        if (this.#deferNotification === undefined) {
+            await deliver();
+        } else {
+            const scheduled = this.#deferNotification(ctx, deliver);
+            if (scheduled !== undefined) await scheduled;
+        }
+        return event;
     }
 
     checkpoint(): SessionEventLogCheckpoint {

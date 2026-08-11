@@ -239,11 +239,7 @@ import { isSessionTransactionPostCommitError } from "./SessionTransactionContext
 import { isTransientInferenceSessionEvent } from "./impl/isTransientInferenceSessionEvent.js";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
 import { providerUsageToClaudeQuota } from "../executor/providerUsageToClaudeQuota.js";
-import {
-    asyncLock,
-    isAsyncLockReentryError,
-    type AsyncLock,
-} from "../concurrency/index.js";
+import { asyncLock, isAsyncLockReentryError, type AsyncLock } from "../concurrency/index.js";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { summarizeDockerExecution } from "../execution/index.js";
@@ -6614,28 +6610,10 @@ export class InMemorySession {
 
     async #commitEvent<TEvent extends SessionEvent>(ctx: Context, event: TEvent): Promise<TEvent> {
         if (this.#workspaceArchived) return event;
-        const append = async (ctx: Context): Promise<TEvent> => {
+        return await this.#runSessionMutation(ctx, async (ctx) => {
             await this.#appendDurableEvent(ctx, event);
             return event;
-        };
-        const inTransaction = sessionCommitStorage.getStore() === this;
-        const run = async (runCtx: Context): Promise<TEvent> => {
-            const checkpoint = this.#captureEventCommitCheckpoint();
-            try {
-                return await (inTransaction || this.#persistence?.transaction === undefined
-                    ? append(runCtx)
-                    : this.#persistence.transaction(runCtx, append));
-            } catch (error) {
-                if (!isSessionTransactionPostCommitError(error)) {
-                    this.#restoreEventCommitCheckpoint(checkpoint);
-                }
-                throw error;
-            }
-        };
-        if (inTransaction) return await run(ctx);
-        return await this.#commitEventLock.runInLock(ctx, (lockCtx) =>
-            sessionCommitStorage.run(this, () => run(lockCtx)),
-        );
+        });
     }
 
     async #runSessionMutation<T>(ctx: Context, body: (ctx: Context) => Promise<T>): Promise<T> {
@@ -6643,20 +6621,24 @@ export class InMemorySession {
         const run = async (runCtx: Context): Promise<T> => {
             const checkpoint = this.#captureEventCommitCheckpoint();
             try {
-                return await (inTransaction || this.#persistence?.transaction === undefined
-                    ? body(runCtx)
-                    : this.#persistence.transaction(runCtx, body));
+                return await body(runCtx);
             } catch (error) {
-                if (!isSessionTransactionPostCommitError(error)) {
-                    this.#restoreEventCommitCheckpoint(checkpoint);
-                }
+                this.#restoreEventCommitCheckpoint(checkpoint);
                 throw error;
             }
         };
         if (inTransaction) return await run(ctx);
-        return await this.#commitEventLock.runInLock(ctx, (lockCtx) =>
-            sessionCommitStorage.run(this, () => run(lockCtx)),
-        );
+        const runInCommitLock = (lockCtx: Context): Promise<T> => {
+            return this.#commitEventLock.runInLock(lockCtx, (ownedCtx) =>
+                sessionCommitStorage.run(this, () => run(ownedCtx)),
+            );
+        };
+        if (this.#persistence?.transaction === undefined) return await runInCommitLock(ctx);
+
+        // The session lock protects only the transaction's in-memory and SQL mutation. The
+        // transaction wrapper commits and runs observers after this callback returns, so
+        // cross-session notifications never execute while this session still owns its lock.
+        return await this.#persistence.transaction(ctx, runInCommitLock);
     }
 
     #captureEventCommitCheckpoint(): SessionEventCommitCheckpoint {
@@ -9222,7 +9204,11 @@ export class InMemorySession {
             sessionCommitStorage.getStore() === this
                 ? await persist(ctx)
                 : await this.#runSessionMutation(ctx, persist);
-        if (started) this.#startDrainQueue();
+        if (started) {
+            await this.#afterTransactionCommit(ctx, () => {
+                this.#startDrainQueue();
+            });
+        }
     }
 
     async #discardQueuedGoalRuns(ctx: Context): Promise<void> {

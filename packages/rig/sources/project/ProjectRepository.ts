@@ -122,7 +122,7 @@ import { loadConfig } from "../config/loadConfig.js";
 import { runWorkspaceSetupCommands } from "./runWorkspaceSetupCommands.js";
 import { syncWorkspaceFiles } from "./syncWorkspaceFiles.js";
 import { watchWorkspaceSyncPaths } from "./watchWorkspaceSyncPaths.js";
-import { asyncLock, type AsyncLock } from "../concurrency/index.js";
+import { mapAsyncLock, type MapAsyncLock } from "../concurrency/index.js";
 import { getManagedProjectsDirectory } from "./getManagedProjectsDirectory.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
@@ -206,7 +206,7 @@ export class ProjectRepository {
     readonly #afterTransactionCommit:
         | ((ctx: Context, callback: () => void | Promise<void>) => Promise<void>)
         | undefined;
-    readonly #avatarLifecycle = new Map<string, Promise<void>>();
+    readonly #avatarLifecycle: MapAsyncLock<string> = mapAsyncLock();
     readonly #createEventId = createEventIdFactory();
     readonly #database: SessionDatabase;
     readonly #git: GitCommandRunner;
@@ -222,7 +222,7 @@ export class ProjectRepository {
     readonly #managedProjectsDirectory: string;
     readonly #initializing = new Set<string>();
     readonly #pendingInitializations: string[] = [];
-    readonly #projectInitializationLocks = new Map<string, AsyncLock>();
+    readonly #projectInitializationLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #cloneRemote: typeof cloneRemoteRepository;
     readonly #now: () => number;
     readonly #onEvent:
@@ -245,9 +245,9 @@ export class ProjectRepository {
     readonly #resolveProfile:
         | ((profileId: string) => RigProfile | undefined | Promise<RigProfile | undefined>)
         | undefined;
-    readonly #workspaceLifecycle = new Map<string, Promise<void>>();
+    readonly #workspaceLifecycle: MapAsyncLock<string> = mapAsyncLock();
     readonly #workspaceSetupControllers = new Map<string, AbortController>();
-    readonly #workspaceSyncChain = new Map<string, Promise<void>>();
+    readonly #workspaceSyncLock: MapAsyncLock<string> = mapAsyncLock();
     readonly #workspaceSyncStops = new Map<string, () => void>();
     readonly #workspaceSyncTimers = new Map<string, NodeJS.Timeout>();
     #activeInitializations = 0;
@@ -706,7 +706,6 @@ export class ProjectRepository {
         this.#workspaceSyncTimers.clear();
         for (const stop of this.#workspaceSyncStops.values()) stop();
         this.#workspaceSyncStops.clear();
-        this.#workspaceSyncChain.clear();
         await this.#ownedTaskDrain?.drain();
     }
 
@@ -1604,8 +1603,9 @@ export class ProjectRepository {
                     try {
                         // Every worktree of a project shares one set of refs and reflogs, so branch
                         // work takes the project's Git lock the way worktree creation does.
-                        await this.#projectInitializationLock(previous.projectId).runInLock(
+                        await this.#projectInitializationLocks.runInLock(
                             workerCtx,
+                            previous.projectId,
                             async () =>
                                 await renameGitBranch({
                                     expectedCommonDir: workspace.gitCommonDir,
@@ -2210,8 +2210,9 @@ export class ProjectRepository {
             return;
         }
         try {
-            const current = await this.#projectInitializationLock(workspace.projectId).runInLock(
+            const current = await this.#projectInitializationLocks.runInLock(
                 ctx,
+                workspace.projectId,
                 async () => {
                     let locked = await this.getWorkspace(ctx, workspace.projectId, workspace.id);
                     if (locked?.status !== "initializing") return undefined;
@@ -2522,18 +2523,9 @@ export class ProjectRepository {
      * a single timer, which queues a single following pass.
      */
     async #queueWorkspaceSyncPass(ctx: Context, projectId: string): Promise<void> {
-        const previous = this.#workspaceSyncChain.get(projectId) ?? Promise.resolve();
-        const queued = previous
-            .catch(() => undefined)
-            .then(() => this.#runWorkspaceSyncPass(ctx, projectId));
-        this.#workspaceSyncChain.set(projectId, queued);
-        try {
-            await queued;
-        } finally {
-            if (this.#workspaceSyncChain.get(projectId) === queued) {
-                this.#workspaceSyncChain.delete(projectId);
-            }
-        }
+        await this.#workspaceSyncLock.runInLock(ctx, projectId, (lockedCtx) =>
+            this.#runWorkspaceSyncPass(lockedCtx, projectId),
+        );
     }
 
     /**
@@ -2686,22 +2678,7 @@ export class ProjectRepository {
         hash: string,
         task: () => Promise<T>,
     ): Promise<T> {
-        const previous = this.#avatarLifecycle.get(hash) ?? Promise.resolve();
-        let release!: () => void;
-        const barrier = new Promise<void>((resolveBarrier) => {
-            release = resolveBarrier;
-        });
-        const queued = previous.catch(() => undefined).then(() => barrier);
-        this.#avatarLifecycle.set(hash, queued);
-        await previous.catch(() => undefined);
-        try {
-            return await task();
-        } finally {
-            release();
-            if (this.#avatarLifecycle.get(hash) === queued) {
-                this.#avatarLifecycle.delete(hash);
-            }
-        }
+        return await this.#avatarLifecycle.runInLock(ctx, hash, task);
     }
 
     async #withWorkspaceLifecycleLock<T>(
@@ -2709,39 +2686,13 @@ export class ProjectRepository {
         workspaceId: string,
         task: () => Promise<T>,
     ): Promise<T> {
-        const previous = this.#workspaceLifecycle.get(workspaceId) ?? Promise.resolve();
-        let release!: () => void;
-        const barrier = new Promise<void>((resolveBarrier) => {
-            release = resolveBarrier;
-        });
-        const queued = previous.catch(() => undefined).then(() => barrier);
-        this.#workspaceLifecycle.set(workspaceId, queued);
-        await previous.catch(() => undefined);
-        try {
-            return await task();
-        } finally {
-            release();
-            if (this.#workspaceLifecycle.get(workspaceId) === queued) {
-                this.#workspaceLifecycle.delete(workspaceId);
-            }
-        }
+        return await this.#workspaceLifecycle.runInLock(ctx, workspaceId, task);
     }
 
     async #initializeWorkspace(ctx: Context, workspace: ProjectWorkspace): Promise<void> {
         await this.#withWorkspaceLifecycleLock(ctx, workspace.id, () =>
             this.#reconcileInitializingWorkspace(ctx, workspace),
         );
-    }
-
-    #projectInitializationLock(projectId: string): AsyncLock {
-        const lock =
-            this.#projectInitializationLocks.get(projectId) ??
-            (() => {
-                const created = asyncLock({ reentry: "block" });
-                this.#projectInitializationLocks.set(projectId, created);
-                return created;
-            })();
-        return lock;
     }
 
     async #publishedProject(

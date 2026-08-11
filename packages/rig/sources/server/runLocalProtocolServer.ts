@@ -652,8 +652,10 @@ async function runOwnedLocalProtocolServer(
                 createRuntime: (options) => {
                     const ownerInstanceId = options.ownerInstanceId ?? p2pIdentity.instanceId;
                     const scopedProviders =
-                        p2pCredentialRuntimeRegistry?.providers(ownerInstanceId) ??
-                        availableProviders;
+                        ownerInstanceId === p2pIdentity.instanceId
+                            ? availableProviders
+                            : (p2pCredentialRuntimeRegistry?.providers(ownerInstanceId) ??
+                              availableProviders);
                     return createCodingAssistantAgent({
                         ...options,
                         // What a provider says about the account while it answers is

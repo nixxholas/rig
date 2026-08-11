@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const SHARED_DOCKER_RUNNER_VERSION = "2";
+const SHARED_DOCKER_RUNNER_VERSION = "3";
 const runners = new Map<string, Promise<SharedDockerRunner>>();
 
 export interface SharedDockerRunner {
@@ -124,7 +124,7 @@ async function startSharedDockerRunner(options: {
             "--add-host",
             "host.docker.internal:host-gateway",
             "--env",
-            "NODE_OPTIONS=--import=/app/rig-source-hook.mjs",
+            "NODE_OPTIONS=--experimental-transform-types --import=/app/rig-source-hook.mjs",
             "--volume",
             `${hostRoot}:${containerRoot}`,
             ...(options.dockerSocket ? ["--volume", `${hostRoot}:${hostRoot}`] : []),
