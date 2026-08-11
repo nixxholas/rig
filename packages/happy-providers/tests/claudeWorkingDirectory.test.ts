@@ -34,7 +34,15 @@ describe("Claude working directory", () => {
 
         try {
             for await (const _event of session.run({
-                context: { messages: [{ role: "user", content: "Hello." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Hello." }],
+                        },
+                    ],
+                },
             })) {
                 // Drain the stream so the query options are observable.
             }

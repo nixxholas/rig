@@ -10,16 +10,20 @@ import type { SessionEvent } from "@/core/SessionEvent.js";
 export function* emitToolCallResult(
     callId: string,
     result: string,
-    options: { incomplete?: boolean } = {},
+    options: { incomplete?: boolean; vendor?: any } = {},
 ): Generator<SessionEvent> {
-    yield { type: "toolcall_result_start", callId };
+    yield {
+        type: "toolcall_result_start",
+        callId,
+        ...(options.vendor === undefined ? {} : { vendor: options.vendor }),
+    };
     if (result.length > 0) {
         yield { type: "toolcall_result_delta", callId, delta: result };
     }
     yield {
         type: "toolcall_result_end",
         callId,
-        result,
+        content: [{ type: "text", text: result }],
         ...(options.incomplete === true ? { incomplete: true as const } : {}),
     };
 }

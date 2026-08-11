@@ -25,7 +25,7 @@ import { createOpenAIResponseRequest } from "@/protocol/responses/createOpenAIRe
 import { classifyResponsesError } from "@/protocol/responses/classifyResponsesError.js";
 import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { toOpenAIResponseInput } from "@/protocol/responses/toOpenAIResponseInput.js";
-import { toSessionCacheUsage } from "@/protocol/responses/toSessionCacheUsage.js";
+import { toSessionUsage } from "@/protocol/responses/toSessionUsage.js";
 
 export interface ResponsesSessionOptions extends SessionOptions, InferenceRetryOptions {
     apiKey: string;
@@ -77,9 +77,12 @@ export class ResponsesSession extends BaseSession {
         return this.streamRun(request);
     }
 
-    async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
+    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
         const { signal } = options;
-        const context = this.context;
+        const context: SessionContext = {
+            instructions: options.context.instructions,
+            messages: [...options.context.messages],
+        };
         if (signal?.aborted) {
             return { status: "cancelled", context };
         }
@@ -89,7 +92,6 @@ export class ResponsesSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: "This Responses API endpoint does not provide native compaction.",
-                context,
             };
         }
         const model = options.model ?? this.activeModel ?? this.model;
@@ -98,17 +100,10 @@ export class ResponsesSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: "A model is required for Responses API compaction.",
-                context,
             };
         }
         this.activeModel = model;
-        const compactedContext =
-            options.context === undefined
-                ? context
-                : {
-                      instructions: context.instructions,
-                      messages: [...options.context.messages],
-                  };
+        const compactedContext = context;
         try {
             const response = await this.client.responses.compact(
                 {
@@ -125,7 +120,6 @@ export class ResponsesSession extends BaseSession {
                     status: "failed",
                     kind: "invalid_summary",
                     message: "Responses API compaction returned no compaction item.",
-                    context,
                 };
             }
             const compaction = {
@@ -146,7 +140,7 @@ export class ResponsesSession extends BaseSession {
                 status: "completed",
                 compaction,
                 preservedMessages,
-                usage: toSessionCacheUsage(response.usage),
+                usage: toSessionUsage(response.usage),
                 context: this.context,
             };
         } catch (error) {
@@ -156,7 +150,6 @@ export class ResponsesSession extends BaseSession {
                 kind: "inference_error",
                 message:
                     error instanceof Error ? error.message : "Responses API compaction failed.",
-                context,
             };
         }
     }
@@ -166,7 +159,7 @@ export class ResponsesSession extends BaseSession {
     private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
         const { abort } = request;
         this.context = {
-            instructions: this.context.instructions,
+            instructions: request.context.instructions ?? this.context.instructions,
             messages: [...request.context.messages],
         };
         const context = this.context;
@@ -236,34 +229,11 @@ export class ResponsesSession extends BaseSession {
                     throw new EmptyResponseError("Responses API");
                 }
                 for (const event of attemptUsage) yield event;
-                if (
-                    result.assistantText.length > 0 ||
-                    result.encryptedReasoning !== undefined ||
-                    result.toolCalls.length > 0 ||
-                    result.responseItems.length > 0
-                ) {
+                if (result.message.content.length > 0) {
                     this.context = {
                         instructions: this.context.instructions,
-                        messages: [
-                            ...this.context.messages,
-                            {
-                                role: "assistant",
-                                content: result.assistantText,
-                                ...(result.encryptedReasoning === undefined
-                                    ? {}
-                                    : { encryptedReasoning: result.encryptedReasoning }),
-                                ...(result.toolCalls.length === 0
-                                    ? {}
-                                    : { toolCalls: result.toolCalls }),
-                                ...(result.responseItems.length === 0
-                                    ? {}
-                                    : { responseItems: result.responseItems }),
-                            },
-                        ],
+                        messages: [...this.context.messages, result.message],
                     };
-                }
-                if (result.responseItems.length > 0) {
-                    yield { type: "response_items", items: result.responseItems };
                 }
                 yield { type: "block_stop" };
                 if (terminal !== undefined) yield terminal;
@@ -326,7 +296,7 @@ function preservedResponsesMessages(
             (candidate, index) => index >= candidateIndex && sessionUserText(candidate) === text,
         );
         if (matchIndex < 0) {
-            preserved.push({ role: "user", content: text });
+            preserved.push({ role: "user", content: [{ type: "text", text }] });
             continue;
         }
         preserved.push(structuredClone(candidates[matchIndex]!));
@@ -364,8 +334,7 @@ function compactedUserText(item: unknown): string | undefined {
 }
 
 function sessionUserText(message: SessionUserMessage): string {
-    if (message.input === undefined) return message.content;
-    return message.input
+    return message.content
         .filter((part) => part.type === "text")
         .map((part) => part.text)
         .join("");

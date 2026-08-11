@@ -18,28 +18,43 @@ describe("Grok continuation goldens", () => {
             toGrokResponseInput({
                 instructions: "System prompt.",
                 messages: [
-                    { role: "user", content: "Inspect the workspace." },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Inspect the workspace." }],
+                    },
                     {
                         role: "assistant",
-                        content: "",
-                        encryptedReasoning: JSON.stringify(reasoning),
-                        toolCalls: [
-                            {
-                                callId: "call-1",
-                                name: "list_dir",
-                                arguments: '{"target_directory":"."}',
-                                vendor: { provider: "grok", type: "function_call" },
-                            },
+                        content: [
+                            { type: "reasoning" as const, reasoning: JSON.stringify(reasoning) },
+                            ...[
+                                {
+                                    callId: "call-1",
+                                    name: "list_dir",
+                                    arguments: '{"target_directory":"."}',
+                                    vendor: { provider: "grok", type: "function_call" },
+                                },
+                            ].map((call) => ({
+                                type: "tool_call" as const,
+                                ...call,
+                            })),
                         ],
                     },
                     {
                         role: "tool",
+                        content: [{ type: "text" as const, text: "README.md" }],
                         callId: "call-1",
-                        content: "README.md",
                         vendor: { provider: "grok", type: "function_call" },
                     },
-                    { role: "assistant", content: "The workspace contains README.md." },
-                    { role: "user", content: "Continue." },
+                    {
+                        role: "assistant",
+                        content: [
+                            { type: "text" as const, text: "The workspace contains README.md." },
+                        ],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Continue." }],
+                    },
                 ],
             }),
         ).toEqual([
@@ -76,13 +91,24 @@ describe("Grok continuation goldens", () => {
                 messages: [
                     {
                         role: "assistant",
-                        content: "",
-                        responseItems: [JSON.stringify(call)],
+                        content: [
+                            {
+                                type: "tool_call",
+                                callId: "search-1",
+                                name: "tool_search",
+                                arguments: '{"query":"workspace tools"}',
+                                vendor: {
+                                    provider: "grok",
+                                    type: "tool_search_call",
+                                    outputItem: JSON.stringify(call),
+                                },
+                            },
+                        ],
                     },
                     {
                         role: "tool",
+                        content: [{ type: "text" as const, text: "Tool unavailable" }],
                         callId: "search-1",
-                        content: "Tool unavailable",
                         isError: true,
                     },
                 ],
@@ -107,8 +133,7 @@ describe("Grok continuation goldens", () => {
                 messages: [
                     {
                         role: "assistant",
-                        content: "",
-                        responseItems: ["null", '"text"', '{"type":17}'],
+                        content: [],
                     },
                 ],
             }),
@@ -206,10 +231,11 @@ describe("Grok continuation goldens", () => {
             ),
         );
         expect(events).toEqual([
+            { type: "reasoning_start" },
             { type: "reasoning_delta", delta: "Inspecting." },
             {
-                type: "encrypted_reasoning",
-                content: JSON.stringify({
+                type: "reasoning_end",
+                reasoning: JSON.stringify({
                     type: "reasoning",
                     id: "reasoning-1",
                     summary: [{ type: "summary_text", text: "Inspecting." }],
@@ -234,9 +260,9 @@ describe("Grok continuation goldens", () => {
             },
             {
                 type: "token_usage",
-                usage: { input: 9, output: 4, cacheRead: 3, cacheWrite: 0, totalTokens: 16 },
+                usage: { input: 12, output: 4, cacheRead: 3, cacheWrite: 0, totalTokens: 16 },
             },
-            { type: "done", state: "tool_call" },
+            { type: "done", state: "tool_call", tokens: { input: 12, output: 4 } },
         ]);
     });
 
@@ -269,7 +295,7 @@ describe("Grok continuation goldens", () => {
                 type: "token_usage",
                 usage: { input: 20, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 25 },
             },
-            { type: "done", state: "length" },
+            { type: "done", state: "length", tokens: { input: 20, output: 5 } },
         ]);
     });
 
@@ -338,7 +364,7 @@ describe("Grok continuation goldens", () => {
                 type: "token_usage",
                 usage: { input: 20, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 25 },
             },
-            { type: "done", state: "length" },
+            { type: "done", state: "length", tokens: { input: 20, output: 5 } },
         ]);
     });
 
@@ -383,7 +409,7 @@ describe("Grok continuation goldens", () => {
             arguments: '{"cmd":"printf',
             incomplete: true,
         });
-        expect(events.at(-1)).toEqual({ type: "done", state: "length" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "length" });
     });
 
     it("surfaces typed stream failures", async () => {

@@ -1,16 +1,11 @@
 import { Type } from "@sinclair/typebox";
 import type { SessionTool } from "@/core/SessionTool.js";
-import type { CodexToolDefinitionVendor } from "@/vendors/codex/CodexToolVendor.js";
 import { toJsonSchema } from "@/vendors/codex/impl/toJsonSchema.js";
 import type { NamespaceTool, Tool } from "openai/resources/responses/responses.js";
 
 const clientToolSearch = {
-    name: "tool_search",
-    vendor: {
-        provider: "codex",
-        type: "tool_search",
-        execution: "client",
-    },
+    type: "tool_search",
+    execution: "client",
     description:
         "# Tool discovery\n\nSearches deferred tools and returns matching definitions for the next model call.\n\nSome tools may not have been provided upfront. Use `tool_search` to discover a relevant deferred tool.",
     parameters: Type.Object(
@@ -22,7 +17,7 @@ const clientToolSearch = {
         },
         { additionalProperties: false },
     ),
-} as const satisfies SessionTool & { readonly vendor: CodexToolDefinitionVendor };
+} as const satisfies Tool;
 
 export function toCodexToolDefinitions(
     tools: readonly SessionTool[],
@@ -36,7 +31,7 @@ export function toCodexToolDefinitions(
     const namespaces = new Map<string, NamespaceTool>();
 
     for (const tool of tools) {
-        if (tool.deferLoading === true && options.includeDeferred !== true) continue;
+        if (tool.defer === true && options.includeDeferred !== true) continue;
         const definition = toCodexTool(tool);
         if (tool.namespace === undefined) {
             output.push(definition);
@@ -63,16 +58,8 @@ export function toCodexToolDefinitions(
         }
         namespace.tools.push(definition);
     }
-    if (
-        options.includeDeferred !== true &&
-        tools.some((tool) => tool.deferLoading === true) &&
-        !tools.some(
-            (tool) =>
-                (tool.vendor as Partial<CodexToolDefinitionVendor> | undefined)?.type ===
-                "tool_search",
-        )
-    ) {
-        output.push(toCodexTool(clientToolSearch));
+    if (options.includeDeferred !== true && tools.some((tool) => tool.defer === true) && true) {
+        output.push(clientToolSearch);
     }
     return output;
 }
@@ -84,19 +71,6 @@ function humanizeNamespace(namespace: string): string {
 function toCodexTool(tool: SessionTool): Tool {
     if (tool.server !== undefined) {
         return structuredClone(tool.server) as Tool;
-    }
-    const vendor = tool.vendor as Partial<CodexToolDefinitionVendor> | undefined;
-    if (
-        vendor?.provider === "codex" &&
-        vendor.type === "tool_search" &&
-        vendor.execution === "client"
-    ) {
-        return {
-            type: "tool_search",
-            execution: "client",
-            ...(tool.description === undefined ? {} : { description: tool.description }),
-            ...(tool.parameters === undefined ? {} : { parameters: toJsonSchema(tool.parameters) }),
-        };
     }
     if (tool.grammar !== undefined) {
         return {
@@ -111,10 +85,7 @@ function toCodexTool(tool: SessionTool): Tool {
         name: tool.name,
         ...(tool.description === undefined ? {} : { description: tool.description }),
         strict: false,
-        ...(tool.deferLoading === true ||
-        (vendor?.provider === "codex" && vendor.type === "function" && vendor.deferLoading === true)
-            ? { defer_loading: true }
-            : {}),
+        ...(tool.defer === true ? { defer_loading: true } : {}),
         parameters: tool.parameters === undefined ? null : toJsonSchema(tool.parameters),
     };
 }

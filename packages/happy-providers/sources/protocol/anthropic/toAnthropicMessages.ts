@@ -6,11 +6,13 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 
 import type {
+    SessionAssistantBlock,
     SessionAssistantMessage,
-    SessionImageContent,
-    SessionInputContent,
+    SessionImageBlock,
+    SessionInputBlock,
     SessionMessage,
-    SessionTextContent,
+    SessionOutputBlock,
+    SessionTextBlock,
     SessionToolResultMessage,
 } from "@/core/SessionContext.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
@@ -27,13 +29,13 @@ export function toAnthropicMessages(messages: readonly SessionMessage[]): BetaMe
             // Anthropic has no system role inside a conversation, so a notice keeps the position
             // the caller chose as a `<system-reminder>` user turn.
             const reminder = toSessionReminderMessage(message);
-            return [{ role: "user", content: toInputContent(reminder.content, reminder.input) }];
+            return [{ role: "user", content: toInputContent(reminder.content) }];
         }
         if (message.role === "compaction") {
             return [{ role: "assistant", content: [toAnthropicCompactionBlock(message)] }];
         }
         if (message.role === "user") {
-            return [{ role: "user", content: toInputContent(message.content, message.input) }];
+            return [{ role: "user", content: toInputContent(message.content) }];
         }
         if (message.role === "tool") {
             return [{ role: "user", content: [toToolResult(message)] }];
@@ -54,19 +56,12 @@ export function encodeAnthropicReasoningBlocks(blocks: readonly AnthropicReasoni
     return JSON.stringify({ provider: "anthropic", blocks });
 }
 
-export function encodeAnthropicResponseItem(block: BetaContentBlockParam): string {
-    return JSON.stringify({ provider: "anthropic", block });
+function toInputContent(content: readonly SessionInputBlock[]): string | BetaContentBlockParam[] {
+    if (content.length === 1 && content[0]?.type === "text") return content[0].text;
+    return content.map(toInputBlock);
 }
 
-function toInputContent(
-    content: string,
-    input?: SessionInputContent,
-): string | BetaContentBlockParam[] {
-    if (input === undefined) return content;
-    return input.map(toInputBlock);
-}
-
-function toInputBlock(block: SessionTextContent | SessionImageContent): BetaContentBlockParam {
+function toInputBlock(block: SessionInputBlock): BetaContentBlockParam {
     if (block.type === "text") return { type: "text", text: block.text };
     return {
         type: "image",
@@ -79,119 +74,50 @@ function toInputBlock(block: SessionTextContent | SessionImageContent): BetaCont
 }
 
 function toAssistantContent(message: SessionAssistantMessage): BetaContentBlockParam[] {
-    const replay = decodeAnthropicResponseItems(message.responseItems);
-    if (replay.length > 0) return replay;
+    return message.content.flatMap(toAssistantBlock);
+}
+
+function toAssistantBlock(block: SessionAssistantBlock): BetaContentBlockParam[] {
+    if (block.type === "text") return [{ type: "text", text: block.text }];
+    if (block.type === "reasoning") {
+        if (block.reasoning === undefined) return [];
+        return block.text === undefined
+            ? [{ type: "redacted_thinking", data: block.reasoning }]
+            : [{ type: "thinking", thinking: block.text, signature: block.reasoning }];
+    }
+    if (block.type === "tool_result") {
+        const outputBlock = parseOutputBlock(block.vendor);
+        if (outputBlock !== undefined) return [outputBlock];
+        return [
+            {
+                type: "tool_result",
+                tool_use_id: block.callId,
+                content: block.content.map(toToolResultContentBlock),
+                ...(block.isError === undefined ? {} : { is_error: block.isError }),
+            },
+        ];
+    }
     return [
-        ...decodeAnthropicReasoning(message.encryptedReasoning),
-        ...(message.content.length === 0 ? [] : [{ type: "text" as const, text: message.content }]),
-        ...(message.toolCalls ?? []).map((call) => ({
-            type: "tool_use" as const,
-            id: call.callId,
-            name: toAnthropicToolName(call),
-            input: parseArguments(call.arguments),
-        })),
+        {
+            type: "tool_use",
+            id: block.callId,
+            name: toAnthropicToolName(block),
+            input: parseArguments(block.arguments),
+        },
     ];
 }
 
-function decodeAnthropicResponseItems(
-    items: readonly string[] | undefined,
-): BetaContentBlockParam[] {
-    if (items === undefined || items.length === 0) return [];
-    const blocks = items.map(decodeAnthropicResponseItem);
-    return blocks.every((block) => block !== undefined) ? (blocks as BetaContentBlockParam[]) : [];
-}
-
-function decodeAnthropicResponseItem(value: string): BetaContentBlockParam | undefined {
+function parseOutputBlock(vendor: unknown): BetaContentBlockParam | undefined {
+    if (typeof vendor !== "object" || vendor === null || !("outputBlock" in vendor)) {
+        return undefined;
+    }
+    const encoded = vendor.outputBlock;
+    if (typeof encoded !== "string") return undefined;
     try {
-        const parsed: unknown = JSON.parse(value);
-        if (
-            typeof parsed !== "object" ||
-            parsed === null ||
-            !("provider" in parsed) ||
-            parsed.provider !== "anthropic" ||
-            !("block" in parsed)
-        ) {
-            return undefined;
-        }
-        const blocks = toReplayBlock(parsed.block);
-        return blocks.length === 1 ? blocks[0] : undefined;
+        return JSON.parse(encoded) as BetaContentBlockParam;
     } catch {
         return undefined;
     }
-}
-
-function decodeAnthropicReasoning(value: string | undefined): BetaContentBlockParam[] {
-    if (value === undefined) return [];
-    try {
-        const parsed: unknown = JSON.parse(value);
-        if (
-            typeof parsed === "object" &&
-            parsed !== null &&
-            "provider" in parsed &&
-            parsed.provider === "anthropic"
-        ) {
-            if ("blocks" in parsed && Array.isArray(parsed.blocks)) {
-                return parsed.blocks.flatMap(toReasoningBlock);
-            }
-            return toReasoningBlock(parsed);
-        }
-    } catch {
-        return [];
-    }
-    return [];
-}
-
-function toReasoningBlock(value: unknown): BetaContentBlockParam[] {
-    if (typeof value !== "object" || value === null || !("type" in value)) return [];
-    if (
-        value.type === "thinking" &&
-        "thinking" in value &&
-        typeof value.thinking === "string" &&
-        "signature" in value &&
-        typeof value.signature === "string"
-    ) {
-        return [
-            {
-                type: "thinking",
-                thinking: value.thinking,
-                signature: value.signature,
-            },
-        ];
-    }
-    if (value.type === "redacted_thinking" && "data" in value && typeof value.data === "string") {
-        return [{ type: "redacted_thinking", data: value.data }];
-    }
-    return [];
-}
-
-function toReplayBlock(value: unknown): BetaContentBlockParam[] {
-    const reasoning = toReasoningBlock(value);
-    if (reasoning.length > 0) return reasoning;
-    if (typeof value !== "object" || value === null || !("type" in value)) return [];
-    if (value.type === "text" && "text" in value && typeof value.text === "string") {
-        return [{ type: "text", text: value.text }];
-    }
-    if (
-        value.type === "tool_use" &&
-        "id" in value &&
-        typeof value.id === "string" &&
-        "name" in value &&
-        typeof value.name === "string" &&
-        "input" in value &&
-        typeof value.input === "object" &&
-        value.input !== null &&
-        !Array.isArray(value.input)
-    ) {
-        return [
-            {
-                type: "tool_use",
-                id: value.id,
-                name: value.name,
-                input: value.input,
-            },
-        ];
-    }
-    return [];
 }
 
 function toToolResult(message: SessionToolResultMessage): BetaContentBlockParam {
@@ -199,15 +125,15 @@ function toToolResult(message: SessionToolResultMessage): BetaContentBlockParam 
         type: "tool_result",
         tool_use_id: message.callId,
         content:
-            message.input === undefined
-                ? message.content
-                : message.input.map(toToolResultContentBlock),
+            message.content.length === 1 && message.content[0]?.type === "text"
+                ? message.content[0].text
+                : message.content.map(toToolResultContentBlock),
         ...(message.isError === undefined ? {} : { is_error: message.isError }),
     };
 }
 
 function toToolResultContentBlock(
-    block: SessionTextContent | SessionImageContent,
+    block: SessionOutputBlock,
 ): BetaTextBlockParam | BetaImageBlockParam {
     if (block.type === "text") return { type: "text", text: block.text };
     return {

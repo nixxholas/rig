@@ -170,9 +170,9 @@ export class CodexSession extends BaseSession {
         return this.streamRun(request);
     }
 
-    async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
+    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
         const { signal } = options;
-        if (signal?.aborted) return { status: "cancelled", context: this.context };
+        if (signal?.aborted) return { status: "cancelled", context: options.context };
         const requestedModel = options.model ?? this.activeModel ?? this.model;
         const model =
             requestedModel === undefined
@@ -214,17 +214,11 @@ export class CodexSession extends BaseSession {
         metadata: CodexCompactionMetadata,
         signal?: AbortSignal,
     ): Promise<SessionCompaction> {
-        // The caller owns the history. The session's own copy is only what it has already
-        // transmitted, so it still ends at the tool calls of the turn that just finished; compacting
-        // that would summarize a conversation whose tools never answered.
-        const context: SessionContext =
-            requested === undefined
-                ? this.context
-                : {
-                      instructions: configuration.instructions,
-                      messages: structuredClone([...requested.messages]),
-                  };
-        if (signal?.aborted) return { status: "cancelled", context: this.context };
+        const context: SessionContext = {
+            instructions: requested.instructions,
+            messages: structuredClone([...requested.messages]),
+        };
+        if (signal?.aborted) return { status: "cancelled", context };
         // Compaction summarizes context that already exists, so it has nothing to search for. It
         // never adds the server tools a turn gets, and it drops any it was handed: declaring one
         // here would let the provider run work during a summary, and would make a name Rig can
@@ -232,7 +226,7 @@ export class CodexSession extends BaseSession {
         const compactionConfiguration: SessionModelConfiguration = {
             ...configuration,
             tools: (configuration.tools ?? []).filter(
-                (tool) => tool.server === undefined && tool.deferLoading !== true,
+                (tool) => tool.server === undefined && tool.defer !== true,
             ),
         };
         if (this.credential.name === "bedrock-bearer-token") {
@@ -378,7 +372,10 @@ export class CodexSession extends BaseSession {
             instructions: context.instructions,
             messages: [
                 ...context.messages,
-                { role: "user", content: context_checkpoint_compaction_instructions },
+                {
+                    role: "user",
+                    content: [{ type: "text", text: context_checkpoint_compaction_instructions }],
+                },
             ],
         };
         const compactionConfiguration: SessionModelConfiguration = {
@@ -434,7 +431,12 @@ export class CodexSession extends BaseSession {
                         ...preservedMessages,
                         {
                             role: "user",
-                            content: `${context_checkpoint_summary_prefix}\n${summary}`,
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `${context_checkpoint_summary_prefix}\n${summary}`,
+                                },
+                            ],
                         },
                     ],
                 };
@@ -499,12 +501,12 @@ export class CodexSession extends BaseSession {
             ...newMessages,
         ];
         this.context = {
-            instructions: configuration.instructions,
+            instructions: request.context.instructions ?? configuration.instructions,
             messages,
         };
         const turnContextPrefixLength = this.context.messages.length;
-        const carriedResponseItems: string[] = [];
-        let carriedAssistantText = "";
+        const carriedContent: import("@/core/SessionContext.js").SessionAssistantBlock[] = [];
+        const internalToolSearchCallIds = new Set<string>();
         let toolSearchRounds = 0;
         this.activeConfiguration = configuration;
         this.activeEffort = effort;
@@ -530,7 +532,6 @@ export class CodexSession extends BaseSession {
                 turnTools.filter((tool) => tool.server !== undefined).map((tool) => tool.name),
             );
             const attemptUsage: Extract<SessionEvent, { type: "token_usage" }>[] = [];
-            const internalToolSearchCallIds = new Set<string>();
             yield { type: "block_start" };
             try {
                 const responseStream = useSse
@@ -622,52 +623,30 @@ export class CodexSession extends BaseSession {
                             };
                             return;
                         }
-                        carriedAssistantText += result.assistantText;
-                        carriedResponseItems.push(...result.responseItems);
+                        carriedContent.push(...result.message.content);
                         this.context = {
                             instructions: this.context.instructions,
-                            messages: [
-                                ...this.context.messages,
-                                {
-                                    role: "assistant",
-                                    content: result.assistantText,
-                                    ...(result.responseItems.length === 0
-                                        ? {}
-                                        : { responseItems: result.responseItems }),
-                                },
-                            ],
+                            messages: [...this.context.messages, result.message],
                         };
                         yield { type: "block_stop" };
                         continue;
                     }
-                    const responseItems = [...carriedResponseItems, ...result.responseItems];
-                    const assistantText = carriedAssistantText + result.assistantText;
-                    if (
-                        assistantText.length > 0 ||
-                        result.encryptedReasoning !== undefined ||
-                        result.toolCalls.length > 0 ||
-                        responseItems.length > 0
-                    ) {
+                    const assistantMessage = {
+                        role: "assistant" as const,
+                        content: [...carriedContent, ...result.message.content].filter(
+                            (block) =>
+                                (block.type !== "tool_call" && block.type !== "tool_result") ||
+                                !internalToolSearchCallIds.has(block.callId),
+                        ),
+                    };
+                    if (assistantMessage.content.length > 0) {
                         this.context = {
                             instructions: this.context.instructions,
                             messages: [
                                 ...this.context.messages.slice(0, turnContextPrefixLength),
-                                {
-                                    role: "assistant",
-                                    content: assistantText,
-                                    ...(result.encryptedReasoning === undefined
-                                        ? {}
-                                        : { encryptedReasoning: result.encryptedReasoning }),
-                                    ...(result.toolCalls.length === 0
-                                        ? {}
-                                        : { toolCalls: result.toolCalls }),
-                                    ...(responseItems.length === 0 ? {} : { responseItems }),
-                                },
+                                assistantMessage,
                             ],
                         };
-                    }
-                    if (responseItems.length > 0) {
-                        yield { type: "response_items", items: responseItems };
                     }
                 }
                 yield { type: "block_stop" };

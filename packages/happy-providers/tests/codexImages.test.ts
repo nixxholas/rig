@@ -12,32 +12,34 @@ describe("Codex image input", () => {
                 messages: [
                     {
                         role: "user",
-                        content: "fallback user text",
-                        input: [
+                        content: [
                             { type: "text", text: "look at this" },
                             { type: "image", mimeType: "image/png", data: "dXNlcg==" },
                         ],
                     },
                     {
                         role: "assistant",
-                        content: "",
-                        toolCalls: [
-                            {
-                                callId: "image-call",
-                                name: "view_image",
-                                arguments: "{}",
-                                vendor: { provider: "codex", type: "function_call" },
-                            },
+                        content: [
+                            ...[
+                                {
+                                    callId: "image-call",
+                                    name: "view_image",
+                                    arguments: "{}",
+                                    vendor: { provider: "codex", type: "function_call" },
+                                },
+                            ].map((call) => ({
+                                type: "tool_call" as const,
+                                ...call,
+                            })),
                         ],
                     },
                     {
                         role: "tool",
-                        callId: "image-call",
-                        content: "fallback tool text",
-                        input: [
+                        content: [
                             { type: "text", text: "tool image" },
                             { type: "image", mimeType: "image/webp", data: "dG9vbA==" },
                         ],
+                        callId: "image-call",
                         vendor: { provider: "codex", type: "function_call" },
                     },
                 ],

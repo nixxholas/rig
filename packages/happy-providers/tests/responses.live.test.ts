@@ -28,17 +28,23 @@ describeLive("ResponsesProvider through OpenRouter", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "user",
-                            content: "Reply with exactly: openrouter responses live ok",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Reply with exactly: openrouter responses live ok",
+                                },
+                            ],
                         },
                     ],
                 },
             }),
         );
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events).toLowerCase()).toContain(
             "openrouter responses live ok",
         );

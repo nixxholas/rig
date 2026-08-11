@@ -141,7 +141,15 @@ describe("provider structured output", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Create metadata." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Create metadata." }],
+                        },
+                    ],
+                },
                 structuredOutput,
             }),
         );
@@ -244,7 +252,15 @@ describe("provider structured output", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Create metadata." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Create metadata." }],
+                        },
+                    ],
+                },
                 structuredOutput,
             }),
         );
@@ -252,7 +268,7 @@ describe("provider structured output", () => {
         // The SDK's own tool is not the caller's to run, and the turn is a normal completion.
         expect(events.filter((event) => event.type === "toolcall_start")).toEqual([]);
         expect(events.filter((event) => event.type === "done")).toEqual([
-            { type: "done", state: "normal" },
+            expect.objectContaining({ type: "done", state: "normal" }),
         ]);
         expect(textFromSessionEvents(events)).toBe(
             '{"title":"Fixing workspace auto naming","recap":"The model answered through the SDK\'s own structured output tool."}',

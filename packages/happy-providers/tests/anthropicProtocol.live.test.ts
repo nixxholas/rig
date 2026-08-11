@@ -24,7 +24,15 @@ describeLive("Anthropic protocol through the native API", () => {
             model: "claude-sonnet-5",
             max_tokens: 512,
             messages: toAnthropicMessages([
-                { role: "user", content: "Reply exactly: anthropic protocol live ok" },
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: "Reply exactly: anthropic protocol live ok",
+                        },
+                    ],
+                },
             ]),
             stream: true,
         });
@@ -36,7 +44,7 @@ describeLive("Anthropic protocol through the native API", () => {
             events.push(event);
         }
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events).toLowerCase()).toContain("anthropic protocol live ok");
         expect(events.some((event) => event.type === "token_usage")).toBe(true);
     }, 120_000);
@@ -49,7 +57,9 @@ describeLive("Anthropic protocol through the native API", () => {
             messages: [
                 {
                     role: "user" as const,
-                    content: `${marker}\n${"filler ".repeat(55_000)}`,
+                    content: [
+                        { type: "text" as const, text: `${marker}\n${"filler ".repeat(55_000)}` },
+                    ],
                 },
             ],
         };
@@ -84,7 +94,12 @@ describeLive("Anthropic protocol through the native API", () => {
                         },
                         {
                             role: "user",
-                            content: "Reply with only the preserved uppercase marker.",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Reply with only the preserved uppercase marker.",
+                                },
+                            ],
                         },
                     ],
                 },
@@ -96,7 +111,7 @@ describeLive("Anthropic protocol through the native API", () => {
         const events: SessionEvent[] = [];
         for await (const event of mapAnthropicStream(continuation)) events.push(event);
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events)).toContain(marker);
     }, 180_000);
 });

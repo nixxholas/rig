@@ -165,7 +165,7 @@ export function claudeSdkBuiltInToolNames(tools: readonly SessionTool[]): string
 }
 
 function hasDeferredClaudeTools(tools: readonly SessionTool[]): boolean {
-    return tools.some((tool) => tool.server === undefined && tool.deferLoading === true);
+    return tools.some((tool) => tool.server === undefined && tool.defer === true);
 }
 
 export function toClaudeMcpToolDefinition(tool: SessionTool) {
@@ -176,7 +176,7 @@ export function toClaudeMcpToolDefinition(tool: SessionTool) {
                 ? `Run ${tool.name} through Rig.`
                 : tool.description,
         inputSchema: tool.parameters ?? Type.Object({}, { additionalProperties: false }),
-        ...(tool.deferLoading === true ? {} : { _meta: { "anthropic/alwaysLoad": true } }),
+        ...(tool.defer === true ? {} : { _meta: { "anthropic/alwaysLoad": true } }),
     };
 }
 

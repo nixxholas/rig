@@ -51,10 +51,10 @@ describe("Grok SSE goldens", () => {
                         .join(""),
                 ).toBe("OK");
                 expect(capturedEvents).toContainEqual({
-                    type: "encrypted_reasoning",
-                    content: expect.stringContaining("<ENCRYPTED_REASONING>"),
+                    type: "reasoning_end",
+                    reasoning: expect.stringContaining("<ENCRYPTED_REASONING>"),
                 });
-                expect(capturedEvents.at(-1)).toEqual({ type: "done", state: "normal" });
+                expect(capturedEvents.at(-1)).toMatchObject({ type: "done", state: "normal" });
                 expect(grok_4_5_system_prompt).toBe(input[0]!.content);
                 const capturedToolNames = new Set(
                     golden.request.tools.map((tool: { name: string }) => tool.name),
@@ -76,9 +76,23 @@ describe("Grok SSE goldens", () => {
                 });
                 for await (const event of session.run({
                     context: {
+                        instructions: grok_4_5_system_prompt,
                         messages: [
-                            ...(input.slice(1, -1) as SessionMessage[]),
-                            { role: "user", content: input.at(-1)!.content },
+                            ...(
+                                input.slice(1, -1) as Array<{
+                                    role: "system" | "user";
+                                    content: string;
+                                }>
+                            ).map(
+                                (message): SessionMessage => ({
+                                    role: message.role,
+                                    content: [{ type: "text", text: message.content }],
+                                }),
+                            ),
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: input.at(-1)!.content }],
+                            },
                         ],
                     },
                     effort,

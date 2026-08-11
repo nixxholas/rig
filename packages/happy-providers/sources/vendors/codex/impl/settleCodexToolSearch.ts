@@ -1,7 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
-import type { SessionToolCall } from "@/core/SessionContext.js";
+import type { SessionAssistantMessage, SessionToolCallBlock } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { searchCodexTools } from "@/vendors/codex/impl/searchCodexTools.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
@@ -16,8 +16,9 @@ const toolSearchArgumentsSchema = Type.Object(
 
 export interface CodexToolSearchResult {
     assistantText: string;
-    responseItems: readonly string[];
-    toolCalls: readonly SessionToolCall[];
+    message: SessionAssistantMessage;
+    outputItems: readonly string[];
+    toolCalls: readonly Omit<SessionToolCallBlock, "type">[];
 }
 
 export function settleCodexToolSearch<T extends CodexToolSearchResult>(
@@ -26,9 +27,7 @@ export function settleCodexToolSearch<T extends CodexToolSearchResult>(
 ): { result: T; settled: boolean } {
     const searches = result.toolCalls.filter(isClientToolSearchCall);
     if (searches.length === 0) return { result, settled: false };
-    const deferredTools = tools.filter(
-        (tool) => tool.server === undefined && tool.deferLoading === true,
-    );
+    const deferredTools = tools.filter((tool) => tool.server === undefined && tool.defer === true);
     const outputs = searches.map((call) => {
         let matched: readonly SessionTool[] = [];
         try {
@@ -53,13 +52,25 @@ export function settleCodexToolSearch<T extends CodexToolSearchResult>(
         settled: true,
         result: {
             ...result,
-            responseItems: [...result.responseItems, ...outputs],
+            outputItems: [...result.outputItems, ...outputs],
+            message: {
+                role: "assistant",
+                content: [
+                    ...result.message.content,
+                    ...outputs.map((output, index) => ({
+                        type: "tool_result" as const,
+                        callId: searches[index]!.callId,
+                        content: [],
+                        vendor: { outputItem: output },
+                    })),
+                ],
+            },
             toolCalls: result.toolCalls.filter((call) => !isClientToolSearchCall(call)),
         } as T,
     };
 }
 
-function isClientToolSearchCall(call: SessionToolCall): boolean {
+function isClientToolSearchCall(call: Omit<SessionToolCallBlock, "type">): boolean {
     const vendor =
         typeof call.vendor === "object" && call.vendor !== null
             ? (call.vendor as { provider?: unknown; type?: unknown })

@@ -12,81 +12,30 @@ Remember that tool execution happens outside this library; the collector only re
 
 ```ts
 import {
-    committedSessionEvents,
+    assistantMessageFromEvents,
     type BaseSession,
     type SessionAssistantMessage,
     type SessionEvent,
     type SessionMessage,
-    type SessionToolCall,
 } from "@slopus/happy-providers";
 
 async function runTurn(
     session: BaseSession,
+    instructions: string,
     messages: readonly SessionMessage[],
 ): Promise<SessionAssistantMessage> {
-    let content = "";
-    let encryptedReasoning: string | undefined;
-    const responseItems: string[] = [];
-    const calls = new Map<string, SessionToolCall>();
-
     const streamed: SessionEvent[] = [];
-    for await (const event of session.run({ context: { messages } })) streamed.push(event);
-
-    for (const event of committedSessionEvents(streamed)) {
-        switch (event.type) {
-            case "text_delta":
-                content += event.delta;
-                break;
-            case "encrypted_reasoning":
-                encryptedReasoning = event.content;
-                break;
-            case "response_items":
-                responseItems.push(...event.items);
-                break;
-            case "toolcall_start":
-                if (event.server === true) break;
-                calls.set(event.callId, {
-                    callId: event.callId,
-                    name: event.name,
-                    ...(event.namespace === undefined ? {} : { namespace: event.namespace }),
-                    arguments: "",
-                    ...(event.vendor === undefined ? {} : { vendor: event.vendor }),
-                });
-                break;
-            case "toolcall_delta": {
-                const call = calls.get(event.callId);
-                if (call !== undefined) {
-                    calls.set(event.callId, {
-                        ...call,
-                        arguments: call.arguments + event.delta,
-                    });
-                }
-                break;
-            }
-            case "toolcall_end": {
-                const call = calls.get(event.callId);
-                if (call !== undefined) {
-                    calls.set(event.callId, {
-                        ...call,
-                        arguments: event.arguments,
-                        ...(event.incomplete === undefined ? {} : { incomplete: event.incomplete }),
-                    });
-                }
-                break;
-            }
-            case "done":
-                if (event.state === "error") throw new Error(event.message);
-                break;
-        }
+    for await (const event of session.run({ context: { instructions, messages } })) {
+        streamed.push(event);
     }
 
-    return {
-        role: "assistant",
-        content,
-        ...(encryptedReasoning === undefined ? {} : { encryptedReasoning }),
-        ...(responseItems.length === 0 ? {} : { responseItems }),
-        ...(calls.size === 0 ? {} : { toolCalls: [...calls.values()] }),
-    };
+    for (const event of streamed) {
+        if (event.type === "done" && event.state === "error") throw new Error(event.message);
+    }
+
+    const assistant = assistantMessageFromEvents(streamed);
+    if (assistant === undefined) throw new Error("The provider returned no assistant message.");
+    return assistant;
 }
 ```
 
@@ -121,41 +70,55 @@ const credential = await CodexSessionCredential.tryLoad();
 if (credential === null) throw new Error("Sign in with Codex first.");
 
 const provider = new CodexProvider({ credential, model: "gpt-5.6-sol" });
+const instructions = "Use read_text_file when you need file contents.";
 const session = await provider.session("tool-example", {
-    instructions: "Use read_text_file when you need file contents.",
+    instructions,
     tools: [readTextFile],
 });
 
-const messages: SessionMessage[] = [{ role: "user", content: "Summarize package.json." }];
+const messages: SessionMessage[] = [
+    { role: "user", content: [{ type: "text", text: "Summarize package.json." }] },
+];
 
 try {
-    const assistant = await runTurn(session, messages);
+    const assistant = await runTurn(session, instructions, messages);
     messages.push(assistant);
 
-    for (const call of assistant.toolCalls ?? []) {
+    for (const call of assistant.content) {
+        if (call.type !== "tool_call" || call.server === true) continue;
         if (call.name !== "read_text_file" || call.incomplete === true) continue;
         const { path } = JSON.parse(call.arguments) as { path: string };
         try {
             messages.push({
                 role: "tool",
                 callId: call.callId,
-                content: await readFile(path, "utf8"),
+                content: [{ type: "text", text: await readFile(path, "utf8") }],
                 ...(call.vendor === undefined ? {} : { vendor: call.vendor }),
             });
         } catch (error) {
             messages.push({
                 role: "tool",
                 callId: call.callId,
-                content: error instanceof Error ? error.message : "The read failed.",
+                content: [
+                    {
+                        type: "text",
+                        text: error instanceof Error ? error.message : "The read failed.",
+                    },
+                ],
                 isError: true,
                 ...(call.vendor === undefined ? {} : { vendor: call.vendor }),
             });
         }
     }
 
-    const finalAssistant = await runTurn(session, messages);
+    const finalAssistant = await runTurn(session, instructions, messages);
     messages.push(finalAssistant);
-    console.log(finalAssistant.content);
+    console.log(
+        finalAssistant.content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join(""),
+    );
 } finally {
     await session.destroy();
 }
@@ -171,13 +134,16 @@ replacement transcript to adopt.
 
 ```ts
 const result = await session.compact({
-    context: { messages },
-    inputTokens: 120_000,
+    context: { instructions, messages },
+    instructions: "Preserve decisions, unfinished work, and exact identifiers.",
 });
 
 if (result.status === "completed") {
     messages.splice(0, messages.length, ...result.context.messages);
-    messages.push({ role: "user", content: "Continue from the compacted context." });
+    messages.push({
+        role: "user",
+        content: [{ type: "text", text: "Continue from the compacted context." }],
+    });
 } else if (result.status === "failed") {
     console.warn(result.message);
 }

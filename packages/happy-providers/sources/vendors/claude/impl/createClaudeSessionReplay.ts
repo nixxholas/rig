@@ -10,12 +10,12 @@ import type {
 import type {
     SessionAssistantMessage,
     SessionContext,
-    SessionImageContent,
-    SessionInputContent,
+    SessionImageBlock,
+    SessionInputBlock,
     SessionMessage,
-    SessionReasoning,
+    SessionReasoningBlock,
     SessionSystemMessage,
-    SessionTextContent,
+    SessionTextBlock,
     SessionToolResultMessage,
     SessionUserMessage,
 } from "@/core/SessionContext.js";
@@ -104,7 +104,7 @@ function toPromptMessage(messages: readonly ReplayMessage[]): SDKUserMessage {
     if (first === undefined) {
         return toSdkUserMessage({
             role: "user",
-            content: "Continue from the supplied tool result.",
+            content: [{ type: "text", text: "Continue from the supplied tool result." }],
         });
     }
     if (first.role === "user") return toSdkUserMessage(first);
@@ -175,7 +175,7 @@ function toSessionStoreEntries(
                     type: "assistant",
                 });
                 parentUuid = blockUuid;
-                if (block.type === "tool_use") {
+                if (typeof block === "object" && block !== null && block.type === "tool_use") {
                     assistantUuidByToolCallId.set(block.id, blockUuid);
                 }
             }
@@ -198,13 +198,16 @@ function toSessionStoreEntries(
             parentUuid = uuid;
             continue;
         }
-        const content = message.content;
-        if (content === null) continue;
+        if (message.role === "compaction" && message.content === null) continue;
+        const content: readonly SessionInputBlock[] =
+            message.role === "compaction"
+                ? [{ type: "text", text: message.content! }]
+                : message.content;
         entries.push({
             ...base,
             message: {
                 role: "user",
-                content: toSdkContent(content, message.role === "user" ? message.input : undefined),
+                content: toSdkContent(content),
             },
             type: "user",
         });
@@ -217,7 +220,7 @@ function toSdkUserMessage(message: SessionUserMessage): SDKUserMessage {
     return {
         type: "user",
         parent_tool_use_id: null,
-        message: { role: "user", content: toSdkContent(message.content, message.input) },
+        message: { role: "user", content: toSdkContent(message.content) },
     };
 }
 
@@ -225,24 +228,25 @@ function toSdkAssistantMessage(message: SessionAssistantMessage, model: string, 
     return {
         id: `msg_rig_${uuid.replaceAll("-", "")}`,
         container: null,
-        content: [
-            // Give the SDK every reasoning block that can be represented faithfully. It owns any
-            // further request-time projection needed for the active model and trajectory.
-            ...(message.reasoning ?? []).flatMap(toThinkingBlock),
-            ...(message.content.length === 0
-                ? []
-                : [{ type: "text" as const, text: message.content }]),
-            ...(message.toolCalls ?? []).map((call) => ({
-                type: "tool_use" as const,
-                id: call.callId,
-                name: call.name,
-                input: parseArguments(call.arguments),
-            })),
-        ],
+        content: message.content.flatMap((block): any[] => {
+            if (block.type === "reasoning") return toThinkingBlock(block);
+            if (block.type === "text") return [{ type: "text" as const, text: block.text }];
+            if (block.type === "tool_result") return [];
+            return [
+                {
+                    type: "tool_use" as const,
+                    id: block.callId,
+                    name: block.name,
+                    input: parseArguments(block.arguments),
+                },
+            ];
+        }),
         model,
         role: "assistant" as const,
         stop_details: null,
-        stop_reason: message.toolCalls?.length ? ("tool_use" as const) : ("end_turn" as const),
+        stop_reason: message.content.some((block) => block.type === "tool_call")
+            ? ("tool_use" as const)
+            : ("end_turn" as const),
         stop_sequence: null,
         type: "message" as const,
         usage: {
@@ -258,20 +262,20 @@ function toSdkAssistantMessage(message: SessionAssistantMessage, model: string, 
 }
 
 function toThinkingBlock(
-    reasoning: SessionReasoning,
+    reasoning: SessionReasoningBlock,
 ): (
     | { type: "thinking"; thinking: string; signature: string }
     | { type: "redacted_thinking"; data: string }
 )[] {
-    if (reasoning.signature === undefined) return [];
-    if (reasoning.redacted === true) {
-        return [{ type: "redacted_thinking" as const, data: reasoning.signature }];
+    if (reasoning.reasoning === undefined) return [];
+    if (reasoning.text === undefined) {
+        return [{ type: "redacted_thinking" as const, data: reasoning.reasoning }];
     }
     return [
         {
             type: "thinking" as const,
             thinking: reasoning.text,
-            signature: reasoning.signature,
+            signature: reasoning.reasoning,
         },
     ];
 }
@@ -280,17 +284,17 @@ function toToolResultBlock(message: SessionToolResultMessage) {
     return {
         type: "tool_result" as const,
         tool_use_id: message.callId,
-        content: toSdkContent(message.content, message.input),
+        content: toSdkContent(message.content),
         ...(message.isError === undefined ? {} : { is_error: message.isError }),
     };
 }
 
-function toSdkContent(content: string, input?: SessionInputContent) {
-    if (input === undefined) return content;
-    return input.map(toContentBlock);
+function toSdkContent(content: readonly SessionInputBlock[]) {
+    if (content.length === 1 && content[0]?.type === "text") return content[0].text;
+    return content.map(toContentBlock);
 }
 
-function toContentBlock(block: SessionTextContent | SessionImageContent) {
+function toContentBlock(block: SessionTextBlock | SessionImageBlock) {
     if (block.type === "text") return { type: "text" as const, text: block.text };
     return {
         type: "image" as const,

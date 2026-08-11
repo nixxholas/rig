@@ -4,6 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
+import { assistantMessageFromEvents } from "@/core/SessionAssistantMessageAccumulator.js";
 import { GrokProvider } from "@/vendors/grok/GrokProvider.js";
 import { formatGrokCompactionSummary } from "@/vendors/grok/impl/grokCompaction.js";
 import { grok_compaction_prompt } from "@/vendors/grok/prompts/grok_compaction_prompt.js";
@@ -55,9 +56,16 @@ describe("Grok compaction behavior", () => {
         for await (const _event of session.run({
             model: "grok-switched",
             context: {
+                instructions: "",
                 messages: [
-                    { role: "system", content: "Switched system message." },
-                    { role: "user", content: "Switch." },
+                    {
+                        role: "system",
+                        content: [{ type: "text" as const, text: "Switched system message." }],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Switch." }],
+                    },
                 ],
             },
         })) {
@@ -65,10 +73,20 @@ describe("Grok compaction behavior", () => {
         }
         const compacted = await session.compact({
             context: {
+                instructions: "Base prompt.",
                 messages: [
-                    { role: "system", content: "Switched system message." },
-                    { role: "user", content: "Switch." },
-                    { role: "assistant", content: "switched response" },
+                    {
+                        role: "system",
+                        content: [{ type: "text" as const, text: "Switched system message." }],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Switch." }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "switched response" }],
+                    },
                 ],
             },
         });
@@ -101,24 +119,39 @@ describe("Grok compaction behavior", () => {
 
         const runEvents = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         })) {
             runEvents.push(event);
         }
         const result = await session.compact({
             context: {
+                instructions: "System prompt.",
                 messages: [
-                    { role: "user", content: "Original query." },
-                    { role: "assistant", content: "assistant-only-marker" },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "assistant-only-marker" }],
+                    },
                 ],
             },
         });
 
         expect(result.status).toBe("completed");
         expect(requests[1]).not.toHaveProperty("tool_choice");
-        expect(runEvents).toContainEqual({
-            type: "response_items",
-            items: [expect.stringContaining('"text":"assistant-only-marker"')],
+        expect(assistantMessageFromEvents(runEvents)).toEqual({
+            role: "assistant",
+            content: [{ type: "text", text: "assistant-only-marker" }],
         });
         const compactionInput = requests[1]?.input as Array<{ content?: string }>;
         expect(JSON.stringify(compactionInput)).toContain("assistant-only-marker");
@@ -139,7 +172,15 @@ describe("Grok compaction behavior", () => {
         const events = [];
         for await (const event of session.run({
             abort: controller.signal,
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
             if (event.type === "text_delta") controller.abort();
@@ -147,6 +188,7 @@ describe("Grok compaction behavior", () => {
 
         expect(events.map((event) => event.type)).toEqual([
             "block_start",
+            "text_start",
             "text_delta",
             "block_reset",
             "done",
@@ -166,7 +208,15 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         const result = await session.compact({
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         });
 
         expect(result.status).toBe("completed");
@@ -182,28 +232,40 @@ describe("Grok compaction behavior", () => {
                 completeText(response, "follow-up ok");
             }
         });
-        const original = { role: "user" as const, content: "Keep this original request." };
+        const original = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "Keep this original request." }],
+        };
         const session = await createSession(endpoint);
 
-        await expect(session.compact({ context: { messages: [original] } })).resolves.toEqual({
+        await expect(
+            session.compact({
+                context: {
+                    instructions: "System prompt.",
+                    messages: [original],
+                },
+            }),
+        ).resolves.toEqual({
             status: "failed",
             kind: "invalid_summary",
             message: "Grok returned three compaction summaries shorter than 500 characters.",
-            context: {
-                instructions: "System prompt.",
-                messages: [original],
-            },
         });
         for await (const _event of session.run({
             context: {
-                messages: [{ role: "user", content: "Follow up." }],
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Follow up." }],
+                    },
+                ],
             },
         })) {
             // Drain the response.
         }
 
         const secondInput = requests[3]?.input as Array<{ content?: string }>;
-        expect(secondInput.some((item) => item.content === original.content)).toBe(false);
+        expect(secondInput.some((item) => item.content === original.content[0]!.text)).toBe(false);
         expect(secondInput.some((item) => item.content === grok_compaction_prompt)).toBe(false);
     });
 
@@ -242,16 +304,21 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         const result = await session.compact({
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         });
 
         expect(result).toMatchObject({
             status: "failed",
             kind: "tool_call",
             message: "Grok emitted tool calls in three compaction attempts.",
-            context: {
-                messages: [{ role: "user", content: "Original query." }],
-            },
         });
     });
 
@@ -269,7 +336,15 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         const result = await session.compact({
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         });
 
         expect(requests).toBe(2);
@@ -294,7 +369,15 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         const result = await session.compact({
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         });
 
         expect(result.status).toBe("completed");
@@ -313,11 +396,20 @@ describe("Grok compaction behavior", () => {
         const result = await session.compact({
             instructions: "Preserve the database migration decision.",
             context: {
+                instructions: "System prompt.",
                 messages: [
-                    { role: "user", content: "Original query." },
                     {
                         role: "user",
-                        content: "<system-reminder>Stale state.</system-reminder>",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "text" as const,
+                                text: "<system-reminder>Stale state.</system-reminder>",
+                            },
+                        ],
                     },
                 ],
             },
@@ -332,7 +424,7 @@ describe("Grok compaction behavior", () => {
         if (result.status !== "completed") return;
         expect(result.context.messages.at(-1)).toEqual({
             role: "user",
-            content: "<system-reminder>Stale state.</system-reminder>",
+            content: [{ type: "text", text: "<system-reminder>Stale state.</system-reminder>" }],
         });
     });
 
@@ -357,7 +449,15 @@ describe("Grok compaction behavior", () => {
         const session = await createSession(endpoint);
 
         const result = await session.compact({
-            context: { messages: [{ role: "user", content: "Original query." }] },
+            context: {
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Original query." }],
+                    },
+                ],
+            },
         });
 
         expect(result.status).toBe("completed");
@@ -383,12 +483,18 @@ describe("Grok compaction behavior", () => {
                 completeText(response, "follow-up ok");
             }
         });
-        const original = { role: "user" as const, content: "Original query." };
+        const original = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "Original query." }],
+        };
         const session = await createSession(endpoint);
         const controller = new AbortController();
 
         const compaction = session.compact({
-            context: { messages: [original] },
+            context: {
+                instructions: "System prompt.",
+                messages: [original],
+            },
             signal: controller.signal,
         });
         await started;
@@ -402,12 +508,20 @@ describe("Grok compaction behavior", () => {
             },
         });
         for await (const _event of session.run({
-            context: { messages: [{ role: "user", content: "Follow up." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Follow up." }],
+                    },
+                ],
+            },
         })) {
             // Drain the response.
         }
         const secondInput = requests[1]?.input as Array<{ content?: string }>;
-        expect(secondInput.some((item) => item.content === original.content)).toBe(false);
+        expect(secondInput.some((item) => item.content === original.content[0]!.text)).toBe(false);
         expect(secondInput.some((item) => item.content === grok_compaction_prompt)).toBe(false);
     });
 
@@ -463,12 +577,15 @@ describe("Grok compaction behavior", () => {
             }
         });
         const session = await createSession(endpoint);
-        const firstUser = { role: "user" as const, content: "Inspect README." };
+        const firstUser = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "Inspect README." }],
+        };
         const toolAssistant = {
             role: "assistant" as const,
-            content: "",
-            toolCalls: [
+            content: [
                 {
+                    type: "tool_call" as const,
                     callId: "call-1",
                     name: "read_file",
                     arguments: '{"target_file":"README.md"}',
@@ -478,27 +595,34 @@ describe("Grok compaction behavior", () => {
         const toolResult = {
             role: "tool" as const,
             callId: "call-1",
-            content: "README contents",
+            content: [{ type: "text" as const, text: "README contents" }],
         };
 
         for await (const _event of session.run({
-            context: { messages: [firstUser] },
+            context: { instructions: "", messages: [firstUser] },
         })) {
             // Drain.
         }
         for await (const _event of session.run({
-            context: { messages: [firstUser, toolAssistant, toolResult] },
+            context: { instructions: "", messages: [firstUser, toolAssistant, toolResult] },
         })) {
             // Drain.
         }
         for await (const _event of session.run({
             context: {
+                instructions: "",
                 messages: [
                     firstUser,
                     toolAssistant,
                     toolResult,
-                    { role: "assistant", content: "README inspected." },
-                    { role: "user", content: "Now summarize it." },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "README inspected." }],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Now summarize it." }],
+                    },
                 ],
             },
         })) {

@@ -1,9 +1,9 @@
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 
-export function addSessionCacheUsage(
-    left: SessionCacheUsage | undefined,
-    right: SessionCacheUsage | undefined,
-): SessionCacheUsage | undefined {
+export function addSessionUsage(
+    left: SessionUsage | undefined,
+    right: SessionUsage | undefined,
+): SessionUsage | undefined {
     if (left === undefined) return right;
     if (right === undefined) return left;
     const input = left.input + right.input;
@@ -15,6 +15,6 @@ export function addSessionCacheUsage(
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }

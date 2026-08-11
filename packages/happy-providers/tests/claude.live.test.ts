@@ -94,7 +94,15 @@ describe.skipIf(!live)("Claude live session", () => {
                 await collectSessionEvents(
                     session.run({
                         context: {
-                            messages: [{ role: "user", content: "Reply exactly WIRE_OK." }],
+                            instructions: "",
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: [
+                                        { type: "text" as const, text: "Reply exactly WIRE_OK." },
+                                    ],
+                                },
+                            ],
                         },
                     }),
                 );
@@ -140,9 +148,37 @@ describe.skipIf(!live)("Claude live session", () => {
                 env: process.env,
             });
             if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
+            const instructions =
+                "You are testing Rig's Claude provider. Follow exact reply instructions.";
+            const firstMessages = [
+                {
+                    role: "user" as const,
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: "Reply with exactly FIRST RIG_CLAUDE_SKILL and nothing else.",
+                        },
+                    ],
+                },
+            ];
+            const switchedMessages = [
+                ...firstMessages,
+                {
+                    role: "assistant" as const,
+                    content: [{ type: "text" as const, text: "FIRST RIG_CLAUDE_SKILL" }],
+                },
+                {
+                    role: "user" as const,
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: "Remember the exact marker RIG_CLAUDE_SKILL. Reply with exactly SWITCHED and nothing else.",
+                        },
+                    ],
+                },
+            ];
             const session = new ClaudeSession("happy-providers-claude-live", {
-                instructions:
-                    "You are testing Rig's Claude provider. Follow exact reply instructions.",
+                instructions,
                 credential,
                 model: "opus[1m]",
             });
@@ -150,13 +186,8 @@ describe.skipIf(!live)("Claude live session", () => {
                 const first = await collectSessionEvents(
                     session.run({
                         context: {
-                            messages: [
-                                {
-                                    role: "user",
-                                    content:
-                                        "Reply with exactly FIRST RIG_CLAUDE_SKILL and nothing else.",
-                                },
-                            ],
+                            instructions,
+                            messages: firstMessages,
                         },
                     }),
                 );
@@ -166,22 +197,8 @@ describe.skipIf(!live)("Claude live session", () => {
                     session.run({
                         model: "sonnet[1m]",
                         context: {
-                            messages: [
-                                {
-                                    role: "user",
-                                    content:
-                                        "Reply with exactly FIRST RIG_CLAUDE_SKILL and nothing else.",
-                                },
-                                {
-                                    role: "assistant",
-                                    content: "FIRST RIG_CLAUDE_SKILL",
-                                },
-                                {
-                                    role: "user",
-                                    content:
-                                        "Remember the exact marker RIG_CLAUDE_SKILL. Reply with exactly SWITCHED and nothing else.",
-                                },
-                            ],
+                            instructions,
+                            messages: switchedMessages,
                         },
                     }),
                 );
@@ -189,6 +206,10 @@ describe.skipIf(!live)("Claude live session", () => {
 
                 const compacted = await session.compact({
                     instructions: "Preserve the exact markers RIG_CLAUDE_SKILL and SWITCHED.",
+                    context: {
+                        instructions,
+                        messages: switchedMessages,
+                    },
                 });
                 expect(compacted.status).toBe("completed");
                 if (compacted.status === "completed") {
@@ -197,12 +218,17 @@ describe.skipIf(!live)("Claude live session", () => {
                     const continued = await collectSessionEvents(
                         session.run({
                             context: {
+                                instructions,
                                 messages: [
                                     ...compacted.context.messages,
                                     {
                                         role: "user",
-                                        content:
-                                            "Using only the compacted context, reply exactly POST_COMPACT RIG_CLAUDE_SKILL SWITCHED and nothing else.",
+                                        content: [
+                                            {
+                                                type: "text" as const,
+                                                text: "Using only the compacted context, reply exactly POST_COMPACT RIG_CLAUDE_SKILL SWITCHED and nothing else.",
+                                            },
+                                        ],
                                     },
                                 ],
                             },
@@ -229,14 +255,39 @@ describe.skipIf(!live)("Claude live session", () => {
         try {
             const compacted = await session.compact({
                 context: {
+                    instructions: "Preserve conversation facts accurately.",
                     messages: [
                         {
                             role: "user",
-                            content: "Remember the exact marker PLAIN_COMPACT_MARKER.",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Remember the exact marker PLAIN_COMPACT_MARKER.",
+                                },
+                            ],
                         },
-                        { role: "assistant", content: "I will remember PLAIN_COMPACT_MARKER." },
-                        { role: "user", content: "The current task is native compaction testing." },
-                        { role: "assistant", content: "Understood." },
+                        {
+                            role: "assistant",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "I will remember PLAIN_COMPACT_MARKER.",
+                                },
+                            ],
+                        },
+                        {
+                            role: "user",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "The current task is native compaction testing.",
+                                },
+                            ],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "Understood." }],
+                        },
                     ],
                 },
             });

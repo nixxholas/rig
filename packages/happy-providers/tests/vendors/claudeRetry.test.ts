@@ -73,7 +73,7 @@ describe("Claude retry contract", () => {
                 attempt: 1,
             }),
         );
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     async function runAgainst(server: ReturnType<typeof createServer>): Promise<SessionEvent[]> {
@@ -98,7 +98,15 @@ describe("Claude retry contract", () => {
         sessions.push(session);
         return collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Retry this request." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Retry this request." }],
+                        },
+                    ],
+                },
             }),
         );
     }

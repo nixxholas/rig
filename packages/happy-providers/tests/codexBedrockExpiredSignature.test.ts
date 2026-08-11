@@ -73,7 +73,15 @@ async function runOnce(status: number, body: string): Promise<string | undefined
     try {
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "Hello." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Hello." }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }

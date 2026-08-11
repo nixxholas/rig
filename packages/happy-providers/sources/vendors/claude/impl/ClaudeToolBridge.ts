@@ -80,14 +80,8 @@ export class ClaudeToolBridge {
 }
 
 function toCallToolResult(message: SessionToolResultMessage): CallToolResult {
-    if (message.input === undefined) {
-        return {
-            content: [{ type: "text", text: message.content }],
-            ...(message.isError === undefined ? {} : { isError: message.isError }),
-        };
-    }
     return {
-        content: message.input.map((block) =>
+        content: message.content.map((block) =>
             block.type === "text"
                 ? { type: "text" as const, text: block.text }
                 : {

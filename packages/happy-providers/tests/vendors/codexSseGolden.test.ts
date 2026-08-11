@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import { describe, expect, it } from "vitest";
 
+import { assistantMessageFromEvents } from "@/core/SessionAssistantMessageAccumulator.js";
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 import { codexCliTools } from "./codexCliTools.js";
 import { codexCliPrompt } from "./codexCliPrompt.js";
@@ -48,7 +49,7 @@ describe("Codex SSE goldens", () => {
             });
             const initialMessages = prompt.systemMessages.map((content) => ({
                 role: "system" as const,
-                content,
+                content: content.map((text) => ({ type: "text" as const, text })),
             }));
             const session = await provider.session("<SESSION_ID>", {
                 instructions: prompt.instructions,
@@ -57,12 +58,16 @@ describe("Codex SSE goldens", () => {
             const events = [];
             for await (const event of session.run({
                 context: {
+                    instructions: prompt.instructions,
                     messages: withCodexSkills(
                         {
                             instructions: prompt.instructions,
                             messages: [
                                 ...initialMessages,
-                                { role: "user", content: "Reply with OK." },
+                                {
+                                    role: "user",
+                                    content: [{ type: "text" as const, text: "Reply with OK." }],
+                                },
                             ],
                         },
                         codexSkills,
@@ -76,24 +81,9 @@ describe("Codex SSE goldens", () => {
             }
             session.destroy();
 
-            expect(events).toContainEqual({
-                type: "response_items",
-                items: [
-                    JSON.stringify({
-                        id: "final-message",
-                        type: "message",
-                        role: "assistant",
-                        phase: "final_answer",
-                        status: "completed",
-                        content: [
-                            {
-                                type: "output_text",
-                                text: "OK.",
-                                annotations: [],
-                            },
-                        ],
-                    }),
-                ],
+            expect(assistantMessageFromEvents(events)).toEqual({
+                role: "assistant",
+                content: [{ type: "text", text: "OK." }],
             });
             expect(captured).toBeDefined();
             expect(protocolProjection(captured!)).toEqual(protocolProjection(golden.request));
@@ -171,19 +161,45 @@ describe("Codex SSE goldens", () => {
             });
             await drain(
                 session.run({
-                    context: { messages: [{ role: "user", content: "first" }] },
+                    context: {
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "first" }],
+                            },
+                        ],
+                    },
                     effort: "low",
                     model: "gpt-5.6-sol",
                 }),
             );
-            const compacted = await session.compact();
+            const compacted = await session.compact({
+                context: {
+                    instructions: prompt.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "first" }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text", text: "mock response" }],
+                        },
+                    ],
+                },
+            });
             if (compacted.status !== "completed") expect.fail("Compaction was cancelled.");
             await drain(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
                             ...compacted.context.messages,
-                            { role: "user", content: "switched" },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "switched" }],
+                            },
                         ],
                     },
                     effort: "low",
@@ -258,7 +274,13 @@ describe("Codex SSE goldens", () => {
 
             const result = await session.compact({
                 context: {
-                    messages: [{ role: "user", content: "Conversation to compact." }],
+                    instructions: "instructions",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Conversation to compact." }],
+                        },
+                    ],
                 },
                 model: "openai/gpt-5.6-sol",
             });
@@ -309,9 +331,9 @@ describe("Codex SSE goldens", () => {
             const initialMessages = [
                 {
                     role: "assistant" as const,
-                    content: "",
-                    toolCalls: [
+                    content: [
                         {
+                            type: "tool_call" as const,
                             callId: "huge-call",
                             name: "exec",
                             arguments: "{}",
@@ -325,15 +347,23 @@ describe("Codex SSE goldens", () => {
                 {
                     role: "tool" as const,
                     callId: "huge-call",
-                    content: "x".repeat(1_200_000),
+                    content: [{ type: "text" as const, text: "x".repeat(1_200_000) }],
                     vendor: {
                         provider: "codex",
                         type: "function_call",
                     },
                 },
-                { role: "user" as const, content: "retain this request" },
+                {
+                    role: "user" as const,
+                    content: [{ type: "text" as const, text: "retain this request" }],
+                },
             ];
-            const compacted = await session.compact({ context: { messages: initialMessages } });
+            const compacted = await session.compact({
+                context: {
+                    instructions: "instructions",
+                    messages: initialMessages,
+                },
+            });
 
             expect(compacted.status).toBe("completed");
             expect(captured).toHaveLength(2);
@@ -389,9 +419,16 @@ describe("Codex SSE goldens", () => {
             await drain(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
-                            { role: "system", content: "legacy system" },
-                            { role: "user", content: "first" },
+                            {
+                                role: "system",
+                                content: [{ type: "text" as const, text: "legacy system" }],
+                            },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "first" }],
+                            },
                         ],
                     },
                     model: "gpt-5.5",
@@ -400,10 +437,20 @@ describe("Codex SSE goldens", () => {
             await drain(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
-                            { role: "system", content: "target system" },
-                            { role: "user", content: "first" },
-                            { role: "user", content: "switch" },
+                            {
+                                role: "system",
+                                content: [{ type: "text" as const, text: "target system" }],
+                            },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "first" }],
+                            },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "switch" }],
+                            },
                         ],
                     },
                     model: "gpt-5.6-sol",
@@ -454,12 +501,24 @@ describe("Codex SSE goldens", () => {
                 instructions: prompt.instructions,
                 tools: codexCliTools("gpt-5.6-sol"),
             });
-            const user = { role: "user" as const, content: "first" };
-            await drain(session.run({ context: { messages: [user] }, effort: "low" }));
+            const user = {
+                role: "user" as const,
+                content: [{ type: "text" as const, text: "first" }],
+            };
+            await drain(
+                session.run({ context: { instructions: "", messages: [user] }, effort: "low" }),
+            );
             await drain(
                 session.run({
                     context: {
-                        messages: [user, { role: "assistant", content: "continuation" }],
+                        instructions: "",
+                        messages: [
+                            user,
+                            {
+                                role: "assistant",
+                                content: [{ type: "text" as const, text: "continuation" }],
+                            },
+                        ],
                     },
                     effort: "low",
                 }),
@@ -467,10 +526,17 @@ describe("Codex SSE goldens", () => {
             await drain(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
                             user,
-                            { role: "assistant", content: "continuation" },
-                            { role: "user", content: "second" },
+                            {
+                                role: "assistant",
+                                content: [{ type: "text" as const, text: "continuation" }],
+                            },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "second" }],
+                            },
                         ],
                     },
                     effort: "low",

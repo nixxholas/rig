@@ -14,14 +14,10 @@ import {
 } from "@/core/inferenceRetrySettings.js";
 import { EmptyResponseError, emptyResponseDoneEvent } from "@/core/EmptyResponseError.js";
 import type { ProviderUsage } from "@/core/ProviderUsage.js";
-import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import { EMPTY_SESSION_USAGE, type SessionUsage } from "@/core/SessionUsage.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
-import type {
-    SessionAssistantMessage,
-    SessionContext,
-    SessionReasoning,
-    SessionToolCall,
-} from "@/core/SessionContext.js";
+import type { SessionContext, SessionToolCallBlock } from "@/core/SessionContext.js";
+import { SessionAssistantMessageAccumulator } from "@/core/SessionAssistantMessageAccumulator.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
@@ -97,7 +93,7 @@ export class ClaudeSession extends BaseSession {
     private activePromptQueue: ClaudePromptQueue | undefined;
     private activeReplay: ClaudeSessionReplay | undefined;
     private activeToolBridge: ClaudeToolBridge | undefined;
-    private lastQueryToolCalls: SessionToolCall[] = [];
+    private lastQueryToolCalls: Omit<SessionToolCallBlock, "type">[] = [];
     private readonly onAccountUsage: ((usage: ProviderUsage) => void) | undefined;
     private readonly resolveInferenceMaxRetries: () => number;
     private readonly retryWait: NonNullable<InferenceRetryOptions["waitForInferenceRetry"]>;
@@ -142,14 +138,11 @@ export class ClaudeSession extends BaseSession {
         return this.streamRun(request);
     }
 
-    async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
-        const original =
-            options.context === undefined
-                ? this.context
-                : {
-                      instructions: this.context.instructions,
-                      messages: [...options.context.messages],
-                  };
+    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
+        const original: SessionContext = {
+            instructions: options.context.instructions,
+            messages: [...options.context.messages],
+        };
         const { instructions, signal } = options;
         if (signal?.aborted) return { status: "cancelled", context: original };
         const requestedModel = options.model ?? this.activeModel ?? this.model;
@@ -163,15 +156,20 @@ export class ClaudeSession extends BaseSession {
                 ...original.messages,
                 {
                     role: "user",
-                    content:
-                        instructions === undefined || instructions.trim().length === 0
-                            ? "/compact"
-                            : `/compact ${instructions}`,
+                    content: [
+                        {
+                            type: "text",
+                            text:
+                                instructions === undefined || instructions.trim().length === 0
+                                    ? "/compact"
+                                    : `/compact ${instructions}`,
+                        },
+                    ],
                 },
             ],
         };
         let summary = "";
-        let usage: SessionCacheUsage | undefined;
+        let usage: SessionUsage | undefined;
         let done: Extract<SessionEvent, { type: "done" }> | undefined;
         for await (const event of this.streamQuery({
             context: compactContext,
@@ -190,7 +188,6 @@ export class ClaudeSession extends BaseSession {
                 status: "failed",
                 kind: "tool_call",
                 message: "Claude attempted to call a tool while compacting.",
-                context: original,
             };
         }
         if (done?.state === "error") {
@@ -198,7 +195,6 @@ export class ClaudeSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: done.message,
-                context: original,
             };
         }
         if (summary.trim().length === 0) {
@@ -206,7 +202,6 @@ export class ClaudeSession extends BaseSession {
                 status: "failed",
                 kind: "invalid_summary",
                 message: "Claude returned an empty compaction summary.",
-                context: original,
             };
         }
         if (usage === undefined) {
@@ -214,13 +209,15 @@ export class ClaudeSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: "Claude completed compaction without reporting token usage.",
-                context: original,
             };
         }
         const preservedMessages = original.messages.filter((message) => message.role === "system");
         this.context = {
             instructions: original.instructions,
-            messages: [...preservedMessages, { role: "user", content: summary }],
+            messages: [
+                ...preservedMessages,
+                { role: "user", content: [{ type: "text", text: summary }] },
+            ],
         };
         return {
             status: "completed",
@@ -244,15 +241,13 @@ export class ClaudeSession extends BaseSession {
         const effort = request.effort ?? this.activeEffort;
         this.activeEffort = effort;
         this.context = {
-            instructions: this.context.instructions,
+            instructions: request.context.instructions ?? this.context.instructions,
             messages: [...request.context.messages],
         };
         let emptyResponseRetries = 0;
         let completedMidResponseAttempts = 0;
         for (;;) {
-            let assistantText = "";
-            let reasoningText = "";
-            let reasoning: SessionReasoning[] = [];
+            const assistant = new SessionAssistantMessageAccumulator();
             let usage: Extract<SessionEvent, { type: "token_usage" }> | undefined;
             let blockStopped = false;
             let terminal: Extract<SessionEvent, { type: "done" }> | undefined;
@@ -269,14 +264,7 @@ export class ClaudeSession extends BaseSession {
                     this.resolveInferenceMaxRetries() - completedMidResponseAttempts,
                 ),
             })) {
-                if (event.type === "text_delta") assistantText += event.delta;
-                if (event.type === "reasoning_delta") reasoningText += event.delta;
-                // The signature closes the thinking block it was issued for, so the pair is
-                // banked together and the buffer reopens for whatever the model reasons about.
-                if (event.type === "encrypted_reasoning") {
-                    reasoning = [...reasoning, { text: reasoningText, signature: event.content }];
-                    reasoningText = "";
-                }
+                assistant.add(event);
                 if (event.type === "token_usage") {
                     usage = event;
                     continue;
@@ -288,11 +276,6 @@ export class ClaudeSession extends BaseSession {
                 if (event.type === "done") {
                     terminal = event;
                     continue;
-                }
-                if (event.type === "block_reset") {
-                    assistantText = "";
-                    reasoningText = "";
-                    reasoning = [];
                 }
                 yield event;
             }
@@ -361,25 +344,20 @@ export class ClaudeSession extends BaseSession {
 
             if (usage !== undefined) yield usage;
             if (terminal.state !== "error" && terminal.state !== "cancelled") {
-                const assistantMessage: SessionAssistantMessage = {
-                    role: "assistant",
-                    content: assistantText,
-                    ...(reasoning.length === 0 ? {} : { reasoning }),
-                    ...(this.lastQueryToolCalls.length === 0
-                        ? {}
-                        : { toolCalls: this.lastQueryToolCalls }),
-                };
-                this.context = {
-                    instructions: this.context.instructions,
-                    messages: [...this.context.messages, assistantMessage],
-                };
-                // The query generated this turn, so it holds it even though no caller sent it.
-                // Leaving it out would let a later edit of this message look like an append.
-                if (this.sentConversation !== undefined) {
-                    this.sentConversation = [
-                        ...this.sentConversation,
-                        claudeMessageIdentity(assistantMessage),
-                    ];
+                const assistantMessage = assistant.message();
+                if (assistantMessage !== undefined) {
+                    this.context = {
+                        instructions: this.context.instructions,
+                        messages: [...this.context.messages, assistantMessage],
+                    };
+                    // The query generated this turn, so it holds it even though no caller sent it.
+                    // Leaving it out would let a later edit of this message look like an append.
+                    if (this.sentConversation !== undefined) {
+                        this.sentConversation = [
+                            ...this.sentConversation,
+                            claudeMessageIdentity(assistantMessage),
+                        ];
+                    }
                 }
             }
             if (blockStopped) yield { type: "block_stop" };
@@ -471,7 +449,12 @@ export class ClaudeSession extends BaseSession {
             invalidateAfterAbort();
         };
         options.abort?.addEventListener("abort", abort, { once: true });
-        const activeTools = new Map<number, SessionToolCall>();
+        const activeTools = new Map<number, Omit<SessionToolCallBlock, "type">>();
+        const completedTools: Omit<SessionToolCallBlock, "type">[] = [];
+        const activeOutputBlocks = new Map<
+            number,
+            { type: "text" } | { type: "reasoning"; reasoning: string }
+        >();
         // Claude Code runs a server tool inside its own process and answers it there, so Rig
         // reports these calls without ever collecting them as work for the executor.
         const serverToolNames = new Set(claudeSdkBuiltInToolNames(tools));
@@ -485,7 +468,7 @@ export class ClaudeSession extends BaseSession {
         let rateLimitInfo: SDKRateLimitInfo | undefined;
         let requestId: string | undefined;
         let attempts = 1;
-        let usage = { ...EMPTY_SESSION_CACHE_USAGE };
+        let usage = { ...EMPTY_SESSION_USAGE };
         let sawInferenceUsage = false;
         try {
             if (!continuingQuery) {
@@ -592,6 +575,47 @@ export class ClaudeSession extends BaseSession {
                     }
                     if (
                         event.type === "content_block_start" &&
+                        event.content_block.type === "text" &&
+                        options.structuredOutput === undefined
+                    ) {
+                        activeOutputBlocks.set(event.index, { type: "text" });
+                        sawText = true;
+                        yield { type: "text_start" };
+                        if (event.content_block.text.length > 0) {
+                            yield { type: "text_delta", delta: event.content_block.text };
+                        }
+                        continue;
+                    }
+                    if (
+                        event.type === "content_block_start" &&
+                        event.content_block.type === "thinking"
+                    ) {
+                        activeOutputBlocks.set(event.index, {
+                            type: "reasoning",
+                            reasoning: event.content_block.signature,
+                        });
+                        yield { type: "reasoning_start" };
+                        if (event.content_block.thinking.length > 0) {
+                            yield {
+                                type: "reasoning_delta",
+                                delta: event.content_block.thinking,
+                            };
+                        }
+                        continue;
+                    }
+                    if (
+                        event.type === "content_block_start" &&
+                        event.content_block.type === "redacted_thinking"
+                    ) {
+                        activeOutputBlocks.set(event.index, {
+                            type: "reasoning",
+                            reasoning: event.content_block.data,
+                        });
+                        yield { type: "reasoning_start" };
+                        continue;
+                    }
+                    if (
+                        event.type === "content_block_start" &&
                         (event.content_block.type === "tool_use" ||
                             event.content_block.type === "server_tool_use")
                     ) {
@@ -621,6 +645,7 @@ export class ClaudeSession extends BaseSession {
                             name: event.content_block.name,
                             arguments: "",
                             vendor: { type: "claude_tool_use" },
+                            ...(server ? { server: true as const } : {}),
                         });
                         yield {
                             type: "toolcall_start",
@@ -656,12 +681,29 @@ export class ClaudeSession extends BaseSession {
                             event.delta.type === "text_delta" &&
                             options.structuredOutput === undefined
                         ) {
+                            if (activeOutputBlocks.get(event.index)?.type !== "text") {
+                                activeOutputBlocks.set(event.index, { type: "text" });
+                                yield { type: "text_start" };
+                            }
                             sawText = true;
                             yield { type: "text_delta", delta: event.delta.text };
                         } else if (event.delta.type === "thinking_delta") {
+                            if (activeOutputBlocks.get(event.index)?.type !== "reasoning") {
+                                activeOutputBlocks.set(event.index, {
+                                    type: "reasoning",
+                                    reasoning: "",
+                                });
+                                yield { type: "reasoning_start" };
+                            }
                             yield { type: "reasoning_delta", delta: event.delta.thinking };
                         } else if (event.delta.type === "signature_delta") {
-                            yield { type: "encrypted_reasoning", content: event.delta.signature };
+                            let block = activeOutputBlocks.get(event.index);
+                            if (block?.type !== "reasoning") {
+                                block = { type: "reasoning", reasoning: "" };
+                                activeOutputBlocks.set(event.index, block);
+                                yield { type: "reasoning_start" };
+                            }
+                            block.reasoning += event.delta.signature;
                         } else if (event.delta.type === "input_json_delta") {
                             const block = activeTools.get(event.index);
                             if (block !== undefined) {
@@ -684,6 +726,19 @@ export class ClaudeSession extends BaseSession {
                         }
                     }
                     if (event.type === "content_block_stop") {
+                        const outputBlock = activeOutputBlocks.get(event.index);
+                        if (outputBlock?.type === "text") {
+                            yield { type: "text_end" };
+                            activeOutputBlocks.delete(event.index);
+                        } else if (outputBlock?.type === "reasoning") {
+                            yield {
+                                type: "reasoning_end",
+                                ...(outputBlock.reasoning.length === 0
+                                    ? {}
+                                    : { reasoning: outputBlock.reasoning }),
+                            };
+                            activeOutputBlocks.delete(event.index);
+                        }
                         const block = activeTools.get(event.index);
                         if (block !== undefined) {
                             yield {
@@ -691,6 +746,8 @@ export class ClaudeSession extends BaseSession {
                                 callId: block.callId,
                                 arguments: block.arguments,
                             };
+                            completedTools.push(block);
+                            activeTools.delete(event.index);
                             // Claude Code answers built-ins out of band and does not stream their
                             // results as content blocks here. A later text block is the model's
                             // synthesis, not the tool payload, so server calls end without a
@@ -705,18 +762,30 @@ export class ClaudeSession extends BaseSession {
                     ) {
                         const callId = event.content_block.tool_use_id;
                         const result = JSON.stringify(event.content_block.content ?? null);
-                        yield { type: "toolcall_result_start", callId };
+                        const vendor = { outputBlock: JSON.stringify(event.content_block) };
+                        yield { type: "toolcall_result_start", callId, vendor };
                         if (result.length > 0) {
                             yield { type: "toolcall_result_delta", callId, delta: result };
                         }
-                        yield { type: "toolcall_result_end", callId, result };
+                        yield {
+                            type: "toolcall_result_end",
+                            callId,
+                            content: [{ type: "text", text: result }],
+                        };
                         continue;
                     }
                     if (event.type === "message_stop" && sawToolCall) {
-                        this.lastQueryToolCalls = [...activeTools.values()];
+                        yield* closeClaudeOutputBlocks(activeOutputBlocks);
+                        this.lastQueryToolCalls = completedTools.filter(
+                            (call) => call.server !== true,
+                        );
                         if (sawInferenceUsage) yield { type: "token_usage", usage };
                         yield { type: "block_stop" };
-                        yield { type: "done", state: "tool_call" };
+                        yield {
+                            type: "done",
+                            state: "tool_call",
+                            tokens: { input: usage.input, output: usage.output },
+                        };
                         return;
                     }
                     continue;
@@ -743,9 +812,15 @@ export class ClaudeSession extends BaseSession {
                     );
                 }
                 this.closeActiveQuery();
+                yield { type: "text_start" };
                 yield { type: "text_delta", delta: summary };
+                yield { type: "text_end" };
                 if (sawInferenceUsage) yield { type: "token_usage", usage };
-                yield { type: "done", state: "normal" };
+                yield {
+                    type: "done",
+                    state: "normal",
+                    tokens: { input: usage.input, output: usage.output },
+                };
                 return;
             }
             if (result === undefined && !sawToolCall) {
@@ -774,11 +849,17 @@ export class ClaudeSession extends BaseSession {
                         );
                     }
                     yield {
+                        type: "text_start",
+                    };
+                    yield {
                         type: "text_delta",
                         delta: JSON.stringify(result.structured_output),
                     };
+                    yield { type: "text_end" };
                 } else if (!sawText && result.subtype === "success" && result.result.length > 0) {
+                    yield { type: "text_start" };
                     yield { type: "text_delta", delta: result.result };
+                    yield { type: "text_end" };
                 }
                 if (result.subtype !== "success" || result.is_error) {
                     const message =
@@ -810,10 +891,15 @@ export class ClaudeSession extends BaseSession {
                     return;
                 }
             }
-            this.lastQueryToolCalls = [...activeTools.values()];
+            this.lastQueryToolCalls = completedTools.filter((call) => call.server !== true);
+            yield* closeClaudeOutputBlocks(activeOutputBlocks);
             if (sawInferenceUsage) yield { type: "token_usage", usage };
             yield { type: "block_stop" };
-            yield { type: "done", state: sawToolCall ? "tool_call" : "normal" };
+            yield {
+                type: "done",
+                state: sawToolCall ? "tool_call" : "normal",
+                tokens: { input: usage.input, output: usage.output },
+            };
         } catch (error) {
             if (options.abort?.aborted) invalidateAfterAbort();
             else this.closeActiveQuery();
@@ -873,57 +959,61 @@ function toUsage(usage: {
     output_tokens?: number | null;
     cache_read_input_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
-}): SessionCacheUsage {
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
+}): SessionUsage {
     const cacheRead = usage.cache_read_input_tokens ?? 0;
     const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const input = (usage.input_tokens ?? 0) + cacheRead + cacheWrite;
+    const output = usage.output_tokens ?? 0;
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
 function mergeUsage(
-    current: SessionCacheUsage,
+    current: SessionUsage,
     update: {
         input_tokens?: number | null;
         output_tokens?: number | null;
         cache_read_input_tokens?: number | null;
         cache_creation_input_tokens?: number | null;
     },
-): SessionCacheUsage {
-    const input = update.input_tokens ?? current.input;
-    const output = update.output_tokens ?? current.output;
+): SessionUsage {
     const cacheRead = update.cache_read_input_tokens ?? current.cacheRead;
     const cacheWrite = update.cache_creation_input_tokens ?? current.cacheWrite;
+    const input =
+        update.input_tokens === undefined || update.input_tokens === null
+            ? current.input
+            : update.input_tokens + cacheRead + cacheWrite;
+    const output = update.output_tokens ?? current.output;
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
 function toAggregateModelUsage(
     modelUsage: SDKResultMessage["modelUsage"],
-): SessionCacheUsage | undefined {
+): SessionUsage | undefined {
     const entries = Object.values(modelUsage);
     if (entries.length === 0) return undefined;
-    const input = entries.reduce((total, usage) => total + usage.inputTokens, 0);
-    const output = entries.reduce((total, usage) => total + usage.outputTokens, 0);
     const cacheRead = entries.reduce((total, usage) => total + usage.cacheReadInputTokens, 0);
     const cacheWrite = entries.reduce((total, usage) => total + usage.cacheCreationInputTokens, 0);
+    const input =
+        entries.reduce((total, usage) => total + usage.inputTokens, 0) + cacheRead + cacheWrite;
+    const output = entries.reduce((total, usage) => total + usage.outputTokens, 0);
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
@@ -964,4 +1054,20 @@ function isClaudeServerToolResultBlock(
         return false;
     }
     return "tool_use_id" in block && typeof block.tool_use_id === "string";
+}
+
+function* closeClaudeOutputBlocks(
+    blocks: Map<number, { type: "text" } | { type: "reasoning"; reasoning: string }>,
+): Generator<SessionEvent> {
+    for (const [, block] of blocks) {
+        if (block.type === "text") {
+            yield { type: "text_end" };
+        } else {
+            yield {
+                type: "reasoning_end",
+                ...(block.reasoning.length === 0 ? {} : { reasoning: block.reasoning }),
+            };
+        }
+    }
+    blocks.clear();
 }

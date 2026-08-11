@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { query as claudeSdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
-import type { SessionMessage, SessionReasoning } from "@/core/SessionContext.js";
+import type { SessionMessage } from "@/core/SessionContext.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
+import { assistantMessageFromEvents } from "@/core/SessionAssistantMessageAccumulator.js";
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
 import { ClaudeSession } from "@/vendors/claude/ClaudeSession.js";
 
@@ -48,30 +49,14 @@ describe("Claude session recreation cache", () => {
 });
 
 function user(content: string): SessionMessage {
-    return { role: "user", content };
+    return { role: "user", content: [{ type: "text", text: content }] };
 }
 
 /** Rebuilds the transcript the way the caller does, from the events the run emitted. */
 function replayContext(events: readonly SessionEvent[]): SessionMessage[] {
-    let text = "";
-    let reasoningText = "";
-    const reasoning: SessionReasoning[] = [];
-    for (const event of events) {
-        if (event.type === "text_delta") text += event.delta;
-        if (event.type === "reasoning_delta") reasoningText += event.delta;
-        if (event.type === "encrypted_reasoning") {
-            reasoning.push({ text: reasoningText, signature: event.content });
-            reasoningText = "";
-        }
-    }
-    return [
-        user("Refactor the parser."),
-        {
-            role: "assistant",
-            content: text,
-            ...(reasoning.length === 0 ? {} : { reasoning }),
-        },
-    ];
+    const assistant = assistantMessageFromEvents(events);
+    if (assistant === undefined) throw new Error("Missing reconstructed assistant message.");
+    return [user("Refactor the parser."), assistant];
 }
 
 interface CapturedRequest {
@@ -156,7 +141,12 @@ async function withServer(
         await scenario({
             run: async (session, messages) => {
                 const events: SessionEvent[] = [];
-                for await (const event of session.run({ context: { messages } })) {
+                for await (const event of session.run({
+                    context: {
+                        instructions: "You are a careful engineer.",
+                        messages,
+                    },
+                })) {
                     events.push(event);
                 }
                 const request = requests.at(-1);

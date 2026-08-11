@@ -11,24 +11,19 @@ export function withCodexSkills(
     if (prompt === undefined) return context;
     const messages = context.messages.map((message) =>
         message.role === "system"
-            ? {
-                  ...message,
-                  content:
-                      typeof message.content === "string"
-                          ? [message.content]
-                          : [...message.content],
-              }
-            : message,
+            ? { ...message, content: [...message.content] }
+            : structuredClone(message),
     );
     const target = messages.find(
         (message) =>
             message.role === "system" &&
-            message.content.some((part) => part.startsWith("<apps_instructions>")),
+            message.content.some((part) => part.text.startsWith("<apps_instructions>")),
     );
     if (target === undefined) {
         const firstSystemMessage = messages.find((message) => message.role === "system");
-        if (firstSystemMessage?.role === "system") firstSystemMessage.content.push(prompt);
-        else messages.unshift({ role: "system", content: [prompt] });
-    } else if (target.role === "system") target.content.push(prompt);
+        if (firstSystemMessage?.role === "system") {
+            firstSystemMessage.content.push({ type: "text", text: prompt });
+        } else messages.unshift({ role: "system", content: [{ type: "text", text: prompt }] });
+    } else if (target.role === "system") target.content.push({ type: "text", text: prompt });
     return { ...context, messages };
 }

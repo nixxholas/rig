@@ -41,11 +41,16 @@ describeLive("Grok native server search live", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "user",
-                            content:
-                                "<user_query>Search the web for the current Node.js LTS version and cite one official URL.</user_query>",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "<user_query>Search the web for the current Node.js LTS version and cite one official URL.</user_query>",
+                                },
+                            ],
                         },
                     ],
                 },
@@ -60,7 +65,7 @@ describeLive("Grok native server search live", () => {
         expect(
             events.filter((event) => event.type === "toolcall_start" && event.server !== true),
         ).toEqual([]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events).length).toBeGreaterThan(0);
     });
 
@@ -78,11 +83,16 @@ describeLive("Grok native server search live", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "user",
-                            content:
-                                "<user_query>Search X for recent posts about Claude Code and reply with one post URL.</user_query>",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "<user_query>Search X for recent posts about Claude Code and reply with one post URL.</user_query>",
+                                },
+                            ],
                         },
                     ],
                 },
@@ -97,7 +107,7 @@ describeLive("Grok native server search live", () => {
         expect(
             events.filter((event) => event.type === "toolcall_start" && event.server !== true),
         ).toEqual([]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events).toLowerCase()).toMatch(/x\.com\//);
     });
 });

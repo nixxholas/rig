@@ -9,9 +9,13 @@ import type { SessionSystemMessage, SessionUserMessage } from "@/core/SessionCon
  * cached prefix on every notice.
  */
 export function toSessionReminderMessage(message: SessionSystemMessage): SessionUserMessage {
-    const parts = typeof message.content === "string" ? [message.content] : message.content;
     return {
         role: "user",
-        content: `<system-reminder>\n${parts.join("\n\n")}\n</system-reminder>`,
+        content: [
+            {
+                type: "text",
+                text: `<system-reminder>\n${message.content.map((block) => block.text).join("\n\n")}\n</system-reminder>`,
+            },
+        ],
     };
 }

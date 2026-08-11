@@ -33,7 +33,15 @@ describe("ClaudeSession", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
-                    messages: [{ role: "user", content: "Retry the incomplete response." }],
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text" as const, text: "Retry the incomplete response." },
+                            ],
+                        },
+                    ],
                 },
             }),
         );
@@ -47,7 +55,7 @@ describe("ClaudeSession", () => {
             reason: "Claude's response was interrupted by a server error.",
         });
         expect(textFromSessionEvents(events)).toBe("RECOVERED");
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(query.mock.calls[0]?.[0].options?.env?.CLAUDE_CODE_MAX_RETRIES).toBe("1");
         expect(query.mock.calls[1]?.[0].options?.env?.CLAUDE_CODE_MAX_RETRIES).toBe("0");
     });
@@ -75,7 +83,15 @@ describe("ClaudeSession", () => {
         const events = [];
         for await (const event of session.run({
             context: {
-                messages: [{ role: "user", content: "Retry the incomplete response." }],
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text" as const, text: "Retry the incomplete response." },
+                        ],
+                    },
+                ],
             },
         })) {
             events.push(event);
@@ -142,7 +158,15 @@ describe("ClaudeSession", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Retry empty output." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Retry empty output." }],
+                        },
+                    ],
+                },
             }),
         );
 
@@ -176,7 +200,7 @@ describe("ClaudeSession", () => {
             },
         ]);
         expect(textFromSessionEvents(events)).toBe("RECOVERED");
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("preserves a non-abort empty-response retry delay failure", async () => {
@@ -200,7 +224,13 @@ describe("ClaudeSession", () => {
             collectSessionEvents(
                 session.run({
                     context: {
-                        messages: [{ role: "user", content: "Retry empty output." }],
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "Retry empty output." }],
+                            },
+                        ],
                     },
                 }),
             ),
@@ -290,7 +320,15 @@ describe("ClaudeSession", () => {
 
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "Hello." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Hello." }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -363,7 +401,17 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "Hello." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Hello." }],
+                        },
+                    ],
+                },
+            }),
         );
 
         expect(observed).toHaveLength(1);
@@ -409,7 +457,15 @@ describe("ClaudeSession", () => {
 
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "Hello." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Hello." }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -450,7 +506,17 @@ describe("ClaudeSession", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "Retry." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Retry." }],
+                        },
+                    ],
+                },
+            }),
         );
 
         expect(events).toContainEqual({
@@ -490,16 +556,23 @@ describe("ClaudeSession", () => {
         await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [{ callId: "call-1", name: "Read", arguments: "{}" }],
+                            content: [
+                                ...[{ callId: "call-1", name: "Read", arguments: "{}" }].map(
+                                    (call) => ({
+                                        type: "tool_call" as const,
+                                        ...call,
+                                    }),
+                                ),
+                            ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "TOOL_RESULT" }],
                             callId: "call-1",
-                            content: "TOOL_RESULT",
                             isError: true,
                         },
                     ],
@@ -551,7 +624,15 @@ describe("ClaudeSession", () => {
 
         const first = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Inspect this." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Inspect this." }],
+                        },
+                    ],
+                },
             }),
         );
         expect(first.find((event) => event.type === "token_usage")).toEqual({
@@ -559,7 +640,7 @@ describe("ClaudeSession", () => {
             usage: {
                 cacheRead: 900,
                 cacheWrite: 5,
-                input: 100,
+                input: 1_005,
                 output: 10,
                 totalTokens: 1_015,
             },
@@ -568,23 +649,31 @@ describe("ClaudeSession", () => {
         const second = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Inspect this." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Inspect this." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "usage-call",
-                                    name: "Bash",
-                                    arguments: '{"command":"pwd"}',
-                                },
+                            content: [
+                                ...[
+                                    {
+                                        callId: "usage-call",
+                                        name: "Bash",
+                                        arguments: '{"command":"pwd"}',
+                                    },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "/workspace" }],
                             callId: "usage-call",
-                            content: "/workspace",
                             isError: false,
                         },
                     ],
@@ -596,7 +685,7 @@ describe("ClaudeSession", () => {
             usage: {
                 cacheRead: 1_000,
                 cacheWrite: 20,
-                input: 150,
+                input: 1_170,
                 output: 20,
                 totalTokens: 1_190,
             },
@@ -622,29 +711,45 @@ describe("ClaudeSession", () => {
 
         await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Inspect this." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Inspect this." }],
+                        },
+                    ],
+                },
             }),
         );
         const continued = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Inspect this." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Inspect this." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "missing-usage-call",
-                                    name: "Bash",
-                                    arguments: '{"command":"pwd"}',
-                                },
+                            content: [
+                                ...[
+                                    {
+                                        callId: "missing-usage-call",
+                                        name: "Bash",
+                                        arguments: '{"command":"pwd"}',
+                                    },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "/workspace" }],
                             callId: "missing-usage-call",
-                            content: "/workspace",
                             isError: false,
                         },
                     ],
@@ -653,7 +758,7 @@ describe("ClaudeSession", () => {
         );
 
         expect(continued.some((event) => event.type === "token_usage")).toBe(false);
-        expect(continued.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(continued.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("replays after a user message interrupts a completed tool batch", async () => {
@@ -680,33 +785,56 @@ describe("ClaudeSession", () => {
         await expect(
             collectSessionEvents(
                 session.run({
-                    context: { messages: [{ role: "user", content: "Run a command." }] },
+                    context: {
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "Run a command." }],
+                            },
+                        ],
+                    },
                 }),
             ),
-        ).resolves.toContainEqual({ type: "done", state: "tool_call" });
+        ).resolves.toEqual(
+            expect.arrayContaining([expect.objectContaining({ type: "done", state: "tool_call" })]),
+        );
 
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Run a command." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run a command." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "call-1",
-                                    name: "Bash",
-                                    arguments: '{"command":"echo done"}',
-                                },
+                            content: [
+                                ...[
+                                    {
+                                        callId: "call-1",
+                                        name: "Bash",
+                                        arguments: '{"command":"echo done"}',
+                                    },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "done" }],
                             callId: "call-1",
-                            content: "done",
                         },
-                        { role: "user", content: "What are the last messages?" },
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text" as const, text: "What are the last messages?" },
+                            ],
+                        },
                     ],
                 },
             }),
@@ -715,7 +843,7 @@ describe("ClaudeSession", () => {
         expect(query).toHaveBeenCalledTimes(2);
         expect(firstClose).toHaveBeenCalledOnce();
         expect(textFromSessionEvents(events)).toBe("RECOVERED");
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("replays after a system notice interrupts a completed tool batch", async () => {
@@ -742,36 +870,59 @@ describe("ClaudeSession", () => {
         await expect(
             collectSessionEvents(
                 session.run({
-                    context: { messages: [{ role: "user", content: "Run a command." }] },
+                    context: {
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "Run a command." }],
+                            },
+                        ],
+                    },
                 }),
             ),
-        ).resolves.toContainEqual({ type: "done", state: "tool_call" });
+        ).resolves.toEqual(
+            expect.arrayContaining([expect.objectContaining({ type: "done", state: "tool_call" })]),
+        );
 
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Run a command." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run a command." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "call-1",
-                                    name: "Bash",
-                                    arguments: '{"command":"echo done"}',
-                                },
+                            content: [
+                                ...[
+                                    {
+                                        callId: "call-1",
+                                        name: "Bash",
+                                        arguments: '{"command":"echo done"}',
+                                    },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "Interrupted by steering." }],
                             callId: "call-1",
-                            content: "Interrupted by steering.",
                             isError: true,
                         },
                         {
                             role: "system",
-                            content: "Background command 19 finished successfully.",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Background command 19 finished successfully.",
+                                },
+                            ],
                         },
                     ],
                 },
@@ -781,7 +932,7 @@ describe("ClaudeSession", () => {
         expect(query).toHaveBeenCalledTimes(2);
         expect(firstClose).toHaveBeenCalledOnce();
         expect(textFromSessionEvents(events)).toBe("RECOVERED");
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("replays parallel tool results as one complete Claude user turn", async () => {
@@ -818,35 +969,46 @@ describe("ClaudeSession", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Run both tools." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run both tools." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "parallel-read",
-                                    name: "Read",
-                                    arguments: '{"file_path":"/tmp/a"}',
-                                },
-                                {
-                                    callId: "parallel-glob",
-                                    name: "Glob",
-                                    arguments: '{"pattern":"**/*.md"}',
-                                },
+                            content: [
+                                ...[
+                                    {
+                                        callId: "parallel-read",
+                                        name: "Read",
+                                        arguments: '{"file_path":"/tmp/a"}',
+                                    },
+                                    {
+                                        callId: "parallel-glob",
+                                        name: "Glob",
+                                        arguments: '{"pattern":"**/*.md"}',
+                                    },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "read result" }],
                             callId: "parallel-read",
-                            content: "read result",
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "glob result" }],
                             callId: "parallel-glob",
-                            content: "glob result",
                         },
-                        { role: "user", content: "Continue." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Continue." }],
+                        },
                     ],
                 },
             }),
@@ -912,7 +1074,15 @@ describe("ClaudeSession", () => {
             collectSessionEvents(
                 session.run({
                     abort: abortController.signal,
-                    context: { messages: [{ role: "user", content: "Hello." }] },
+                    context: {
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "Hello." }],
+                            },
+                        ],
+                    },
                 }),
             ),
         ).rejects.toThrow("SDK construction failed.");
@@ -964,13 +1134,21 @@ describe("ClaudeSession", () => {
         const events = await collectSessionEvents(
             session.run({
                 abort: controller.signal,
-                context: { messages: [{ role: "user", content: "Finish." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Finish." }],
+                        },
+                    ],
+                },
             }),
         );
 
         expect(controller.signal.aborted).toBe(true);
         expect(events).toContainEqual({ type: "block_stop" });
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("stops immediately when the Claude SDK does not settle after interruption", async () => {
@@ -1001,7 +1179,15 @@ describe("ClaudeSession", () => {
         const eventsPromise = collectSessionEvents(
             session.run({
                 abort: controller.signal,
-                context: { messages: [{ role: "user", content: "Keep waiting." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Keep waiting." }],
+                        },
+                    ],
+                },
             }),
         );
 
@@ -1047,7 +1233,15 @@ describe("ClaudeSession", () => {
         const firstRun = collectSessionEvents(
             session.run({
                 abort: controller.signal,
-                context: { messages: [{ role: "user", content: "Keep waiting." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Keep waiting." }],
+                        },
+                    ],
+                },
             }),
         );
 
@@ -1057,9 +1251,16 @@ describe("ClaudeSession", () => {
         const secondRun = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Keep waiting." },
-                        { role: "user", content: "Continue." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Keep waiting." }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Continue." }],
+                        },
                     ],
                 },
             }),
@@ -1097,7 +1298,15 @@ describe("ClaudeSession", () => {
                 collectSessionEvents(
                     session.run({
                         abort: controller.signal,
-                        context: { messages: [{ role: "user", content: "Keep waiting." }] },
+                        context: {
+                            instructions: "",
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: [{ type: "text" as const, text: "Keep waiting." }],
+                                },
+                            ],
+                        },
                     }),
                 ),
             ),
@@ -1138,17 +1347,22 @@ describe("ClaudeSession", () => {
         await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [{ callId: "call-1", name: "Read", arguments: "{}" }],
+                            content: [
+                                ...[{ callId: "call-1", name: "Read", arguments: "{}" }].map(
+                                    (call) => ({
+                                        type: "tool_call" as const,
+                                        ...call,
+                                    }),
+                                ),
+                            ],
                         },
                         {
                             role: "tool",
-                            callId: "call-1",
-                            content: "tool image",
-                            input: [
+                            content: [
                                 { type: "text", text: "tool image" },
                                 {
                                     type: "image",
@@ -1156,11 +1370,11 @@ describe("ClaudeSession", () => {
                                     data: "dG9vbC1pbWFnZQ==",
                                 },
                             ],
+                            callId: "call-1",
                         },
                         {
                             role: "user",
-                            content: "user image",
-                            input: [
+                            content: [
                                 { type: "text", text: "user image" },
                                 {
                                     type: "image",
@@ -1225,8 +1439,14 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const systemMessages = [
-            { role: "system" as const, content: "Project instructions." },
-            { role: "system" as const, content: "Golden skill description." },
+            {
+                role: "system" as const,
+                content: [{ type: "text" as const, text: "Project instructions." }],
+            },
+            {
+                role: "system" as const,
+                content: [{ type: "text" as const, text: "Golden skill description." }],
+            },
         ];
         const session = new ClaudeSession("session-id", {
             instructions: "Rig system instructions.",
@@ -1270,7 +1490,14 @@ describe("ClaudeSession", () => {
             session.run({
                 abort: abortController.signal,
                 context: {
-                    messages: [...systemMessages, { role: "user", content: "First turn." }],
+                    instructions: "Rig system instructions.",
+                    messages: [
+                        ...systemMessages,
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "First turn." }],
+                        },
+                    ],
                 },
             }),
         );
@@ -1278,17 +1505,50 @@ describe("ClaudeSession", () => {
             session.run({
                 model: "sonnet[1m]",
                 context: {
+                    instructions: "Rig system instructions.",
                     messages: [
                         ...systemMessages,
-                        { role: "user", content: "First turn." },
-                        { role: "assistant", content: "FIRST" },
-                        { role: "user", content: "Switch models." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "First turn." }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "FIRST" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Switch models." }],
+                        },
                     ],
                 },
             }),
         );
-        const compacted = await session.compact();
+        const compactionContext = {
+            instructions: "Rig system instructions.",
+            messages: [
+                ...systemMessages,
+                {
+                    role: "user" as const,
+                    content: [{ type: "text" as const, text: "First turn." }],
+                },
+                {
+                    role: "assistant" as const,
+                    content: [{ type: "text" as const, text: "FIRST" }],
+                },
+                {
+                    role: "user" as const,
+                    content: [{ type: "text" as const, text: "Switch models." }],
+                },
+                {
+                    role: "assistant" as const,
+                    content: [{ type: "text" as const, text: "SWITCHED" }],
+                },
+            ],
+        };
+        const compacted = await session.compact({ context: compactionContext });
         const customCompacted = await session.compact({
+            context: compactionContext,
             instructions: "Keep CUSTOM_MARKER.",
         });
 
@@ -1298,7 +1558,7 @@ describe("ClaudeSession", () => {
             status: "completed",
             summary: "SUMMARY",
             usage: {
-                input: 7,
+                input: 121,
                 output: 11,
                 cacheRead: 101,
                 cacheWrite: 13,
@@ -1307,9 +1567,15 @@ describe("ClaudeSession", () => {
             context: {
                 instructions: "Rig system instructions.",
                 messages: [
-                    { role: "system", content: "Project instructions." },
-                    { role: "system", content: "Golden skill description." },
-                    { role: "user", content: "SUMMARY" },
+                    {
+                        role: "system",
+                        content: [{ type: "text", text: "Project instructions." }],
+                    },
+                    {
+                        role: "system",
+                        content: [{ type: "text", text: "Golden skill description." }],
+                    },
+                    { role: "user", content: [{ type: "text", text: "SUMMARY" }] },
                 ],
             },
         });
@@ -1394,9 +1660,16 @@ describe("ClaudeSession", () => {
 
         const compacted = await session.compact({
             context: {
+                instructions: "Rig system instructions.",
                 messages: [
-                    { role: "user", content: "Review this." },
-                    { role: "assistant", content: "Reviewed." },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Review this." }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "Reviewed." }],
+                    },
                 ],
             },
         });
@@ -1405,7 +1678,7 @@ describe("ClaudeSession", () => {
             status: "completed",
             summary: "SUMMARY",
             usage: {
-                input: 7,
+                input: 121,
                 output: 11,
                 cacheRead: 101,
                 cacheWrite: 13,
@@ -1441,15 +1714,24 @@ describe("ClaudeSession", () => {
             }
             return Object.assign(messages(), { close: () => {} });
         }) as ClaudeSdkQuery;
-        const systemMessage = { role: "system" as const, content: "Project instructions." };
+        const systemMessage = {
+            role: "system" as const,
+            content: [{ type: "text" as const, text: "Project instructions." }],
+        };
         const compactedPrefix = [
             systemMessage,
-            { role: "user" as const, content: "OLD QUESTION" },
-            { role: "assistant" as const, content: "OLD ANSWER" },
+            {
+                role: "user" as const,
+                content: [{ type: "text" as const, text: "OLD QUESTION" }],
+            },
+            {
+                role: "assistant" as const,
+                content: [{ type: "text" as const, text: "OLD ANSWER" }],
+            },
         ];
         const retainedMessage = {
             role: "user" as const,
-            content: "RETAIN THIS LATEST TURN",
+            content: [{ type: "text" as const, text: "RETAIN THIS LATEST TURN" }],
         };
         const session = new ClaudeSession("restored-session", {
             instructions: "Rig system instructions.",
@@ -1460,16 +1742,25 @@ describe("ClaudeSession", () => {
         });
 
         const compacted = await session.compact({
-            context: { messages: compactedPrefix },
+            context: {
+                instructions: "Rig system instructions.",
+                messages: compactedPrefix,
+            },
         });
         await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "Rig system instructions.",
                     messages: [
                         systemMessage,
                         {
                             role: "user",
-                            content: "<conversation_summary>\nSUMMARY\n</conversation_summary>",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "<conversation_summary>\nSUMMARY\n</conversation_summary>",
+                                },
+                            ],
                         },
                         retainedMessage,
                     ],
@@ -1481,7 +1772,11 @@ describe("ClaudeSession", () => {
             status: "completed",
             preservedMessages: [systemMessage],
             context: {
-                messages: [systemMessage, { role: "user", content: "SUMMARY" }],
+                instructions: "Rig system instructions.",
+                messages: [
+                    systemMessage,
+                    { role: "user", content: [{ type: "text", text: "SUMMARY" }] },
+                ],
             },
         });
         expect(JSON.stringify(replayEntries[0])).not.toContain(retainedMessage.content);
@@ -1490,7 +1785,7 @@ describe("ClaudeSession", () => {
         expect(JSON.stringify(replayEntries[1])).toContain("SUMMARY");
         expect(postCompactionPrompt).toMatchObject({
             type: "user",
-            message: { content: retainedMessage.content },
+            message: { content: "RETAIN THIS LATEST TURN" },
         });
     });
 
@@ -1529,33 +1824,57 @@ describe("ClaudeSession", () => {
         await expect(
             collectSessionEvents(
                 session.run({
-                    context: { messages: [{ role: "user", content: "ORIGINAL QUESTION" }] },
+                    context: {
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "ORIGINAL QUESTION" }],
+                            },
+                        ],
+                    },
                 }),
             ),
-        ).resolves.toContainEqual({ type: "done", state: "tool_call" });
+        ).resolves.toEqual(
+            expect.arrayContaining([expect.objectContaining({ type: "done", state: "tool_call" })]),
+        );
 
         // The caller compacted while the tool ran, so the history behind the pending tool result
         // is no longer the history the live query holds.
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "user",
-                            content: "<conversation_summary>\nSUMMARY\n</conversation_summary>",
-                        },
-                        {
-                            role: "assistant",
-                            content: "",
-                            toolCalls: [
+                            content: [
                                 {
-                                    callId: "call-1",
-                                    name: "Bash",
-                                    arguments: '{"command":"echo done"}',
+                                    type: "text" as const,
+                                    text: "<conversation_summary>\nSUMMARY\n</conversation_summary>",
                                 },
                             ],
                         },
-                        { role: "tool", callId: "call-1", content: "done" },
+                        {
+                            role: "assistant",
+                            content: [
+                                ...[
+                                    {
+                                        callId: "call-1",
+                                        name: "Bash",
+                                        arguments: '{"command":"echo done"}',
+                                    },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
+                            ],
+                        },
+                        {
+                            role: "tool",
+                            content: [{ type: "text" as const, text: "done" }],
+                            callId: "call-1",
+                        },
                     ],
                 },
             }),
@@ -1586,29 +1905,46 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "Run a command." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run a command." }],
+                        },
+                    ],
+                },
+            }),
         );
         // The executor round trip decorates the assistant it replays with fields Claude never
         // sent back, so wire identity - not raw equality - has to drive the decision.
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Run a command." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run a command." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            encryptedReasoning: "round-trip-only",
-                            responseItems: [{ type: "ignored" }],
-                            toolCalls: [
+                            content: [
+                                { type: "reasoning", reasoning: "round-trip-only" },
                                 {
+                                    type: "tool_call",
                                     callId: "call-1",
                                     name: "Bash",
                                     arguments: '{"command":"echo done"}',
                                 },
                             ],
                         },
-                        { role: "tool", callId: "call-1", content: "done" },
+                        {
+                            role: "tool",
+                            content: [{ type: "text" as const, text: "done" }],
+                            callId: "call-1",
+                        },
                     ] as never,
                 },
             }),
@@ -1631,15 +1967,35 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "First." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "First." }],
+                        },
+                    ],
+                },
+            }),
         );
         await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "First." },
-                        { role: "assistant", content: "EDITED ANSWER" },
-                        { role: "user", content: "Second." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "First." }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "EDITED ANSWER" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Second." }],
+                        },
                     ],
                 },
             }),
@@ -1674,18 +2030,41 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "First." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "First." }],
+                        },
+                    ],
+                },
+            }),
         );
         // Only the final message reaches a live query, so a notice appended beside the next
         // prompt would be silently dropped if the session continued here.
         await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "First." },
-                        { role: "assistant", content: "ANSWER" },
-                        { role: "system", content: "PROJECT NOTICE" },
-                        { role: "user", content: "Second." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "First." }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "ANSWER" }],
+                        },
+                        {
+                            role: "system",
+                            content: [{ type: "text" as const, text: "PROJECT NOTICE" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Second." }],
+                        },
                     ],
                 },
             }),
@@ -1715,22 +2094,44 @@ describe("ClaudeSession", () => {
         });
 
         await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "Run two." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run two." }],
+                        },
+                    ],
+                },
+            }),
         );
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "Run two." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Run two." }],
+                        },
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                { callId: "call-1", name: "Bash", arguments: "{}" },
-                                { callId: "call-2", name: "Bash", arguments: "{}" },
+                            content: [
+                                ...[
+                                    { callId: "call-1", name: "Bash", arguments: "{}" },
+                                    { callId: "call-2", name: "Bash", arguments: "{}" },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
-                        { role: "tool", callId: "call-1", content: "only one" },
+                        {
+                            role: "tool",
+                            content: [{ type: "text" as const, text: "only one" }],
+                            callId: "call-1",
+                        },
                     ],
                 },
             }),
@@ -1752,7 +2153,15 @@ describe("ClaudeSession", () => {
             tools: [],
         });
 
-        const firstTurn = { messages: [{ role: "user" as const, content: "Same prompt." }] };
+        const firstTurn = {
+            instructions: "",
+            messages: [
+                {
+                    role: "user" as const,
+                    content: [{ type: "text" as const, text: "Same prompt." }],
+                },
+            ],
+        };
         await collectSessionEvents(session.run({ context: firstTurn }));
         // Clearing rewinds behind an answer the live query still holds, so the identical prompt
         // must not resume that conversation.

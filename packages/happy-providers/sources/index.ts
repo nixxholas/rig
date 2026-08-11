@@ -26,10 +26,11 @@ export {
     isProviderQuotaStale,
 } from "@/core/isProviderQuotaStale.js";
 export { unavailableProviderQuota } from "@/core/unavailableProviderQuota.js";
-export { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+export { EMPTY_SESSION_USAGE, type SessionUsage } from "@/core/SessionUsage.js";
 export type {
     CancelledSessionCompaction,
     CompletedSessionCompaction,
+    FailedSessionCompaction,
     SessionCompaction,
     SessionCompactionOptions,
 } from "@/core/SessionCompaction.js";
@@ -38,13 +39,16 @@ export type {
     SessionAgentMessage,
     SessionCompactionMessage,
     SessionContext,
-    SessionImageContent,
-    SessionInputContent,
+    SessionAssistantBlock,
+    SessionImageBlock,
+    SessionInputBlock,
     SessionMessage,
-    SessionReasoning,
+    SessionOutputBlock,
+    SessionReasoningBlock,
     SessionSystemMessage,
-    SessionTextContent,
-    SessionToolCall,
+    SessionTextBlock,
+    SessionToolCallBlock,
+    SessionToolResultBlock,
     SessionToolResultMessage,
     SessionUserMessage,
 } from "@/core/SessionContext.js";
@@ -56,8 +60,13 @@ export type {
     SessionProviderError,
     SessionProviderErrorDiagnostics,
     SessionStream,
+    SessionTokens,
 } from "@/core/SessionEvent.js";
 export { isSessionDoneEvent, isSessionErrorDone } from "@/core/SessionEvent.js";
+export {
+    assistantMessageFromEvents,
+    SessionAssistantMessageAccumulator,
+} from "@/core/SessionAssistantMessageAccumulator.js";
 export {
     sessionProviderErrorDiagnosticsSchema,
     sessionProviderErrorSchema,
@@ -139,10 +148,7 @@ export {
     type FetchCodexProviderUsageOptions,
 } from "@/vendors/codex/fetchCodexProviderUsage.js";
 export { CodexSession, type CodexSessionOptions } from "@/vendors/codex/CodexSession.js";
-export type {
-    CodexToolDefinitionVendor,
-    CodexToolVendor,
-} from "@/vendors/codex/CodexToolVendor.js";
+export type { CodexToolVendor } from "@/vendors/codex/CodexToolVendor.js";
 export {
     CODEX_API_ENDPOINT,
     CODEX_CHATGPT_ENDPOINT,

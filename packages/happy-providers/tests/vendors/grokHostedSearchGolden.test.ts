@@ -73,7 +73,7 @@ describe("Grok server tool goldens", () => {
         ).toEqual([]);
         expect(result.toolCalls).toEqual([]);
         expect(result.stopReason).toBe("stop");
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(result.assistantText).toContain("https://x.com/");
     });
 
@@ -117,13 +117,20 @@ describe("Grok server tool goldens", () => {
         const input = toGrokResponseInput({
             instructions: "System prompt.",
             messages: [
-                { role: "user", content: "Search X for the latest posts about 'Claude Code'." },
                 {
-                    role: "assistant",
-                    content: result.assistantText,
-                    responseItems: result.responseItems,
+                    role: "user",
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: "Search X for the latest posts about 'Claude Code'.",
+                        },
+                    ],
                 },
-                { role: "user", content: "Who posted first?" },
+                result.message,
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Who posted first?" }],
+                },
             ],
         });
 
@@ -593,7 +600,7 @@ describe("Grok server tool goldens", () => {
         expect(result.assistantText).toBe("I found both sources.");
         expect(result.toolCalls.map((call) => call.name)).toEqual(["read_file"]);
         expect(result.stopReason).toBe("tool_use");
-        expect(events.at(-1)).toEqual({ type: "done", state: "tool_call" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "tool_call" });
     });
 
     it("closes an open server call when the user aborts the response", async () => {
@@ -908,7 +915,15 @@ function serverToolCallResults(
     const serverCallIds = new Set(serverToolCallStarts(events).map((event) => event.callId));
     return events.flatMap((event) =>
         event.type === "toolcall_result_end" && serverCallIds.has(event.callId)
-            ? [{ callId: event.callId, result: event.result }]
+            ? [
+                  {
+                      callId: event.callId,
+                      result: event.content
+                          .filter((block) => block.type === "text")
+                          .map((block) => block.text)
+                          .join(""),
+                  },
+              ]
             : [],
     );
 }
@@ -1009,13 +1024,31 @@ async function captureRequest(options: {
             tools: [readFileTool, ...(options.serverTools ?? [])],
         });
         for await (const _event of session.run({
-            context: { messages: [{ role: "user", content: "Hi." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Hi." }],
+                    },
+                ],
+            },
         })) {
             // Drained so the request completes.
         }
         if (options.compaction === true) {
             capturedBody = undefined;
-            const compacted = await session.compact();
+            const compacted = await session.compact({
+                context: {
+                    instructions: "System prompt.",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "Hi." }],
+                        },
+                    ],
+                },
+            });
             expect(compacted.status).toBe("completed");
         }
         return capturedBody;

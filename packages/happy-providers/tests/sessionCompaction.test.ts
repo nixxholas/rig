@@ -12,24 +12,33 @@ describe("SessionCompaction", () => {
         });
 
         const result = await session.compact({
-            context: { messages: [{ role: "system", content: "Preserved metadata." }] },
+            context: {
+                instructions: "System prompt.",
+                messages: [
+                    {
+                        role: "system",
+                        content: [{ type: "text" as const, text: "Preserved metadata." }],
+                    },
+                ],
+            },
         });
 
         expect(result).toEqual({
             status: "failed",
             kind: "inference_error",
             message: "This Responses API endpoint does not provide native compaction.",
-            context: {
-                instructions: "System prompt.",
-                messages: [],
-            },
         });
     });
 
     it("returns cancellation separately and leaves context untouched", async () => {
         const context = {
             instructions: "System prompt.",
-            messages: [{ role: "user" as const, content: "Original state." }],
+            messages: [
+                {
+                    role: "user" as const,
+                    content: [{ type: "text" as const, text: "Original state." }],
+                },
+            ],
         };
         const session = new ResponsesSession("session", {
             apiKey: "test-key",
@@ -40,10 +49,16 @@ describe("SessionCompaction", () => {
         controller.abort();
 
         await expect(
-            session.compact({ signal: controller.signal, context: { messages: context.messages } }),
+            session.compact({
+                signal: controller.signal,
+                context: {
+                    instructions: context.instructions,
+                    messages: context.messages,
+                },
+            }),
         ).resolves.toEqual({
             status: "cancelled",
-            context: { instructions: context.instructions, messages: [] },
+            context,
         });
     });
 });

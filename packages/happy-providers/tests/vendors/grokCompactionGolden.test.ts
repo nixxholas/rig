@@ -169,7 +169,12 @@ describe("Grok CLI compaction golden trace", () => {
                 instructions: context.instructions,
                 tools: grok_4_5_tools,
             });
-            const result = await session.compact({ context: { messages: context.messages } });
+            const result = await session.compact({
+                context: {
+                    instructions: context.instructions,
+                    messages: context.messages,
+                },
+            });
 
             expect(result.status).toBe("completed");
             expect(capturedHeaders[0]?.["x-grok-turn-idx"]).toBeUndefined();
@@ -186,22 +191,30 @@ describe("Grok CLI compaction golden trace", () => {
             expect(result.preservedMessages).toHaveLength(2);
             const checkpoint = result.preservedMessages[1];
             if (checkpoint?.role !== "user") throw new Error("Expected a user checkpoint.");
-            expect(checkpoint.content).toContain("Checkpoint DELTA:");
+            expect(messageContentText(checkpoint.content)).toContain("Checkpoint DELTA:");
             const continuation = result.context.messages[2];
             const reminder = result.context.messages[3];
             if (continuation?.role !== "user" || reminder?.role !== "user") {
                 throw new Error("Expected user compaction messages.");
             }
-            expect(continuation.content).toContain("This session is being continued");
-            expect(reminder.content).toContain("<system-reminder>");
+            expect(messageContentText(continuation.content)).toContain(
+                "This session is being continued",
+            );
+            expect(messageContentText(reminder.content)).toContain("<system-reminder>");
 
             for await (const _event of session.run({
                 context: {
+                    instructions: result.context.instructions,
                     messages: [
                         ...result.context.messages,
                         {
                             role: "user",
-                            content: `<user_query>\n${trace.scenario.followUpPrompt}\n</user_query>`,
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: `<user_query>\n${trace.scenario.followUpPrompt}\n</user_query>`,
+                                },
+                            ],
                         },
                     ],
                 },
@@ -239,6 +252,13 @@ function messageText(exchange: TraceExchange | undefined): string {
     );
 }
 
+function messageContentText(content: readonly { type: string; text?: string }[]): string {
+    return content
+        .filter((block) => block.type === "text" && block.text !== undefined)
+        .map((block) => block.text!)
+        .join("");
+}
+
 function contextFromCompactionInput(input: TraceInput[]): SessionContext {
     const instructions = input[0]?.content;
     if (typeof instructions !== "string") throw new Error("Missing system instructions.");
@@ -248,38 +268,57 @@ function contextFromCompactionInput(input: TraceInput[]): SessionContext {
         if (item.type === "reasoning") {
             reasoning = item;
         } else if (item.type === "message" && item.role === "user") {
-            messages.push({ role: "user", content: item.content ?? "" });
+            messages.push({
+                role: "user",
+                content: [{ type: "text" as const, text: item.content ?? "" }],
+            });
         } else if (item.type === "message" && item.role === "assistant") {
             messages.push({
                 role: "assistant",
-                content: item.content ?? "",
-                ...(reasoning === undefined
-                    ? {}
-                    : { encryptedReasoning: JSON.stringify(reasoning) }),
+                content: [
+                    ...(reasoning === undefined
+                        ? []
+                        : [
+                              {
+                                  type: "reasoning" as const,
+                                  reasoning: JSON.stringify(reasoning),
+                              },
+                          ]),
+                    { type: "text" as const, text: item.content ?? "" },
+                ],
             });
             reasoning = undefined;
         } else if (item.type === "function_call") {
             messages.push({
                 role: "assistant",
-                content: "",
-                ...(reasoning === undefined
-                    ? {}
-                    : { encryptedReasoning: JSON.stringify(reasoning) }),
-                toolCalls: [
-                    {
-                        callId: item.call_id ?? "",
-                        name: item.name ?? "",
-                        arguments: item.arguments ?? "",
-                        vendor: { provider: "grok", type: "function_call" },
-                    },
+                content: [
+                    ...(reasoning === undefined
+                        ? []
+                        : [
+                              {
+                                  type: "reasoning" as const,
+                                  reasoning: JSON.stringify(reasoning),
+                              },
+                          ]),
+                    ...[
+                        {
+                            callId: item.call_id ?? "",
+                            name: item.name ?? "",
+                            arguments: item.arguments ?? "",
+                            vendor: { provider: "grok", type: "function_call" },
+                        },
+                    ].map((call) => ({
+                        type: "tool_call" as const,
+                        ...call,
+                    })),
                 ],
             });
             reasoning = undefined;
         } else if (item.type === "function_call_output") {
             messages.push({
                 role: "tool",
+                content: [{ type: "text" as const, text: item.output ?? "" }],
                 callId: item.call_id ?? "",
-                content: item.output ?? "",
                 vendor: { provider: "grok", type: "function_call" },
             });
         }

@@ -11,7 +11,7 @@ export abstract class BaseSession {
 
     abstract run(request: SessionRunRequest): SessionStream;
 
-    abstract compact(options?: SessionCompactionOptions): Promise<SessionCompaction>;
+    abstract compact(options: SessionCompactionOptions): Promise<SessionCompaction>;
 
     abstract destroy(): void | Promise<void>;
 }

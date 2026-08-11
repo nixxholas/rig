@@ -14,7 +14,7 @@ import type {
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import type { ResponseInputItem } from "openai/resources/responses/responses.js";
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 import type { SessionMessage, SessionUserMessage } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { responseInputItems } from "@/protocol/responses/responseInputItems.js";
@@ -23,7 +23,7 @@ import { createResponsesLiteSseRequest } from "@/protocol/responsesLite/createRe
 import { context_checkpoint_summary_prefix } from "@/vendors/codex/prompts/context_checkpoint_compaction_instructions.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
-import { toSessionCacheUsage } from "@/protocol/responses/toSessionCacheUsage.js";
+import { toSessionUsage } from "@/protocol/responses/toSessionUsage.js";
 
 export interface CodexCompactionMetadata {
     readonly trigger: "manual";
@@ -213,7 +213,8 @@ export function preserveCodexCompactionMessages(
     let remainingTokens = PRESERVED_TOKEN_LIMIT;
     for (const message of candidates.toReversed()) {
         if (remainingTokens === 0) break;
-        const tokens = Math.ceil(Buffer.byteLength(message.content) / APPROXIMATE_BYTES_PER_TOKEN);
+        const text = sessionUserText(message);
+        const tokens = Math.ceil(Buffer.byteLength(text) / APPROXIMATE_BYTES_PER_TOKEN);
         if (tokens <= remainingTokens) {
             preserved.unshift(structuredClone(message));
             remainingTokens -= tokens;
@@ -221,7 +222,7 @@ export function preserveCodexCompactionMessages(
         }
         preserved.unshift({
             ...structuredClone(message),
-            content: truncateCodexText(message.content, remainingTokens),
+            content: [{ type: "text", text: truncateCodexText(text, remainingTokens) }],
         });
         break;
     }
@@ -237,13 +238,14 @@ export function preserveCodexLocalCompactionMessages(
     const candidates = messages.filter(
         (message): message is SessionUserMessage =>
             message.role === "user" &&
-            !message.content.startsWith(`${context_checkpoint_summary_prefix}\n`),
+            !sessionUserText(message).startsWith(`${context_checkpoint_summary_prefix}\n`),
     );
     const preserved: SessionUserMessage[] = [];
     let remainingTokens = LOCAL_PRESERVED_TOKEN_LIMIT;
     for (const message of candidates.toReversed()) {
         if (remainingTokens === 0) break;
-        const tokens = Math.ceil(Buffer.byteLength(message.content) / APPROXIMATE_BYTES_PER_TOKEN);
+        const text = sessionUserText(message);
+        const tokens = Math.ceil(Buffer.byteLength(text) / APPROXIMATE_BYTES_PER_TOKEN);
         if (tokens <= remainingTokens) {
             preserved.unshift(structuredClone(message));
             remainingTokens -= tokens;
@@ -251,16 +253,23 @@ export function preserveCodexLocalCompactionMessages(
         }
         preserved.unshift({
             ...structuredClone(message),
-            content: truncateCodexText(message.content, remainingTokens),
+            content: [{ type: "text", text: truncateCodexText(text, remainingTokens) }],
         });
         break;
     }
     return preserved;
 }
 
+function sessionUserText(message: SessionUserMessage): string {
+    return message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+}
+
 export interface CollectedCodexCompaction {
     readonly item: ResponseCompactionItemParam;
-    readonly usage: SessionCacheUsage;
+    readonly usage: SessionUsage;
 }
 
 export async function collectCodexCompaction(
@@ -313,7 +322,7 @@ export async function collectCodexCompaction(
             throw new Error("Compaction response did not contain a compaction item.");
         return {
             item: resolved,
-            usage: toSessionCacheUsage(event.response.usage),
+            usage: toSessionUsage(event.response.usage),
         };
     }
     throw new Error("Compaction response stream closed before completion.");

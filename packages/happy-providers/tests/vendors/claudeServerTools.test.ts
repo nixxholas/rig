@@ -45,7 +45,7 @@ describe("Claude server tools", () => {
     });
 
     it("enables native ToolSearch when a client tool is deferred", () => {
-        const deferred = { name: "RareTool", deferLoading: true };
+        const deferred = { name: "RareTool", defer: true };
         const options = toClaudeSdkOptions({
             context: { instructions: "", messages: [] },
             credential: { name: "claude-code", credential: undefined },
@@ -78,7 +78,17 @@ describe("Claude server tools", () => {
         });
 
         const events = await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "Search." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Search." }],
+                        },
+                    ],
+                },
+            }),
         );
 
         expect(events).toContainEqual({
@@ -112,7 +122,7 @@ describe("Claude server tools", () => {
                 .every((event) => serverToolCallIds(events).has(event.callId)),
         ).toBe(true);
         // `tool_call` would send the run to the executor to answer a call nothing can answer.
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events)).toBe("Rig is a coding agent.");
     });
 
@@ -125,11 +135,21 @@ describe("Claude server tools", () => {
             credential,
             model: "sonnet[1m]",
             query,
-            tools: [read, { name: "RareTool", deferLoading: true }],
+            tools: [read, { name: "RareTool", defer: true }],
         });
 
         const events = await collectSessionEvents(
-            session.run({ context: { messages: [{ role: "user", content: "Find a tool." }] } }),
+            session.run({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Find a tool." }],
+                        },
+                    ],
+                },
+            }),
         );
 
         expect(events).toContainEqual({
@@ -139,7 +159,7 @@ describe("Claude server tools", () => {
             server: true,
             vendor: { type: "claude_tool_use" },
         });
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 });
 
@@ -169,11 +189,19 @@ function serverToolQuery(name = "WebSearch"): ReturnType<ClaudeSdkQuery> {
             delta: { type: "input_json_delta", partial_json: '{"query":"Rig"}' },
         });
         yield streamEvent({ type: "content_block_stop", index: 0 });
+        // Claude Code can continue after a built-in in a new Anthropic message. Content indexes
+        // restart for that message, so the text block may reuse the completed tool's index.
+        yield streamEvent({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+        });
         yield streamEvent({
             type: "content_block_delta",
-            index: 1,
+            index: 0,
             delta: { type: "text_delta", text: "Rig is a coding agent." },
         });
+        yield streamEvent({ type: "content_block_stop", index: 0 });
         yield {
             type: "result",
             subtype: "success",

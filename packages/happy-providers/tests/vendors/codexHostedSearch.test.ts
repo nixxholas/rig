@@ -126,7 +126,7 @@ describe("Codex server tools", () => {
     // compaction sample that calls a tool counting as a tool call rather than as provider work.
     it("declares no server search while compacting, even when handed one", async () => {
         const declared = await declaredTools(codex_server_tools, async (session) => {
-            await session.compact().catch(() => {
+            await session.compact({ context: { instructions: "", messages: [] } }).catch(() => {
                 // The stub server does not return a real compaction item; the request it was sent
                 // is the whole subject here.
             });
@@ -142,11 +142,11 @@ describe("Codex server tools", () => {
                     name: "weather_forecast",
                     description: "Read a weather forecast.",
                     parameters: Type.Object({ city: Type.String() }),
-                    deferLoading: true,
+                    defer: true,
                 },
             ],
             async (session) => {
-                await session.compact().catch(() => {
+                await session.compact({ context: { instructions: "", messages: [] } }).catch(() => {
                     // The stub server does not return a real compaction item.
                 });
             },
@@ -249,7 +249,7 @@ describe("Codex server tools", () => {
                         name: "weather_forecast",
                         description: "Read a weather forecast.",
                         parameters: Type.Object({ city: Type.String() }),
-                        deferLoading: true,
+                        defer: true,
                     },
                 ],
                 transport: "sse",
@@ -257,7 +257,15 @@ describe("Codex server tools", () => {
             });
             const events: SessionEvent[] = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "Check the weather." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Check the weather." }],
+                        },
+                    ],
+                },
                 effort: "low",
                 model: "gpt-5.6-sol",
             })) {
@@ -273,7 +281,7 @@ describe("Codex server tools", () => {
                 type: "text_delta",
                 delta: "Forecast tool loaded.",
             });
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             expect(bodies).toHaveLength(2);
             const firstRequestTools = requestTools(bodies[0] ?? {});
             const secondRequestTools = requestTools(bodies[1] ?? {});
@@ -348,7 +356,7 @@ describe("Codex server tools", () => {
                         name: "weather_forecast",
                         description: "Read a weather forecast.",
                         parameters: Type.Object({ city: Type.String() }),
-                        deferLoading: true,
+                        defer: true,
                     },
                 ],
                 transport: "sse",
@@ -356,7 +364,17 @@ describe("Codex server tools", () => {
             });
             const events: SessionEvent[] = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "Find a missing capability." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text" as const, text: "Find a missing capability." },
+                            ],
+                        },
+                    ],
+                },
                 effort: "low",
                 model: "gpt-5.6-sol",
             })) {
@@ -437,7 +455,15 @@ async function declaredTools(
             userAgent: "rig-test",
         });
         for await (const _event of session.run({
-            context: { messages: [{ role: "user", content: "Reply with OK." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Reply with OK." }],
+                    },
+                ],
+            },
             effort: "low",
             model: "gpt-5.6-sol",
         })) {

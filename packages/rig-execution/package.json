@@ -22,7 +22,7 @@
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.49",
-        "@slopus/happy-providers": "workspace:*"
+        "@slopus/happy-providers": "0.0.1"
     },
     "devDependencies": {
         "@types/node": "^24.0.10",

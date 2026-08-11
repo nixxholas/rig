@@ -46,11 +46,16 @@ describeLive("CodexProvider live", () => {
                 const events = await collectSessionEvents(
                     session.run({
                         context: {
+                            instructions: "",
                             messages: [
                                 {
                                     role: "user",
-                                    content:
-                                        "Call read_alpha and read_beta now. They are independent; call both before waiting for either result.",
+                                    content: [
+                                        {
+                                            type: "text" as const,
+                                            text: "Call read_alpha and read_beta now. They are independent; call both before waiting for either result.",
+                                        },
+                                    ],
                                 },
                             ],
                         },
@@ -65,7 +70,16 @@ describeLive("CodexProvider live", () => {
                         .map((event) => event.name)
                         .sort(),
                 ).toEqual(["read_alpha", "read_beta"]);
-                expect(events).toContainEqual({ type: "done", state: "tool_call" });
+                expect(events).toContainEqual(
+                    expect.objectContaining({
+                        type: "done",
+                        state: "tool_call",
+                        tokens: {
+                            input: expect.any(Number),
+                            output: expect.any(Number),
+                        },
+                    }),
+                );
             } finally {
                 await session.destroy();
             }
@@ -92,10 +106,16 @@ describeLive("CodexProvider live", () => {
                 const events = await collectSessionEvents(
                     session.run({
                         context: {
+                            instructions: "",
                             messages: [
                                 {
                                     role: "user",
-                                    content: `Reply with exactly: codex ${transport} live ok`,
+                                    content: [
+                                        {
+                                            type: "text" as const,
+                                            text: `Reply with exactly: codex ${transport} live ok`,
+                                        },
+                                    ],
                                 },
                             ],
                         },
@@ -103,7 +123,16 @@ describeLive("CodexProvider live", () => {
                     }),
                 );
 
-                expect(events).toContainEqual({ type: "done", state: "normal" });
+                expect(events).toContainEqual(
+                    expect.objectContaining({
+                        type: "done",
+                        state: "normal",
+                        tokens: {
+                            input: expect.any(Number),
+                            output: expect.any(Number),
+                        },
+                    }),
+                );
                 expect(events.some((event) => event.type === "token_usage")).toBe(true);
                 expect(textFromSessionEvents(events).toLowerCase()).toContain(
                     `codex ${transport} live ok`,
@@ -131,28 +160,48 @@ describeLive("CodexProvider live", () => {
             });
             try {
                 const firstMessages = [
-                    { role: "user" as const, content: "Remember the marker ALPHA." },
+                    {
+                        role: "user" as const,
+                        content: [{ type: "text" as const, text: "Remember the marker ALPHA." }],
+                    },
                 ];
                 const first = await collectSessionEvents(
                     session.run({
-                        context: { messages: firstMessages },
+                        context: { instructions: "", messages: firstMessages },
                         effort: "low",
                         model: "gpt-5.6-sol",
                     }),
                 );
                 const secondMessages = [
                     ...firstMessages,
-                    { role: "assistant" as const, content: textFromSessionEvents(first) },
-                    { role: "user" as const, content: "Remember the marker BETA." },
+                    {
+                        role: "assistant" as const,
+                        content: [{ type: "text" as const, text: textFromSessionEvents(first) }],
+                    },
+                    {
+                        role: "user" as const,
+                        content: [{ type: "text" as const, text: "Remember the marker BETA." }],
+                    },
                 ];
                 const second = await collectSessionEvents(
                     session.run({
-                        context: { messages: secondMessages },
+                        context: { instructions: "", messages: secondMessages },
                         effort: "low",
                         model: "gpt-5.6-sol",
                     }),
                 );
-                const compacted = await session.compact();
+                const compacted = await session.compact({
+                    context: {
+                        instructions: "You are a concise coding assistant.",
+                        messages: [
+                            ...secondMessages,
+                            {
+                                role: "assistant",
+                                content: [{ type: "text", text: textFromSessionEvents(second) }],
+                            },
+                        ],
+                    },
+                });
                 expect(compacted.status).toBe("completed");
                 if (compacted.status !== "completed") return;
                 expect(compacted.summary).toBeUndefined();
@@ -163,11 +212,17 @@ describeLive("CodexProvider live", () => {
                 const switched = await collectSessionEvents(
                     session.run({
                         context: {
+                            instructions: "",
                             messages: [
                                 ...compacted.context.messages,
                                 {
                                     role: "user",
-                                    content: "Reply with exactly: compacted model switch live ok",
+                                    content: [
+                                        {
+                                            type: "text" as const,
+                                            text: "Reply with exactly: compacted model switch live ok",
+                                        },
+                                    ],
                                 },
                             ],
                         },

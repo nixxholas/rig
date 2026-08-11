@@ -70,11 +70,16 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
             const events = await collectSessionEvents(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
                             {
                                 role: "user",
-                                content:
-                                    "<user_query>Search the web for the current Node.js LTS version and cite one official URL.</user_query>",
+                                content: [
+                                    {
+                                        type: "text" as const,
+                                        text: "<user_query>Search the web for the current Node.js LTS version and cite one official URL.</user_query>",
+                                    },
+                                ],
                             },
                         ],
                     },
@@ -99,11 +104,15 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
             if (results.length > 0) {
                 expect(
                     results.some((event) => {
+                        const result = event.content
+                            .filter((block) => block.type === "text")
+                            .map((block) => block.text)
+                            .join("");
                         try {
-                            const parsed: unknown = JSON.parse(event.result);
+                            const parsed: unknown = JSON.parse(result);
                             return Array.isArray(parsed) && parsed.length > 0;
                         } catch {
-                            return event.result.length > 0;
+                            return result.length > 0;
                         }
                     }),
                 ).toBe(true);
@@ -119,7 +128,7 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
                     }),
                 ).toBe(true);
             }
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             expect(textFromSessionEvents(events).length).toBeGreaterThan(0);
         },
     );
@@ -146,11 +155,16 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
                 events = await collectSessionEvents(
                     session.run({
                         context: {
+                            instructions: "",
                             messages: [
                                 {
                                     role: "user",
-                                    content:
-                                        "Use WebSearch to find the current Node.js LTS version and reply with one official URL.",
+                                    content: [
+                                        {
+                                            type: "text" as const,
+                                            text: "Use WebSearch to find the current Node.js LTS version and reply with one official URL.",
+                                        },
+                                    ],
                                 },
                             ],
                         },
@@ -180,7 +194,7 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
             expect(
                 events.filter((event) => event.type === "toolcall_start" && event.server !== true),
             ).toEqual([]);
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             expect(textFromSessionEvents(events).length).toBeGreaterThan(0);
         },
     );
@@ -212,11 +226,16 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
             const events = await collectSessionEvents(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
                             {
                                 role: "user",
-                                content:
-                                    "Search the web for the current Node.js LTS version and reply with one official URL.",
+                                content: [
+                                    {
+                                        type: "text" as const,
+                                        text: "Search the web for the current Node.js LTS version and reply with one official URL.",
+                                    },
+                                ],
                             },
                         ],
                     },
@@ -226,7 +245,7 @@ describe.skipIf(!LIVE)("Server tool result live coverage", () => {
             // OpenRouter may or may not honor Responses server web_search for Anthropic models.
             // Accept either a completed server search or a normal text answer; never a stalled
             // client tool loop for a tool Rig does not execute.
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             expect(
                 events.filter((event) => event.type === "toolcall_start" && event.server !== true),
             ).toEqual([]);

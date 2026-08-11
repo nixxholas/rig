@@ -10,10 +10,22 @@ import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js"
 const CONTEXT: SessionContext = {
     instructions: "Base instructions.",
     messages: [
-        { role: "user", content: "Read the config." },
-        { role: "assistant", content: "Reading it now." },
-        { role: "system", content: ["Permission mode is now Auto."] },
-        { role: "user", content: "Continue." },
+        {
+            role: "user",
+            content: [{ type: "text" as const, text: "Read the config." }],
+        },
+        {
+            role: "assistant",
+            content: [{ type: "text" as const, text: "Reading it now." }],
+        },
+        {
+            role: "system",
+            content: [{ type: "text" as const, text: "Permission mode is now Auto." }],
+        },
+        {
+            role: "user",
+            content: [{ type: "text" as const, text: "Continue." }],
+        },
     ],
 };
 

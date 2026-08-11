@@ -81,6 +81,8 @@ warm, but you own the transcript.
 import {
     CodexProvider,
     CodexSessionCredential,
+    SessionAssistantMessageAccumulator,
+    type SessionAssistantMessage,
     type SessionMessage,
 } from "@slopus/happy-providers";
 
@@ -94,25 +96,30 @@ const provider = new CodexProvider({
     model: "gpt-5.6-sol",
     transport: "auto",
 });
+const instructions = "You are a concise coding assistant.";
 const session = await provider.session("conversation-1", {
-    instructions: "You are a concise coding assistant.",
+    instructions,
     tools: [],
 });
 
 const messages: SessionMessage[] = [];
 
 async function ask(content: string): Promise<string> {
-    messages.push({ role: "user", content });
+    messages.push({ role: "user", content: [{ type: "text", text: content }] });
 
     let response = "";
-    for await (const event of session.run({ context: { messages } })) {
+    const assistant = new SessionAssistantMessageAccumulator();
+    for await (const event of session.run({ context: { instructions, messages } })) {
+        assistant.add(event);
         if (event.type === "text_delta") response += event.delta;
         if (event.type === "done" && event.state === "error") {
             throw new Error(event.message);
         }
     }
 
-    messages.push({ role: "assistant", content: response });
+    const message = assistant.message();
+    if (message === undefined) throw new Error("The provider returned no assistant message.");
+    messages.push(message);
     return response;
 }
 
@@ -124,8 +131,10 @@ try {
 }
 ```
 
-A production caller should persist more than plain text — reasoning, response items, tool calls,
-tool results, and their opaque `vendor` fields all belong in your durable transcript.
+A production caller reconstructs and persists the assistant message from the ordered block events.
+`SessionAssistantMessageAccumulator` does that directly, including retry rewinds. Its result
+contains the text, reasoning, tool calls, provider-owned tool results, and opaque replay metadata
+needed for the next turn.
 [EXAMPLES.md](EXAMPLES.md) walks through a complete event collector and a tool-call continuation.
 
 ## Providers and credentials
@@ -180,7 +189,7 @@ reasoning effort, priority service tier, structured output schema, and an abort 
 
 ```ts
 const stream = session.run({
-    context: { messages },
+    context: { instructions, messages },
     model: "gpt-5.6-sol",
     effort: "high",
     abort: abortController.signal,
@@ -216,22 +225,23 @@ continuing the same conversation; mint a new one for a new conversation or an in
 ## Messages and events
 
 `SessionMessage` covers user, assistant, tool-result, system-notice, agent, and compaction
-messages. Multimodal content uses ordered text/image parts in `input`.
+messages. User, system, assistant, and tool-result content is always an ordered block array.
 
 Some fields exist purely so the provider can continue a conversation faithfully, and their
 contents are intentionally opaque. Whenever these appear, store them byte-for-byte and send them
 back unchanged:
 
-- assistant `encryptedReasoning` and `responseItems`;
-- tool-call and tool-result `vendor` metadata;
-- signed reasoning blocks;
+- reasoning block `reasoning` payloads;
+- tool-call and tool-result block `vendor` metadata;
 - compaction `encryptedContent` and `vendor` metadata.
 
 `SessionStream` is an `AsyncIterable<SessionEvent>`. You'll see text and reasoning deltas,
 tool-call boundaries, provider-owned tool results, token usage, retry notices, and block rollback
-boundaries. Every started stream ends with exactly one `done` event. When collecting a stream, use
-`committedSessionEvents()` so output invalidated by `block_reset` is discarded correctly — more on
-that in the [retries section](#retries-happen-inside-the-session) below.
+boundaries. Content-block start order is the exact order of `SessionAssistantMessage.content`;
+indexes are neither exposed nor needed. Every started stream ends with exactly one `done` event.
+Use `SessionAssistantMessageAccumulator` to build the message while streaming, or
+`assistantMessageFromEvents()` after collecting a run. Both discard output invalidated by
+`block_reset` correctly.
 
 ## Tools: you run them, not the library
 
@@ -277,8 +287,8 @@ behind your back:
 
 ```ts
 const compacted = await session.compact({
-    context: { messages },
-    inputTokens,
+    context: { instructions, messages },
+    instructions: "Preserve decisions, unfinished work, and exact identifiers.",
     signal: abortController.signal,
 });
 
@@ -289,6 +299,11 @@ if (compacted.status === "completed") {
 
 On success, adopt and persist the complete returned `context` as your new transcript. On
 cancellation or failure, keep the original — nothing was changed out from under you.
+
+The `context` is the complete caller-selected input to compact: root instructions and messages
+travel together exactly as they do for inference. The separate `instructions` field tells the
+provider what the compacted replacement should retain. Compaction does not accept a caller token
+count; providers report their own usage.
 
 ## The most important part: sessions are stateful and managed
 
@@ -346,11 +361,11 @@ next operation.
 
 ```ts
 // Correct: turns on one session are sequential.
-for await (const event of session.run({ context: { messages } })) {
+for await (const event of session.run({ context: { instructions, messages } })) {
     // Consume every event.
 }
 
-const compacted = await session.compact({ context: { messages } });
+const compacted = await session.compact({ context: { instructions, messages } });
 ```
 
 Independent sessions run concurrently just fine — use one session per conversation or branch:
@@ -360,12 +375,16 @@ const first = await provider.session("conversation-1", firstOptions);
 const second = await provider.session("conversation-2", secondOptions);
 
 const runFirst = async () => {
-    for await (const event of first.run({ context: { messages: firstMessages } })) {
+    for await (const event of first.run({
+        context: { instructions: firstInstructions, messages: firstMessages },
+    })) {
         // Consume the first conversation's events.
     }
 };
 const runSecond = async () => {
-    for await (const event of second.run({ context: { messages: secondMessages } })) {
+    for await (const event of second.run({
+        context: { instructions: secondInstructions, messages: secondMessages },
+    })) {
         // Consume the second conversation's events.
     }
 };
@@ -384,7 +403,7 @@ the next inference begins.
 or by creating two session objects with the same ID.
 
 To branch today, copy your transcript and open a new session with its own ID. Include all opaque
-reasoning, response items, tool metadata, and compaction messages in the copy:
+reasoning, tool metadata, and compaction messages in the copy:
 
 ```ts
 const branchMessages = structuredClone(messages);
@@ -395,7 +414,7 @@ const branch = await provider.session("conversation-1-branch-1", {
 });
 
 for await (const event of branch.run({
-    context: { messages: branchMessages },
+    context: { instructions, messages: branchMessages },
     model,
     effort,
 })) {
@@ -450,7 +469,7 @@ out the rewound output:
 import { committedSessionEvents, type SessionEvent } from "@slopus/happy-providers";
 
 const streamed: SessionEvent[] = [];
-for await (const event of session.run({ context: { messages } })) {
+for await (const event of session.run({ context: { instructions, messages } })) {
     streamed.push(event);
 }
 
@@ -598,7 +617,7 @@ abstract class BaseSession {
     readonly id: string;
 
     abstract run(request: SessionRunRequest): SessionStream;
-    abstract compact(options?: SessionCompactionOptions): Promise<SessionCompaction>;
+    abstract compact(options: SessionCompactionOptions): Promise<SessionCompaction>;
     abstract destroy(): void | Promise<void>;
 }
 ```
@@ -635,10 +654,8 @@ What one `run()` takes:
 
 ```ts
 interface SessionRunRequest {
-    /** Complete rebuilt conversation history for this inference turn. */
-    context: {
-        readonly messages: readonly SessionMessage[];
-    };
+    /** Complete rebuilt conversation context for this inference turn. */
+    context: SessionContext;
     abort?: AbortSignal;
     model?: string;
     effort?: SessionReasoningEffort;
@@ -673,58 +690,54 @@ type SessionMessage =
     | SessionCompactionMessage;
 ```
 
-A user turn. `input`, when present, replaces `content` with ordered multimodal parts:
+A user turn contains ordered multimodal blocks:
 
 ```ts
 interface SessionUserMessage {
     readonly role: "user";
-    readonly content: string;
-    /** Background context that does not establish a provider turn boundary. */
-    readonly contextOnly?: true;
-    readonly input?: SessionInputContent;
+    readonly content: readonly SessionInputBlock[];
 }
 
-type SessionInputContent = readonly (SessionTextContent | SessionImageContent)[];
+type SessionInputBlock = SessionTextBlock | SessionImageBlock;
 
-interface SessionTextContent {
+interface SessionTextBlock {
     readonly type: "text";
     readonly text: string;
 }
 
-interface SessionImageContent {
+interface SessionImageBlock {
     readonly type: "image";
     readonly data: string;
     readonly mimeType: string;
 }
 ```
 
-A model turn — the shape with the most to preserve. Anthropic signs the text of its thinking
-blocks, so a signature replayed beside different text is rejected: keep each reasoning block and
-its signature together, untouched. `encryptedReasoning` and `responseItems` are opaque; store
-them byte-for-byte:
+A model turn is one ordered block array. Do not flatten or reorder it: provider replay state lives
+on the block it belongs to, so text, reasoning, client tool calls, and provider-owned tool results
+retain their original sequence:
 
 ```ts
 interface SessionAssistantMessage {
     readonly role: "assistant";
-    readonly content: string;
-    /** Opaque encrypted reasoning from a Responses-compatible backend. */
-    readonly encryptedReasoning?: string;
-    /** Ordered reasoning blocks retained as caller-owned history. */
-    readonly reasoning?: readonly SessionReasoning[];
-    /** Completed client tool calls emitted alongside this message. */
-    readonly toolCalls?: readonly SessionToolCall[];
-    /** Ordered, opaque Responses output items, replayed without flattening or reordering. */
-    readonly responseItems?: readonly string[];
+    readonly content: readonly SessionAssistantBlock[];
 }
 
-interface SessionReasoning {
-    readonly text: string;
-    readonly signature?: string;
-    /** Reasoning the vendor withheld, where the signature is the whole payload. */
-    readonly redacted?: boolean;
+type SessionAssistantBlock =
+    | SessionTextBlock
+    | SessionReasoningBlock
+    | SessionToolCallBlock
+    | SessionToolResultBlock;
+
+interface SessionReasoningBlock {
+    readonly type: "reasoning";
+    /** Human-readable reasoning, when exposed. */
+    readonly text?: string;
+    /** Opaque signed or encrypted replay state, when required. */
+    readonly reasoning?: string;
 }
 
-interface SessionToolCall {
+interface SessionToolCallBlock {
+    readonly type: "tool_call";
     readonly callId: string;
     readonly name: string;
     readonly namespace?: string;
@@ -743,11 +756,9 @@ Your answer to a tool call, tied back by `callId`:
 interface SessionToolResultMessage {
     readonly role: "tool";
     readonly callId: string;
-    readonly content: string;
+    readonly content: readonly SessionOutputBlock[];
     /** Whether the caller reported that the tool invocation failed. */
     readonly isError?: boolean;
-    /** Ordered multimodal content. When present, providers use this instead of content. */
-    readonly input?: SessionInputContent;
     /** The opaque metadata that arrived with the call, echoed back. */
     readonly vendor?: any;
 }
@@ -760,7 +771,7 @@ edit it):
 ```ts
 interface SessionSystemMessage {
     readonly role: "system";
-    readonly content: string | readonly string[];
+    readonly content: readonly SessionTextBlock[];
 }
 
 interface SessionAgentMessage {
@@ -784,6 +795,11 @@ interface SessionCompactionMessage {
 }
 ```
 
+`SessionAgentMessage` is specifically Codex cross-agent replay state. It represents encrypted
+messages exchanged by Codex collaborators and preserves their author, recipient, display header,
+and turn boundary. Persist and replay values emitted by Codex; do not construct it as a generic
+application message. Non-Codex providers ignore it.
+
 ### `SessionTool`
 
 A tool definition, as covered in the [Tools section](#tools-you-run-them-not-the-library):
@@ -802,9 +818,7 @@ interface SessionTool {
     readonly description?: string;
     readonly parameters?: TSchema; // a TypeBox schema
     /** Provider-neutral request to expose this tool through native tool discovery. */
-    readonly deferLoading?: boolean;
-    /** Opaque provider metadata persisted with this tool definition. */
-    readonly vendor?: any;
+    readonly defer?: boolean;
     /** OpenAI-style Lark grammar; ignored by providers that do not support grammar tools. */
     readonly grammar?: SessionToolLarkGrammar;
 }
@@ -821,34 +835,61 @@ interface SessionToolLarkGrammar {
 
 ```ts
 type SessionEvent =
-    // Blocks bracket tentative output so provider-owned retries can rewind it.
+    // Attempt blocks bracket tentative output so provider-owned retries can rewind it.
     | { type: "block_start" }
     | { type: "block_stop" }
     | { type: "block_reset" }
-    // Content.
+    // Text and reasoning blocks are sequential. Start order is message-content order.
+    | { type: "text_start" }
     | { type: "text_delta"; delta: string }
+    | { type: "text_end" }
+    | { type: "reasoning_start" }
     | { type: "reasoning_delta"; delta: string }
-    | { type: "encrypted_reasoning"; content: string }
-    | { type: "response_items"; items: readonly string[] }
+    | { type: "reasoning_end"; reasoning?: string }
     // Tool calls. `server: true` marks a provider-owned call the client never executes.
-    | { type: "toolcall_start"; callId: string; name: string; namespace?: string; server?: true; vendor?: any }
+    | {
+          type: "toolcall_start";
+          callId: string;
+          name: string;
+          namespace?: string;
+          server?: true;
+          vendor?: any;
+      }
     | { type: "toolcall_delta"; callId: string; delta: string }
     | { type: "toolcall_end"; callId: string; arguments: string; incomplete?: boolean }
     // Server-tool results settle inside the same response, streamed beside the call.
-    | { type: "toolcall_result_start"; callId: string }
+    | { type: "toolcall_result_start"; callId: string; vendor?: any }
     | { type: "toolcall_result_delta"; callId: string; delta: string }
-    | { type: "toolcall_result_end"; callId: string; result: string; incomplete?: boolean }
+    | {
+          type: "toolcall_result_end";
+          callId: string;
+          content: readonly SessionOutputBlock[];
+          isError?: boolean;
+          incomplete?: boolean;
+      }
     // Progress.
     | { type: "retrying"; attempt: number; reason: string }
-    | { type: "token_usage"; usage: SessionCacheUsage }
+    | { type: "token_usage"; usage: SessionUsage }
     // Exactly one done event ends every started stream.
     | { type: "done"; state: "cancelled" }
-    | { type: "done"; state: "normal"; endTurn?: boolean }
-    | { type: "done"; state: "tool_call" }
-    | { type: "done"; state: "length" }
-    | { type: "done"; state: "error"; kind: SessionErrorKind; message: string; providerError?: SessionProviderError };
+    | { type: "done"; state: "normal"; tokens: SessionTokens; endTurn?: boolean }
+    | { type: "done"; state: "tool_call"; tokens: SessionTokens }
+    | { type: "done"; state: "length"; tokens: SessionTokens }
+    | {
+          type: "done";
+          state: "error";
+          kind: SessionErrorKind;
+          message: string;
+          providerError?: SessionProviderError;
+      };
 
 type SessionErrorKind = "internal_error" | "context_overflow" | "billing_error" | "unknown";
+
+interface SessionTokens {
+    /** Full input context size, including cached input. */
+    readonly input: number;
+    readonly output: number;
+}
 
 type SessionStream = AsyncIterable<SessionEvent>;
 ```
@@ -859,15 +900,37 @@ response hit a length limit, `"cancelled"` means the run was aborted, and `"erro
 Ordinary tools never emit `toolcall_result_*` events — you answer those with a `role: "tool"`
 message; only server tools stream their results here.
 
+No content index is exposed. A `text_start`, `reasoning_start`, `toolcall_start`, or
+`toolcall_result_start` appends that block to the assistant message. Text and reasoning are
+sequential; parallel tool calls are updated by `callId`. The corresponding end event closes the
+block and supplies final opaque state or normalized content when needed.
+
+The exported accumulator implements those rules and the outer retry rollback boundaries:
+
+```ts
+const assistant = new SessionAssistantMessageAccumulator();
+
+for await (const event of session.run({ context: { instructions, messages } })) {
+    assistant.add(event);
+}
+
+const message = assistant.message();
+if (message !== undefined) messages.push(message);
+```
+
+If you already collected the complete run, `assistantMessageFromEvents(events)` returns the same
+result. There is no terminal `assistant_message` event and no provider-specific `response_items`
+event; the ordered lifecycle is the message.
+
 The helpers `isSessionDoneEvent()` and `isSessionErrorDone()` narrow events, and
 `committedSessionEvents()` filters a collected stream down to what survived block rewinds.
 
-### `SessionCacheUsage`
+### `SessionUsage`
 
 Token accounting for one attempt:
 
 ```ts
-interface SessionCacheUsage {
+interface SessionUsage {
     readonly input: number;
     readonly output: number;
     readonly cacheRead: number;
@@ -876,8 +939,27 @@ interface SessionCacheUsage {
 }
 ```
 
-Cache reads are the payoff of prompt-cache continuity — a healthy continuation shows most of its
-input arriving as `cacheRead`.
+The fields are normalized the same way for every provider: `input` is the complete input context,
+including cached tokens; `cacheRead` and `cacheWrite` describe subsets of that input; and
+`totalTokens` is `input + output`. Cache reads are the payoff of prompt-cache continuity — a
+healthy continuation shows much of its input also reported as `cacheRead`.
+
+**Getting the last turn's context size.** The size of the context the model actually saw on a
+turn is `input`; cache columns are already included:
+
+```ts
+let lastUsage: SessionUsage | undefined;
+for await (const event of session.run({ context: { instructions, messages } })) {
+    if (event.type === "token_usage") lastUsage = event.usage;
+}
+
+const contextSize = lastUsage?.input ?? 0;
+```
+
+Keep the _last_ `token_usage` event of the run — a retried run reports usage per attempt, and the
+final event describes the attempt that produced the committed response. This is the right value
+for a context-window meter in your UI. Compaction itself does not accept a caller-supplied token
+count; its returned usage comes from the provider.
 
 ### `SessionCompaction`
 
@@ -889,12 +971,8 @@ interface SessionCompactionOptions {
     readonly model?: string;
     /** Provider-native instructions describing what the compaction should retain. */
     readonly instructions?: string;
-    /** Rebuilt conversation prefix selected by the caller for this compaction. */
-    readonly context?: {
-        readonly messages: readonly SessionMessage[];
-    };
-    /** Best available count of input tokens in the selected context. */
-    readonly inputTokens?: number;
+    /** Complete context to compact, including its root instructions and messages. */
+    readonly context: SessionContext;
     readonly signal?: AbortSignal;
 }
 
@@ -913,7 +991,7 @@ interface CompletedSessionCompaction {
     readonly encryptedReasoning?: string;
     /** Original messages intentionally retained alongside the summary. */
     readonly preservedMessages: readonly SessionMessage[];
-    readonly usage: SessionCacheUsage;
+    readonly usage: SessionUsage;
     /** Complete replacement context — adopt this as your new transcript. */
     readonly context: SessionContext;
 }
@@ -928,8 +1006,6 @@ interface FailedSessionCompaction {
     readonly status: "failed";
     readonly kind: "inference_error" | "invalid_summary" | "tool_call";
     readonly message: string;
-    /** Original context left active because compaction did not complete. */
-    readonly context: SessionContext;
 }
 
 interface SessionContext {
@@ -938,7 +1014,8 @@ interface SessionContext {
 }
 ```
 
-On `"cancelled"` and `"failed"` nothing changed — the original context is still active.
+On `"cancelled"` and `"failed"` nothing changed. Cancellation echoes the selected context;
+failure only describes the error because the caller already owns the unchanged input context.
 
 ### `SessionProviderError`
 

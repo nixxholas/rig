@@ -87,7 +87,15 @@ describe("session retry budget", () => {
         const events: SessionEvent[] = [];
         try {
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "Reply with OK." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Reply with OK." }],
+                        },
+                    ],
+                },
                 effort: "low",
             })) {
                 events.push(event);

@@ -5,21 +5,19 @@ import type {
 import { APIConnectionError } from "@anthropic-ai/sdk/error";
 
 import { EmptyResponseError } from "@/core/EmptyResponseError.js";
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
+import type { SessionToolCallBlock, SessionToolResultBlock } from "@/core/SessionContext.js";
 import { emitToolCallResult } from "@/core/emitToolCallResult.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js";
-import {
-    type AnthropicReasoningState,
-    encodeAnthropicReasoning,
-    encodeAnthropicResponseItem,
-} from "@/protocol/anthropic/toAnthropicMessages.js";
+import { type AnthropicReasoningState } from "@/protocol/anthropic/toAnthropicMessages.js";
 
 type AnthropicReplayBlock =
     | AnthropicReasoningState
     | { type: "text"; text: string }
-    | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
+    | SessionToolCallBlock
+    | SessionToolResultBlock;
 
 export async function* mapAnthropicStream(
     stream: AsyncIterable<BetaRawMessageStreamEvent>,
@@ -42,7 +40,7 @@ export async function* mapAnthropicStream(
             server?: true;
         }
     >();
-    let usage: SessionCacheUsage = {
+    let usage: SessionUsage = {
         input: 0,
         output: 0,
         cacheRead: 0,
@@ -114,13 +112,22 @@ export async function* mapAnthropicStream(
             } else if (isAnthropicServerToolResultBlock(event.content_block)) {
                 const callId = event.content_block.tool_use_id;
                 const result = JSON.stringify(event.content_block.content ?? null);
-                yield* emitToolCallResult(callId, result);
+                blocks.set(event.index, {
+                    type: "tool_result",
+                    callId,
+                    content: [{ type: "text", text: result }],
+                    vendor: { outputBlock: JSON.stringify(event.content_block) },
+                });
+                yield* emitToolCallResult(callId, result, {
+                    vendor: { outputBlock: JSON.stringify(event.content_block) },
+                });
             } else if (event.content_block.type === "thinking") {
                 blocks.set(event.index, {
                     type: "thinking",
                     thinking: event.content_block.thinking,
                     signature: event.content_block.signature,
                 });
+                yield { type: "reasoning_start" };
                 if (event.content_block.thinking.length > 0) {
                     yield {
                         type: "reasoning_delta",
@@ -129,11 +136,13 @@ export async function* mapAnthropicStream(
                 }
             } else if (event.content_block.type === "redacted_thinking") {
                 blocks.set(event.index, event.content_block);
+                yield { type: "reasoning_start" };
             } else if (event.content_block.type === "text") {
                 blocks.set(event.index, {
                     type: "text",
                     text: event.content_block.text,
                 });
+                yield { type: "text_start" };
                 if (event.content_block.text.length > 0) {
                     yield { type: "text_delta", delta: event.content_block.text };
                 }
@@ -190,17 +199,21 @@ export async function* mapAnthropicStream(
             const block = blocks.get(event.index);
             if (block?.type === "thinking" || block?.type === "redacted_thinking") {
                 yield {
-                    type: "encrypted_reasoning",
-                    content: encodeAnthropicReasoning(block),
+                    type: "reasoning_end",
+                    reasoning: block.type === "thinking" ? block.signature : block.data,
                 };
             }
+            if (block?.type === "text") yield { type: "text_end" };
             const tool = tools.get(event.index);
             if (tool !== undefined) {
                 blocks.set(event.index, {
-                    type: "tool_use",
-                    id: tool.callId,
-                    name: tool.wireName,
-                    input: parseArguments(tool.arguments, tool.input),
+                    type: "tool_call",
+                    callId: tool.callId,
+                    name: tool.name,
+                    ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
+                    arguments: JSON.stringify(parseArguments(tool.arguments, tool.input)),
+                    ...(tool.server === undefined ? {} : { server: true }),
+                    vendor: { type: "claude_tool_use", wireName: tool.wireName },
                 });
                 yield {
                     type: "toolcall_end",
@@ -218,10 +231,7 @@ export async function* mapAnthropicStream(
             continue;
         }
         if (event.type === "message_stop") {
-            const orderedBlocks = [...blocks.entries()]
-                .sort(([left], [right]) => left - right)
-                .map(([, block]) => block);
-            const terminal = toDoneEvent(stopReason, sawClientTool, sawCompaction);
+            const terminal = toDoneEvent(stopReason, sawClientTool, sawCompaction, usage);
             if (
                 terminal.state !== "error" &&
                 terminal.state !== "cancelled" &&
@@ -229,12 +239,6 @@ export async function* mapAnthropicStream(
                 usage.output === 0
             ) {
                 throw new EmptyResponseError("Anthropic Bedrock", usage);
-            }
-            if (orderedBlocks.length > 0) {
-                yield {
-                    type: "response_items",
-                    items: orderedBlocks.map(encodeAnthropicResponseItem),
-                };
             }
             yield { type: "token_usage", usage };
             yield { type: "block_stop" };
@@ -246,7 +250,7 @@ export async function* mapAnthropicStream(
     if (sawCompaction || stopReason === "compaction") {
         yield { type: "token_usage", usage };
         yield { type: "block_stop" };
-        yield toDoneEvent(stopReason, sawClientTool, sawCompaction);
+        yield toDoneEvent(stopReason, sawClientTool, sawCompaction, usage);
         return;
     }
     throw new APIConnectionError({
@@ -289,39 +293,42 @@ function toUsage(usage: {
     output_tokens?: number | null;
     cache_read_input_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
-}): SessionCacheUsage {
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
+}): SessionUsage {
     const cacheRead = usage.cache_read_input_tokens ?? 0;
     const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const input = (usage.input_tokens ?? 0) + cacheRead + cacheWrite;
+    const output = usage.output_tokens ?? 0;
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
 function mergeUsage(
-    current: SessionCacheUsage,
+    current: SessionUsage,
     update: {
         input_tokens?: number | null;
         output_tokens?: number | null;
         cache_read_input_tokens?: number | null;
         cache_creation_input_tokens?: number | null;
     },
-): SessionCacheUsage {
-    const input = update.input_tokens ?? current.input;
-    const output = update.output_tokens ?? current.output;
+): SessionUsage {
     const cacheRead = update.cache_read_input_tokens ?? current.cacheRead;
     const cacheWrite = update.cache_creation_input_tokens ?? current.cacheWrite;
+    const input =
+        update.input_tokens === undefined || update.input_tokens === null
+            ? current.input
+            : update.input_tokens + cacheRead + cacheWrite;
+    const output = update.output_tokens ?? current.output;
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
@@ -329,6 +336,7 @@ function toDoneEvent(
     stopReason: BetaStopReason | null,
     sawTool: boolean,
     sawCompaction: boolean,
+    usage: SessionUsage,
 ): Extract<SessionEvent, { type: "done" }> {
     if (sawCompaction || stopReason === "compaction") {
         return {
@@ -340,7 +348,11 @@ function toDoneEvent(
         };
     }
     if (stopReason === "max_tokens" || stopReason === "model_context_window_exceeded") {
-        return { type: "done", state: "length" };
+        return {
+            type: "done",
+            state: "length",
+            tokens: { input: usage.input, output: usage.output },
+        };
     }
     if (stopReason === "refusal") {
         return {
@@ -351,6 +363,16 @@ function toDoneEvent(
             providerError: { type: "unclassified" },
         };
     }
-    if (sawTool || stopReason === "tool_use") return { type: "done", state: "tool_call" };
-    return { type: "done", state: "normal" };
+    if (sawTool || stopReason === "tool_use") {
+        return {
+            type: "done",
+            state: "tool_call",
+            tokens: { input: usage.input, output: usage.output },
+        };
+    }
+    return {
+        type: "done",
+        state: "normal",
+        tokens: { input: usage.input, output: usage.output },
+    };
 }

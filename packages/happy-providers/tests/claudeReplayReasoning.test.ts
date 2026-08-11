@@ -7,15 +7,25 @@ describe("Claude session replay reasoning", () => {
     it("replays the thinking a turn was signed with", () => {
         const replay = createClaudeSessionReplay({
             context: context([
-                { role: "user", content: "Refactor the parser." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Refactor the parser." }],
+                },
                 {
                     role: "assistant",
-                    content: "Renamed the entry point.",
-                    reasoning: [
-                        { text: "The parser entry point is misnamed.", signature: "sig-1" },
+                    content: [
+                        {
+                            type: "reasoning",
+                            text: "The parser entry point is misnamed.",
+                            reasoning: "sig-1",
+                        },
+                        { type: "text", text: "Renamed the entry point." },
                     ],
                 },
-                { role: "user", content: "Now update the tests." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Now update the tests." }],
+                },
             ]),
             model: "claude-opus-4-8",
             sessionId: "replay-session",
@@ -34,16 +44,30 @@ describe("Claude session replay reasoning", () => {
     it("keeps every thinking block in the order the turn produced them", () => {
         const replay = createClaudeSessionReplay({
             context: context([
-                { role: "user", content: "Ship it." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Ship it." }],
+                },
                 {
                     role: "assistant",
-                    content: "Done.",
-                    reasoning: [
-                        { text: "First consider the failure.", signature: "sig-1" },
-                        { text: "Then confirm the fix.", signature: "sig-2" },
+                    content: [
+                        {
+                            type: "reasoning",
+                            text: "First consider the failure.",
+                            reasoning: "sig-1",
+                        },
+                        {
+                            type: "reasoning",
+                            text: "Then confirm the fix.",
+                            reasoning: "sig-2",
+                        },
+                        { type: "text", text: "Done." },
                     ],
                 },
-                { role: "user", content: "Thanks." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Thanks." }],
+                },
             ]),
             model: "claude-opus-4-8",
             sessionId: "replay-session",
@@ -57,13 +81,21 @@ describe("Claude session replay reasoning", () => {
     it("replays redacted thinking as the opaque block Anthropic returned", () => {
         const replay = createClaudeSessionReplay({
             context: context([
-                { role: "user", content: "Ship it." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Ship it." }],
+                },
                 {
                     role: "assistant",
-                    content: "Done.",
-                    reasoning: [{ text: "", signature: "opaque-payload", redacted: true }],
+                    content: [
+                        { type: "reasoning", reasoning: "opaque-payload" },
+                        { type: "text", text: "Done." },
+                    ],
                 },
-                { role: "user", content: "Thanks." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Thanks." }],
+                },
             ]),
             model: "claude-opus-4-8",
             sessionId: "replay-session",
@@ -77,9 +109,18 @@ describe("Claude session replay reasoning", () => {
     it("leaves a turn that never reasoned untouched", () => {
         const replay = createClaudeSessionReplay({
             context: context([
-                { role: "user", content: "Ship it." },
-                { role: "assistant", content: "Done." },
-                { role: "user", content: "Thanks." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Ship it." }],
+                },
+                {
+                    role: "assistant",
+                    content: [{ type: "text" as const, text: "Done." }],
+                },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Thanks." }],
+                },
             ]),
             model: "claude-opus-4-8",
             sessionId: "replay-session",
@@ -93,10 +134,22 @@ describe("Claude session replay reasoning", () => {
     it("does not leave an orphaned parent when an empty assistant turn has no transcript block", () => {
         const replay = createClaudeSessionReplay({
             context: context([
-                { role: "user", content: "First." },
-                { role: "assistant", content: "" },
-                { role: "user", content: "Second." },
-                { role: "user", content: "Third." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "First." }],
+                },
+                {
+                    role: "assistant",
+                    content: [],
+                },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Second." }],
+                },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Third." }],
+                },
             ]),
             model: "claude-opus-4-8",
             sessionId: "replay-session",
@@ -109,13 +162,21 @@ describe("Claude session replay reasoning", () => {
 
     it("projects unsigned reasoning only at the Claude request boundary", () => {
         const source = context([
-            { role: "user", content: "Ship it." },
+            {
+                role: "user",
+                content: [{ type: "text" as const, text: "Ship it." }],
+            },
             {
                 role: "assistant",
-                content: "Done.",
-                reasoning: [{ text: "Reasoning from a different provider." }],
+                content: [
+                    { type: "text" as const, text: "Done." },
+                    { type: "reasoning", text: "Reasoning from a different provider." },
+                ],
             },
-            { role: "user", content: "Thanks." },
+            {
+                role: "user",
+                content: [{ type: "text" as const, text: "Thanks." }],
+            },
         ]);
         const original = structuredClone(source);
         const replay = createClaudeSessionReplay({
@@ -131,9 +192,18 @@ describe("Claude session replay reasoning", () => {
     it("ignores transcript entries Claude tries to mirror back", async () => {
         const replay = createClaudeSessionReplay({
             context: context([
-                { role: "user", content: "First." },
-                { role: "assistant", content: "Done." },
-                { role: "user", content: "Second." },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "First." }],
+                },
+                {
+                    role: "assistant",
+                    content: [{ type: "text" as const, text: "Done." }],
+                },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: "Second." }],
+                },
             ]),
             model: "claude-opus-4-8",
             sessionId: "replay-session",

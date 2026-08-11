@@ -17,14 +17,21 @@ describe("getCodexTurnKey", () => {
         expect(getCodexTurnKey([task])).toBe(
             getCodexTurnKey([
                 task,
-                { role: "assistant", content: "Working." },
-                { role: "tool", callId: "call-1", content: "done" },
+                { role: "assistant", content: [{ type: "text", text: "Working." }] },
+                {
+                    role: "tool",
+                    callId: "call-1",
+                    content: [{ type: "text", text: "done" }],
+                },
             ]),
         );
     });
 
     it("does not treat a queued native agent message as a new turn", () => {
-        const human: SessionMessage = { role: "user", content: "Original task" };
+        const human: SessionMessage = {
+            role: "user",
+            content: [{ type: "text", text: "Original task" }],
+        };
         const queued: SessionMessage = {
             role: "agent",
             author: "/root",
@@ -36,16 +43,16 @@ describe("getCodexTurnKey", () => {
         expect(getCodexTurnKey([human, queued])).toBe(getCodexTurnKey([human]));
     });
 
-    it("pins the turn key to the later actionable user message", () => {
-        const first: SessionMessage = { role: "user", content: "Original task" };
-        const note: SessionMessage = {
+    it("treats every user message as a new turn boundary", () => {
+        const first: SessionMessage = {
             role: "user",
-            content: "Background context",
-            contextOnly: true,
+            content: [{ type: "text", text: "Original task" }],
         };
-        const actionable: SessionMessage = { role: "user", content: "Continue now" };
+        const next: SessionMessage = {
+            role: "user",
+            content: [{ type: "text", text: "Background context" }],
+        };
 
-        expect(getCodexTurnKey([first, note])).toBe(getCodexTurnKey([first]));
-        expect(getCodexTurnKey([first, note, actionable])).not.toBe(getCodexTurnKey([first]));
+        expect(getCodexTurnKey([first, next])).not.toBe(getCodexTurnKey([first]));
     });
 });

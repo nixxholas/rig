@@ -1,35 +1,27 @@
-import type {
-    ResponseInput,
-    ResponseInputItem,
-    ResponseReasoningItem,
-} from "openai/resources/responses/responses.js";
-import { Type } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import type { ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
-import type { SessionContext } from "@/core/SessionContext.js";
+import type {
+    SessionAssistantBlock,
+    SessionContext,
+    SessionOutputBlock,
+} from "@/core/SessionContext.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
 import type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 import { toGrokInputContent } from "@/vendors/grok/impl/toGrokInputContent.js";
 
 export function toGrokResponseInput(context: SessionContext): ResponseInput {
     const input: ResponseInput = [
-        {
-            type: "message",
-            role: "system",
-            content: context.instructions,
-        } as ResponseInputItem,
+        { type: "message", role: "system", content: context.instructions } as ResponseInputItem,
     ];
     const customToolCallIds = new Set<string>();
     const toolSearchCallIds = new Set<string>();
     for (const message of context.messages) {
         if (message.role === "system") {
-            // Grok has no system role inside a conversation. Its native client delivers notices as
-            // `<system-reminder>` user turns, keeping the position the caller chose.
             const reminder = toSessionReminderMessage(message);
             input.push({
                 type: "message",
                 role: "user",
-                content: toGrokInputContent(reminder.content, reminder.input),
+                content: toGrokInputContent(reminder.content),
             } as ResponseInputItem);
             continue;
         }
@@ -37,7 +29,7 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
             input.push({
                 type: "message",
                 role: "user",
-                content: toGrokInputContent(message.content, message.input),
+                content: toGrokInputContent(message.content),
             });
             continue;
         }
@@ -63,106 +55,119 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
                         ? "custom_tool_call_output"
                         : "function_call_output",
                 call_id: message.callId,
-                output: toGrokInputContent(message.content, message.input),
+                output: toGrokInputContent(message.content),
             } as ResponseInputItem);
             continue;
         }
 
-        if (message.responseItems !== undefined) {
-            for (const encoded of message.responseItems) {
+        for (const block of message.content) {
+            const native = nativeOutputItem(block);
+            if (native !== undefined) {
+                input.push(native);
+                rememberNativeCall(native, customToolCallIds, toolSearchCallIds);
+                continue;
+            }
+            if (block.type === "reasoning") {
+                if (block.reasoning === undefined) continue;
                 try {
-                    const parsed: unknown = JSON.parse(encoded);
-                    if (!Value.Check(opaqueResponseItemSchema, parsed)) continue;
-                    const item = parsed as ResponseInputItem;
-                    input.push(item);
-                    if (
-                        item.type === "tool_search_call" &&
-                        item.call_id !== null &&
-                        item.call_id !== undefined
-                    ) {
-                        toolSearchCallIds.add(item.call_id);
-                    } else if (item.type === "custom_tool_call") {
-                        customToolCallIds.add(item.call_id);
-                    }
+                    const item = JSON.parse(block.reasoning) as ResponseInputItem;
+                    if (item.type === "reasoning") input.push(item);
                 } catch {
-                    // Ignore malformed opaque response state from an earlier response.
+                    // Optional replay state must not make the whole conversation unusable.
                 }
+                continue;
             }
-            continue;
-        }
-
-        if (message.encryptedReasoning !== undefined) {
-            try {
-                const reasoning = JSON.parse(message.encryptedReasoning) as ResponseReasoningItem;
-                if (reasoning.type === "reasoning") {
-                    input.push(reasoning);
-                }
-            } catch {
-                // Ignore malformed opaque reasoning from an earlier response.
+            if (block.type === "text") {
+                input.push({
+                    type: "message",
+                    role: "assistant",
+                    content: block.text,
+                } as ResponseInputItem);
+                continue;
             }
-        }
-
-        for (const toolCall of message.toolCalls ?? []) {
-            const vendorType = toolVendorType(toolCall.vendor);
+            if (block.type === "tool_result") continue;
+            const vendorType = toolVendorType(block.vendor);
             if (vendorType === "tool_search_call") {
                 try {
                     input.push({
                         type: "tool_search_call",
-                        call_id: toolCall.callId,
+                        call_id: block.callId,
                         execution: "client",
-                        arguments: JSON.parse(toolCall.arguments),
+                        arguments: JSON.parse(block.arguments),
                     } as ResponseInputItem);
-                    toolSearchCallIds.add(toolCall.callId);
+                    toolSearchCallIds.add(block.callId);
                 } catch {
-                    // Ignore malformed tool-search arguments from an earlier response.
+                    // Malformed optional tool-search state is omitted from replay.
                 }
             } else if (vendorType === "custom_tool_call") {
                 input.push({
                     type: "custom_tool_call",
-                    call_id: toolCall.callId,
-                    name: toolCall.name,
-                    input: toolCall.arguments,
+                    call_id: block.callId,
+                    name: block.name,
+                    input: block.arguments,
                 } as ResponseInputItem);
-                customToolCallIds.add(toolCall.callId);
+                customToolCallIds.add(block.callId);
             } else {
                 input.push({
                     type: "function_call",
-                    call_id: toolCall.callId,
-                    name: toolCall.name,
-                    arguments: toolCall.arguments,
+                    call_id: block.callId,
+                    name: block.name,
+                    arguments: block.arguments,
                 } as ResponseInputItem);
             }
         }
-        if (message.content.length > 0) {
-            input.push({
-                type: "message",
-                role: "assistant",
-                content: message.content,
-            } as ResponseInputItem);
-        }
     }
-
     return input;
 }
 
-const toolSearchToolsSchema = Type.Union([
-    Type.Array(Type.Unknown()),
-    Type.Object({ tools: Type.Array(Type.Unknown()) }, { additionalProperties: true }),
-]);
-
-const opaqueResponseItemSchema = Type.Object(
-    { type: Type.String() },
-    { additionalProperties: true },
-);
-
-function parseToolSearchTools(content: string): readonly unknown[] {
+function parseToolSearchTools(content: readonly SessionOutputBlock[]): readonly unknown[] {
     try {
-        const parsed: unknown = JSON.parse(content);
-        if (!Value.Check(toolSearchToolsSchema, parsed)) return [];
-        return Array.isArray(parsed) ? parsed : parsed.tools;
+        const parsed: unknown = JSON.parse(textFromBlocks(content));
+        if (Array.isArray(parsed)) return parsed;
+        return typeof parsed === "object" &&
+            parsed !== null &&
+            "tools" in parsed &&
+            Array.isArray(parsed.tools)
+            ? parsed.tools
+            : [];
     } catch {
-        // A failed client tool still needs an output so the provider does not wait forever.
         return [];
+    }
+}
+
+function textFromBlocks(content: readonly SessionOutputBlock[]): string {
+    return content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+}
+
+function nativeOutputItem(block: SessionAssistantBlock): ResponseInputItem | undefined {
+    if ((block.type !== "tool_call" && block.type !== "tool_result") || block.vendor === undefined)
+        return undefined;
+    const vendor = block.vendor;
+    if (
+        typeof vendor !== "object" ||
+        vendor === null ||
+        !("outputItem" in vendor) ||
+        typeof vendor.outputItem !== "string"
+    )
+        return undefined;
+    try {
+        return JSON.parse(vendor.outputItem) as ResponseInputItem;
+    } catch {
+        return undefined;
+    }
+}
+
+function rememberNativeCall(
+    item: ResponseInputItem,
+    customToolCallIds: Set<string>,
+    toolSearchCallIds: Set<string>,
+): void {
+    if (item.type === "custom_tool_call") customToolCallIds.add(item.call_id);
+    if (item.type === "tool_search_call" && item.call_id != null) {
+        toolSearchCallIds.add(item.call_id);
     }
 }
 

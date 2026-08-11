@@ -309,6 +309,27 @@ code-mode execution, we do not adopt it: the rewrite it would force is large and
 unproven. Decisions like this are deliberate omissions, not gaps to be closed later, and should be
 recorded in the vendor document rather than silently reversed.
 
+### The public protocol is frozen by default
+
+Changing the shared session protocol — the message shapes, events, options, and results every
+caller programs against — is highly undesirable. Every addition is a concept every caller must
+now understand, persist, and replay correctly, forever. A new feature must first be made to lie
+transparently on the existing types: an existing message role, an existing event, the opaque
+`vendor` and encrypted fields that callers already persist without interpreting. A small additive
+flag on an existing type is acceptable when nothing existing can carry the behavior.
+
+Sometimes a vendor genuinely needs something persisted between requests — continuation state from
+a tool call, the residue of a special vendor mode. The tolerance for this is narrow. It must
+belong exclusively to that one vendor, and it must ride inside the opaque channels that already
+exist, where the caller stores it byte-for-byte and never interprets it.
+
+What is not acceptable is a new parallel persistence channel on the shared surface — raw provider
+payloads that every caller must separately store and hand back. `responseItems` is the cautionary
+example: bare Responses output items pushed into the shared assistant message for callers to
+persist and replay. Do not repeat it. When a design seems to need one, reshape it onto the opaque
+fields or a flag instead, and if it truly cannot fit, treat that as a signal to redesign the
+feature rather than to widen the protocol.
+
 ## Compaction
 
 - Always use native compaction where the vendor provides it. Never implement compaction here.

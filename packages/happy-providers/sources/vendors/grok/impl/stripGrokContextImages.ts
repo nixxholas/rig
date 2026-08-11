@@ -1,17 +1,17 @@
-import type { SessionContext, SessionInputContent } from "@/core/SessionContext.js";
+import type { SessionContext, SessionInputBlock } from "@/core/SessionContext.js";
 
 export function stripGrokContextImages(context: SessionContext): SessionContext | undefined {
     let removed = false;
     const messages = context.messages.map((message) => {
-        if ((message.role !== "user" && message.role !== "tool") || message.input === undefined) {
+        if (message.role !== "user" && message.role !== "tool") {
             return message;
         }
-        const input = message.input.filter((block) => {
+        const content = message.content.filter((block) => {
             if (block.type !== "image") return true;
             removed = true;
             return false;
-        }) as SessionInputContent;
-        return { ...message, input };
+        }) as readonly SessionInputBlock[];
+        return { ...message, content };
     });
     return removed ? { ...context, messages } : undefined;
 }

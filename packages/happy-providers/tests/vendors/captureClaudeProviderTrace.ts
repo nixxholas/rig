@@ -12,9 +12,11 @@ import { ClaudeOAuthCredential } from "@/vendors/claude/ClaudeOAuthCredential.js
 import { ClaudeSession } from "@/vendors/claude/ClaudeSession.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
 import { resolveClaudeTools } from "@/vendors/claude/impl/resolveClaudeTools.js";
-import type { SessionMessage, SessionToolCall } from "@/core/SessionContext.js";
+import type { SessionMessage, SessionToolCallBlock } from "@/core/SessionContext.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import { createClaudeTestInstructions } from "./createClaudeTestInstructions.js";
+
+type SessionToolCall = Omit<SessionToolCallBlock, "type">;
 
 const outputArgument = process.argv[2];
 if (outputArgument === undefined) {
@@ -105,17 +107,34 @@ let captureError: unknown;
 try {
     const firstPrompt =
         "Call the Read tool exactly once with file_path /virtual/provider-golden.txt. Do not reply with text before the tool call.";
-    const first = await captureTurn(firstPrompt, [{ role: "user", content: firstPrompt }]);
+    const first = await captureTurn(firstPrompt, [
+        {
+            role: "user",
+            content: [{ type: "text" as const, text: firstPrompt }],
+        },
+    ]);
     const readCall = first.toolCalls.find((call) => call.name === "Read");
     if (readCall === undefined) throw new Error("Claude did not call the Read tool.");
 
     const afterToolPrompt: SessionMessage[] = [
-        { role: "user", content: firstPrompt },
-        { role: "assistant", content: first.text, toolCalls: first.toolCalls },
+        {
+            role: "user",
+            content: [{ type: "text" as const, text: firstPrompt }],
+        },
+        {
+            role: "assistant",
+            content: [
+                { type: "text" as const, text: first.text },
+                ...first.toolCalls.map((call) => ({
+                    type: "tool_call" as const,
+                    ...call,
+                })),
+            ],
+        },
         {
             role: "tool",
+            content: [{ type: "text" as const, text: "PROVIDER_TOOL_MARKER" }],
             callId: readCall.callId,
-            content: "PROVIDER_TOOL_MARKER",
             vendor: { type: "claude_tool_use" },
         },
     ];
@@ -128,23 +147,44 @@ try {
         "Remember PROVIDER_SKILL_MARKER and PROVIDER_TOOL_MARKER. Reply exactly SECOND.";
     const secondContext: SessionMessage[] = [
         ...afterToolPrompt,
-        { role: "assistant", content: afterTool.text },
-        { role: "user", content: secondPrompt },
+        {
+            role: "assistant",
+            content: [{ type: "text" as const, text: afterTool.text }],
+        },
+        {
+            role: "user",
+            content: [{ type: "text" as const, text: secondPrompt }],
+        },
     ];
     const second = await captureTurn(secondPrompt, secondContext);
 
     const switchedPrompt = "After switching models, reply exactly SWITCHED.";
     const switchedContext: SessionMessage[] = [
         ...secondContext,
-        { role: "assistant", content: second.text },
-        { role: "user", content: switchedPrompt },
+        {
+            role: "assistant",
+            content: [{ type: "text" as const, text: second.text }],
+        },
+        {
+            role: "user",
+            content: [{ type: "text" as const, text: switchedPrompt }],
+        },
     ];
     await captureTurn(switchedPrompt, switchedContext, switchedModel);
 
     const compactInstructions =
         "Preserve PROVIDER_SKILL_MARKER, PROVIDER_TOOL_MARKER, SECOND, and SWITCHED exactly.";
     const exchangeStart = exchanges.length;
-    const compacted = await session.compact({ instructions: compactInstructions });
+    const compacted = await session.compact({
+        context: {
+            instructions: createClaudeTestInstructions(switchedModel, {
+                cwd,
+                env: providerEnv,
+            }),
+            messages: switchedContext,
+        },
+        instructions: compactInstructions,
+    });
     turns.push({
         kind: "compact",
         model: switchedModel,
@@ -160,7 +200,13 @@ try {
         "Using only compacted context, reply exactly POST_COMPACT PROVIDER_SKILL_MARKER PROVIDER_TOOL_MARKER SECOND SWITCHED.";
     const continued = await captureTurn(
         continuedPrompt,
-        [...compacted.context.messages, { role: "user", content: continuedPrompt }],
+        [
+            ...compacted.context.messages,
+            {
+                role: "user",
+                content: [{ type: "text" as const, text: continuedPrompt }],
+            },
+        ],
         switchedModel,
     );
     if (
@@ -204,7 +250,13 @@ async function captureTurn(
     const exchangeStart = exchanges.length;
     const events: SessionEvent[] = [];
     for await (const event of session.run({
-        context: { messages },
+        context: {
+            instructions: createClaudeTestInstructions(model ?? initialModel, {
+                cwd,
+                env: providerEnv,
+            }),
+            messages,
+        },
         ...(model === undefined ? {} : { model }),
     })) {
         events.push(event);

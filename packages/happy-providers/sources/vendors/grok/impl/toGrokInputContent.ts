@@ -3,14 +3,13 @@ import type {
     ResponseInputText,
 } from "openai/resources/responses/responses.js";
 
-import type { SessionInputContent } from "@/core/SessionContext.js";
+import type { SessionInputBlock } from "@/core/SessionContext.js";
 
 export function toGrokInputContent(
-    content: string,
-    input?: SessionInputContent,
+    content: readonly SessionInputBlock[],
 ): string | Array<ResponseInputText | ResponseInputImage> {
-    if (input === undefined) return content;
-    return input.map((block) =>
+    if (content.length === 1 && content[0]?.type === "text") return content[0].text;
+    return content.map((block) =>
         block.type === "text"
             ? { type: "input_text", text: block.text }
             : {

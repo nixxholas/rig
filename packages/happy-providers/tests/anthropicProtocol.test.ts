@@ -53,7 +53,7 @@ describe("Anthropic protocol stop reasons", () => {
                 events.push(event);
             }
 
-            expect(events.some((event) => event.type === "response_items")).toBe(false);
+            expect(events.some((event) => event.type === "text_start")).toBe(false);
             expect(events.at(-1)).toEqual({
                 type: "done",
                 state: "error",

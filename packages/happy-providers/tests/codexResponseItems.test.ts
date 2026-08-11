@@ -19,17 +19,9 @@ describe("Codex response items", () => {
             messages: [
                 {
                     role: "assistant",
-                    content: "",
-                    responseItems: [
-                        JSON.stringify({
-                            arguments: "{}",
-                            call_id: overlongCallId,
-                            name: "inspect",
-                            type: "function_call",
-                        }),
-                    ],
-                    toolCalls: [
+                    content: [
                         {
+                            type: "tool_call",
                             arguments: "{}",
                             callId: overlongCallId,
                             name: "inspect",
@@ -38,8 +30,8 @@ describe("Codex response items", () => {
                 },
                 {
                     role: "tool",
+                    content: [{ type: "text" as const, text: "done" }],
                     callId: overlongCallId,
-                    content: "done",
                 },
             ],
         };
@@ -111,7 +103,17 @@ describe("Codex response items", () => {
         expect(
             toOpenAIResponseInput({
                 instructions: "instructions",
-                messages: [{ role: "assistant", content: "", toolCalls: result.toolCalls }],
+                messages: [
+                    {
+                        role: "assistant",
+                        content: [
+                            ...result.toolCalls.map((call) => ({
+                                type: "tool_call" as const,
+                                ...call,
+                            })),
+                        ],
+                    },
+                ],
             }),
         ).toEqual([functionCall]);
     });
@@ -182,7 +184,7 @@ describe("Codex response items", () => {
         ]);
     });
 
-    it("requires response item IDs to match before reusing previous_response_id", () => {
+    it("reuses previous_response_id without exposing provider-generated message IDs", () => {
         const previousRequest = {
             model: "gpt-5.6-sol",
             input: [{ type: "message", role: "user", content: "first" }],
@@ -204,10 +206,12 @@ describe("Codex response items", () => {
             ],
         };
 
-        expect(getCodexIncrementalInput(previousRequest, responseItems, rebuilt)).toBeUndefined();
+        expect(getCodexIncrementalInput(previousRequest, responseItems, rebuilt)).toEqual([
+            { type: "message", role: "user", content: "second" },
+        ]);
     });
 
-    it("keeps GPT continuation incremental after executor argument normalization", () => {
+    it("rebuilds context after executor argument normalization", () => {
         const user = { type: "message", role: "user", content: "Read it." };
         const functionCall = {
             type: "function_call",
@@ -221,32 +225,35 @@ describe("Codex response items", () => {
             input: toOpenAIResponseInput({
                 instructions: "instructions",
                 messages: [
-                    { role: "user", content: "Read it." },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Read it." }],
+                    },
                     {
                         role: "assistant",
-                        content: "",
-                        responseItems: [JSON.stringify(functionCall)],
-                        toolCalls: [
+                        content: [
                             {
+                                type: "tool_call",
                                 callId: "call-1",
                                 name: "Read",
                                 arguments: '{"file_path":"/tmp/input"}',
                             },
                         ],
                     },
-                    { role: "tool", callId: "call-1", content: "done" },
+                    {
+                        role: "tool",
+                        content: [{ type: "text" as const, text: "done" }],
+                        callId: "call-1",
+                    },
                 ],
             }),
         };
 
-        expect(rebuilt.input[1]).toEqual(functionCall);
-        expect(getCodexIncrementalInput(previousRequest, [functionCall], rebuilt)).toEqual([
-            {
-                type: "function_call_output",
-                call_id: "call-1",
-                output: "done",
-            },
-        ]);
+        expect(rebuilt.input[1]).toEqual({
+            ...functionCall,
+            arguments: '{"file_path":"/tmp/input"}',
+        });
+        expect(getCodexIncrementalInput(previousRequest, [functionCall], rebuilt)).toBeUndefined();
     });
 
     /**
@@ -323,33 +330,15 @@ describe("Codex response items", () => {
         ).toBeUndefined();
     });
 
-    it("selects the native tool-search definition from vendor metadata, not its name", () => {
+    it("keeps arbitrary tool_search functions distinct from the internal native descriptor", () => {
         const ordinaryToolSearch: SessionTool = {
-            ...tool_search,
-            vendor: undefined,
+            name: tool_search.name,
+            description: tool_search.description,
+            parameters: tool_search.parameters,
         };
 
-        expect(toCodexToolDefinitions([tool_search])).toEqual([
-            {
-                type: "tool_search",
-                execution: "client",
-                description: tool_search.description,
-                parameters: {
-                    type: "object",
-                    properties: {
-                        limit: {
-                            type: "number",
-                            description: "Maximum number of tools to return. Defaults to 8.",
-                        },
-                        query: {
-                            type: "string",
-                            description: "Search query for deferred tools.",
-                        },
-                    },
-                    required: ["query"],
-                    additionalProperties: false,
-                },
-            },
+        expect(toCodexToolDefinitions([tool_search])).toMatchObject([
+            { type: "tool_search", execution: "client" },
         ]);
         expect(toCodexToolDefinitions([ordinaryToolSearch])).toMatchObject([
             {
@@ -363,23 +352,27 @@ describe("Codex response items", () => {
                 messages: [
                     {
                         role: "assistant",
-                        content: "",
-                        toolCalls: [
-                            {
-                                callId: "ordinary-search",
-                                name: "tool_search",
-                                arguments: '{"query":"tools"}',
-                                vendor: {
-                                    provider: "codex",
-                                    type: "function_call",
+                        content: [
+                            ...[
+                                {
+                                    callId: "ordinary-search",
+                                    name: "tool_search",
+                                    arguments: '{"query":"tools"}',
+                                    vendor: {
+                                        provider: "codex",
+                                        type: "function_call",
+                                    },
                                 },
-                            },
+                            ].map((call) => ({
+                                type: "tool_call" as const,
+                                ...call,
+                            })),
                         ],
                     },
                     {
                         role: "tool",
+                        content: [{ type: "text" as const, text: "[]" }],
                         callId: "ordinary-search",
-                        content: "[]",
                         vendor: {
                             provider: "codex",
                             type: "function_call",
@@ -408,7 +401,7 @@ describe("Codex response items", () => {
                 name: "rare_tool",
                 description: "Perform a rare operation.",
                 parameters: Type.Object({}),
-                deferLoading: true,
+                defer: true,
             },
         ]);
 
@@ -498,9 +491,9 @@ describe("Codex response items", () => {
                 },
             ],
         });
-        if (result === undefined || !("responseItems" in result))
+        if (result === undefined || !("outputItems" in result))
             expect.fail("Missing mapped result.");
-        expect(result.responseItems.map((item) => JSON.parse(item))).toEqual(output);
+        expect(result.outputItems.map((item) => JSON.parse(item))).toEqual(output);
         expect(events).toContainEqual({
             type: "toolcall_start",
             callId: "search-call",
@@ -515,26 +508,46 @@ describe("Codex response items", () => {
         const context: SessionContext = {
             instructions: "instructions",
             messages: [
-                {
-                    role: "assistant",
-                    content: result.assistantText,
-                    toolCalls: result.toolCalls,
-                    responseItems: result.responseItems,
-                },
+                result.message,
                 {
                     role: "tool",
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: JSON.stringify([{ type: "function", name: "github_search" }]),
+                        },
+                    ],
                     callId: "search-call",
                     vendor: {
                         provider: "codex",
                         type: "tool_search_call",
                         execution: "client",
                     },
-                    content: JSON.stringify([{ type: "function", name: "github_search" }]),
                 },
             ],
         };
         expect(toOpenAIResponseInput(context)).toEqual([
-            ...output,
+            reasoning,
+            {
+                type: "message",
+                id: "msg_rig_0",
+                role: "assistant",
+                status: "completed",
+                content: commentary.content,
+            },
+            {
+                type: "tool_search_call",
+                call_id: "search-call",
+                execution: "client",
+                arguments: { namespace: "github", query: "pull requests" },
+            },
+            {
+                type: "message",
+                id: "msg_rig_1",
+                role: "assistant",
+                status: "completed",
+                content: final.content,
+            },
             {
                 type: "tool_search_output",
                 call_id: "search-call",
@@ -552,29 +565,33 @@ describe("Codex response items", () => {
                 messages: [
                     {
                         role: "assistant",
-                        content: "",
-                        toolCalls: [
-                            {
-                                callId: "search-call",
-                                name: "tool_search",
-                                vendor: {
-                                    provider: "codex",
-                                    type: "tool_search_call",
-                                    execution: "client",
+                        content: [
+                            ...[
+                                {
+                                    callId: "search-call",
+                                    name: "tool_search",
+                                    vendor: {
+                                        provider: "codex",
+                                        type: "tool_search_call",
+                                        execution: "client",
+                                    },
+                                    arguments: '{"query":"tools"}',
                                 },
-                                arguments: '{"query":"tools"}',
-                            },
+                            ].map((call) => ({
+                                type: "tool_call" as const,
+                                ...call,
+                            })),
                         ],
                     },
                     {
                         role: "tool",
+                        content: [{ type: "text" as const, text: "[]" }],
                         callId: "search-call",
                         vendor: {
                             provider: "codex",
                             type: "tool_search_call",
                             execution: "client",
                         },
-                        content: "[]",
                     },
                 ],
             }),
@@ -601,23 +618,27 @@ describe("Codex response items", () => {
             messages: [
                 {
                     role: "assistant",
-                    content: "",
-                    toolCalls: [
-                        {
-                            callId: "grok-call",
-                            name: "search",
-                            arguments: "{}",
-                            vendor: {
-                                provider: "grok",
-                                type: "custom_tool_call",
+                    content: [
+                        ...[
+                            {
+                                callId: "grok-call",
+                                name: "search",
+                                arguments: "{}",
+                                vendor: {
+                                    provider: "grok",
+                                    type: "custom_tool_call",
+                                },
                             },
-                        },
+                        ].map((call) => ({
+                            type: "tool_call" as const,
+                            ...call,
+                        })),
                     ],
                 },
                 {
                     role: "tool",
+                    content: [{ type: "text" as const, text: "result" }],
                     callId: "grok-call",
-                    content: "result",
                     vendor: {
                         provider: "grok",
                         type: "custom_tool_call",
@@ -645,23 +666,27 @@ describe("Codex response items", () => {
                 messages: [
                     {
                         role: "assistant",
-                        content: "",
-                        toolCalls: [
-                            {
-                                callId: "codex-call",
-                                name: "exec",
-                                arguments: "{}",
-                                vendor: {
-                                    provider: "codex",
-                                    type: "custom_tool_call",
+                        content: [
+                            ...[
+                                {
+                                    callId: "codex-call",
+                                    name: "exec",
+                                    arguments: "{}",
+                                    vendor: {
+                                        provider: "codex",
+                                        type: "custom_tool_call",
+                                    },
                                 },
-                            },
+                            ].map((call) => ({
+                                type: "tool_call" as const,
+                                ...call,
+                            })),
                         ],
                     },
                     {
                         role: "tool",
+                        content: [{ type: "text" as const, text: "result" }],
                         callId: "codex-call",
-                        content: "result",
                         vendor: {
                             provider: "codex",
                             type: "custom_tool_call",

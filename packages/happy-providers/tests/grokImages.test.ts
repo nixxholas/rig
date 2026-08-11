@@ -11,32 +11,34 @@ describe("Grok image input", () => {
             messages: [
                 {
                     role: "user",
-                    content: "user image",
-                    input: [
+                    content: [
                         { type: "text", text: "user image" },
                         { type: "image", mimeType: "image/png", data: "dXNlcg==" },
                     ],
                 },
                 {
                     role: "assistant",
-                    content: "",
-                    toolCalls: [
-                        {
-                            callId: "call-1",
-                            name: "read_file",
-                            arguments: "{}",
-                            vendor: { provider: "grok", type: "function_call" },
-                        },
+                    content: [
+                        ...[
+                            {
+                                callId: "call-1",
+                                name: "read_file",
+                                arguments: "{}",
+                                vendor: { provider: "grok", type: "function_call" },
+                            },
+                        ].map((call) => ({
+                            type: "tool_call" as const,
+                            ...call,
+                        })),
                     ],
                 },
                 {
                     role: "tool",
-                    callId: "call-1",
-                    content: "tool image",
-                    input: [
+                    content: [
                         { type: "text", text: "tool image" },
                         { type: "image", mimeType: "image/webp", data: "dG9vbA==" },
                     ],
+                    callId: "call-1",
                 },
             ],
         });
@@ -73,8 +75,7 @@ describe("Grok image input", () => {
             messages: [
                 {
                     role: "user" as const,
-                    content: "inspect",
-                    input: [
+                    content: [
                         { type: "text" as const, text: "before" },
                         {
                             type: "image" as const,
@@ -99,8 +100,7 @@ describe("Grok image input", () => {
             messages: [
                 {
                     role: "user",
-                    content: "inspect",
-                    input: [
+                    content: [
                         { type: "text", text: "before" },
                         { type: "text", text: "after" },
                     ],

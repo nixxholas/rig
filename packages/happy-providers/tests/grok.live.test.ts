@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Type } from "@sinclair/typebox";
 
 import type { SessionEvent } from "@/core/SessionEvent.js";
+import { assistantMessageFromEvents } from "@/core/SessionAssistantMessageAccumulator.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import type { GrokCredential } from "@/vendors/VendorCredential.js";
 import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
@@ -32,7 +33,15 @@ describeLive("GrokProvider live", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
-                    messages: [{ role: "user", content: "Reply with exactly: grok live ok" }],
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text" as const, text: "Reply with exactly: grok live ok" },
+                            ],
+                        },
+                    ],
                 },
                 model: "grok-4.5",
             }),
@@ -64,14 +73,25 @@ describeLive("GrokProvider live", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
-                    messages: [{ role: "user", content: "Reply with exactly: composer live ok" }],
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Reply with exactly: composer live ok",
+                                },
+                            ],
+                        },
+                    ],
                 },
                 effort: "off",
                 model: "grok-composer-2.5-fast",
             }),
         );
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events).toLowerCase()).toContain("composer live ok");
     }, 120_000);
 
@@ -94,58 +114,56 @@ describeLive("GrokProvider live", () => {
         });
         const user = {
             role: "user" as const,
-            content: 'Call live_probe exactly once with value "tool path ok". Do not answer yet.',
+            content: [
+                {
+                    type: "text" as const,
+                    text: 'Call live_probe exactly once with value "tool path ok". Do not answer yet.',
+                },
+            ],
         };
         const first = await collectSessionEvents(
-            session.run({ context: { messages: [user] }, effort: "low" }),
+            session.run({ context: { instructions: "", messages: [user] }, effort: "low" }),
         );
-        expect(first.at(-1)).toEqual({ type: "done", state: "tool_call" });
-        const callId = first.find((event) => event.type === "toolcall_delta")?.callId;
-        const argumentsJson = first
-            .filter((event) => event.type === "toolcall_delta")
-            .map((event) => event.delta)
-            .join("");
-        const encryptedReasoning = first.find(
-            (event) => event.type === "encrypted_reasoning",
-        )?.content;
-        expect(callId).toBeDefined();
-        expect(JSON.parse(argumentsJson)).toEqual({ value: "tool path ok" });
-        expect(encryptedReasoning).toBeDefined();
+        expect(first.at(-1)).toMatchObject({ type: "done", state: "tool_call" });
+        const assistant = assistantMessageFromEvents(first);
+        if (assistant === undefined) expect.fail("Missing assistant tool-call message.");
+        const call = assistant.content.find((block) => block.type === "tool_call");
+        if (call?.type !== "tool_call") expect.fail("Missing live_probe tool call.");
+        expect(JSON.parse(call.arguments)).toEqual({ value: "tool path ok" });
+        expect(
+            assistant.content.some(
+                (block) => block.type === "reasoning" && block.reasoning !== undefined,
+            ),
+        ).toBe(true);
 
         const second = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         user,
-                        {
-                            role: "assistant",
-                            content: "",
-                            encryptedReasoning: encryptedReasoning!,
-                            toolCalls: [
-                                {
-                                    callId: callId!,
-                                    name: "live_probe",
-                                    arguments: argumentsJson,
-                                    vendor: { provider: "grok", type: "function_call" },
-                                },
-                            ],
-                        },
+                        assistant,
                         {
                             role: "tool",
-                            callId: callId!,
-                            content: "tool path ok",
-                            vendor: { provider: "grok", type: "function_call" },
+                            content: [{ type: "text" as const, text: "tool path ok" }],
+                            callId: call.callId,
+                            ...(call.vendor === undefined ? {} : { vendor: call.vendor }),
                         },
                         {
                             role: "user",
-                            content: "Reply with exactly: grok tool continuation ok",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Reply with exactly: grok tool continuation ok",
+                                },
+                            ],
                         },
                     ],
                 },
                 effort: "low",
             }),
         );
-        expect(second.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(second.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(second).toLowerCase()).toContain("grok tool continuation ok");
     }, 120_000);
 
@@ -162,16 +180,29 @@ describeLive("GrokProvider live", () => {
         const messages = [
             {
                 role: "user" as const,
-                content: "Remember that the verification command is pnpm test.",
+                content: [
+                    {
+                        type: "text" as const,
+                        text: "Remember that the verification command is pnpm test.",
+                    },
+                ],
             },
         ];
         await collectSessionEvents(
             session.run({
-                context: { messages },
+                context: {
+                    instructions: "You are a concise coding assistant.",
+                    messages,
+                },
                 effort: "low",
             }),
         );
-        const compacted = await session.compact({ context: { messages } });
+        const compacted = await session.compact({
+            context: {
+                instructions: "You are a concise coding assistant.",
+                messages,
+            },
+        });
         if (compacted.status !== "completed") {
             expect.fail(`Live compaction failed: ${JSON.stringify(compacted)}`);
         }
@@ -209,11 +240,16 @@ describeLive("GrokProvider live", () => {
         const events = await collectSessionEvents(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         {
                             role: "user",
-                            content:
-                                "<user_query>Search X for recent posts about Claude Code and reply with one post URL.</user_query>",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "<user_query>Search X for recent posts about Claude Code and reply with one post URL.</user_query>",
+                                },
+                            ],
                         },
                     ],
                 },
@@ -234,7 +270,7 @@ describeLive("GrokProvider live", () => {
         expect(
             events.filter((event) => event.type === "toolcall_start" && event.server !== true),
         ).toEqual([]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(textFromSessionEvents(events)).toContain("x.com/");
     }, 180_000);
 });

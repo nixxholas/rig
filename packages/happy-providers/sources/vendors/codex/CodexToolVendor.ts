@@ -7,11 +7,12 @@ export type CodexToolVendor =
           readonly execution: "client";
       };
 
+/** Internal metadata attached only to captured Codex reference descriptors. */
 export type CodexToolDefinitionVendor =
     | {
           readonly provider: "codex";
           readonly type: "function";
-          readonly deferLoading?: boolean;
+          readonly defer?: boolean;
       }
     | {
           readonly provider: "codex";

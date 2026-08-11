@@ -6,6 +6,7 @@ import type { BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages
 import { describe, expect, it } from "vitest";
 
 import { committedSessionEvents } from "@/core/committedSessionEvents.js";
+import { assistantMessageFromEvents } from "@/core/SessionAssistantMessageAccumulator.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import { BedrockBearerTokenCredential } from "@/vendors/bedrock/BedrockBearerTokenCredential.js";
 import {
@@ -22,10 +23,7 @@ import {
 } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
 import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
-import {
-    encodeAnthropicReasoningBlocks,
-    toAnthropicMessages,
-} from "@/protocol/anthropic/toAnthropicMessages.js";
+import { toAnthropicMessages } from "@/protocol/anthropic/toAnthropicMessages.js";
 import { resolveAnthropicBedrockModelId } from "@/vendors/bedrock/impl/resolveAnthropicBedrockModelId.js";
 import { claude_tools } from "@/vendors/claude/tools/index.js";
 
@@ -193,9 +191,16 @@ describe("AnthropicBedrockProvider", () => {
 
         const result = await session.compact({
             context: {
-                messages: [{ role: "user", content: "prefix selected for compaction" }],
+                instructions: "system",
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text" as const, text: "prefix selected for compaction" },
+                        ],
+                    },
+                ],
             },
-            inputTokens: 60_000,
             instructions: "Preserve identifiers.",
         });
 
@@ -233,7 +238,7 @@ describe("AnthropicBedrockProvider", () => {
                 encryptedContent: "opaque-compaction-metadata",
             },
             usage: {
-                input: 60_000,
+                input: 70_500,
                 output: 1_500,
                 cacheRead: 10_000,
                 cacheWrite: 500,
@@ -241,6 +246,7 @@ describe("AnthropicBedrockProvider", () => {
             },
             preservedMessages: [],
             context: {
+                instructions: "system",
                 messages: [
                     {
                         role: "compaction",
@@ -268,7 +274,14 @@ describe("AnthropicBedrockProvider", () => {
 
         for await (const _event of session.run({
             context: {
-                messages: [result.compaction, { role: "user", content: "retained turn" }],
+                instructions: "system",
+                messages: [
+                    result.compaction,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retained turn" }],
+                    },
+                ],
             },
         })) {
             // Consume the continuation so its wire request is captured.
@@ -309,9 +322,15 @@ describe("AnthropicBedrockProvider", () => {
 
         await session.compact({
             context: {
-                messages: [result.compaction, { role: "user", content: "retained turn" }],
+                instructions: "system",
+                messages: [
+                    result.compaction,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retained turn" }],
+                    },
+                ],
             },
-            inputTokens: 60_000,
         });
 
         expect(capturedRequests[2]?.messages).toEqual([
@@ -408,9 +427,14 @@ describe("AnthropicBedrockProvider", () => {
 
         const result = await session.compact({
             context: {
-                messages: [{ role: "user", content: "selected short prefix" }],
+                instructions: "system",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "selected short prefix" }],
+                    },
+                ],
             },
-            inputTokens: 49_999,
         });
 
         expect(capturedRequests).toHaveLength(1);
@@ -423,6 +447,7 @@ describe("AnthropicBedrockProvider", () => {
                 encryptedContent: "opaque-null-content",
             },
             context: {
+                instructions: "system",
                 messages: [
                     {
                         role: "compaction",
@@ -493,8 +518,15 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         const result = await session.compact({
-            context: { messages: [{ role: "user", content: "long conversation" }] },
-            inputTokens: 50_000,
+            context: {
+                instructions: "system",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "long conversation" }],
+                    },
+                ],
+            },
         });
 
         expect(capturedRequests).toHaveLength(1);
@@ -510,7 +542,12 @@ describe("AnthropicBedrockProvider", () => {
         const request = createAnthropicRequest({
             context: {
                 instructions: "",
-                messages: [{ role: "user", content: "hello" }],
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "hello" }],
+                    },
+                ],
             },
             model: "us.anthropic.claude-opus-4-8",
             tools: [],
@@ -523,7 +560,12 @@ describe("AnthropicBedrockProvider", () => {
         const request = createAnthropicRequest({
             context: {
                 instructions: "system",
-                messages: [{ role: "user", content: "hello" }],
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "hello" }],
+                    },
+                ],
             },
             effort: "off",
             model: "us.anthropic.claude-opus-4-8",
@@ -579,9 +621,16 @@ describe("AnthropicBedrockProvider", () => {
 
         for await (const _event of session.run({
             context: {
+                instructions: "",
                 messages: [
-                    { role: "system", content: "configured system message" },
-                    { role: "user", content: "hello" },
+                    {
+                        role: "system",
+                        content: [{ type: "text" as const, text: "configured system message" }],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "hello" }],
+                    },
                 ],
             },
         })) {
@@ -608,34 +657,36 @@ describe("AnthropicBedrockProvider", () => {
         const messages = toAnthropicMessages([
             {
                 role: "assistant",
-                content: "I will inspect it.",
-                encryptedReasoning: encodeAnthropicReasoningBlocks([
+                content: [
                     {
-                        type: "thinking",
-                        thinking: "Inspect the requested file.",
-                        signature: "signed-thinking",
+                        type: "reasoning",
+                        text: "Inspect the requested file.",
+                        reasoning: "signed-thinking",
                     },
-                    { type: "redacted_thinking", data: "redacted-thinking" },
-                ]),
-                toolCalls: [
-                    {
-                        callId: "tool-1",
-                        name: "Read",
-                        namespace: "files",
-                        arguments: '{"file_path":"/tmp/image.png"}',
-                        vendor: { type: "claude_tool_use" },
-                    },
+                    { type: "reasoning", reasoning: "redacted-thinking" },
+                    { type: "text", text: "I will inspect it." },
+                    ...[
+                        {
+                            callId: "tool-1",
+                            name: "Read",
+                            namespace: "files",
+                            arguments: '{"file_path":"/tmp/image.png"}',
+                            vendor: { type: "claude_tool_use" },
+                        },
+                    ].map((call) => ({
+                        type: "tool_call" as const,
+                        ...call,
+                    })),
                 ],
             },
             {
                 role: "tool",
-                callId: "tool-1",
-                content: "image result",
-                isError: true,
-                input: [
+                content: [
                     { type: "text", text: "image result" },
                     { type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
                 ],
+                callId: "tool-1",
+                isError: true,
             },
         ]);
 
@@ -778,14 +829,22 @@ describe("AnthropicBedrockProvider", () => {
         try {
             const events: SessionEvent[] = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "retry once" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "retry once" }],
+                        },
+                    ],
+                },
             })) {
                 events.push(event);
             }
             expect(attempts).toBe(2);
             expect(events[0]).toMatchObject({ type: "retrying", attempt: 1 });
             expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         } finally {
             session.destroy();
             await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -946,7 +1005,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "retry zero output" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retry zero output" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1000,8 +1067,24 @@ describe("AnthropicBedrockProvider", () => {
                 },
             },
         ]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
-        await expect(session.compact()).resolves.toMatchObject({ status: "completed" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        await expect(
+            session.compact({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "retry zero output" }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text", text: "recovered" }],
+                        },
+                    ],
+                },
+            }),
+        ).resolves.toMatchObject({ status: "completed" });
         expect(JSON.stringify(requests[2])).toContain("recovered");
         expect(JSON.stringify(requests[2])).not.toContain("discarded");
         expect(JSON.stringify(requests[2])).not.toContain("discarded_tool");
@@ -1033,7 +1116,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "fail" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "fail" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1187,7 +1278,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "retry the empty stream" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retry the empty stream" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1200,7 +1299,7 @@ describe("AnthropicBedrockProvider", () => {
         ]);
         expect(events.filter((event) => event.type === "block_start")).toHaveLength(2);
         expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("retries a stream that drops the connection after response content started", async () => {
@@ -1254,7 +1353,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "survive the timeout" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "survive the timeout" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1269,7 +1376,7 @@ describe("AnthropicBedrockProvider", () => {
             expect.objectContaining({ type: "retrying", attempt: 1 }),
         ]);
         expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("reports a readable error when a mid-response connection failure is not retried", async () => {
@@ -1301,7 +1408,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "time out mid response" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "time out mid response" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1374,7 +1489,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "continue after compaction" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "continue after compaction" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1418,7 +1541,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "continue after compaction" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "continue after compaction" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1468,7 +1599,15 @@ describe("AnthropicBedrockProvider", () => {
 
         const events: SessionEvent[] = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "continue after compaction" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "continue after compaction" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1520,7 +1659,15 @@ describe("AnthropicBedrockProvider", () => {
         const events: SessionEvent[] = [];
         for await (const event of session.run({
             abort: controller.signal,
-            context: { messages: [{ role: "user", content: "cancel after compaction" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "cancel after compaction" }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -1601,17 +1748,11 @@ describe("AnthropicBedrockProvider", () => {
             events.push(event);
         }
 
-        const responseItems = events.find((event) => event.type === "response_items");
-        if (responseItems?.type !== "response_items") {
-            throw new Error("Missing Anthropic response items.");
+        const assistantMessage = assistantMessageFromEvents(events);
+        if (assistantMessage === undefined) {
+            throw new Error("Missing Anthropic assistant message.");
         }
-        const replay = toAnthropicMessages([
-            {
-                role: "assistant",
-                content: "flattened",
-                responseItems: responseItems.items,
-            },
-        ]);
+        const replay = toAnthropicMessages([assistantMessage]);
         const replayContent = replay[0]?.content;
         if (!Array.isArray(replayContent)) throw new Error("Missing Anthropic replay blocks.");
         expect((replayContent as { type: string }[]).map(({ type }) => type)).toEqual([
@@ -1635,12 +1776,12 @@ describe("AnthropicBedrockProvider", () => {
             events.filter((event) => event.type === "reasoning_delta").map((event) => event.delta),
         ).toEqual(["first", "second"]);
         const eventTypes = events.map((event) => event.type);
-        const encryptedReasoningIndexes = eventTypes.flatMap((type, index) =>
-            type === "encrypted_reasoning" ? [index] : [],
+        const reasoningEndIndexes = eventTypes.flatMap((type, index) =>
+            type === "reasoning_end" ? [index] : [],
         );
-        expect(encryptedReasoningIndexes).toHaveLength(2);
-        expect(encryptedReasoningIndexes[0]).toBeLessThan(eventTypes.indexOf("toolcall_start"));
-        expect(encryptedReasoningIndexes[1]).toBeLessThan(eventTypes.indexOf("text_delta"));
+        expect(reasoningEndIndexes).toHaveLength(2);
+        expect(reasoningEndIndexes[0]).toBeLessThan(eventTypes.indexOf("toolcall_start"));
+        expect(reasoningEndIndexes[1]).toBeLessThan(eventTypes.indexOf("text_start"));
         expect(events).toContainEqual({ type: "text_delta", delta: "after" });
         expect(events).toContainEqual({
             type: "toolcall_start",
@@ -1649,7 +1790,7 @@ describe("AnthropicBedrockProvider", () => {
             namespace: "files",
             vendor: { type: "claude_tool_use" },
         });
-        expect(events.at(-1)).toEqual({ type: "done", state: "length" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "length" });
     });
 
     it("matches the Claude provider request on Bedrock Runtime and maps native events", async () => {
@@ -1724,7 +1865,15 @@ describe("AnthropicBedrockProvider", () => {
         try {
             const events: SessionEvent[] = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: prompt }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: prompt }],
+                        },
+                    ],
+                },
                 effort: "high",
             })) {
                 events.push(event);
@@ -1795,14 +1944,14 @@ describe("AnthropicBedrockProvider", () => {
                     {
                         type: "token_usage",
                         usage: {
-                            input: 2,
+                            input: 11_595,
                             output: 112,
                             cacheRead: 10_128,
                             cacheWrite: 1_465,
                             totalTokens: 11_707,
                         },
                     },
-                    { type: "done", state: "tool_call" },
+                    expect.objectContaining({ type: "done", state: "tool_call" }),
                 ]),
             );
         } finally {

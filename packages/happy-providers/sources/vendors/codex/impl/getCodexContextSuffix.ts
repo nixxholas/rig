@@ -19,21 +19,21 @@ export function getCodexContextSuffix(
 function toCallerIdentity(message: SessionMessage | undefined): unknown {
     if (message?.role !== "assistant") return message;
     const clone = structuredClone(message);
-    delete (clone as { encryptedReasoning?: string }).encryptedReasoning;
-    delete (clone as { reasoning?: unknown }).reasoning;
-    delete (clone as { responseItems?: readonly string[] }).responseItems;
-    if (clone.toolCalls !== undefined) {
-        return {
-            ...clone,
-            toolCalls: clone.toolCalls.map((call) => ({
-                ...call,
-                arguments: isCustomToolCall(call.vendor)
-                    ? call.arguments
-                    : parseArguments(call.arguments),
-            })),
-        };
-    }
-    return clone;
+    return {
+        ...clone,
+        content: clone.content
+            .filter((block) => block.type !== "reasoning")
+            .map((block): unknown =>
+                block.type !== "tool_call"
+                    ? block
+                    : {
+                          ...block,
+                          arguments: isCustomToolCall(block.vendor)
+                              ? block.arguments
+                              : parseArguments(block.arguments),
+                      },
+            ),
+    };
 }
 
 function parseArguments(argumentsJson: string): unknown {

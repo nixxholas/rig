@@ -6,13 +6,23 @@ import { getCodexContextSuffix } from "@/vendors/codex/impl/getCodexContextSuffi
 describe("getCodexContextSuffix", () => {
     it("keeps provider context when tool argument JSON is reformatted", () => {
         const previous = [
-            { role: "user", content: "Read it." },
+            {
+                role: "user",
+                content: [{ type: "text" as const, text: "Read it." }],
+            },
             assistant('{"file_path": "/tmp/input", "line": 1}'),
         ] satisfies SessionMessage[];
         const current = [
-            { role: "user", content: "Read it." },
+            {
+                role: "user",
+                content: [{ type: "text" as const, text: "Read it." }],
+            },
             assistant('{"line":1,"file_path":"/tmp/input"}'),
-            { role: "tool", callId: "call-1", content: "done" },
+            {
+                role: "tool",
+                content: [{ type: "text" as const, text: "done" }],
+                callId: "call-1",
+            },
         ] satisfies SessionMessage[];
 
         expect(getCodexContextSuffix(previous, current)).toEqual([current[2]]);
@@ -29,16 +39,28 @@ describe("getCodexContextSuffix", () => {
         const previous = [
             {
                 ...assistant('{"line":1}'),
-                encryptedReasoning: "opaque",
-                responseItems: ['{"type":"reasoning","encrypted_content":"opaque"}'],
+                content: [
+                    {
+                        type: "reasoning" as const,
+                        reasoning: '{"type":"reasoning","encrypted_content":"opaque"}',
+                    },
+                    ...assistant('{"line":1}').content,
+                ],
             },
         ] satisfies SessionMessage[];
         const current = [
             {
                 ...assistant('{"line":1}'),
-                reasoning: [{ text: "Visible summary." }],
+                content: [
+                    { type: "reasoning" as const, text: "Visible summary." },
+                    ...assistant('{"line":1}').content,
+                ],
             },
-            { role: "tool", callId: "call-1", content: "done" },
+            {
+                role: "tool",
+                content: [{ type: "text" as const, text: "done" }],
+                callId: "call-1",
+            },
         ] satisfies SessionMessage[];
 
         expect(getCodexContextSuffix(previous, current)).toEqual([current[1]]);
@@ -46,46 +68,23 @@ describe("getCodexContextSuffix", () => {
 
     it("keeps custom tool input byte-sensitive", () => {
         const customVendor = { provider: "codex", type: "custom_tool_call" };
-        const previous = [
-            {
-                ...assistant('{"line": 1}'),
-                toolCalls: [
-                    {
-                        callId: "call-1",
-                        name: "Read",
-                        arguments: '{"line": 1}',
-                        vendor: customVendor,
-                    },
-                ],
-            },
-        ] satisfies SessionMessage[];
-        const current = [
-            {
-                ...assistant('{"line":1}'),
-                toolCalls: [
-                    {
-                        callId: "call-1",
-                        name: "Read",
-                        arguments: '{"line":1}',
-                        vendor: customVendor,
-                    },
-                ],
-            },
-        ] satisfies SessionMessage[];
+        const previous = [assistant('{"line": 1}', customVendor)] satisfies SessionMessage[];
+        const current = [assistant('{"line":1}', customVendor)] satisfies SessionMessage[];
 
         expect(getCodexContextSuffix(previous, current)).toBeUndefined();
     });
 });
 
-function assistant(argumentsJson: string): SessionAssistantMessage {
+function assistant(argumentsJson: string, vendor?: unknown): SessionAssistantMessage {
     return {
         role: "assistant" as const,
-        content: "",
-        toolCalls: [
+        content: [
             {
+                type: "tool_call",
                 callId: "call-1",
                 name: "Read",
                 arguments: argumentsJson,
+                ...(vendor === undefined ? {} : { vendor }),
             },
         ],
     };

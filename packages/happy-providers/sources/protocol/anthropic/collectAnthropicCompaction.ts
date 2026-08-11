@@ -5,11 +5,11 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { APIConnectionError } from "@anthropic-ai/sdk/error";
 
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 
 export interface CollectedAnthropicCompaction {
     readonly block: BetaCompactionBlock | undefined;
-    readonly usage: SessionCacheUsage;
+    readonly usage: SessionUsage;
 }
 
 export async function collectAnthropicCompaction(
@@ -18,7 +18,7 @@ export async function collectAnthropicCompaction(
 ): Promise<CollectedAnthropicCompaction> {
     let block: BetaCompactionBlock | undefined;
     let iterations: BetaIterationsUsage | null = null;
-    let usage: SessionCacheUsage = {
+    let usage: SessionUsage = {
         input: 0,
         output: 0,
         cacheRead: 0,
@@ -65,24 +65,27 @@ export async function collectAnthropicCompaction(
 }
 
 function mergeUsage(
-    current: SessionCacheUsage,
+    current: SessionUsage,
     update: {
         input_tokens?: number | null;
         output_tokens?: number | null;
         cache_read_input_tokens?: number | null;
         cache_creation_input_tokens?: number | null;
     },
-): SessionCacheUsage {
-    const input = update.input_tokens ?? current.input;
-    const output = update.output_tokens ?? current.output;
+): SessionUsage {
     const cacheRead = update.cache_read_input_tokens ?? current.cacheRead;
     const cacheWrite = update.cache_creation_input_tokens ?? current.cacheWrite;
+    const input =
+        update.input_tokens === undefined || update.input_tokens === null
+            ? current.input
+            : update.input_tokens + cacheRead + cacheWrite;
+    const output = update.output_tokens ?? current.output;
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
@@ -91,33 +94,37 @@ function toUsage(usage: {
     output_tokens?: number | null;
     cache_read_input_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
-}): SessionCacheUsage {
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
+}): SessionUsage {
     const cacheRead = usage.cache_read_input_tokens ?? 0;
     const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const input = (usage.input_tokens ?? 0) + cacheRead + cacheWrite;
+    const output = usage.output_tokens ?? 0;
     return {
         input,
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: input + output + cacheRead + cacheWrite,
+        totalTokens: input + output,
     };
 }
 
-function toIterationsUsage(iterations: BetaIterationsUsage): SessionCacheUsage {
-    return iterations.reduce<SessionCacheUsage>(
+function toIterationsUsage(iterations: BetaIterationsUsage): SessionUsage {
+    return iterations.reduce<SessionUsage>(
         (total, iteration) => {
-            const input = total.input + iteration.input_tokens;
-            const output = total.output + iteration.output_tokens;
             const cacheRead = total.cacheRead + iteration.cache_read_input_tokens;
             const cacheWrite = total.cacheWrite + iteration.cache_creation_input_tokens;
+            const input =
+                total.input +
+                iteration.input_tokens +
+                iteration.cache_read_input_tokens +
+                iteration.cache_creation_input_tokens;
+            const output = total.output + iteration.output_tokens;
             return {
                 input,
                 output,
                 cacheRead,
                 cacheWrite,
-                totalTokens: input + output + cacheRead + cacheWrite,
+                totalTokens: input + output,
             };
         },
         { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },

@@ -1,17 +1,17 @@
 import type { ResponseUsage } from "openai/resources/responses/responses.js";
 
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 
-export function toSessionCacheUsage(usage: ResponseUsage | undefined): SessionCacheUsage {
+export function toSessionUsage(usage: ResponseUsage | undefined): SessionUsage {
     const cachedTokens = usage?.input_tokens_details?.cached_tokens ?? 0;
     const cacheWriteTokens = usage?.input_tokens_details?.cache_write_tokens ?? 0;
-    const input = Math.max(0, (usage?.input_tokens ?? 0) - cachedTokens - cacheWriteTokens);
+    const input = usage?.input_tokens ?? 0;
     const output = usage?.output_tokens ?? 0;
     return {
         input,
         output,
         cacheRead: cachedTokens,
         cacheWrite: cacheWriteTokens,
-        totalTokens: usage?.total_tokens ?? input + output + cachedTokens + cacheWriteTokens,
+        totalTokens: usage?.total_tokens ?? input + output,
     };
 }

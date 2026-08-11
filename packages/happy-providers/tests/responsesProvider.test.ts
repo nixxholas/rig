@@ -64,7 +64,15 @@ describe("ResponsesProvider", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Try again if empty." }] },
+                context: {
+                    instructions: "Be concise.",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Try again if empty." }],
+                        },
+                    ],
+                },
             }),
         );
 
@@ -97,7 +105,7 @@ describe("ResponsesProvider", () => {
             },
         ]);
         expect(textFromSessionEvents(events)).toBe("recovered");
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("preserves diagnostics when zero-output retries are exhausted", async () => {
@@ -119,7 +127,15 @@ describe("ResponsesProvider", () => {
 
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "Keep trying." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Keep trying." }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }
@@ -166,12 +182,20 @@ describe("ResponsesProvider", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Usage may be absent." }] },
+                context: {
+                    instructions: "Be concise.",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Usage may be absent." }],
+                        },
+                    ],
+                },
             }),
         );
 
         expect(attempts).toBe(1);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
     it("preserves a completed response that requests another inference", async () => {
@@ -198,11 +222,19 @@ describe("ResponsesProvider", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Keep working." }] },
+                context: {
+                    instructions: "Be concise.",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Keep working." }],
+                        },
+                    ],
+                },
             }),
         );
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal", endTurn: false });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal", endTurn: false });
     });
 
     it("runs the standard Responses SSE protocol with configured endpoint and model", async () => {
@@ -282,7 +314,15 @@ describe("ResponsesProvider", () => {
 
         const events = await collectSessionEvents(
             session.run({
-                context: { messages: [{ role: "user", content: "Check the protocol." }] },
+                context: {
+                    instructions: "Be concise.",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Check the protocol." }],
+                        },
+                    ],
+                },
             }),
         );
 
@@ -324,7 +364,12 @@ describe("ResponsesProvider", () => {
             },
             context: {
                 instructions: "Be concise.",
-                messages: [{ role: "user", content: "Hello." }],
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Hello." }],
+                    },
+                ],
             },
             effort: "high",
             model: "open-model",
@@ -377,9 +422,16 @@ describe("ResponsesProvider", () => {
         await expect(
             session.compact({
                 context: {
+                    instructions: "Preserve state.",
                     messages: [
-                        { role: "user", content: "Provider dropped this." },
-                        { role: "user", content: "Provider kept this." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Provider dropped this." }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Provider kept this." }],
+                        },
                     ],
                 },
             }),
@@ -391,9 +443,14 @@ describe("ResponsesProvider", () => {
                 encryptedContent: "opaque-checkpoint",
                 vendor: { type: "responses_compaction", id: "compaction-1" },
             },
-            preservedMessages: [{ role: "user", content: "Provider kept this." }],
+            preservedMessages: [
+                {
+                    role: "user",
+                    content: [{ type: "text", text: "Provider kept this." }],
+                },
+            ],
             usage: {
-                input: 15,
+                input: 20,
                 output: 4,
                 cacheRead: 5,
                 totalTokens: 24,
@@ -420,7 +477,15 @@ describe("ResponsesProvider", () => {
 
         for await (const event of session.run({
             abort: controller.signal,
-            context: { messages: [{ role: "user", content: "Do not send." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Do not send." }],
+                    },
+                ],
+            },
         })) {
             events.push(event);
         }

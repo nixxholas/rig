@@ -5,11 +5,15 @@ import { Value } from "@sinclair/typebox/value";
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { createServerCitationFilter } from "./stripServerCitationMarkers.js";
 
-import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
-import type { SessionToolCall } from "@/core/SessionContext.js";
+import { EMPTY_SESSION_USAGE, type SessionUsage } from "@/core/SessionUsage.js";
+import type {
+    SessionAssistantBlock,
+    SessionAssistantMessage,
+    SessionToolCallBlock,
+} from "@/core/SessionContext.js";
 import { emitToolCallResult } from "@/core/emitToolCallResult.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
-import { toSessionCacheUsage } from "@/protocol/responses/toSessionCacheUsage.js";
+import { toSessionUsage } from "@/protocol/responses/toSessionUsage.js";
 import type {
     ResponsesToolCallType,
     ResponsesToolVendor,
@@ -40,13 +44,16 @@ interface ActiveOutputItem {
 
 export interface OpenAIResponseRunResult {
     assistantText: string;
-    encryptedReasoning?: string | undefined;
+    message: SessionAssistantMessage;
     outputTokensReported: boolean;
-    responseItems: readonly string[];
+    /** Provider output retained only for provider-internal follow-up requests. */
+    outputItems: readonly string[];
     stopReason: "stop" | "length" | "tool_use";
-    toolCalls: readonly SessionToolCall[];
-    usage: SessionCacheUsage;
+    toolCalls: readonly CollectedToolCall[];
+    usage: SessionUsage;
 }
+
+type CollectedToolCall = Omit<SessionToolCallBlock, "type">;
 
 /**
  * Maps the OpenAI Responses event protocol shared by Codex, Grok, and Bedrock Mantle.
@@ -71,13 +78,34 @@ export async function* mapOpenAIResponseStream(
     const stripCitations = createServerCitationFilter();
     let encryptedReasoning: string | undefined;
     let sawToolUse = false;
-    const toolCalls: SessionToolCall[] = [];
-    const responseItems = new Map<number, string>();
+    const toolCalls: CollectedToolCall[] = [];
+    const outputItems = new Map<number, string>();
     const finishedServerToolCalls = new Set<string>();
     const finishedMessageItems = new Set<number>();
+    const finishedReasoningItems = new Set<number>();
     const fallbackCallIdScope = randomUUID();
-    let usage: SessionCacheUsage = { ...EMPTY_SESSION_CACHE_USAGE };
+    let usage: SessionUsage = { ...EMPTY_SESSION_USAGE };
     let outputTokensReported = false;
+
+    const finish = (stopReason: OpenAIResponseRunResult["stopReason"]): OpenAIResponseRunResult => {
+        const orderedOutputItems = [...outputItems.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([, item]) => item);
+        return {
+            assistantText,
+            message: toSessionAssistantMessage(
+                orderedOutputItems,
+                toolCalls,
+                options,
+                fallbackCallIdScope,
+            ),
+            outputTokensReported,
+            outputItems: orderedOutputItems,
+            stopReason,
+            toolCalls,
+            usage,
+        };
+    };
 
     try {
         for await (const event of responseStream) {
@@ -96,17 +124,7 @@ export async function* mapOpenAIResponseStream(
                     fallbackCallIdScope,
                     true,
                 );
-                return {
-                    assistantText,
-                    encryptedReasoning,
-                    outputTokensReported,
-                    responseItems: [...responseItems.entries()]
-                        .sort(([left], [right]) => left - right)
-                        .map(([, item]) => item),
-                    stopReason: "stop",
-                    toolCalls,
-                    usage,
-                };
+                return finish("stop");
             }
 
             if (event.type === "response.output_item.added") {
@@ -114,8 +132,10 @@ export async function* mapOpenAIResponseStream(
                 assertServerCallWasDeclared(event.item, options);
                 if (event.item.type === "reasoning") {
                     activeItems.set(event.output_index, { type: "reasoning" });
+                    yield { type: "reasoning_start" };
                 } else if (event.item.type === "message") {
                     activeItems.set(event.output_index, { type: "message" });
+                    yield { type: "text_start" };
                 } else if (event.item.type === "function_call") {
                     sawToolUse = true;
                     activeItems.set(event.output_index, {
@@ -242,11 +262,16 @@ export async function* mapOpenAIResponseStream(
             ) {
                 const activeItem = activeItems.get(event.output_index);
                 if (activeItem?.type !== "reasoning") continue;
+                activeItem.streamedText = (activeItem.streamedText ?? "") + event.delta;
                 yield { type: "reasoning_delta", delta: event.delta };
                 continue;
             }
 
             if (event.type === "response.reasoning_summary_part.done") {
+                const activeItem = activeItems.get(event.output_index);
+                if (activeItem?.type === "reasoning") {
+                    activeItem.streamedText = (activeItem.streamedText ?? "") + "\n\n";
+                }
                 yield { type: "reasoning_delta", delta: "\n\n" };
                 continue;
             }
@@ -306,18 +331,32 @@ export async function* mapOpenAIResponseStream(
                 assertValidToolCallItem(event.item);
                 assertServerCallWasDeclared(event.item, options);
                 const activeItem = activeItems.get(event.output_index);
-                responseItems.set(event.output_index, JSON.stringify(event.item));
+                outputItems.set(event.output_index, JSON.stringify(event.item));
                 if (event.item.type === "reasoning") {
                     encryptedReasoning = JSON.stringify(event.item);
-                    yield { type: "encrypted_reasoning", content: encryptedReasoning };
+                    if (activeItem?.type !== "reasoning") yield { type: "reasoning_start" };
+                    const finalText = reasoningText(
+                        event.item as unknown as Record<string, unknown>,
+                    );
+                    const missingText = missingTerminalText(
+                        activeItem?.streamedText,
+                        finalText ?? "",
+                    );
+                    if (missingText.length > 0) {
+                        yield { type: "reasoning_delta", delta: missingText };
+                    }
+                    yield { type: "reasoning_end", reasoning: encryptedReasoning };
+                    finishedReasoningItems.add(event.output_index);
                 }
                 if (event.item.type === "message") {
+                    if (activeItem?.type !== "message") yield { type: "text_start" };
                     const finalText = stripCitations(messageText(event.item));
                     const missingText = missingTerminalText(activeItem?.streamedText, finalText);
                     if (missingText.length > 0) {
                         assistantText += missingText;
                         yield { type: "text_delta", delta: missingText };
                     }
+                    yield { type: "text_end" };
                     finishedMessageItems.add(event.output_index);
                 }
                 const serverToolName =
@@ -481,7 +520,7 @@ export async function* mapOpenAIResponseStream(
                     assertServerCallWasDeclared(item, options);
                 }
                 for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
-                    responseItems.set(outputIndex, JSON.stringify(item));
+                    outputItems.set(outputIndex, JSON.stringify(item));
                 }
                 yield* settleServerToolCalls(
                     activeItems,
@@ -490,6 +529,11 @@ export async function* mapOpenAIResponseStream(
                     options,
                     fallbackCallIdScope,
                     true,
+                );
+                yield* settleTerminalReasoningBlocks(
+                    activeItems,
+                    event.response.output ?? [],
+                    finishedReasoningItems,
                 );
                 yield* settleTerminalMessageText(
                     activeItems,
@@ -500,6 +544,7 @@ export async function* mapOpenAIResponseStream(
                         assistantText += delta;
                     },
                 );
+                yield* closeRemainingResponseContentBlocks(activeItems);
                 for (const [outputIndex, activeItem] of activeItems) {
                     if (
                         (activeItem.type !== "function_call" &&
@@ -544,24 +589,18 @@ export async function* mapOpenAIResponseStream(
                         true,
                         options.serverToolNames,
                     )) || sawToolUse;
-                usage = toSessionCacheUsage(event.response.usage);
+                usage = toSessionUsage(event.response.usage);
                 outputTokensReported = hasReportedOutputTokens(event.response.usage);
                 if (usage.totalTokens > 0) {
                     yield { type: "token_usage", usage };
                 }
                 if (reason === "max_output_tokens") {
-                    yield { type: "done", state: "length" };
-                    return {
-                        assistantText,
-                        encryptedReasoning,
-                        outputTokensReported,
-                        responseItems: [...responseItems.entries()]
-                            .sort(([left], [right]) => left - right)
-                            .map(([, item]) => item),
-                        stopReason: "length",
-                        toolCalls,
-                        usage,
+                    yield {
+                        type: "done",
+                        state: "length",
+                        tokens: { input: usage.input, output: usage.output },
                     };
+                    return finish("length");
                 }
                 throw new Error(`Incomplete response returned, reason: ${reason}`);
             }
@@ -572,7 +611,7 @@ export async function* mapOpenAIResponseStream(
                     assertServerCallWasDeclared(item, options);
                 }
                 for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
-                    responseItems.set(outputIndex, JSON.stringify(item));
+                    outputItems.set(outputIndex, JSON.stringify(item));
                 }
                 yield* settleServerToolCalls(
                     activeItems,
@@ -580,6 +619,11 @@ export async function* mapOpenAIResponseStream(
                     finishedServerToolCalls,
                     options,
                     fallbackCallIdScope,
+                );
+                yield* settleTerminalReasoningBlocks(
+                    activeItems,
+                    event.response.output ?? [],
+                    finishedReasoningItems,
                 );
                 yield* settleTerminalMessageText(
                     activeItems,
@@ -590,6 +634,7 @@ export async function* mapOpenAIResponseStream(
                         assistantText += delta;
                     },
                 );
+                yield* closeRemainingResponseContentBlocks(activeItems);
                 for (const [outputIndex, activeItem] of activeItems) {
                     if (
                         (activeItem.type !== "function_call" &&
@@ -645,7 +690,7 @@ export async function* mapOpenAIResponseStream(
                         false,
                         options.serverToolNames,
                     )) || sawToolUse;
-                usage = toSessionCacheUsage(event.response.usage);
+                usage = toSessionUsage(event.response.usage);
                 outputTokensReported = hasReportedOutputTokens(event.response.usage);
                 const completedResponse = Value.Check(
                     completedResponseExtensionSchema,
@@ -657,21 +702,12 @@ export async function* mapOpenAIResponseStream(
                 yield {
                     type: "done",
                     state: sawToolUse ? "tool_call" : "normal",
+                    tokens: { input: usage.input, output: usage.output },
                     ...(!sawToolUse && completedResponse?.end_turn !== undefined
                         ? { endTurn: completedResponse.end_turn }
                         : {}),
                 };
-                return {
-                    assistantText,
-                    encryptedReasoning,
-                    outputTokensReported,
-                    responseItems: [...responseItems.entries()]
-                        .sort(([left], [right]) => left - right)
-                        .map(([, item]) => item),
-                    stopReason: sawToolUse ? "tool_use" : "stop",
-                    toolCalls,
-                    usage,
-                };
+                return finish(sawToolUse ? "tool_use" : "stop");
             }
 
             if (event.type === "error") {
@@ -725,18 +761,114 @@ export async function* mapOpenAIResponseStream(
     yield {
         type: "done",
         state: sawToolUse ? "tool_call" : "normal",
+        tokens: { input: usage.input, output: usage.output },
     };
-    return {
-        assistantText,
-        encryptedReasoning,
-        outputTokensReported,
-        responseItems: [...responseItems.entries()]
-            .sort(([left], [right]) => left - right)
-            .map(([, item]) => item),
-        stopReason: sawToolUse ? "tool_use" : "stop",
-        toolCalls,
-        usage,
-    };
+    return finish(sawToolUse ? "tool_use" : "stop");
+}
+
+function toSessionAssistantMessage(
+    outputItems: readonly string[],
+    toolCalls: readonly CollectedToolCall[],
+    options: {
+        vendor?: "codex" | "grok" | "responses";
+        serverToolNames?: ReadonlySet<string>;
+    },
+    fallbackCallIdScope: string,
+): SessionAssistantMessage {
+    const stripCitations = createServerCitationFilter();
+    const content = outputItems.flatMap((encoded, outputIndex): SessionAssistantBlock[] => {
+        let item: unknown;
+        try {
+            item = JSON.parse(encoded);
+        } catch {
+            return [];
+        }
+        if (isItemType(item, "reasoning")) {
+            const text = reasoningText(item);
+            return [
+                {
+                    type: "reasoning",
+                    ...(text === undefined ? {} : { text }),
+                    reasoning: encoded,
+                },
+            ];
+        }
+        if (isItemType(item, "message")) {
+            const text = outputMessageText(item);
+            return text === undefined ? [] : [{ type: "text", text: stripCitations(text) }];
+        }
+        const serverName = serverExecutedItemName(item, options);
+        if (serverName !== undefined) {
+            const callId = serverToolCallId(item, outputIndex, fallbackCallIdScope);
+            const incomplete = isIncompleteServerToolCall(item);
+            const result = serverToolCallResult(item);
+            return [
+                {
+                    type: "tool_call",
+                    callId,
+                    name: serverName,
+                    arguments: serverToolCallArguments(item),
+                    server: true,
+                    ...(incomplete ? { incomplete: true } : {}),
+                    vendor: {
+                        provider: options.vendor ?? "grok",
+                        type: "server_tool_call",
+                        outputItem: encoded,
+                    },
+                },
+                ...(result === undefined
+                    ? []
+                    : [
+                          {
+                              type: "tool_result" as const,
+                              callId,
+                              content: [{ type: "text" as const, text: result }],
+                              ...(incomplete ? { incomplete: true } : {}),
+                          },
+                      ]),
+            ];
+        }
+        const parsed = asOutputItem(item);
+        const callId = parsed?.call_id;
+        if (callId === undefined) return [];
+        const call = toolCalls.find((candidate) => candidate.callId === callId);
+        return call === undefined ? [] : [{ type: "tool_call", ...call }];
+    });
+    return { role: "assistant", content };
+}
+
+function isItemType(
+    item: unknown,
+    type: string,
+): item is Record<string, unknown> & { type: string } {
+    return typeof item === "object" && item !== null && "type" in item && item.type === type;
+}
+
+function reasoningText(item: Record<string, unknown>): string | undefined {
+    const parts = [item.summary, item.content]
+        .filter(Array.isArray)
+        .flatMap((value) => value as unknown[])
+        .flatMap((part) => {
+            if (typeof part !== "object" || part === null) return [];
+            if ("text" in part && typeof part.text === "string") return [part.text];
+            return [];
+        });
+    return parts.length === 0 ? undefined : parts.join("\n\n");
+}
+
+function outputMessageText(item: Record<string, unknown>): string | undefined {
+    if (!Array.isArray(item.content)) return undefined;
+    const parts = item.content.flatMap((part): string[] => {
+        if (typeof part !== "object" || part === null || !("type" in part)) return [];
+        if (part.type === "output_text" && "text" in part && typeof part.text === "string") {
+            return [part.text];
+        }
+        if (part.type === "refusal" && "refusal" in part && typeof part.refusal === "string") {
+            return [part.refusal];
+        }
+        return [];
+    });
+    return parts.length === 0 ? undefined : parts.join("");
 }
 
 function hasReportedOutputTokens(usage: unknown): boolean {
@@ -918,6 +1050,24 @@ function missingTerminalText(streamedText: string | undefined, finalText: string
     return finalText.startsWith(streamedText) ? finalText.slice(streamedText.length) : "";
 }
 
+function* settleTerminalReasoningBlocks(
+    activeItems: Map<number, ActiveOutputItem>,
+    terminalOutput: readonly unknown[],
+    finishedReasoningItems: Set<number>,
+): Generator<SessionEvent> {
+    for (const [outputIndex, item] of terminalOutput.entries()) {
+        if (finishedReasoningItems.has(outputIndex) || !isItemType(item, "reasoning")) continue;
+        const active = activeItems.get(outputIndex);
+        if (active?.type !== "reasoning") yield { type: "reasoning_start" };
+        const finalText = reasoningText(item);
+        const missingText = missingTerminalText(active?.streamedText, finalText ?? "");
+        if (missingText.length > 0) yield { type: "reasoning_delta", delta: missingText };
+        yield { type: "reasoning_end", reasoning: JSON.stringify(item) };
+        finishedReasoningItems.add(outputIndex);
+        activeItems.delete(outputIndex);
+    }
+}
+
 function* settleTerminalMessageText(
     activeItems: Map<number, ActiveOutputItem>,
     terminalOutput: readonly unknown[],
@@ -956,20 +1106,36 @@ function* settleTerminalMessageText(
             continue;
         }
         const finalText = stripCitations(messageText({ content } as never));
-        const missingText = missingTerminalText(
-            activeItems.get(outputIndex)?.streamedText,
-            finalText,
-        );
-        if (missingText.length === 0) continue;
-        append(missingText);
+        const active = activeItems.get(outputIndex);
+        if (active?.type !== "message") yield { type: "text_start" };
+        const missingText = missingTerminalText(active?.streamedText, finalText);
+        if (missingText.length > 0) {
+            append(missingText);
+            yield { type: "text_delta", delta: missingText };
+        }
+        yield { type: "text_end" };
         finishedMessageItems.add(outputIndex);
-        yield { type: "text_delta", delta: missingText };
+        activeItems.delete(outputIndex);
+    }
+}
+
+function* closeRemainingResponseContentBlocks(
+    activeItems: Map<number, ActiveOutputItem>,
+): Generator<SessionEvent> {
+    for (const [outputIndex, item] of activeItems) {
+        if (item.type === "message") {
+            yield { type: "text_end" };
+            activeItems.delete(outputIndex);
+        } else if (item.type === "reasoning") {
+            yield { type: "reasoning_end" };
+            activeItems.delete(outputIndex);
+        }
     }
 }
 
 function* settleTerminalClientToolCalls(
     terminalOutput: readonly unknown[],
-    toolCalls: SessionToolCall[],
+    toolCalls: CollectedToolCall[],
     vendor: "codex" | "grok" | "responses" | undefined,
     incomplete: boolean,
     serverToolNames: ReadonlySet<string> | undefined,

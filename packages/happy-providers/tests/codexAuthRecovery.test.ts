@@ -78,13 +78,21 @@ describe("Codex ChatGPT unauthorized recovery", () => {
             });
             const events = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "hello" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "hello" }],
+                        },
+                    ],
+                },
                 effort: "low",
             })) {
                 events.push(event);
             }
 
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             expect(inferenceTokens).toEqual([
                 "Bearer stale-access",
                 "Bearer stale-access",

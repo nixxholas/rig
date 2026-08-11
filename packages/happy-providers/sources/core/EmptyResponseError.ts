@@ -1,5 +1,5 @@
 import { extractProviderErrorDiagnostics } from "@/core/extractProviderErrorDiagnostics.js";
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 
 type ErrorDoneEvent = Extract<SessionEvent, { type: "done"; state: "error" }>;
@@ -7,9 +7,9 @@ type ErrorDoneEvent = Extract<SessionEvent, { type: "done"; state: "error" }>;
 export class EmptyResponseError extends Error {
     readonly code = "empty_response";
     readonly errorType = "empty_response";
-    readonly usage: SessionCacheUsage | undefined;
+    readonly usage: SessionUsage | undefined;
 
-    constructor(provider: string, usage?: SessionCacheUsage) {
+    constructor(provider: string, usage?: SessionUsage) {
         super(`${provider} returned a response with zero output tokens.`);
         this.name = "EmptyResponseError";
         this.usage = usage;

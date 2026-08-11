@@ -497,9 +497,12 @@ describe("Codex CLI mode WebSocket goldens", () => {
                     messages: [
                         ...prompt.systemMessages.map((content) => ({
                             role: "system" as const,
-                            content,
+                            content: content.map((text) => ({ type: "text" as const, text })),
                         })),
-                        { role: "user", content: "Reply with OK." },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Reply with OK." }],
+                        },
                     ],
                 },
                 codexSkillsWithGithub,
@@ -552,7 +555,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             });
             const initialMessages = prompt.systemMessages.map((content) => ({
                 role: "system" as const,
-                content,
+                content: content.map((text) => ({ type: "text" as const, text })),
             }));
             const session = await provider.session("<SESSION_ID>", {
                 instructions: prompt.instructions,
@@ -561,12 +564,16 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
             for await (const event of session.run({
                 context: {
+                    instructions: prompt.instructions,
                     messages: withCodexSkills(
                         {
                             instructions: prompt.instructions,
                             messages: [
                                 ...initialMessages,
-                                { role: "user", content: "Reply with OK." },
+                                {
+                                    role: "user",
+                                    content: [{ type: "text" as const, text: "Reply with OK." }],
+                                },
                             ],
                         },
                         codexSkillsWithGithub,
@@ -666,16 +673,31 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
+                context: {
+                    instructions: prompt.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         await drain(
             session.run({
                 context: {
+                    instructions: prompt.instructions,
                     messages: [
-                        { role: "user", content: "first" },
-                        { role: "user", content: "second" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "second" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -701,14 +723,26 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const first = { role: "user" as const, content: "first" };
-        await drain(session.run({ context: { messages: [first] }, effort: "low" }));
+        const first = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "first" }],
+        };
+        await drain(
+            session.run({ context: { instructions: "", messages: [first] }, effort: "low" }),
+        );
         websocket.missingPreviousResponseFailures = 1;
 
         const events = [];
         for await (const event of session.run({
             context: {
-                messages: [first, { role: "user", content: "second" }],
+                instructions: "",
+                messages: [
+                    first,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "second" }],
+                    },
+                ],
             },
             effort: "low",
         })) {
@@ -723,7 +757,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             "block_stop",
             "done",
         ]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(events).toContainEqual({
             type: "retrying",
             attempt: 1,
@@ -747,7 +781,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "first" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "first" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -761,7 +803,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             "block_stop",
             "done",
         ]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(2);
         expect(websocket.sent).toHaveLength(2);
         session.destroy();
@@ -777,7 +819,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "first" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "first" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -796,7 +846,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             attempt: 1,
             reason: "Stream disconnected; reconnecting: Internal server error",
         });
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(2);
         expect(websocket.sent).toHaveLength(3);
         session.destroy();
@@ -808,10 +858,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const first = { role: "user" as const, content: "first" };
+        const first = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "first" }],
+        };
         await drain(
             session.run({
-                context: { messages: [first] },
+                context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
         );
@@ -820,7 +873,14 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const events = [];
         for await (const event of session.run({
             context: {
-                messages: [first, { role: "user", content: "second" }],
+                instructions: "",
+                messages: [
+                    first,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "second" }],
+                    },
+                ],
             },
             effort: "low",
         })) {
@@ -829,7 +889,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         expect(blockLifecycle(events)).toEqual(["block_start", "block_stop", "done"]);
         expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(2);
         expect(websocket.sent).toHaveLength(3);
         expect(websocket.sent[2]!.previous_response_id).toBeUndefined();
@@ -852,10 +912,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const first = { role: "user" as const, content: "first" };
+        const first = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "first" }],
+        };
         await drain(
             session.run({
-                context: { messages: [first] },
+                context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
         );
@@ -865,7 +928,14 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const events = [];
         for await (const event of session.run({
             context: {
-                messages: [first, { role: "user", content: "second" }],
+                instructions: "",
+                messages: [
+                    first,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "second" }],
+                    },
+                ],
             },
             effort: "low",
         })) {
@@ -887,7 +957,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
                 "Stream disconnected; reconnecting: " +
                 "The Codex WebSocket closed before the request could be sent.",
         });
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(3);
         expect(websocket.sent).toHaveLength(3);
         expect(websocket.sent[2]!.previous_response_id).toBeUndefined();
@@ -902,10 +972,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const first = { role: "user" as const, content: "first" };
+        const first = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "first" }],
+        };
         await drain(
             session.run({
-                context: { messages: [first] },
+                context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
         );
@@ -930,14 +1003,21 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const events = [];
         for await (const event of session.run({
             context: {
-                messages: [first, { role: "user", content: "second" }],
+                instructions: "",
+                messages: [
+                    first,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "second" }],
+                    },
+                ],
             },
             effort: "low",
         })) {
             events.push(event);
         }
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(2);
         expect(websocket.sent.at(-1)!.previous_response_id).toBeUndefined();
         expect(JSON.stringify(websocket.sent.at(-1)!.input)).toContain("second");
@@ -952,10 +1032,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const first = { role: "user" as const, content: "first" };
+        const first = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "first" }],
+        };
         await drain(
             session.run({
-                context: { messages: [first] },
+                context: { instructions: "", messages: [first] },
                 effort: "low",
             }),
         );
@@ -964,14 +1047,21 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const events = [];
         for await (const event of session.run({
             context: {
-                messages: [first, { role: "user", content: "second" }],
+                instructions: "",
+                messages: [
+                    first,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "second" }],
+                    },
+                ],
             },
             effort: "low",
         })) {
             events.push(event);
         }
 
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(2);
         expect(websocket.sent.at(-1)!.previous_response_id).toBeUndefined();
         expect(JSON.stringify(websocket.sent.at(-1)!.input)).toContain("second");
@@ -997,13 +1087,29 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
+                context: {
+                    instructions: prompt.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "replacement" }] },
+                context: {
+                    instructions: prompt.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "replacement" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
@@ -1035,7 +1141,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
+                context: {
+                    instructions: prompt.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                    ],
+                },
                 effort: "low",
                 model: "gpt-5.6-sol",
             }),
@@ -1043,9 +1157,16 @@ describe("Codex CLI mode WebSocket goldens", () => {
         await drain(
             session.run({
                 context: {
+                    instructions: prompt.instructions,
                     messages: [
-                        { role: "user", content: "first" },
-                        { role: "user", content: "second" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "second" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1087,32 +1208,77 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
-                effort: "low",
-                model: "gpt-5.6-sol",
-            }),
-        );
-        await drain(
-            session.run({
                 context: {
+                    instructions: prompt.instructions,
                     messages: [
-                        { role: "user", content: "first" },
-                        { role: "assistant", content: "mock response" },
-                        { role: "user", content: "second" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
                     ],
                 },
                 effort: "low",
                 model: "gpt-5.6-sol",
             }),
         );
-        const compacted = await session.compact();
-        expect(compacted.status).toBe("completed");
         await drain(
             session.run({
                 context: {
+                    instructions: prompt.instructions,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "mock response" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "second" }],
+                        },
+                    ],
+                },
+                effort: "low",
+                model: "gpt-5.6-sol",
+            }),
+        );
+        const compacted = await session.compact({
+            context: {
+                instructions: prompt.instructions,
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text", text: "first" }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text", text: "mock response" }],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text", text: "second" }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text", text: "mock response" }],
+                    },
+                ],
+            },
+        });
+        expect(compacted.status).toBe("completed");
+        if (compacted.status !== "completed") expect.fail("Expected completed compaction.");
+        await drain(
+            session.run({
+                context: {
+                    instructions: prompt.instructions,
                     messages: [
                         ...compacted.context.messages,
-                        { role: "user", content: "switched" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "switched" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1181,7 +1347,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "retry me" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retry me" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -1222,7 +1396,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "use a tool" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "use a tool" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -1263,16 +1445,31 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "first" },
-                        { role: "user", content: "second" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "second" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1308,7 +1505,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "retry me" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retry me" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -1317,7 +1522,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         expect(
             events.filter((event) => event.type === "retrying").map((event) => event.attempt),
         ).toEqual([1, 2, 3]);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(sse.requests).toHaveLength(2);
         session.destroy();
     });
@@ -1329,10 +1534,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const user = { role: "user" as const, content: "use exec" };
+        const user = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "use exec" }],
+        };
         const first = [];
         for await (const event of session.run({
-            context: { messages: [user] },
+            context: { instructions: "", messages: [user] },
             effort: "low",
         })) {
             first.push(event);
@@ -1349,32 +1557,37 @@ describe("Codex CLI mode WebSocket goldens", () => {
             callId: "custom-call",
             arguments: "text(true);",
         });
-        expect(first.at(-1)).toEqual({ type: "done", state: "tool_call" });
+        expect(first.at(-1)).toMatchObject({ type: "done", state: "tool_call" });
 
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         user,
                         {
                             role: "assistant",
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "custom-call",
-                                    name: "exec",
-                                    arguments: "text(true);",
-                                    vendor: {
-                                        provider: "codex",
-                                        type: "custom_tool_call",
+                            content: [
+                                ...[
+                                    {
+                                        callId: "custom-call",
+                                        name: "exec",
+                                        arguments: "text(true);",
+                                        vendor: {
+                                            provider: "codex",
+                                            type: "custom_tool_call",
+                                        },
                                     },
-                                },
+                                ].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
                             ],
                         },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "true" }],
                             callId: "custom-call",
-                            content: "true",
                             vendor: { provider: "codex", type: "custom_tool_call" },
                         },
                     ],
@@ -1406,16 +1619,31 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "retry" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "retry" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "retry" },
-                        { role: "user", content: "new turn" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "retry" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "new turn" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1440,16 +1668,31 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: "first" },
-                        { role: "user", content: "second" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "second" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1486,9 +1729,16 @@ describe("Codex CLI mode WebSocket goldens", () => {
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
-                        { role: "user", content: restored },
-                        { role: "user", content: "continue" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: restored }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "continue" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1515,24 +1765,38 @@ describe("Codex CLI mode WebSocket goldens", () => {
             instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
-        const user = { role: "user" as const, content: "use exec" };
+        const user = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "use exec" }],
+        };
         const toolCall = {
             callId: "custom-call",
             name: "exec",
             arguments: "text(true);",
             vendor: { provider: "codex" as const, type: "custom_tool_call" as const },
         };
-        await drain(session.run({ context: { messages: [user] }, effort: "low" }));
+        await drain(
+            session.run({ context: { instructions: "", messages: [user] }, effort: "low" }),
+        );
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         user,
-                        { role: "assistant", content: "", toolCalls: [toolCall] },
+                        {
+                            role: "assistant",
+                            content: [
+                                ...[toolCall].map((call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                })),
+                            ],
+                        },
                         {
                             role: "tool",
+                            content: [{ type: "text" as const, text: "true" }],
                             callId: toolCall.callId,
-                            content: "true",
                             vendor: { provider: "codex", type: "custom_tool_call" },
                         },
                     ],
@@ -1570,19 +1834,48 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "use exec" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "use exec" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         websocket.beforeOutputFailures = 1;
 
-        const compacted = await session.compact();
+        const compacted = await session.compact({
+            context: {
+                instructions: prompt.instructions,
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text", text: "use exec" }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [
+                            {
+                                type: "tool_call",
+                                callId: "custom-call",
+                                name: "exec",
+                                arguments: "text(true);",
+                                vendor: { provider: "codex", type: "custom_tool_call" },
+                            },
+                        ],
+                    },
+                ],
+            },
+        });
 
         expect(compacted.status).toBe("completed");
-        expect(websocket.sent[2]!.input).toEqual([{ type: "compaction_trigger" }]);
+        expect(websocket.sent[2]!.input).toContainEqual({ type: "compaction_trigger" });
         expect(websocket.sent[3]!.input).toContainEqual({
             type: "custom_tool_call",
-            id: "custom-tool-item",
             call_id: "custom-call",
             name: "exec",
             input: "text(true);",
@@ -1600,7 +1893,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const controller = new AbortController();
         const compacting = session.compact({
-            context: { messages: [{ role: "user", content: "new caller state" }] },
+            context: {
+                instructions: prompt.instructions,
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "new caller state" }],
+                    },
+                ],
+            },
             signal: controller.signal,
         });
         setTimeout(() => controller.abort(), 10);
@@ -1645,12 +1946,16 @@ describe("Codex CLI mode WebSocket goldens", () => {
         await drain(
             session.run({
                 context: {
+                    instructions: sol.instructions,
                     messages: [
                         ...sol.systemMessages.map((content) => ({
                             role: "system" as const,
-                            content,
+                            content: content.map((text) => ({ type: "text" as const, text })),
                         })),
-                        { role: "user", content: "first" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1659,13 +1964,20 @@ describe("Codex CLI mode WebSocket goldens", () => {
         await drain(
             session.run({
                 context: {
+                    instructions: legacy.instructions,
                     messages: [
                         ...legacy.systemMessages.map((content) => ({
                             role: "system" as const,
-                            content,
+                            content: content.map((text) => ({ type: "text" as const, text })),
                         })),
-                        { role: "user", content: "first" },
-                        { role: "user", content: "switch" },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "switch" }],
+                        },
                     ],
                 },
                 model: "gpt-5.5",
@@ -1710,12 +2022,24 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
 
         const compacted = await session.compact({
-            context: { messages: [{ role: "user", content: "compact this" }] },
+            context: {
+                instructions: prompt.instructions,
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "compact this" }],
+                    },
+                ],
+            },
         });
 
         expect(compacted.status).toBe("completed");
+        if (compacted.status !== "completed") expect.fail("Expected completed compaction.");
         expect(compacted.context.messages).toEqual([
-            { role: "user", content: "compact this" },
+            {
+                role: "user",
+                content: [{ type: "text", text: "compact this" }],
+            },
             {
                 role: "compaction",
                 content: null,
@@ -1733,7 +2057,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         for await (const _event of session.run({
-            context: { messages: [{ role: "user", content: "first" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "first" }],
+                    },
+                ],
+            },
         })) {
             // Drain the turn so the session records what it has already transmitted.
         }
@@ -1743,14 +2075,28 @@ describe("Codex CLI mode WebSocket goldens", () => {
         // never got an answer.
         await session.compact({
             context: {
+                instructions: prompt.instructions,
                 messages: [
-                    { role: "user", content: "first" },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "first" }],
+                    },
                     {
                         role: "assistant",
-                        content: "",
-                        toolCalls: [{ callId: "call-1", name: "shell", arguments: "{}" }],
+                        content: [
+                            ...[{ callId: "call-1", name: "shell", arguments: "{}" }].map(
+                                (call) => ({
+                                    type: "tool_call" as const,
+                                    ...call,
+                                }),
+                            ),
+                        ],
                     },
-                    { role: "tool", callId: "call-1", content: "tool finished" },
+                    {
+                        role: "tool",
+                        content: [{ type: "text" as const, text: "tool finished" }],
+                        callId: "call-1",
+                    },
                 ],
             },
         });
@@ -1769,28 +2115,42 @@ describe("Codex CLI mode WebSocket goldens", () => {
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const originalHistory = [
-            { role: "assistant" as const, content: oldHistory },
-            { role: "assistant" as const, content: "Old response." },
+            {
+                role: "assistant" as const,
+                content: [{ type: "text" as const, text: oldHistory }],
+            },
+            {
+                role: "assistant" as const,
+                content: [{ type: "text" as const, text: "Old response." }],
+            },
         ];
         await drain(
             session.run({
-                context: { messages: originalHistory },
+                context: { instructions: "", messages: originalHistory },
                 effort: "low",
             }),
         );
         const compacted = await session.compact({
             context: {
+                instructions: prompt.instructions,
                 messages: originalHistory,
             },
         });
         expect(compacted.status).toBe("completed");
+        if (compacted.status !== "completed") expect.fail("Expected completed compaction.");
 
         await drain(
             session.run({
                 context: {
+                    instructions: "",
                     messages: [
                         ...compacted.context.messages,
-                        { role: "user", content: "Continue after compaction." },
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text" as const, text: "Continue after compaction." },
+                            ],
+                        },
                     ],
                 },
                 effort: "low",
@@ -1819,10 +2179,22 @@ describe("Codex CLI mode WebSocket goldens", () => {
         // The caller's history is authoritative even when compaction reorders it.
         await session.compact({
             context: {
+                instructions: prompt.instructions,
                 messages: [
-                    { role: "system", content: "The model changed to gpt-5.6-sol." },
-                    { role: "user", content: "first" },
-                    { role: "assistant", content: "answered" },
+                    {
+                        role: "system",
+                        content: [
+                            { type: "text" as const, text: "The model changed to gpt-5.6-sol." },
+                        ],
+                    },
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "first" }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text" as const, text: "answered" }],
+                    },
                 ],
             },
         });
@@ -1845,10 +2217,22 @@ describe("Codex CLI mode WebSocket goldens", () => {
                 {
                     instructions: prompt.instructions,
                     messages: [
-                        { role: "system", content: "Original instructions." },
-                        { role: "system", content: "Later instructions." },
-                        { role: "user", content: "first" },
-                        { role: "assistant", content: "answered" },
+                        {
+                            role: "system",
+                            content: [{ type: "text" as const, text: "Original instructions." }],
+                        },
+                        {
+                            role: "system",
+                            content: [{ type: "text" as const, text: "Later instructions." }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "first" }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text" as const, text: "answered" }],
+                        },
                     ],
                 },
                 codexSkills,
@@ -1871,7 +2255,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "retry" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "retry" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -1899,13 +2291,29 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "fail" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "fail" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "recover" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "recover" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
@@ -1932,7 +2340,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const firstEvents = [];
         for await (const event of session.run({
             abort: controller.signal,
-            context: { messages: [{ role: "user", content: "abort" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "abort" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             firstEvents.push(event);
@@ -1940,7 +2356,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         }
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "recover" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "recover" }],
+                        },
+                    ],
+                },
                 effort: "low",
             }),
         );
@@ -1967,7 +2391,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const controller = new AbortController();
         for await (const event of session.run({
             abort: controller.signal,
-            context: { messages: [{ role: "user", content: "abort" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "abort" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             if (event.type === "text_delta") controller.abort();
@@ -1976,13 +2408,21 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         const recoveryEvents = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "recover" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "recover" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             recoveryEvents.push(event);
         }
 
-        expect(recoveryEvents.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(recoveryEvents.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(JSON.stringify(websocket.sent.at(-1)!.input)).toContain("recover");
         session.destroy();
     });
@@ -1998,7 +2438,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const aborted = session
             .run({
                 abort: controller.signal,
-                context: { messages: [{ role: "user", content: "abort warmup" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "abort warmup" }],
+                        },
+                    ],
+                },
                 effort: "low",
             })
             [Symbol.asyncIterator]();
@@ -2011,13 +2459,21 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         const recoveryEvents = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "recover" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "recover" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             recoveryEvents.push(event);
         }
 
-        expect(recoveryEvents.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(recoveryEvents.at(-1)).toMatchObject({ type: "done", state: "normal" });
         expect(JSON.stringify(websocket.sent.at(-1)!.input)).toContain("recover");
         session.destroy();
     });
@@ -2031,7 +2487,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "fallback" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "fallback" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -2039,7 +2503,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         expect(events.filter((event) => event.type === "retrying")).toHaveLength(1);
         expect(sse.requests).toHaveLength(1);
-        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         session.destroy();
     });
 
@@ -2052,7 +2516,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "do not retry" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "do not retry" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -2074,7 +2546,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         const events = [];
         for await (const event of session.run({
-            context: { messages: [{ role: "user", content: "one retry only" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "one retry only" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);
@@ -2099,7 +2579,15 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const events = [];
         for await (const event of session.run({
             abort: controller.signal,
-            context: { messages: [{ role: "user", content: "fallback" }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "fallback" }],
+                    },
+                ],
+            },
             effort: "low",
         })) {
             events.push(event);

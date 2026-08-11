@@ -8,7 +8,7 @@ import {
     emptyResponseDoneEvent,
     isEmptyResponseError,
 } from "@/core/EmptyResponseError.js";
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
@@ -102,18 +102,12 @@ export class GrokSession extends BaseSession {
         return this.streamRun(request);
     }
 
-    async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
+    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
         const { signal } = options;
-        const context: SessionContext =
-            options.context === undefined
-                ? {
-                      ...this.context,
-                      messages: [...this.context.messages],
-                  }
-                : {
-                      instructions: this.context.instructions,
-                      messages: [...options.context.messages],
-                  };
+        const context: SessionContext = {
+            instructions: options.context.instructions,
+            messages: [...options.context.messages],
+        };
         if (signal?.aborted) {
             return { status: "cancelled", context };
         }
@@ -125,7 +119,6 @@ export class GrokSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: "A model is required for Grok compaction.",
-                context,
             };
         }
         this.activeModel = model;
@@ -142,7 +135,9 @@ export class GrokSession extends BaseSession {
                 ...configured.context.messages,
                 {
                     role: "user",
-                    content: createGrokCompactionPrompt(options.instructions),
+                    content: [
+                        { type: "text", text: createGrokCompactionPrompt(options.instructions) },
+                    ],
                 },
             ],
         };
@@ -167,7 +162,6 @@ export class GrokSession extends BaseSession {
                     status: "failed",
                     kind: "inference_error",
                     message: result.message,
-                    context,
                 };
             }
 
@@ -192,7 +186,6 @@ export class GrokSession extends BaseSession {
                     lastInvalidKind === "tool_call"
                         ? "Grok emitted tool calls in three compaction attempts."
                         : "Grok returned three compaction summaries shorter than 500 characters.",
-                context,
             };
         }
 
@@ -202,7 +195,6 @@ export class GrokSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: "Grok completed compaction without reporting token usage.",
-                context,
             };
         }
         const summary = formatGrokCompactionSummary(rawSummary);
@@ -214,7 +206,12 @@ export class GrokSession extends BaseSession {
         const preservedQuery =
             query === undefined
                 ? []
-                : [{ role: "user" as const, content: wrapGrokUserQuery(query) }];
+                : [
+                      {
+                          role: "user" as const,
+                          content: [{ type: "text" as const, text: wrapGrokUserQuery(query) }],
+                      },
+                  ];
         const preservedMessages: SessionContext["messages"] = [
             ...userInfo,
             ...projectInstructions,
@@ -227,7 +224,7 @@ export class GrokSession extends BaseSession {
                 ...preservedMessages,
                 {
                     role: "user",
-                    content: createGrokCompactionContinuation(rawSummary),
+                    content: [{ type: "text", text: createGrokCompactionContinuation(rawSummary) }],
                 },
                 ...stateReminders,
             ],
@@ -255,7 +252,7 @@ export class GrokSession extends BaseSession {
             this.turnIndex += nextUserQueries - previousUserQueries;
         }
         this.context = {
-            instructions: this.context.instructions,
+            instructions: request.context.instructions ?? this.context.instructions,
             messages,
         };
         const context = this.context;
@@ -318,33 +315,11 @@ export class GrokSession extends BaseSession {
             yield terminal;
             return;
         }
-        if (
-            result !== undefined &&
-            (result.assistantText.length > 0 ||
-                result.encryptedReasoning !== undefined ||
-                result.toolCalls.length > 0 ||
-                result.responseItems.length > 0)
-        ) {
+        if (result !== undefined && result.message.content.length > 0) {
             this.context = {
                 instructions: this.context.instructions,
-                messages: [
-                    ...this.context.messages,
-                    {
-                        role: "assistant",
-                        content: result.assistantText,
-                        ...(result.encryptedReasoning === undefined
-                            ? {}
-                            : { encryptedReasoning: result.encryptedReasoning }),
-                        ...(result.toolCalls.length === 0 ? {} : { toolCalls: result.toolCalls }),
-                        ...(result.responseItems.length === 0
-                            ? {}
-                            : { responseItems: result.responseItems }),
-                    },
-                ],
+                messages: [...this.context.messages, result.message],
             };
-        }
-        if (result !== undefined && result.responseItems.length > 0) {
-            yield { type: "response_items", items: result.responseItems };
         }
         if (blockOpen) yield { type: "block_stop" };
         if (terminal !== undefined) yield terminal;
@@ -358,7 +333,7 @@ export class GrokSession extends BaseSession {
     ): Promise<GrokCompactionAttempt> {
         let rawSummary = "";
         let encryptedReasoning: string | undefined;
-        let usage: SessionCacheUsage | undefined;
+        let usage: SessionUsage | undefined;
         let emittedToolCall = false;
         try {
             for await (const event of this.streamInference({
@@ -388,7 +363,7 @@ export class GrokSession extends BaseSession {
                 ) {
                     emittedToolCall = true;
                 }
-                if (event.type === "encrypted_reasoning") encryptedReasoning = event.content;
+                if (event.type === "reasoning_end") encryptedReasoning = event.reasoning;
                 if (event.type === "token_usage") usage = event.usage;
                 if (isSessionErrorDone(event)) {
                     return {
@@ -470,7 +445,7 @@ export class GrokSession extends BaseSession {
                     if (
                         event.type === "text_delta" ||
                         event.type === "reasoning_delta" ||
-                        event.type === "encrypted_reasoning" ||
+                        event.type === "reasoning_end" ||
                         event.type === "toolcall_start" ||
                         event.type === "toolcall_delta" ||
                         event.type === "toolcall_end"
@@ -574,7 +549,7 @@ interface CompletedGrokCompactionAttempt {
     rawSummary: string;
     emittedToolCall: boolean;
     encryptedReasoning?: string;
-    usage?: SessionCacheUsage;
+    usage?: SessionUsage;
 }
 
 type GrokCompactionAttempt =

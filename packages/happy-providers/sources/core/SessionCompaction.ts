@@ -1,4 +1,4 @@
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
+import type { SessionUsage } from "@/core/SessionUsage.js";
 import type {
     SessionCompactionMessage,
     SessionContext,
@@ -10,12 +10,8 @@ export interface SessionCompactionOptions {
     readonly model?: string;
     /** Provider-native instructions describing what the compaction should retain. */
     readonly instructions?: string;
-    /** Rebuilt conversation prefix selected by the caller for this compaction. */
-    readonly context?: {
-        readonly messages: readonly SessionMessage[];
-    };
-    /** Best available count of input tokens in the selected context. */
-    readonly inputTokens?: number;
+    /** Complete context to compact, including its root instructions and messages. */
+    readonly context: SessionContext;
     readonly signal?: AbortSignal;
 }
 
@@ -29,7 +25,7 @@ export interface CompletedSessionCompaction {
     readonly encryptedReasoning?: string;
     /** Original messages intentionally retained alongside the summary. */
     readonly preservedMessages: readonly SessionMessage[];
-    readonly usage: SessionCacheUsage;
+    readonly usage: SessionUsage;
     /** Complete replacement context applied to the session. */
     readonly context: SessionContext;
 }
@@ -44,8 +40,6 @@ export interface FailedSessionCompaction {
     readonly status: "failed";
     readonly kind: "inference_error" | "invalid_summary" | "tool_call";
     readonly message: string;
-    /** Original context left active because compaction did not complete. */
-    readonly context: SessionContext;
 }
 
 export type SessionCompaction =

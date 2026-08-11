@@ -29,17 +29,23 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
                 session.run({
                     effort: "low",
                     context: {
+                        instructions: "",
                         messages: [
                             {
                                 role: "user",
-                                content: "Reply with exactly ANTHROPIC_BEDROCK_LIVE_OK",
+                                content: [
+                                    {
+                                        type: "text" as const,
+                                        text: "Reply with exactly ANTHROPIC_BEDROCK_LIVE_OK",
+                                    },
+                                ],
                             },
                         ],
                     },
                 }),
             );
             expect(textFromSessionEvents(events).trim()).toBe("ANTHROPIC_BEDROCK_LIVE_OK");
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         } finally {
             session.destroy();
         }
@@ -64,14 +70,38 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
         try {
             const compaction = await session.compact({
                 context: {
+                    instructions: "You are a helpful assistant.",
                     messages: [
-                        { role: "user", content: "My favorite color is teal. Remember it." },
-                        { role: "assistant", content: "Got it, your favorite color is teal." },
                         {
                             role: "user",
-                            content:
-                                "Here is a long document to pad the context past the native compaction trigger:\n" +
-                                "The quick brown fox jumps over the lazy dog. ".repeat(30_000),
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "My favorite color is teal. Remember it.",
+                                },
+                            ],
+                        },
+                        {
+                            role: "assistant",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text: "Got it, your favorite color is teal.",
+                                },
+                            ],
+                        },
+                        {
+                            role: "user",
+                            content: [
+                                {
+                                    type: "text" as const,
+                                    text:
+                                        "Here is a long document to pad the context past the native compaction trigger:\n" +
+                                        "The quick brown fox jumps over the lazy dog. ".repeat(
+                                            30_000,
+                                        ),
+                                },
+                            ],
                         },
                     ],
                 },
@@ -84,18 +114,24 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
                 session.run({
                     effort: "low",
                     context: {
+                        instructions: "",
                         messages: [
                             compaction.compaction,
                             {
                                 role: "user",
-                                content: "What is my favorite color? Reply with one word.",
+                                content: [
+                                    {
+                                        type: "text" as const,
+                                        text: "What is my favorite color? Reply with one word.",
+                                    },
+                                ],
                             },
                         ],
                     },
                 }),
             );
             expect(textFromSessionEvents(events).toLowerCase()).toContain("teal");
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         } finally {
             session.destroy();
         }

@@ -5,7 +5,8 @@ import {
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
-import type { SessionContext, SessionToolCall } from "@/core/SessionContext.js";
+import type { SessionContext } from "@/core/SessionContext.js";
+import { SessionAssistantMessageAccumulator } from "@/core/SessionAssistantMessageAccumulator.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
@@ -98,14 +99,11 @@ export class AnthropicBedrockSession extends BaseSession {
         return this.streamRun(request);
     }
 
-    async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
-        const original =
-            options.context === undefined
-                ? this.context
-                : {
-                      instructions: this.context.instructions,
-                      messages: [...options.context.messages],
-                  };
+    async compact(options: SessionCompactionOptions): Promise<SessionCompaction> {
+        const original: SessionContext = {
+            instructions: options.context.instructions,
+            messages: [...options.context.messages],
+        };
         if (options.signal?.aborted) return { status: "cancelled", context: original };
         const model = options.model ?? this.activeModel ?? this.model;
         if (model === undefined) {
@@ -131,7 +129,6 @@ export class AnthropicBedrockSession extends BaseSession {
                     status: "failed",
                     kind: "inference_error",
                     message: "Anthropic Bedrock native compaction returned no compaction block.",
-                    context: original,
                 };
             }
             const compaction = {
@@ -159,7 +156,6 @@ export class AnthropicBedrockSession extends BaseSession {
                 status: "failed",
                 kind: "inference_error",
                 message: error instanceof Error ? error.message : String(error),
-                context: original,
             };
         }
     }
@@ -177,13 +173,10 @@ export class AnthropicBedrockSession extends BaseSession {
         const effort = request.effort ?? this.activeEffort;
         this.activeEffort = effort;
         this.context = {
-            instructions: this.context.instructions,
+            instructions: request.context.instructions ?? this.context.instructions,
             messages: [...request.context.messages],
         };
-        let assistantText = "";
-        let encryptedReasoning: string | undefined;
-        let responseItems: readonly string[] | undefined;
-        const toolCalls = new Map<string, SessionToolCall>();
+        const assistant = new SessionAssistantMessageAccumulator();
         for await (const event of this.streamQuery({
             context: this.context,
             model,
@@ -193,52 +186,15 @@ export class AnthropicBedrockSession extends BaseSession {
                 ? {}
                 : { structuredOutput: request.structuredOutput }),
         })) {
-            if (event.type === "text_delta") assistantText += event.delta;
-            if (event.type === "encrypted_reasoning") encryptedReasoning = event.content;
-            if (event.type === "response_items") responseItems = event.items;
-            if (event.type === "toolcall_start") {
-                toolCalls.set(event.callId, {
-                    callId: event.callId,
-                    name: event.name,
-                    arguments: "",
-                    vendor: event.vendor,
-                });
-            }
-            if (event.type === "toolcall_delta") {
-                const call = toolCalls.get(event.callId);
-                if (call !== undefined) {
-                    toolCalls.set(event.callId, {
-                        ...call,
-                        arguments: call.arguments + event.delta,
-                    });
-                }
-            }
-            if (event.type === "toolcall_end") {
-                const call = toolCalls.get(event.callId);
-                if (call !== undefined) {
-                    toolCalls.set(event.callId, { ...call, arguments: event.arguments });
-                }
-            }
-            if (event.type === "block_reset") {
-                assistantText = "";
-                encryptedReasoning = undefined;
-                responseItems = undefined;
-                toolCalls.clear();
-            }
+            assistant.add(event);
             if (event.type === "done" && event.state !== "error" && event.state !== "cancelled") {
-                this.context = {
-                    instructions: this.context.instructions,
-                    messages: [
-                        ...this.context.messages,
-                        {
-                            role: "assistant",
-                            content: assistantText,
-                            ...(encryptedReasoning === undefined ? {} : { encryptedReasoning }),
-                            ...(responseItems === undefined ? {} : { responseItems }),
-                            ...(toolCalls.size === 0 ? {} : { toolCalls: [...toolCalls.values()] }),
-                        },
-                    ],
-                };
+                const message = assistant.message();
+                if (message !== undefined) {
+                    this.context = {
+                        instructions: this.context.instructions,
+                        messages: [...this.context.messages, message],
+                    };
+                }
             }
             yield event;
         }
@@ -402,10 +358,15 @@ function emptyStream(): SessionStream {
 
 function isAnthropicResponseContentEvent(event: SessionEvent): boolean {
     return (
+        event.type === "text_start" ||
         event.type === "text_delta" ||
+        event.type === "reasoning_start" ||
         event.type === "reasoning_delta" ||
         event.type === "toolcall_start" ||
         event.type === "toolcall_delta" ||
-        event.type === "toolcall_end"
+        event.type === "toolcall_end" ||
+        event.type === "toolcall_result_start" ||
+        event.type === "toolcall_result_delta" ||
+        event.type === "toolcall_result_end"
     );
 }

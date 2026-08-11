@@ -1,6 +1,10 @@
 import type { ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
-import type { SessionContext } from "@/core/SessionContext.js";
+import type {
+    SessionAssistantBlock,
+    SessionContext,
+    SessionOutputBlock,
+} from "@/core/SessionContext.js";
 import { createCodexCallIdMapper } from "@/protocol/responses/createCodexCallIdMapper.js";
 import { toOpenAIInputContent } from "@/protocol/responses/toOpenAIInputContent.js";
 import type { ResponsesToolCallType } from "@/protocol/responses/ResponsesToolVendor.js";
@@ -11,15 +15,13 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
     const toolSearchCallIds = new Set<string>();
     const mapCallId = createCodexCallIdMapper();
     let messageId = 0;
+
     for (const message of context.messages) {
         if (message.role === "system") {
             input.push({
                 type: "message",
                 role: "developer",
-                content:
-                    typeof message.content === "string"
-                        ? message.content
-                        : message.content.map((text) => ({ type: "input_text", text })),
+                content: message.content.map((block) => ({ type: "input_text", text: block.text })),
             });
             continue;
         }
@@ -27,7 +29,7 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
             input.push({
                 type: "message",
                 role: "user",
-                content: toOpenAIInputContent(message.content, message.input),
+                content: toOpenAIInputContent(message.content),
             });
             continue;
         }
@@ -38,10 +40,7 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
                 recipient: message.recipient,
                 content: [
                     { type: "input_text", text: message.header },
-                    {
-                        type: "encrypted_content",
-                        encrypted_content: message.encryptedContent,
-                    },
+                    { type: "encrypted_content", encrypted_content: message.encryptedContent },
                 ],
             } as unknown as ResponseInputItem);
             continue;
@@ -50,17 +49,14 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
             if (message.encryptedContent === null) {
                 throw new Error("Responses compaction is missing encrypted content.");
             }
-            input.push({
-                type: "compaction",
-                encrypted_content: message.encryptedContent,
-            });
+            input.push({ type: "compaction", encrypted_content: message.encryptedContent });
             continue;
         }
         if (message.role === "tool") {
             const callId = mapCallId(message.callId);
             if (toolSearchCallIds.has(callId)) {
                 try {
-                    const parsed: unknown = JSON.parse(message.content);
+                    const parsed: unknown = JSON.parse(textFromBlocks(message.content));
                     input.push({
                         type: "tool_search_output",
                         call_id: callId,
@@ -75,7 +71,7 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
                                 : parsed,
                     } as ResponseInputItem);
                 } catch {
-                    // Malformed opaque tool-search output is omitted from replay.
+                    // Malformed tool-search output is omitted from replay.
                 }
                 continue;
             }
@@ -86,55 +82,48 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
                         ? "custom_tool_call_output"
                         : "function_call_output",
                 call_id: callId,
-                output: toOpenAIInputContent(message.content, message.input),
+                output: toOpenAIInputContent(message.content),
             } as ResponseInputItem);
             continue;
         }
-        if (message.responseItems !== undefined) {
-            for (const encoded of message.responseItems) {
+
+        for (const block of message.content) {
+            const native = nativeOutputItem(block);
+            if (native !== undefined) {
+                input.push(mapNativeCallId(native, mapCallId));
+                continue;
+            }
+            if (block.type === "reasoning") {
+                if (block.reasoning === undefined) continue;
                 try {
-                    const parsed = JSON.parse(encoded) as ResponseInputItem;
-                    const item =
-                        "call_id" in parsed && typeof parsed.call_id === "string"
-                            ? ({
-                                  ...parsed,
-                                  call_id: mapCallId(parsed.call_id),
-                              } as ResponseInputItem)
-                            : parsed;
-                    input.push(item);
-                    if (
-                        item.type === "tool_search_call" &&
-                        item.call_id !== null &&
-                        item.call_id !== undefined
-                    ) {
-                        toolSearchCallIds.add(item.call_id);
-                    } else if (item.type === "custom_tool_call") {
-                        customToolCallIds.add(item.call_id);
-                    }
+                    const item = JSON.parse(block.reasoning) as ResponseInputItem;
+                    if (item.type === "reasoning") input.push(item);
                 } catch {
-                    // Malformed opaque response state is omitted from replay.
+                    // Invalid optional reasoning state does not break the conversation.
                 }
+                continue;
             }
-            continue;
-        }
-        if (message.encryptedReasoning !== undefined) {
-            try {
-                const item = JSON.parse(message.encryptedReasoning) as ResponseInputItem;
-                if (item.type === "reasoning") input.push(item);
-            } catch {
-                // Opaque reasoning is optional; malformed state must not break the conversation.
+            if (block.type === "text") {
+                input.push({
+                    type: "message",
+                    id: `msg_rig_${messageId++}`,
+                    role: "assistant",
+                    status: "completed",
+                    content: [{ type: "output_text", text: block.text, annotations: [] }],
+                } as ResponseInputItem);
+                continue;
             }
-        }
-        for (const toolCall of message.toolCalls ?? []) {
-            const callId = mapCallId(toolCall.callId);
-            const vendorType = toolVendorType(toolCall.vendor);
+            if (block.type === "tool_result") continue;
+
+            const callId = mapCallId(block.callId);
+            const vendorType = toolVendorType(block.vendor);
             if (vendorType === "tool_search_call") {
                 try {
                     input.push({
                         type: "tool_search_call",
                         call_id: callId,
                         execution: "client",
-                        arguments: JSON.parse(toolCall.arguments),
+                        arguments: JSON.parse(block.arguments),
                     } as ResponseInputItem);
                     toolSearchCallIds.add(callId);
                 } catch {
@@ -144,40 +133,65 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
                 input.push({
                     type: "custom_tool_call",
                     call_id: callId,
-                    name: toolCall.name,
-                    ...(toolCall.namespace === undefined ? {} : { namespace: toolCall.namespace }),
-                    input: toolCall.arguments,
+                    name: block.name,
+                    ...(block.namespace === undefined ? {} : { namespace: block.namespace }),
+                    input: block.arguments,
                 } as ResponseInputItem);
                 customToolCallIds.add(callId);
             } else {
                 input.push({
                     type: "function_call",
                     call_id: callId,
-                    name: toolCall.name,
-                    ...(toolCall.namespace === undefined ? {} : { namespace: toolCall.namespace }),
-                    arguments: toolCall.arguments,
+                    name: block.name,
+                    ...(block.namespace === undefined ? {} : { namespace: block.namespace }),
+                    arguments: block.arguments,
                 } as ResponseInputItem);
             }
-        }
-        if (message.content.length > 0) {
-            input.push({
-                type: "message",
-                id: `msg_${messageId++}`,
-                role: "assistant",
-                status: "completed",
-                content: [{ type: "output_text", text: message.content, annotations: [] }],
-            } as ResponseInputItem);
         }
     }
     return input;
 }
 
-function toolVendorType(vendor: any): ResponsesToolCallType | undefined {
-    if (typeof vendor !== "object" || vendor === null || vendor.provider !== "codex")
+function textFromBlocks(blocks: readonly SessionOutputBlock[]): string {
+    return blocks
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+}
+
+function nativeOutputItem(block: SessionAssistantBlock): ResponseInputItem | undefined {
+    if (
+        (block.type !== "tool_call" && block.type !== "tool_result") ||
+        block.vendor === undefined
+    ) {
         return undefined;
-    return vendor.type === "function_call" ||
-        vendor.type === "custom_tool_call" ||
-        vendor.type === "tool_search_call"
+    }
+    const vendor = block.vendor;
+    if (typeof vendor !== "object" || vendor === null || !("outputItem" in vendor))
+        return undefined;
+    const encoded = vendor.outputItem;
+    if (typeof encoded !== "string") return undefined;
+    try {
+        return JSON.parse(encoded) as ResponseInputItem;
+    } catch {
+        return undefined;
+    }
+}
+
+function mapNativeCallId(
+    item: ResponseInputItem,
+    mapCallId: (callId: string) => string,
+): ResponseInputItem {
+    return "call_id" in item && typeof item.call_id === "string"
+        ? ({ ...item, call_id: mapCallId(item.call_id) } as ResponseInputItem)
+        : item;
+}
+
+function toolVendorType(vendor: any): ResponsesToolCallType | undefined {
+    if (vendor?.provider !== "codex" && vendor?.provider !== "responses") return undefined;
+    return vendor?.type === "function_call" ||
+        vendor?.type === "custom_tool_call" ||
+        vendor?.type === "tool_search_call"
         ? vendor.type
         : undefined;
 }

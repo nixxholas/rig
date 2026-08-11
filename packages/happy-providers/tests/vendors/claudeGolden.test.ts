@@ -5,13 +5,20 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { SessionMessage, SessionToolCall } from "@/core/SessionContext.js";
+import type {
+    SessionAssistantMessage,
+    SessionMessage,
+    SessionToolCallBlock,
+} from "@/core/SessionContext.js";
+import { assistantMessageFromEvents } from "@/core/SessionAssistantMessageAccumulator.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
 import { ClaudeSession } from "@/vendors/claude/ClaudeSession.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
 import { resolveClaudeTools } from "@/vendors/claude/impl/resolveClaudeTools.js";
 import { createClaudeTestInstructions } from "./createClaudeTestInstructions.js";
+
+type SessionToolCall = Omit<SessionToolCallBlock, "type">;
 
 const SDK_DEFAULT_WORKSPACE_SLUG = process.cwd().replaceAll(/[^A-Za-z0-9-]/gu, "-");
 
@@ -87,11 +94,16 @@ describe("Claude provider golden", () => {
             CLAUDE_CODE_OVERRIDE_DATE: "2000-01-01",
             TZ: "UTC",
         };
+        const initialInstructions = createClaudeTestInstructions(golden.scenario.initialModel, {
+            cwd,
+            env: providerEnv,
+        });
+        const switchedInstructions = createClaudeTestInstructions(golden.scenario.switchedModel, {
+            cwd,
+            env: providerEnv,
+        });
         const session = new ClaudeSession("<SESSION_ID>", {
-            instructions: createClaudeTestInstructions(golden.scenario.initialModel, {
-                cwd,
-                env: providerEnv,
-            }),
+            instructions: initialInstructions,
             credential,
             env: providerEnv,
             modelConfigurations: {
@@ -116,43 +128,75 @@ describe("Claude provider golden", () => {
 
         try {
             const firstPrompt = golden.turns[0].prompt;
-            const first = await run(session, [{ role: "user", content: firstPrompt }]);
+            const first = await run(
+                session,
+                [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: firstPrompt }],
+                    },
+                ],
+                initialInstructions,
+            );
             expect(first.toolCalls).toEqual(golden.turns[0].toolCalls);
             const readCall = first.toolCalls[0]!;
 
             const toolContext: SessionMessage[] = [
-                { role: "user", content: firstPrompt },
-                { role: "assistant", content: first.text, toolCalls: first.toolCalls },
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: firstPrompt }],
+                },
+                first.message,
                 {
                     role: "tool",
+                    content: [{ type: "text" as const, text: "PROVIDER_TOOL_MARKER" }],
                     callId: readCall.callId,
-                    content: "PROVIDER_TOOL_MARKER",
                     vendor: { type: "claude_tool_use" },
                 },
             ];
-            const afterTool = await run(session, toolContext);
+            const afterTool = await run(session, toolContext, initialInstructions);
             expect(afterTool.text).toBe(golden.turns[1].text);
 
             const secondPrompt = golden.turns[2].prompt;
             const secondContext: SessionMessage[] = [
                 ...toolContext,
-                { role: "assistant", content: afterTool.text },
-                { role: "user", content: secondPrompt },
+                afterTool.message,
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: secondPrompt }],
+                },
             ];
-            const second = await run(session, secondContext);
+            const second = await run(session, secondContext, initialInstructions);
             expect(second.text).toBe(golden.turns[2].text);
 
             const switchedPrompt = golden.turns[3].prompt;
             const switchedContext: SessionMessage[] = [
                 ...secondContext,
-                { role: "assistant", content: second.text },
-                { role: "user", content: switchedPrompt },
+                second.message,
+                {
+                    role: "user",
+                    content: [{ type: "text" as const, text: switchedPrompt }],
+                },
             ];
-            const switched = await run(session, switchedContext, golden.scenario.switchedModel);
+            const switched = await run(
+                session,
+                switchedContext,
+                switchedInstructions,
+                golden.scenario.switchedModel,
+            );
             expect(switched.text).toBe(golden.turns[3].text);
 
             const compactInstructions = golden.turns[4].prompt.replace(/^\/compact\s*/u, "");
-            const compacted = await session.compact({ instructions: compactInstructions });
+            const compacted = await session.compact({
+                context: {
+                    instructions: createClaudeTestInstructions(golden.scenario.switchedModel, {
+                        cwd,
+                        env: providerEnv,
+                    }),
+                    messages: switchedContext,
+                },
+                instructions: compactInstructions,
+            });
             // The SDK's native compact boundary is local process state and is not
             // reproducible from an HTTP response alone. The real capture above
             // proves completion; this replay verifies its exact wire request and
@@ -175,7 +219,13 @@ describe("Claude provider golden", () => {
             const continuedPrompt = golden.turns[5].prompt;
             const continued = await run(
                 session,
-                [...compactedContext.messages, { role: "user", content: continuedPrompt }],
+                [
+                    ...compactedContext.messages,
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: continuedPrompt }],
+                    },
+                ],
                 golden.scenario.switchedModel,
             );
             expect(continued.text).toBe(golden.turns[5].text);
@@ -223,21 +273,29 @@ async function fixture(name: string): Promise<any> {
 async function run(
     session: ClaudeSession,
     messages: SessionMessage[],
+    instructions: string,
     model?: string,
-): Promise<{ text: string; toolCalls: SessionToolCall[] }> {
+): Promise<{
+    text: string;
+    toolCalls: SessionToolCall[];
+    message: SessionAssistantMessage;
+}> {
     const events: SessionEvent[] = [];
     for await (const event of session.run({
-        context: { messages },
+        context: { instructions, messages },
         ...(model === undefined ? {} : { model }),
     })) {
         events.push(event);
     }
+    const message = assistantMessageFromEvents(events);
+    if (message === undefined) throw new Error("Missing reconstructed assistant message.");
     return {
         text: events
             .filter((event) => event.type === "text_delta")
             .map((event) => event.delta)
             .join(""),
         toolCalls: collectToolCalls(events),
+        message,
     };
 }
 

@@ -51,7 +51,15 @@ describe("Grok user agent", () => {
         try {
             const events: SessionEvent[] = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "Retry empty output." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Retry empty output." }],
+                        },
+                    ],
+                },
             })) {
                 events.push(event);
             }
@@ -100,7 +108,7 @@ describe("Grok user agent", () => {
                     .map((event) => event.delta)
                     .join(""),
             ).toBe("recovered");
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             expect(rebuild).not.toHaveBeenCalled();
         } finally {
             rebuild.mockRestore();
@@ -143,7 +151,15 @@ describe("Grok user agent", () => {
         try {
             const events: SessionEvent[] = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "Keep trying." }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "Keep trying." }],
+                        },
+                    ],
+                },
             })) {
                 events.push(event);
             }
@@ -209,7 +225,15 @@ async function runOnce(options: {
     });
     try {
         for await (const _event of session.run({
-            context: { messages: [{ role: "user", content: "Hello." }] },
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "Hello." }],
+                    },
+                ],
+            },
         })) {
             // Draining the stream is what performs the request under test.
         }

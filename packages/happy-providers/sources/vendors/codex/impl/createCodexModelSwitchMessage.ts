@@ -4,14 +4,17 @@ export function createCodexModelSwitchMessage(instructions: string): SessionSyst
     return {
         role: "system",
         content: [
-            [
-                "<model_switch>",
-                "The user was previously using a different model. Please continue the conversation according to the following instructions:",
-                "",
-                instructions,
-                "",
-                "</model_switch>",
-            ].join("\n"),
+            {
+                type: "text",
+                text: [
+                    "<model_switch>",
+                    "The user was previously using a different model. Please continue the conversation according to the following instructions:",
+                    "",
+                    instructions,
+                    "",
+                    "</model_switch>",
+                ].join("\n"),
+            },
         ],
     };
 }

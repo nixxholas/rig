@@ -22,9 +22,7 @@ export interface SessionTool {
     readonly description?: string;
     readonly parameters?: TSchema;
     /** Provider-neutral request to expose this tool through native tool discovery. */
-    readonly deferLoading?: boolean;
-    /** Opaque provider metadata persisted with this tool definition. */
-    readonly vendor?: any;
+    readonly defer?: boolean;
     /** Ignored by providers that do not support grammar-based tools. */
     readonly grammar?: SessionToolLarkGrammar;
 }

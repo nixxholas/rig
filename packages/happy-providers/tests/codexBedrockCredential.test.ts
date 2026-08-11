@@ -139,7 +139,15 @@ describe("CodexProvider credential behavior", () => {
                 });
                 const events = [];
                 for await (const event of session.run({
-                    context: { messages: [{ role: "user", content: "retry me" }] },
+                    context: {
+                        instructions: codex_coding_agent_instructions,
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "retry me" }],
+                            },
+                        ],
+                    },
                 })) {
                     events.push(event);
                 }
@@ -149,16 +157,17 @@ describe("CodexProvider credential behavior", () => {
                     "block_reset",
                     "retrying",
                     "block_start",
+                    "text_start",
                     "text_delta",
+                    "text_end",
                     "token_usage",
-                    "response_items",
                     "block_stop",
                     "done",
                 ]);
                 expect(events).toContainEqual(
                     expect.objectContaining({ type: "retrying", attempt: 1 }),
                 );
-                expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+                expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
                 expect(requests).toBe(2);
                 session.destroy();
             } finally {
@@ -214,7 +223,15 @@ describe("CodexProvider credential behavior", () => {
             });
             const events = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "retry empty output" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "retry empty output" }],
+                        },
+                    ],
+                },
             })) {
                 events.push(event);
             }
@@ -226,9 +243,10 @@ describe("CodexProvider credential behavior", () => {
                 "token_usage",
                 "retrying",
                 "block_start",
+                "text_start",
                 "text_delta",
+                "text_end",
                 "token_usage",
-                "response_items",
                 "block_stop",
                 "done",
             ]);
@@ -237,7 +255,7 @@ describe("CodexProvider credential behavior", () => {
                 attempt: 1,
                 reason: "Codex returned a response with zero output tokens.",
             });
-            expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
             session.destroy();
         } finally {
             server.close();
@@ -288,7 +306,15 @@ describe("CodexProvider credential behavior", () => {
             });
             const events = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "fail once" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "fail once" }],
+                        },
+                    ],
+                },
             })) {
                 events.push(event);
             }
@@ -355,7 +381,15 @@ describe("CodexProvider credential behavior", () => {
             });
             const events = [];
             for await (const event of session.run({
-                context: { messages: [{ role: "user", content: "fail at HTTP" }] },
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "fail at HTTP" }],
+                        },
+                    ],
+                },
             })) {
                 events.push(event);
             }
@@ -451,8 +485,14 @@ describe("CodexProvider credential behavior", () => {
                     userAgent: golden.http.headers["user-agent"]!,
                 });
                 const initialMessages = [
-                    { role: "system" as const, content: read_only_permissions },
-                    { role: "user" as const, content: environmentMessage! },
+                    {
+                        role: "system" as const,
+                        content: [{ type: "text" as const, text: read_only_permissions }],
+                    },
+                    {
+                        role: "user" as const,
+                        content: [{ type: "text" as const, text: environmentMessage! }],
+                    },
                 ];
                 const session = await provider.session("bedrock-session", {
                     instructions: codex_coding_agent_instructions,
@@ -463,17 +503,30 @@ describe("CodexProvider credential behavior", () => {
                         request_user_input,
                         apply_patch,
                         view_image,
-                        { ...tool_search, description: goldenToolSearchDescription },
+                        {
+                            ...tool_search,
+                            description: goldenToolSearchDescription,
+                            server: {
+                                ...tool_search.server,
+                                description: goldenToolSearchDescription,
+                            },
+                        },
                     ],
                 });
                 for await (const event of session.run({
                     context: {
+                        instructions: codex_coding_agent_instructions,
                         messages: withCodexSkills(
                             {
                                 instructions: codex_coding_agent_instructions,
                                 messages: [
                                     ...initialMessages,
-                                    { role: "user", content: "Reply with OK." },
+                                    {
+                                        role: "user",
+                                        content: [
+                                            { type: "text" as const, text: "Reply with OK." },
+                                        ],
+                                    },
                                 ],
                             },
                             codexSkills,
@@ -551,21 +604,57 @@ describe("CodexProvider credential behavior", () => {
             });
             await drain(
                 session.run({
-                    context: { messages: [{ role: "user", content: "first" }] },
+                    context: {
+                        instructions: "",
+                        messages: [
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "first" }],
+                            },
+                        ],
+                    },
                 }),
             );
             await drain(
                 session.run({
                     context: {
+                        instructions: "",
                         messages: [
-                            { role: "user", content: "first" },
-                            { role: "assistant", content: "reply-1" },
-                            { role: "user", content: "second" },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "first" }],
+                            },
+                            {
+                                role: "assistant",
+                                content: [{ type: "text" as const, text: "reply-1" }],
+                            },
+                            {
+                                role: "user",
+                                content: [{ type: "text" as const, text: "second" }],
+                            },
                         ],
                     },
                 }),
             );
-            const compacted = await session.compact();
+            const compacted = await session.compact({
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "first" }],
+                        },
+                        {
+                            role: "assistant",
+                            content: [{ type: "text", text: "reply-1" }],
+                        },
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: "second" }],
+                        },
+                    ],
+                },
+            });
             if (compacted.status !== "completed") expect.fail("Compaction failed.");
 
             expect(captured).toHaveLength(3);
@@ -606,14 +695,18 @@ describe("CodexProvider credential behavior", () => {
                 }),
             );
             expect(compacted.preservedMessages).toEqual([
-                { role: "user", content: "first" },
-                { role: "user", content: "second" },
+                { role: "user", content: [{ type: "text", text: "first" }] },
+                { role: "user", content: [{ type: "text", text: "second" }] },
             ]);
             expect(
                 compacted.context.messages.filter(
                     (message) =>
                         message.role === "user" &&
-                        message.content.startsWith(`${context_checkpoint_summary_prefix}\n`),
+                        message.content.some(
+                            (block) =>
+                                block.type === "text" &&
+                                block.text.startsWith(`${context_checkpoint_summary_prefix}\n`),
+                        ),
                 ),
             ).toHaveLength(1);
             expect(JSON.stringify(compacted.context)).toContain("summary-1");

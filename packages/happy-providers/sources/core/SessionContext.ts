@@ -1,26 +1,28 @@
-export interface SessionTextContent {
+export interface SessionTextBlock {
     readonly type: "text";
     readonly text: string;
 }
 
-export interface SessionImageContent {
+export interface SessionImageBlock {
     readonly type: "image";
     readonly data: string;
     readonly mimeType: string;
 }
 
-export type SessionInputContent = readonly (SessionTextContent | SessionImageContent)[];
+export type SessionInputBlock = SessionTextBlock | SessionImageBlock;
+export type SessionOutputBlock = SessionTextBlock | SessionImageBlock;
 
 export interface SessionUserMessage {
     readonly role: "user";
-    readonly content: string;
-    /** Background context that does not establish a provider turn boundary. */
-    readonly contextOnly?: true;
-    /** Ordered multimodal content. When present, providers use this instead of content. */
-    readonly input?: SessionInputContent;
+    readonly content: readonly SessionInputBlock[];
 }
 
-/** Opaque provider-native message exchanged between collaborating Codex agents. */
+/**
+ * Opaque Codex-native message exchanged between collaborating Codex agents.
+ *
+ * Other providers ignore this block. Callers should only persist and replay values emitted by a
+ * Codex integration; the encrypted payload is not a general-purpose application message.
+ */
 export interface SessionAgentMessage {
     readonly role: "agent";
     readonly author: string;
@@ -33,7 +35,7 @@ export interface SessionAgentMessage {
 
 export interface SessionSystemMessage {
     readonly role: "system";
-    readonly content: string | readonly string[];
+    readonly content: readonly SessionTextBlock[];
 }
 
 /**
@@ -41,33 +43,24 @@ export interface SessionSystemMessage {
  *
  * Anthropic signs the text of its thinking blocks, so a signature replayed beside different text
  * is rejected. Unsigned reasoning still remains part of caller-owned history even when a vendor
- * must omit it while serializing a request. Vendors that hand back reasoning as one opaque payload
- * use `encryptedReasoning` instead.
+ * must omit it while serializing a request. Providers can retain the replay payload directly on
+ * the block without flattening it onto the surrounding message.
  */
-export interface SessionReasoning {
-    readonly text: string;
-    readonly signature?: string;
-    /** Reasoning the vendor withheld, where the signature is the whole payload. */
-    readonly redacted?: boolean;
+export interface SessionReasoningBlock {
+    readonly type: "reasoning";
+    /** Human-readable reasoning, when the provider exposes it. */
+    readonly text?: string;
+    /** Opaque signed or encrypted reasoning required for faithful replay. */
+    readonly reasoning?: string;
 }
 
 export interface SessionAssistantMessage {
     readonly role: "assistant";
-    readonly content: string;
-    /** Opaque encrypted reasoning JSON from a prior Responses-compatible response. */
-    readonly encryptedReasoning?: string;
-    /** Ordered reasoning blocks retained as caller-owned history. */
-    readonly reasoning?: readonly SessionReasoning[];
-    /** Completed client tool calls emitted alongside this assistant message. */
-    readonly toolCalls?: readonly SessionToolCall[];
-    /**
-     * Ordered, opaque Responses output items. Providers use these to replay commentary,
-     * reasoning, and parallel tool calls without flattening or reordering them.
-     */
-    readonly responseItems?: readonly string[];
+    readonly content: readonly SessionAssistantBlock[];
 }
 
-export interface SessionToolCall {
+export interface SessionToolCallBlock {
+    readonly type: "tool_call";
     readonly callId: string;
     readonly name: string;
     readonly namespace?: string;
@@ -76,16 +69,31 @@ export interface SessionToolCall {
     readonly incomplete?: boolean;
     /** Opaque provider metadata persisted with this tool call. */
     readonly vendor?: any;
+    /** The provider executed this call and settled it inside the assistant response. */
+    readonly server?: true;
 }
+
+export interface SessionToolResultBlock {
+    readonly type: "tool_result";
+    readonly callId: string;
+    readonly content: readonly SessionOutputBlock[];
+    readonly isError?: boolean;
+    readonly incomplete?: boolean;
+    readonly vendor?: any;
+}
+
+export type SessionAssistantBlock =
+    | SessionTextBlock
+    | SessionReasoningBlock
+    | SessionToolCallBlock
+    | SessionToolResultBlock;
 
 export interface SessionToolResultMessage {
     readonly role: "tool";
     readonly callId: string;
-    readonly content: string;
+    readonly content: readonly SessionOutputBlock[];
     /** Whether the caller reported that the tool invocation failed. */
     readonly isError?: boolean;
-    /** Ordered multimodal content. When present, providers use this instead of content. */
-    readonly input?: SessionInputContent;
     /** Opaque provider metadata persisted with this tool result. */
     readonly vendor?: any;
 }

@@ -12,19 +12,19 @@ const tools = [
         parameters: Type.Object({
             timezone: Type.String({ description: "IANA timezone for the event." }),
         }),
-        deferLoading: true,
+        defer: true,
     },
     {
         name: "repository_search",
         description: "Find source code in a repository.",
         parameters: Type.Object({ query: Type.String() }),
-        deferLoading: true,
+        defer: true,
     },
     {
         name: "music_lookup",
         description: "Find songs and albums.",
         parameters: Type.Object({}),
-        deferLoading: true,
+        defer: true,
     },
 ] as const satisfies readonly SessionTool[];
 
@@ -40,7 +40,7 @@ describe("Codex tool search", () => {
         const settled = settleCodexToolSearch(
             {
                 assistantText: "",
-                responseItems: [
+                outputItems: [
                     JSON.stringify({
                         type: "tool_search_call",
                         call_id: "search-1",
@@ -48,6 +48,18 @@ describe("Codex tool search", () => {
                         arguments: { query: "calendar meeting" },
                     }),
                 ],
+                message: {
+                    role: "assistant",
+                    content: [
+                        {
+                            type: "tool_call",
+                            callId: "search-1",
+                            name: "tool_search",
+                            arguments: '{"query":"calendar meeting"}',
+                            vendor: { provider: "codex", type: "tool_search_call" },
+                        },
+                    ],
+                },
                 toolCalls: [
                     {
                         callId: "search-1",
@@ -62,7 +74,7 @@ describe("Codex tool search", () => {
 
         expect(settled.settled).toBe(true);
         expect(settled.result.toolCalls).toEqual([]);
-        expect(JSON.parse(settled.result.responseItems.at(-1)!)).toMatchObject({
+        expect(JSON.parse(settled.result.outputItems.at(-1)!)).toMatchObject({
             type: "tool_search_output",
             call_id: "search-1",
             execution: "client",
@@ -81,7 +93,26 @@ describe("Codex tool search", () => {
         const settled = settleCodexToolSearch(
             {
                 assistantText: "",
-                responseItems: [],
+                outputItems: [],
+                message: {
+                    role: "assistant",
+                    content: [
+                        {
+                            type: "tool_call",
+                            callId: "search-1",
+                            name: "tool_search",
+                            arguments: '{"query":"repository source"}',
+                            vendor: { provider: "codex", type: "tool_search_call" },
+                        },
+                        {
+                            type: "tool_call",
+                            callId: "shell-1",
+                            name: "exec_command",
+                            arguments: '{"cmd":"pwd"}',
+                            vendor: { provider: "codex", type: "function_call" },
+                        },
+                    ],
+                },
                 toolCalls: [
                     {
                         callId: "search-1",
@@ -104,7 +135,7 @@ describe("Codex tool search", () => {
             expect.objectContaining({ callId: "shell-1", name: "exec_command" }),
         ]);
         expect(
-            settled.result.responseItems.filter(
+            settled.result.outputItems.filter(
                 (item) => JSON.parse(item).type === "tool_search_output",
             ),
         ).toHaveLength(1);

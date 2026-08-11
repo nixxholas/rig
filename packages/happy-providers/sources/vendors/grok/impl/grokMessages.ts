@@ -13,7 +13,7 @@ export function wrapGrokUserQuery(query: string): string {
 
 export function extractGrokUserQuery(message: SessionMessage): string | undefined {
     if (message.role !== "user") return undefined;
-    const content = message.content.trim();
+    const content = userText(message).trim();
     if (
         content.startsWith("<user_info>") ||
         content.startsWith("<system-reminder>") ||
@@ -36,20 +36,27 @@ export function findLastGrokUserQuery(
 }
 
 export function isGrokUserInfoMessage(message: SessionMessage): boolean {
-    return message.role === "user" && message.content.trimStart().startsWith("<user_info>");
+    return message.role === "user" && userText(message).trimStart().startsWith("<user_info>");
 }
 
 export function isGrokProjectInstructionsMessage(message: SessionMessage): boolean {
-    if (message.role !== "user" || !message.content.trimStart().startsWith("<system-reminder>")) {
+    if (message.role !== "user" || !userText(message).trimStart().startsWith("<system-reminder>")) {
         return false;
     }
-    return /\bAGENTS\.md\b|project instructions/iu.test(message.content);
+    return /\bAGENTS\.md\b|project instructions/iu.test(userText(message));
 }
 
 export function isGrokStateReminderMessage(message: SessionMessage): boolean {
     return (
         message.role === "user" &&
-        message.content.trimStart().startsWith("<system-reminder>") &&
+        userText(message).trimStart().startsWith("<system-reminder>") &&
         !isGrokProjectInstructionsMessage(message)
     );
+}
+
+function userText(message: Extract<SessionMessage, { role: "user" }>): string {
+    return message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
 }
