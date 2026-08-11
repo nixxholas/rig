@@ -1,7 +1,10 @@
 import { createTestRootContext } from "../testing/createTestRootContext.js";
 import {
     contactSessionDescriptor,
+    MemoryMurmurStore,
+    MurmurClient,
     type CreateMurmurSessionOptions,
+    type DeliveryFetch,
     type MurmurContact,
     type MurmurContactProfile,
     type MurmurContactRequested,
@@ -197,6 +200,73 @@ describe("SharingService", () => {
         await closing;
         expect(client.closed).toBe(true);
         await database.close(ctx);
+    });
+
+    it("closes while an aborted Murmur event stream cancellation remains pending", async () => {
+        const database = await PersistentSessionStore.open(ctx, {
+            databasePath: ":memory:",
+        });
+        const profiles = new RigProfileStore({
+            database,
+            localInstanceId: "alocalinstance00000000001",
+            publish: () => undefined,
+        });
+        let streamOpened = false;
+        let cancelCalled = false;
+        const fetch: DeliveryFetch = async (input, init) => {
+            const path = new URL(String(input)).pathname;
+            if (path === "/v1/queue/read") {
+                return Response.json({
+                    acknowledgedThrough: null,
+                    deliveries: [],
+                    exhausted: true,
+                    head: null,
+                });
+            }
+            if (path !== "/v1/queue/events") throw new Error(`Unexpected relay path: ${path}`);
+            streamOpened = true;
+            return {
+                body: {
+                    getReader: () => ({
+                        cancel: () => {
+                            cancelCalled = true;
+                            return new Promise<void>(() => undefined);
+                        },
+                        read: () =>
+                            new Promise<never>((_resolve, reject) => {
+                                init?.signal?.addEventListener(
+                                    "abort",
+                                    () => reject(init.signal?.reason),
+                                    { once: true },
+                                );
+                            }),
+                        releaseLock: () => undefined,
+                    }),
+                },
+                headers: new Headers({ "content-type": "text/event-stream" }),
+                ok: true,
+            } as unknown as Response;
+        };
+        const client = await MurmurClient.open({
+            fetch,
+            relay: "https://relay.example.test",
+            store: new MemoryMurmurStore(),
+        });
+        const sharing = new SharingService({
+            client,
+            database,
+            profiles,
+            publish: () => undefined,
+        });
+        try {
+            sharing.start(ctx);
+            await vi.waitFor(() => expect(streamOpened).toBe(true));
+            await sharing.close(ctx);
+            expect(cancelCalled).toBe(true);
+        } finally {
+            await sharing.close(ctx);
+            await database.close(ctx);
+        }
     });
 
     it("aborts an active Murmur invitation upload while closing", async () => {
