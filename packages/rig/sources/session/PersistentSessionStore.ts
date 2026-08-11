@@ -912,10 +912,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
                 modelCatalog: this.#modelCatalogFor(state.ownerInstanceId),
                 now: this.#now,
-                onInitialTitle: async (metadata) =>
-                    withWorkerContext("session-initial-title", (workerCtx) =>
-                        this.#inheritWorkspaceName(workerCtx, metadata),
-                    ),
+                onInitialTitle: (metadata) => this.#inheritWorkspaceNameInWorker(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
                     : {}),
@@ -1153,10 +1150,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     emitCreatedEvent: false,
                     modelCatalog: this.#modelCatalogFor(ownerInstanceId),
                     now: this.#now,
-                    onInitialTitle: async (metadata) =>
-                        withWorkerContext("session-initial-title", (workerCtx) =>
-                            this.#inheritWorkspaceName(workerCtx, metadata),
-                        ),
+                    onInitialTitle: (metadata) => this.#inheritWorkspaceNameInWorker(metadata),
                     ...(this.#mcpToolProvider !== undefined
                         ? { mcpToolProvider: this.#mcpToolProvider }
                         : {}),
@@ -2858,6 +2852,17 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         );
     }
 
+    #inheritWorkspaceNameInWorker(
+        metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
+    ): Promise<void> {
+        return withWorkerContext(
+            "session-initial-title",
+            (workerCtx) =>
+                this.#inheritWorkspaceName(withDatabase(workerCtx, this.#database), metadata),
+            { sessionId: metadata.sessionId },
+        );
+    }
+
     async #loadSession(ctx: Context, sessionId: string): Promise<InMemorySession | undefined> {
         const loaded = await querySessionRestore(ctx, sessionId);
         if (loaded === undefined) return undefined;
@@ -2901,10 +2906,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
             modelCatalog: this.#modelCatalogFor(ownerInstanceId),
             now: this.#now,
-            onInitialTitle: async (metadata) =>
-                withWorkerContext("session-initial-title", (workerCtx) =>
-                    this.#inheritWorkspaceName(workerCtx, metadata),
-                ),
+            onInitialTitle: (metadata) => this.#inheritWorkspaceNameInWorker(metadata),
             ...(this.#mcpToolProvider === undefined
                 ? {}
                 : { mcpToolProvider: this.#mcpToolProvider }),

@@ -589,6 +589,89 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("gives an unnamed workspace the title of its first session", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const root = await mkdtemp(join(tmpdir(), "rig-workspace-session-title-"));
+        const repository = join(root, "project");
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "openai/gym",
+            name: "Gym",
+            thinkingLevels: ["off"],
+        });
+        const catalog: ModelCatalog = {
+            defaultModelId: model.id,
+            defaultProviderId: "gym",
+            models: [model],
+            providers: [{ models: [model], providerId: "gym" }],
+        };
+        const originalFetch = globalThis.fetch;
+        const originalInferenceUrl = process.env.RIG_GYM_INFERENCE_URL;
+        let store: PersistentSessionStore | undefined;
+        try {
+            await createGitRepository(repository);
+            process.env.RIG_GYM_INFERENCE_URL = "http://gym.test/inference";
+            globalThis.fetch = async (_input, init) => {
+                if (typeof init?.body !== "string") {
+                    throw new Error("Expected a serialized gym inference request.");
+                }
+                const request = JSON.parse(init.body) as GymInferenceRequest;
+                return (
+                    sessionMetadataResponse(request) ??
+                    new Response(
+                        JSON.stringify({
+                            content: [{ text: "Done.", type: "text" }],
+                            stopReason: "stop",
+                        }),
+                        { headers: { "content-type": "application/json" }, status: 200 },
+                    )
+                );
+            };
+            store = await PersistentSessionStore.open(ctx, {
+                databasePath,
+                modelCatalog: catalog,
+                stateDirectory: join(root, "state"),
+                workspacesDirectory: join(root, "workspaces"),
+            });
+            const owner = await store.create(ctx, { cwd: repository });
+            const projectId = owner.snapshot().projectId;
+            if (projectId === undefined) throw new Error("Expected a registered project.");
+            const workspace = await store.createWorkspace(ctx, projectId, {
+                baseRef: "main",
+                name: "Workspace 90",
+            });
+            if (workspace === undefined) throw new Error("Expected a workspace.");
+            await expect
+                .poll(async () => (await store?.getWorkspace(ctx, projectId, workspace.id))?.status)
+                .toBe("ready");
+            const session = await store.create(ctx, {
+                cwd: workspace.path,
+                modelId: model.id,
+                projectId,
+                providerId: "gym",
+                workspaceId: workspace.id,
+            });
+
+            const submitted = await session.submit(ctx, { text: "Name this workspace." });
+            await expect(session.waitForRun(ctx, submitted.runId)).resolves.toEqual({
+                status: "completed",
+            });
+
+            await expect
+                .poll(async () => (await store?.getWorkspace(ctx, projectId, workspace.id))?.name)
+                .toBe("Generated Session Title");
+        } finally {
+            await store?.close(ctx);
+            globalThis.fetch = originalFetch;
+            if (originalInferenceUrl === undefined) {
+                delete process.env.RIG_GYM_INFERENCE_URL;
+            } else {
+                process.env.RIG_GYM_INFERENCE_URL = originalInferenceUrl;
+            }
+            await Promise.all([cleanup(), rm(root, { force: true, recursive: true })]);
+        }
+    });
+
     it("rolls back every session when one workspace archive write fails", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const root = await mkdtemp(join(tmpdir(), "rig-workspace-archive-rollback-"));
