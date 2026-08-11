@@ -1,16 +1,12 @@
 import { backoff, type BackoffOptions } from "./backoff.js";
 
 export interface RetryOptions extends Omit<BackoffOptions, "timeout"> {
-    /** How long to keep trying before giving up. Defaults to 30 seconds. */
     timeout?: number;
 }
 
 const DEFAULT_RETRY_TIMEOUT_MS = 30_000;
 
-/**
- * A backoff bounded by time. When the work has still not succeeded once the
- * time runs out, the failure is thrown rather than swallowed.
- */
+/** Bounded form of the stdlib-backed exponential retry. */
 export function retry<T>(
     work: (attempt: number) => Promise<T>,
     options: RetryOptions = {},

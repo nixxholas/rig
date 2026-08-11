@@ -40,7 +40,7 @@ export interface SessionEventLogCheckpoint {
 const SESSION_EVENT_RETENTION_LIMIT = 4_096;
 
 export class SessionEventLog {
-    readonly #appendLock: AsyncLock = asyncLock();
+    readonly #appendLock: AsyncLock = asyncLock({ reentry: "block" });
     #events: SessionEvent[] = [];
     #eventIndexes = new Map<EventId, number>();
     #eventStartIndex = 0;
@@ -93,7 +93,7 @@ export class SessionEventLog {
     }
 
     append(ctx: Context, event: SessionEvent): Promise<SessionEvent> {
-        return this.#appendLock.runInLock(async () => {
+        return this.#appendLock.runInLock(ctx, async (ctx) => {
             // The durable hook runs before any in-memory projection changes. A rejected
             // persistence write therefore leaves the log, cursors, and notifications untouched.
             if (this.#onAppend !== undefined) await this.#onAppend(ctx, event);

@@ -833,7 +833,7 @@ export class InMemorySession {
     #suspendOnAbort = false;
     #shutdownCleanup: Promise<void> | undefined;
     #ready: Promise<void> = Promise.resolve();
-    readonly #commitEventLock: AsyncLock = asyncLock();
+    readonly #commitEventLock: AsyncLock = asyncLock({ reentry: "block" });
     #shellCommandCompletions = new Map<number, Promise<void>>();
     #shellHistoryRevision = 0;
     #taskList: SessionTaskList;
@@ -6602,12 +6602,12 @@ export class InMemorySession {
             return event;
         };
         const inTransaction = sessionCommitStorage.getStore() === this;
-        const run = async (): Promise<TEvent> => {
+        const run = async (runCtx: Context): Promise<TEvent> => {
             const checkpoint = this.#captureEventCommitCheckpoint();
             try {
                 return await (inTransaction || this.#persistence?.transaction === undefined
-                    ? append(ctx)
-                    : this.#persistence.transaction(ctx, append));
+                    ? append(runCtx)
+                    : this.#persistence.transaction(runCtx, append));
             } catch (error) {
                 if (!isSessionTransactionPostCommitError(error)) {
                     this.#restoreEventCommitCheckpoint(checkpoint);
@@ -6615,18 +6615,20 @@ export class InMemorySession {
                 throw error;
             }
         };
-        if (inTransaction) return await run();
-        return await this.#commitEventLock.runInLock(() => sessionCommitStorage.run(this, run));
+        if (inTransaction) return await run(ctx);
+        return await this.#commitEventLock.runInLock(ctx, (lockCtx) =>
+            sessionCommitStorage.run(this, () => run(lockCtx)),
+        );
     }
 
     async #runSessionMutation<T>(ctx: Context, body: (ctx: Context) => Promise<T>): Promise<T> {
         const inTransaction = sessionCommitStorage.getStore() === this;
-        const run = async (): Promise<T> => {
+        const run = async (runCtx: Context): Promise<T> => {
             const checkpoint = this.#captureEventCommitCheckpoint();
             try {
                 return await (inTransaction || this.#persistence?.transaction === undefined
-                    ? body(ctx)
-                    : this.#persistence.transaction(ctx, body));
+                    ? body(runCtx)
+                    : this.#persistence.transaction(runCtx, body));
             } catch (error) {
                 if (!isSessionTransactionPostCommitError(error)) {
                     this.#restoreEventCommitCheckpoint(checkpoint);
@@ -6634,8 +6636,10 @@ export class InMemorySession {
                 throw error;
             }
         };
-        if (inTransaction) return await run();
-        return await this.#commitEventLock.runInLock(() => sessionCommitStorage.run(this, run));
+        if (inTransaction) return await run(ctx);
+        return await this.#commitEventLock.runInLock(ctx, (lockCtx) =>
+            sessionCommitStorage.run(this, () => run(lockCtx)),
+        );
     }
 
     #captureEventCommitCheckpoint(): SessionEventCommitCheckpoint {

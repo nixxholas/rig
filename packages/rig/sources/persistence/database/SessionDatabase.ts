@@ -59,7 +59,9 @@ class SessionDatabaseOwner {
         readonly client: Client,
         readonly database: DrizzleSessionDatabase,
     ) {
-        this.asyncLock = asyncLock();
+        // A recursive acquisition would otherwise append behind this operation and wait forever.
+        // It is a programming error: nested database work must use the transaction facade.
+        this.asyncLock = asyncLock({ reentry: "block" });
         owners.set(database, this);
     }
 
@@ -81,7 +83,7 @@ class SessionDatabaseOwner {
             if (this.closePromise !== undefined) return await this.closePromise;
 
             this.state = "closing";
-            const closePromise = this.asyncLock.runInLock(async () => {
+            const closePromise = this.asyncLock.runInLock(ctx, async () => {
                 try {
                     await this.client.close();
                 } finally {
@@ -112,7 +114,9 @@ class SessionDatabaseOwner {
         if (this.state !== "open") {
             throw new SessionDatabaseClosedError(this.state);
         }
-        return this.asyncLock.runInLock(() => Promise.resolve(operation(ctx, this.database)));
+        return this.asyncLock.runInLock(ctx, (lockCtx) =>
+            Promise.resolve(operation(lockCtx, this.database)),
+        );
     }
 
     /**

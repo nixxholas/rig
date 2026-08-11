@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@steve.kite/stdlib': 0.0.8
+
 importers:
 
   .:
@@ -116,8 +119,6 @@ importers:
         specifier: ^8.21.1
         version: 8.21.1
 
-  packages/happy-bus: {}
-
   packages/happy-plugins:
     dependencies:
       '@sinclair/typebox':
@@ -152,8 +153,8 @@ importers:
         specifier: ^0.34.49
         version: 0.34.49
       '@steve.kite/stdlib':
-        specifier: 0.0.6
-        version: 0.0.6
+        specifier: 0.0.8
+        version: 0.0.8
       deunicode:
         specifier: 1.0.7
         version: 1.0.7
@@ -305,8 +306,8 @@ importers:
         specifier: 0.4.4
         version: 0.4.4
       '@steve.kite/stdlib':
-        specifier: 0.0.6
-        version: 0.0.6
+        specifier: 0.0.8
+        version: 0.0.8
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -519,8 +520,8 @@ importers:
         specifier: 0.0.5
         version: 0.0.5(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
-        specifier: 0.0.6
-        version: 0.0.6
+        specifier: 0.0.8
+        version: 0.0.8
     devDependencies:
       '@types/node':
         specifier: ^24.0.10
@@ -2330,8 +2331,8 @@ packages:
   '@stablelib/base64@1.0.1':
     resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
 
-  '@steve.kite/stdlib@0.0.6':
-    resolution: {integrity: sha512-TjhPqncIZzjhVNPFnr1duLKL6MIkpah+qhL1GwjgOC7xtXivCXKMaBiHMG/uewHkL+pzTjT2UON59lVK/kLSKQ==}
+  '@steve.kite/stdlib@0.0.8':
+    resolution: {integrity: sha512-+OzCwzV2oblIptw/pt87f4dyBD33GL/iQG9OARsmjf9gCOSZgOD/imPFMYRoa/nuboKjYdYFoSi+lFsTwijXKg==}
 
   '@tokenizer/inflate@0.4.1':
     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
@@ -2363,6 +2364,9 @@ packages:
 
   '@types/node@24.13.2':
     resolution: {integrity: sha512-fRa09kZTgu8o71KFcDjUFuc7F+dEbZYZmkI0mg5YBTRs0yMKjYHsq/c0urDKeDb+D5qVgXOdFcuu+DZPKOITwA==}
+
+  '@types/node@24.13.3':
+    resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
 
   '@types/pg@8.15.6':
     resolution: {integrity: sha512-NoaMtzhxOrubeL/7UZuNTrejB4MPAJ0RpxZqXQf2qXuVlTPuG6Y8p4u9dKRaue4yjmC7ZhzVO2/Yyyn25znrPQ==}
@@ -5793,7 +5797,7 @@ snapshots:
       '@anthropic-ai/sdk': 0.110.0(zod@4.4.3)
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@sinclair/typebox': 0.34.49
-      '@steve.kite/stdlib': 0.0.6
+      '@steve.kite/stdlib': 0.0.8
       deunicode: 1.0.7
       openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       undici: 8.8.0
@@ -6067,7 +6071,7 @@ snapshots:
 
   '@stablelib/base64@1.0.1': {}
 
-  '@steve.kite/stdlib@0.0.6': {}
+  '@steve.kite/stdlib@0.0.8': {}
 
   '@tokenizer/inflate@0.4.1':
     dependencies:
@@ -6111,9 +6115,14 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
+  '@types/node@24.13.3':
+    dependencies:
+      undici-types: 7.18.2
+    optional: true
+
   '@types/pg@8.15.6':
     dependencies:
-      '@types/node': 24.13.2
+      '@types/node': 24.13.3
       pg-protocol: 1.16.0
       pg-types: 2.2.0
     optional: true

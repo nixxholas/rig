@@ -29,7 +29,7 @@ type StoreLifecycle = "open" | "closing" | "closed";
 
 export class SqliteMurmurStore implements MurmurStore {
     readonly #client: Client;
-    readonly #lock: AsyncLock = asyncLock();
+    readonly #lock: AsyncLock = asyncLock({ reentry: "block" });
     readonly #ready: Promise<void>;
     #lifecycle: StoreLifecycle = "open";
     #closePromise: Promise<void> | undefined;
@@ -118,7 +118,7 @@ export class SqliteMurmurStore implements MurmurStore {
         this.#lifecycle = "closing";
         this.#closePromise = withWorkerContext("murmur-store-close", (ctx) =>
             ctx.span("rig.sql.sharing.murmur.close", () =>
-                this.#lock.runInLock(async () => {
+                this.#lock.runInLock(ctx, async () => {
                     try {
                         await this.#ready.catch(() => undefined);
                         await this.#client.close();
@@ -198,10 +198,12 @@ export class SqliteMurmurStore implements MurmurStore {
 
     #run<Result>(operation: (database: Client) => Promise<Result>): Promise<Result> {
         if (this.#lifecycle !== "open") return Promise.reject(new Error("Murmur store is closed"));
-        return this.#lock.runInLock(async () => {
-            await this.#ready;
-            return operation(this.#client);
-        });
+        return withWorkerContext("murmur-store-operation", (ctx) =>
+            this.#lock.runInLock(ctx, async () => {
+                await this.#ready;
+                return await operation(this.#client);
+            }),
+        );
     }
 }
 

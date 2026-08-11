@@ -1,4 +1,5 @@
 import type { ProviderUsage } from "@slopus/happy-providers";
+import { createRootContext } from "@steve.kite/stdlib";
 
 import { asyncQueue, forever, type GracefulShutdown } from "../concurrency/index.js";
 
@@ -66,13 +67,14 @@ export function createProviderUsageTracker(
     const pollingQueues = new Map(
         [...entries.keys()].map((providerId) => [providerId, asyncQueue()]),
     );
+    const pollingContext = createRootContext().named("provider-usage");
     let started = false;
 
     async function poll(providerId: string): Promise<ProviderUsageEntry | undefined> {
         const entry = entries.get(providerId);
         const queue = pollingQueues.get(providerId);
         if (entry === undefined || queue === undefined) return undefined;
-        return queue.runInLock(async () => {
+        return queue.runInLock(pollingContext, async () => {
             try {
                 const usage = await options.loadUsage(providerId);
                 entry.checkedAt = now();

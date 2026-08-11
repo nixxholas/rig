@@ -1,5 +1,6 @@
 import { ONLINE_PRESENCE_ID } from "./builtInPresences.js";
 import type { Presence, PresenceState, SetPresenceRequest } from "./types.js";
+import { createRootContext } from "@steve.kite/stdlib";
 import { asyncQueue } from "../concurrency/index.js";
 
 export interface PresenceSelection {
@@ -24,6 +25,7 @@ export class PresenceStore {
     readonly #listeners = new Set<(state: PresenceState) => void>();
     readonly #now: () => number;
     readonly #persistenceQueue = asyncQueue();
+    readonly #persistenceQueueContext = createRootContext().named("presence-persistence");
     readonly #persist: ((selection: PresenceSelection) => Promise<void>) | undefined;
     readonly #presences: readonly Presence[];
     #expiry: ReturnType<typeof setTimeout> | undefined;
@@ -91,7 +93,7 @@ export class PresenceStore {
             ...(request.until === undefined ? {} : { until: request.until }),
         });
         const revision = ++this.#selectionRevision;
-        return this.#persistenceQueue.runInLock(async () => {
+        return this.#persistenceQueue.runInLock(this.#persistenceQueueContext, async () => {
             await this.#persist?.(selection);
             if (revision !== this.#selectionRevision) return this.state();
             this.#selection = selection;
@@ -122,7 +124,7 @@ export class PresenceStore {
         this.#selection = fallback;
         this.#scheduleExpiry();
         void this.#persistenceQueue
-            .runInLock(async () => {
+            .runInLock(this.#persistenceQueueContext, async () => {
                 await this.#persist?.(fallback);
                 if (publishAfterPersistence && revision === this.#selectionRevision) {
                     this.#publish();

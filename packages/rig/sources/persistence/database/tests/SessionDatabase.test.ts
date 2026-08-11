@@ -43,6 +43,20 @@ describe("SessionDatabase", () => {
         await opened.database.close(opened.ctx);
     });
 
+    it("rejects recursive connection-lock acquisition instead of waiting for itself", async () => {
+        const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
+
+        try {
+            await expect(
+                opened.database.runInLock(opened.ctx, async (lockCtx) =>
+                    opened.database.runInLock(lockCtx, async () => {}),
+                ),
+            ).rejects.toThrow("AsyncLock reentry is blocked");
+        } finally {
+            await opened.database.close(opened.ctx);
+        }
+    });
+
     it("reuses a transaction-scoped context without reacquiring the database lock", async () => {
         const opened = await openSessionDatabase(createTestRootContext(), ":memory:");
         await opened.ctx.tx.run(sql.raw("CREATE TABLE values_log (value TEXT NOT NULL)"));

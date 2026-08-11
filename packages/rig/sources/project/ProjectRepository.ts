@@ -1605,6 +1605,7 @@ export class ProjectRepository {
                         // Every worktree of a project shares one set of refs and reflogs, so branch
                         // work takes the project's Git lock the way worktree creation does.
                         await this.#projectInitializationLock(previous.projectId).runInLock(
+                            workerCtx,
                             async () =>
                                 await renameGitBranch({
                                     expectedCommonDir: workspace.gitCommonDir,
@@ -2210,6 +2211,7 @@ export class ProjectRepository {
         }
         try {
             const current = await this.#projectInitializationLock(workspace.projectId).runInLock(
+                ctx,
                 async () => {
                     let locked = await this.getWorkspace(ctx, workspace.projectId, workspace.id);
                     if (locked?.status !== "initializing") return undefined;
@@ -2735,7 +2737,7 @@ export class ProjectRepository {
         const lock =
             this.#projectInitializationLocks.get(projectId) ??
             (() => {
-                const created = asyncLock();
+                const created = asyncLock({ reentry: "block" });
                 this.#projectInitializationLocks.set(projectId, created);
                 return created;
             })();

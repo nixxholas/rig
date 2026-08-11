@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createRootContext } from "@steve.kite/stdlib";
 
 import {
     AbortedError,
@@ -15,10 +16,11 @@ import {
 describe("asyncLock", () => {
     it("runs work in arrival order without overlapping", async () => {
         const lock = asyncLock();
+        const ctx = createRootContext();
         const events: string[] = [];
 
         const run = (name: string, ms: number) =>
-            lock.runInLock(async () => {
+            lock.runInLock(ctx, async () => {
                 events.push(`${name}:start`);
                 await new Promise((resolve) => setTimeout(resolve, ms));
                 events.push(`${name}:end`);
@@ -31,14 +33,28 @@ describe("asyncLock", () => {
 
     it("keeps serving later callers after one throws", async () => {
         const lock = asyncLock();
+        const ctx = createRootContext();
 
-        const failure = lock.runInLock(() => Promise.reject(new Error("boom")));
+        const failure = lock.runInLock(ctx, () => Promise.reject(new Error("boom")));
         await expect(failure).rejects.toThrow("boom");
-        await expect(lock.runInLock(() => Promise.resolve("ok"))).resolves.toBe("ok");
+        await expect(lock.runInLock(ctx, () => Promise.resolve("ok"))).resolves.toBe("ok");
     });
 
     it("returns the value the work produced", async () => {
-        await expect(asyncQueue().runInLock(() => Promise.resolve(42))).resolves.toBe(42);
+        await expect(
+            asyncQueue().runInLock(createRootContext(), () => Promise.resolve(42)),
+        ).resolves.toBe(42);
+    });
+
+    it("rejects recursive database-style acquisition instead of waiting for itself", async () => {
+        const lock = asyncLock({ reentry: "block" });
+        const ctx = createRootContext();
+
+        await expect(
+            lock.runInLock(ctx, async (lockCtx) =>
+                lock.runInLock(lockCtx, async () => Promise.resolve()),
+            ),
+        ).rejects.toThrow("AsyncLock reentry is blocked");
     });
 });
 
