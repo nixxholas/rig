@@ -23,6 +23,11 @@
     "publishConfig": {
         "access": "public"
     },
+    "dependencies": {
+        "@sinclair/typebox": "^0.34.49",
+        "@slopus/happy-providers": "0.0.5",
+        "@steve.kite/stdlib": "0.0.8"
+    },
     "scripts": {
         "build": "node --eval \"import('node:fs/promises').then(({ rm }) => rm('dist', { force: true, recursive: true }))\" && tsc -p tsconfig.build.json",
         "check": "tsc --noEmit",

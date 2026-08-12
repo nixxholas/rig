@@ -1,0 +1,11 @@
+import type { AnyAgentTool } from "./AgentTool.js";
+
+/**
+ * The mutable configuration of a running agent. The constructor copies the provided initial
+ * state into the agent's own `state`, which may then be mutated directly; every inference reads
+ * the current values.
+ */
+export interface AgentBaseState {
+    instructions: string;
+    tools: AnyAgentTool[];
+}
