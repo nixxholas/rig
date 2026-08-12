@@ -440,16 +440,24 @@ describe("createNodeBashContext", () => {
                 permissions: createPermissionContext("full_access"),
                 processManager: new NativeProcessManager(),
             });
+            const gate = join(cwd, "go");
             const sessionId = await context.startSession({
-                command: "printf first; sleep 1; printf second",
+                command: `printf first; until [ -e '${gate}' ]; do sleep 0.05; done; printf second`,
                 cwd,
             });
 
-            const early = await context.readSession(sessionId, { waitMs: 300 });
+            await expect
+                .poll(
+                    async () =>
+                        (await context.readSession(sessionId, { peek: true }))?.stdout,
+                    { timeout: 10_000 },
+                )
+                .toBe("first");
+            const early = await context.readSession(sessionId);
             expect(early?.stdoutDelta).toBe("first");
 
-            await delay(1_500);
-            const later = await context.readSession(sessionId);
+            await writeFile(gate, "");
+            const later = await context.readSession(sessionId, { waitMs: 10_000 });
 
             expect(later?.stdoutDelta).toBe("second");
             expect(later?.stdout).toBe("firstsecond");
