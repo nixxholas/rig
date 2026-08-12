@@ -17,6 +17,7 @@ import type { AnthropicBedrockTransport } from "@/vendors/bedrock/AnthropicBedro
 import {
     describeAnthropicBedrockRetry,
     isAnthropicBedrockConnectionFailure,
+    isRetryableAnthropicBedrockStreamError,
     resolveAnthropicBedrockRetryDelay,
     shouldRetryAnthropicBedrock,
     waitForAnthropicBedrockRetry,
@@ -247,11 +248,14 @@ export class AnthropicBedrockSession extends BaseSession {
                     }
                     return;
                 } catch (error) {
-                    // A connection that drops mid-response is replayed through the block_reset
+                    // A connection that drops mid-response, or a retryable error event the
+                    // server sent on the open stream, is replayed through the block_reset
                     // rollback below, unless compaction output began: compaction is stateful on
                     // the server and must not be replayed.
                     const replayableAfterContent =
-                        !compactionOutputStarted && isAnthropicBedrockConnectionFailure(error);
+                        !compactionOutputStarted &&
+                        (isAnthropicBedrockConnectionFailure(error) ||
+                            isRetryableAnthropicBedrockStreamError(error));
                     if (
                         responseContentStarted &&
                         !isEmptyResponseError(error) &&

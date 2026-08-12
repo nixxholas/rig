@@ -1381,6 +1381,357 @@ describe("AnthropicBedrockProvider", () => {
         expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
     });
 
+    it("retries an error event the server streams before response content", async () => {
+        let attempts = 0;
+        const server = createServer(async (request, response) => {
+            await readBody(request);
+            attempts += 1;
+            response.writeHead(200, {
+                "content-type": "text/event-stream",
+                "retry-after": "0",
+            });
+            if (attempts === 1) {
+                response.end(
+                    toSse([
+                        {
+                            type: "message_start",
+                            message: {
+                                id: "msg-stream-error",
+                                type: "message",
+                                role: "assistant",
+                                content: [],
+                                model: "anthropic.claude-opus-4-8",
+                                stop_reason: null,
+                                stop_sequence: null,
+                                usage: { input_tokens: 10, output_tokens: 0 },
+                            },
+                        },
+                        {
+                            type: "error",
+                            error: {
+                                details: null,
+                                type: "api_error",
+                                message: "Internal server error",
+                            },
+                            request_id: "req-stream-error",
+                        },
+                    ]),
+                );
+                return;
+            }
+            response.end(
+                toSse([
+                    {
+                        type: "message_start",
+                        message: {
+                            id: "msg-stream-error-retry",
+                            type: "message",
+                            role: "assistant",
+                            content: [],
+                            model: "anthropic.claude-opus-4-8",
+                            stop_reason: null,
+                            stop_sequence: null,
+                            usage: { input_tokens: 10, output_tokens: 0 },
+                        },
+                    },
+                    {
+                        type: "content_block_start",
+                        index: 0,
+                        content_block: { type: "text", text: "" },
+                    },
+                    {
+                        type: "content_block_delta",
+                        index: 0,
+                        delta: { type: "text_delta", text: "recovered" },
+                    },
+                    { type: "content_block_stop", index: 0 },
+                    {
+                        type: "message_delta",
+                        delta: { stop_reason: "end_turn", stop_sequence: null },
+                        usage: { output_tokens: 1 },
+                    },
+                    { type: "message_stop" },
+                ]),
+            );
+        });
+        await listen(server);
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+            throw new Error("Missing Anthropic Bedrock stream error server port.");
+        }
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-stream-error-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const provider = new AnthropicBedrockProvider({
+            credential,
+            endpoint: `http://127.0.0.1:${address.port}`,
+            model: "anthropic/opus-4-8",
+            region: "us-east-1",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        try {
+            const events: SessionEvent[] = [];
+            for await (const event of session.run(testContext, {
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "survive the stream error" }],
+                        },
+                    ],
+                },
+            })) {
+                events.push(event);
+            }
+            expect(attempts).toBe(2);
+            expect(events).toContainEqual(
+                expect.objectContaining({ type: "retrying", attempt: 1 }),
+            );
+            expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        } finally {
+            session.destroy();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
+    it("retries an error event the server streams after response content started", async () => {
+        let attempts = 0;
+        const server = createServer(async (request, response) => {
+            await readBody(request);
+            attempts += 1;
+            response.writeHead(200, {
+                "content-type": "text/event-stream",
+                "retry-after": "0",
+            });
+            if (attempts === 1) {
+                response.end(
+                    toSse([
+                        {
+                            type: "message_start",
+                            message: {
+                                id: "msg-midstream-error",
+                                type: "message",
+                                role: "assistant",
+                                content: [],
+                                model: "anthropic.claude-opus-4-8",
+                                stop_reason: null,
+                                stop_sequence: null,
+                                usage: { input_tokens: 10, output_tokens: 0 },
+                            },
+                        },
+                        {
+                            type: "content_block_start",
+                            index: 0,
+                            content_block: { type: "text", text: "" },
+                        },
+                        {
+                            type: "content_block_delta",
+                            index: 0,
+                            delta: { type: "text_delta", text: "partial answer" },
+                        },
+                        {
+                            type: "error",
+                            error: {
+                                details: null,
+                                type: "overloaded_error",
+                                message: "Overloaded",
+                            },
+                            request_id: "req-midstream-error",
+                        },
+                    ]),
+                );
+                return;
+            }
+            response.end(
+                toSse([
+                    {
+                        type: "message_start",
+                        message: {
+                            id: "msg-midstream-error-retry",
+                            type: "message",
+                            role: "assistant",
+                            content: [],
+                            model: "anthropic.claude-opus-4-8",
+                            stop_reason: null,
+                            stop_sequence: null,
+                            usage: { input_tokens: 10, output_tokens: 0 },
+                        },
+                    },
+                    {
+                        type: "content_block_start",
+                        index: 0,
+                        content_block: { type: "text", text: "" },
+                    },
+                    {
+                        type: "content_block_delta",
+                        index: 0,
+                        delta: { type: "text_delta", text: "recovered" },
+                    },
+                    { type: "content_block_stop", index: 0 },
+                    {
+                        type: "message_delta",
+                        delta: { stop_reason: "end_turn", stop_sequence: null },
+                        usage: { output_tokens: 1 },
+                    },
+                    { type: "message_stop" },
+                ]),
+            );
+        });
+        await listen(server);
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+            throw new Error("Missing Anthropic Bedrock mid-stream error server port.");
+        }
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-midstream-error-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const provider = new AnthropicBedrockProvider({
+            credential,
+            endpoint: `http://127.0.0.1:${address.port}`,
+            model: "anthropic/opus-4-8",
+            region: "us-east-1",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        try {
+            const events: SessionEvent[] = [];
+            for await (const event of session.run(testContext, {
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "survive mid-stream" }],
+                        },
+                    ],
+                },
+            })) {
+                events.push(event);
+            }
+            expect(attempts).toBe(2);
+            const partialIndex = events.findIndex(
+                (event) => event.type === "text_delta" && event.delta === "partial answer",
+            );
+            expect(partialIndex).toBeGreaterThanOrEqual(0);
+            expect(events.slice(partialIndex + 1, partialIndex + 3)).toEqual([
+                { type: "block_reset" },
+                expect.objectContaining({ type: "retrying", attempt: 1 }),
+            ]);
+            expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        } finally {
+            session.destroy();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
+    it("classifies an exhausted mid-stream error event as an internal server error", async () => {
+        let attempts = 0;
+        const server = createServer(async (request, response) => {
+            await readBody(request);
+            attempts += 1;
+            response.writeHead(200, {
+                "content-type": "text/event-stream",
+                "retry-after": "0",
+            });
+            response.end(
+                toSse([
+                    {
+                        type: "message_start",
+                        message: {
+                            id: "msg-exhausted-stream-error",
+                            type: "message",
+                            role: "assistant",
+                            content: [],
+                            model: "anthropic.claude-opus-4-8",
+                            stop_reason: null,
+                            stop_sequence: null,
+                            usage: { input_tokens: 10, output_tokens: 0 },
+                        },
+                    },
+                    {
+                        type: "error",
+                        error: {
+                            details: null,
+                            type: "api_error",
+                            message: "Internal server error",
+                        },
+                        request_id: "req-exhausted-stream-error",
+                    },
+                ]),
+            );
+        });
+        await listen(server);
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+            throw new Error("Missing Anthropic Bedrock exhausted stream error server port.");
+        }
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-exhausted-stream-error-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const provider = new AnthropicBedrockProvider({
+            credential,
+            endpoint: `http://127.0.0.1:${address.port}`,
+            inferenceMaxRetries: 1,
+            model: "anthropic/opus-4-8",
+            region: "us-east-1",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        try {
+            const events: SessionEvent[] = [];
+            for await (const event of session.run(testContext, {
+                context: {
+                    instructions: "",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [{ type: "text" as const, text: "fail on stream error" }],
+                        },
+                    ],
+                },
+            })) {
+                events.push(event);
+            }
+            expect(attempts).toBe(2);
+            expect(events.filter((event) => event.type === "retrying")).toEqual([
+                expect.objectContaining({ type: "retrying", attempt: 1 }),
+            ]);
+            expect(events.at(-1)).toMatchObject({
+                type: "done",
+                state: "error",
+                kind: "internal_error",
+                message:
+                    "Anthropic Bedrock reported an error while streaming the response: Internal server error.",
+                providerError: {
+                    type: "internal_server_error",
+                    diagnostics: expect.objectContaining({
+                        attempts: 2,
+                        errorType: "api_error",
+                    }),
+                },
+            });
+        } finally {
+            session.destroy();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
     it("reports a readable error when a mid-response connection failure is not retried", async () => {
         let attempts = 0;
         const credential = await BedrockBearerTokenCredential.tryLoad({

@@ -5,15 +5,26 @@ import {
     extractProviderRetryResetAt,
 } from "@/core/extractProviderErrorDiagnostics.js";
 import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
-import { isAnthropicBedrockConnectionFailure } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
+import {
+    anthropicBedrockStreamErrorDetails,
+    isAnthropicBedrockConnectionFailure,
+    resolveAnthropicBedrockErrorStatus,
+} from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
 
 /**
  * Surfaced errors must read like a sentence. Raw transport failures such as undici's
- * "terminated" get a human message; SDK API errors already carry one.
+ * "terminated" get a human message, and a mid-stream error event's message is lifted out of
+ * its JSON body; other SDK API errors already carry one.
  */
 export function describeAnthropicBedrockErrorMessage(error: unknown): string {
     if (!(error instanceof APIError) && isAnthropicBedrockConnectionFailure(error)) {
         return "The network connection to Anthropic Bedrock was lost before the response finished.";
+    }
+    const stream = anthropicBedrockStreamErrorDetails(error);
+    if (stream !== undefined) {
+        return stream.message === undefined
+            ? "Anthropic Bedrock reported an error while streaming the response."
+            : `Anthropic Bedrock reported an error while streaming the response: ${stream.message}.`;
     }
     return error instanceof Error ? error.message : String(error);
 }
@@ -37,8 +48,9 @@ export function classifyAnthropicBedrockError(error: unknown): SessionErrorKind 
         return "billing_error";
     }
     if (error instanceof APIError) {
-        if (error.status === 402) return "billing_error";
-        if (error.status !== undefined && error.status >= 500) return "internal_error";
+        const status = resolveAnthropicBedrockErrorStatus(error);
+        if (status === 402) return "billing_error";
+        if (status !== undefined && status >= 500) return "internal_error";
     }
     return "unknown";
 }
@@ -52,7 +64,7 @@ export function classifyAnthropicBedrockProviderError(
         attempts: Math.max(1, attempts),
         upstreamMessage: message,
     });
-    const status = diagnostics?.status;
+    const status = diagnostics?.status ?? resolveAnthropicBedrockErrorStatus(error);
     const kind = classifyAnthropicBedrockError(error);
     const normalized = message.toLowerCase();
     const type: SessionProviderError["type"] =
@@ -62,7 +74,7 @@ export function classifyAnthropicBedrockProviderError(
               ? "out_of_tokens"
               : status === 429
                 ? "rate_limit"
-                : status === 503 || normalized.includes("overloaded")
+                : status === 503 || status === 529 || normalized.includes("overloaded")
                   ? "server_overloaded"
                   : (status !== undefined && status >= 500) || kind === "internal_error"
                     ? "internal_server_error"
