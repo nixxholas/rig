@@ -1,18 +1,27 @@
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
-import type { AgentSystem } from "./AgentSystem.js";
+import type { AgentSystemRef } from "./AgentSystemRef.js";
 
-const agentSystemNamespace = createContextNamespace<AgentSystem | undefined>(
-    "happyAgentBase.agentSystem",
+/** The context slot that carries the collection owning the current agent or feature operation. */
+const agentSystemNamespace = createContextNamespace<AgentSystemRef | undefined>(
+    "happyAgent.agentSystem",
     undefined,
 );
 
-/** Carry the collection that owns an agent and its features. */
-export function withAgentSystem(ctx: Context, value: AgentSystem): Context {
+/**
+ * Carry the collection that owns an agent and its features, as a reference.
+ *
+ * Only the reference travels on a context. Everything that reads one — a feature hook, a tool —
+ * is code some run loop is waiting for, while the owner's surface holds the operations that wait
+ * for a loop to reach a particular point. A collection therefore puts an `AgentSystemRef` on
+ * every context it derives, and agents come back from it as `AgentRef`, so nothing reached
+ * through a context can wait for the loop that is waiting for it.
+ */
+export function withAgentSystem(ctx: Context, value: AgentSystemRef): Context {
     return agentSystemNamespace.set(ctx, value);
 }
 
 /** The collection owning the current feature or agent operation. */
-export function agentSystem(ctx: Context): AgentSystem | undefined {
+export function agentSystem(ctx: Context): AgentSystemRef | undefined {
     return agentSystemNamespace.get(ctx);
 }

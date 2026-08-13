@@ -18,10 +18,14 @@ export class AgentBaseKV {
     /** The absolute key prefix of this scope, ending with the separator. */
     readonly prefix: string;
 
+    /** The append-only store this scope reads and writes through. */
     readonly #persistence: AgentBasePersistence;
+    /** How this scope's operations are serialized against the rest of the agent's store access. */
     readonly #run: AgentBaseKVRunner;
+    /** True once `release` has been called on this handle, after which it does nothing at all. */
     #released = false;
 
+    /** Build a scope over `prefix`, executing every operation through `run`. */
     constructor(persistence: AgentBasePersistence, prefix: string, run: AgentBaseKVRunner) {
         this.#persistence = persistence;
         this.prefix = prefix;
@@ -89,6 +93,7 @@ export class AgentBaseKV {
         });
     }
 
+    /** Store the value under `key`, replacing whatever was there before. */
     async write(ctx: Context, key: string, value: unknown): Promise<void> {
         if (this.#released) return;
         await this.#run(ctx, (opCtx) =>
@@ -158,6 +163,7 @@ export class AgentBaseKV {
         );
     }
 
+    /** Remove the entry stored under `key`, if any. */
     async delete(ctx: Context, key: string): Promise<void> {
         if (this.#released) return;
         await this.#run(ctx, (opCtx) =>

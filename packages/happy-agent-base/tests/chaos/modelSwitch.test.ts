@@ -43,7 +43,7 @@ describe("durability of a model switch under crashes", () => {
             crashAt: number | undefined,
         ): Promise<{ crashed: boolean; queued: boolean }> => {
             const persistence = new CrashingPersistence(disk, crashAt);
-            const agent = new AgentBase(ctx, {
+            const agent = await AgentBase.create(ctx, {
                 id: "switching-agent",
                 providers,
                 provider: "first",

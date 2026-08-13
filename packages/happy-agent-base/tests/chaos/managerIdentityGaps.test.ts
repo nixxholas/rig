@@ -124,7 +124,7 @@ describe("manager identity and recovery gaps", () => {
         };
 
         const creation = outcomeOf(
-            creator.create(ctx, "shared", {
+            creator.createWithId(ctx, "shared", {
                 features: { identity: { generation: "provisional" } },
             }),
         );
@@ -184,7 +184,7 @@ describe("manager identity and recovery gaps", () => {
         };
 
         const firstCreation = outcomeOf(
-            first.create(ctx, "shared", {
+            first.createWithId(ctx, "shared", {
                 features: { identity: { generation: "first" } },
             }),
         );
@@ -194,7 +194,7 @@ describe("manager identity and recovery gaps", () => {
         // A different owner removes the failed generation and claims the same ID for a genuine
         // successor while the old generation's unconditional rollback is still suspended.
         await successorOwner.delete(ctx, "shared");
-        const successor = await successorOwner.create(ctx, "shared", {
+        const successor = await successorOwner.createWithId(ctx, "shared", {
             features: { identity: { generation: "successor" } },
         });
         await successor.waitForIdle();
@@ -279,7 +279,7 @@ describe("manager identity and recovery gaps", () => {
         const agentDisk = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("live answer")]);
         const liveOwner = collection(managerDisk, agentDisk, provider);
-        const live = await liveOwner.create(ctx, "shared", {});
+        const live = await liveOwner.createWithId(ctx, "shared", {});
         await live.waitForIdle();
 
         const liveWriteStarted = deferred();
@@ -417,13 +417,13 @@ describe("manager identity and recovery gaps", () => {
             slowSibling,
         ]);
 
-        const firstCreation = outcomeOf(owner.create(ctx, "shared", {}));
+        const firstCreation = outcomeOf(owner.createWithId(ctx, "shared", {}));
         await slowLoadStarted.promise;
         const earlyFailure = await observedWithin(firstCreation);
         if (earlyFailure.status === "pending") releaseFirstSlowLoad.resolve();
         await firstCreation;
 
-        const retry = outcomeOf(owner.create(ctx, "shared", {}));
+        const retry = outcomeOf(owner.createWithId(ctx, "shared", {}));
         if (earlyFailure.status === "settled") {
             await secondSlowLoadStarted.promise;
             releaseFirstSlowLoad.resolve();
@@ -467,7 +467,7 @@ describe("manager identity and recovery gaps", () => {
             reentrantFeature,
         ]);
 
-        const creation = outcomeOf(owner.create(ctx, "root", {}));
+        const creation = outcomeOf(owner.createWithId(ctx, "root", {}));
         const observed = await observedWithin(creation);
         if (observed.status === "settled" && observed.value.status === "fulfilled") {
             const dependency = await owner.resolve(ctx, "dependency");
@@ -498,7 +498,7 @@ describe("manager identity and recovery gaps", () => {
             return originalDeleteValue(deleteCtx, key);
         };
 
-        const creation = await outcomeOf(owner.create(ctx, "ghost", {}));
+        const creation = await outcomeOf(owner.createWithId(ctx, "ghost", {}));
         const durableConfig = await owner.config(ctx, "ghost");
         const message =
             creation.status === "rejected" ? errorMessage(creation.reason) : "fulfilled";
@@ -559,14 +559,14 @@ describe("manager identity and recovery gaps", () => {
         const provider = new ScriptedProvider([textTurn("old answer"), textTurn("new answer")]);
         const owner = collection(managerDisk, agentDisk, provider);
 
-        const oldAgent = await owner.create(ctx, "shared", {});
+        const oldAgent = await owner.createWithId(ctx, "shared", {});
         await oldAgent.waitForIdle();
         await owner.send(ctx, "shared", user("old question"), { await: true, model: "old-model" });
         await oldAgent.waitForIdle();
         agentDisk.values.set("kv.shared.feature.state.legacy", "old value");
         await owner.delete(ctx, "shared");
 
-        const recreated = await owner.create(ctx, "shared", {});
+        const recreated = await owner.createWithId(ctx, "shared", {});
         await recreated.waitForIdle();
         const recreatedKV = agentDisk.values.get("kv.shared.feature.state.legacy");
         await owner.send(ctx, "shared", user("new question"), { await: true });
@@ -608,7 +608,7 @@ describe("manager identity and recovery gaps", () => {
             features: { recorder: { label: "original" } },
         };
 
-        const creation = owner.create(ctx, "shared", config);
+        const creation = owner.createWithId(ctx, "shared", config);
         await loadStarted.promise;
         const callerSettings = config.features?.recorder;
         if (callerSettings !== undefined) callerSettings.label = "mutated by caller";

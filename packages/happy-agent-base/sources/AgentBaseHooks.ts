@@ -11,11 +11,14 @@ import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
+/** A value or a promise of it; every hook may answer either synchronously or asynchronously. */
 export type MaybePromise<Value> = Value | Promise<Value>;
 
 /** What the `modelChanged` hook sees when a consumed message changes the effective model. */
 export interface AgentBaseModelChange {
+    /** The model in force before this change, absent when none had been set yet. */
     readonly previousModel: string | undefined;
+    /** The model now in force. */
     readonly model: string;
     /** The registry ID of the provider serving the previous model. */
     readonly previousProvider: string;
@@ -67,11 +70,29 @@ export interface AgentBaseTurn extends AgentBaseTurnStart {
 }
 
 /**
+ * One validated tool invocation offered to an around-execution correctness hook.
+ *
+ * A wrapper calls `execute` to continue to the next wrapper and, ultimately, the tool. Repeated
+ * calls join the same execution rather than repeating side effects.
+ */
+export interface AgentBaseToolExecution {
+    /** The ID the model attached to this call, used to match its eventual result back to it. */
+    readonly callId: string;
+    /** The tool definition the call resolved to. */
+    readonly tool: AnyAgentTool;
+    /** The call's arguments, already parsed from JSON but not yet validated against the schema. */
+    readonly arguments: unknown;
+    /** Continue to the next wrapper and, ultimately, the tool itself. */
+    readonly execute: () => Promise<unknown>;
+}
+
+/**
  * Optional observation points. A hook must never fail or delay the run. Every hook receives the
  * agent's context, which carries the provider, model, and effort readable through
- * `agentBaseProvider`, `agentBaseModel`, and `agentBaseEffort`.
+ * `agentProvider`, `agentModel`, and `agentEffort`.
  */
 export interface AgentBaseHooks {
+    /** Called for every session event the provider emits, for observation only. */
     readonly onEvent?: (ctx: Context, event: SessionEvent) => void;
     /**
      * Extends `state.instructions` for the session, consulted before each inference and
@@ -87,6 +108,16 @@ export interface AgentBaseHooks {
      * recreated so the model sees the current tools.
      */
     readonly tools?: (ctx: Context) => MaybePromise<readonly AnyAgentTool[]>;
+    /**
+     * Wraps execution after the tool exists and its JSON arguments pass runtime validation.
+     * This is a correctness hook: a failure becomes that call's error result. The hook must call
+     * `execution.execute()` to continue; omitting it deliberately replaces the execution, while
+     * repeated calls join the same downstream work.
+     */
+    readonly aroundToolExecution?: (
+        ctx: Context,
+        execution: AgentBaseToolExecution,
+    ) => MaybePromise<unknown>;
     /**
      * Called when a consumed message changes the effective model. An incompatible change —
      * judged by the provider-model compatibility matrix — erases the conversation history
@@ -135,6 +166,18 @@ export interface AgentBaseHooks {
     readonly afterAgentLoop?: (
         ctx: Context,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    /**
+     * Called inside the transaction that settles the agent, before the settlement commits. The
+     * key-value store on the context writes into that same transaction, so a conclusion about
+     * the run and the fact that the run is over become durable together, without a second commit
+     * a crash could land between. The `Transact` suffix is what marks this: a hook carrying it
+     * runs inside a transaction, and everything it writes commits or rolls back with it.
+     *
+     * Unlike the observing hooks, a failure here is not swallowed. It rolls the settlement back,
+     * leaving the agent recorded as still working, because a conclusion that failed to be
+     * written must not be reported as one that was. The store handle is lent for the call only.
+     */
+    readonly afterAgentSettledTransact?: (ctx: Context) => MaybePromise<void>;
     /** Called once after the loop has fully settled and no feature reopened it. */
     readonly afterAgentSettled?: (ctx: Context) => MaybePromise<void>;
 }

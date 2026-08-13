@@ -30,6 +30,7 @@
         "test:real": "RIG_LIVE_TEST=1 vitest run tests/real-gym"
     },
     "dependencies": {
+        "@paralleldrive/cuid2": "^3.3.0",
         "@sinclair/typebox": "^0.34.49",
         "@slopus/happy-providers": "0.0.7",
         "@steve.kite/stdlib": "0.0.8"

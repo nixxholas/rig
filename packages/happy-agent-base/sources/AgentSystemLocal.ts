@@ -1,42 +1,68 @@
-import type { SessionUserMessage } from "@slopus/happy-providers";
+import { createId } from "@paralleldrive/cuid2";
+import type { SessionMessage, SessionUserMessage } from "@slopus/happy-providers";
 import { randomUUID } from "node:crypto";
 import { Value } from "@sinclair/typebox/value";
 import { asyncLock, type AsyncLock, type Context } from "@steve.kite/stdlib";
 
 import { Agent } from "./Agent.js";
-import {
-    agentBaseOwesWork,
-    type AgentBaseAwaitOptions,
-    type AgentBaseMessageOptions,
-} from "./AgentBase.js";
+import { type AgentBaseAwaitOptions, type AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentBaseKV } from "./AgentBaseKV.js";
 import type { AgentBasePersistence } from "./AgentBasePersistence.js";
+import { agentBaseStoreOwesWork } from "./AgentBasePending.js";
 import { agentBaseWithStoreStill } from "./AgentBaseStoreLock.js";
 import { agentConfigSchema, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
-import type { AgentFeature, AgentFeatureConstructor } from "./AgentFeature.js";
+import type {
+    AgentFeature,
+    AgentFeatureConstructor,
+    SharedAgentFeatureConstructor,
+} from "./AgentFeature.js";
 import type { AgentModel } from "./AgentModel.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AgentStorage } from "./AgentStorage.js";
-import type { AgentSystem } from "./AgentSystem.js";
+import type { AgentInitialContext, AgentSystem } from "./AgentSystem.js";
 import { withAgentSystem } from "./AgentSystemContext.js";
+import { AgentSystemRef } from "./AgentSystemRef.js";
 
+/** Everything `AgentSystemLocal` needs to build and run the agents in its collection. */
 export interface AgentSystemLocalOptions {
-    readonly features: readonly AgentFeatureConstructor[];
+    /** Identity allocator; production uses cuid2 and tests may inject a deterministic sequence. */
+    readonly createAgentId?: () => string;
+    /**
+     * Individual features: one instance per agent, built when that agent is. Each may hold the
+     * state of the one agent it belongs to and may be configured for it alone, through the
+     * agent's own `features` entry — a goal belongs to one conversation, and an agent created
+     * without one has none.
+     */
+    readonly features?: readonly AgentFeatureConstructor[];
+    /**
+     * Shared features: one instance for the whole collection, given to every agent it builds and
+     * placed ahead of the individual ones, so the system prompt opens the instructions. These are
+     * the capabilities that are the same wherever they run, and they read the agent a hook is
+     * serving from its context rather than from the instance.
+     */
+    readonly sharedFeatures?: readonly SharedAgentFeatureConstructor[];
+    /** Where the collection's identities, configuration, and per-agent state are durable. */
     readonly storage: AgentStorage;
+    /** The registry providers are resolved from when an agent is built. */
     readonly providers: AgentProviders;
+    /** The registry ID of the provider new agents are created with. */
     readonly provider: string;
+    /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
 }
 
 /** The record that says an identity exists, and which creation it belongs to. */
 interface CreationRecord {
+    /** The random value that identifies which creation attempt owns this identity. */
     readonly token: string;
+    /** True while the creation that claimed this identity has not yet produced an agent. */
     readonly pending?: boolean;
 }
 
 /** Thrown inside a rollback that found the identity already belonged to someone else. */
 const STALE_ROLLBACK = Symbol("staleRollback");
 
+/** Parse a stored creation record, or undefined when the value is not one. */
 function creationRecordOf(value: unknown): CreationRecord | undefined {
     if (typeof value !== "object" || value === null) return undefined;
     const token = (value as { token?: unknown }).token;
@@ -59,24 +85,47 @@ function creationRecordOf(value: unknown): CreationRecord | undefined {
  * agent instead.
  */
 export class AgentSystemLocal implements AgentSystem {
+    /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
 
+    /** Per-agent feature constructors, instantiated fresh for each agent this collection builds. */
     readonly #featureClasses: readonly AgentFeatureConstructor[];
+    /** Identity allocator for new agents; defaults to cuid2. */
+    readonly #createAgentId: () => string;
+    /**
+     * What this collection looks like from inside one of its agents, and the only form of it a
+     * derived context ever carries.
+     */
+    readonly #ref: AgentSystemRef = new AgentSystemRef(this);
+    /** The collection's own feature instances, serving every agent it builds. */
+    readonly #sharedFeatures: readonly AgentFeature[];
+    /** The one load of those instances, shared by every agent that waits for it. */
+    #sharedLoad: Promise<void> | undefined;
+    /** Where the collection's identities, configuration, and per-agent state are durable. */
     readonly #storage: AgentStorage;
+    /** The registry providers are resolved from when an agent is built. */
     readonly #providers: AgentProviders;
+    /** The registry ID of the provider new agents are created with. */
     readonly #provider: string;
+    /** Which agent identities are worth resuming on the next start. */
     readonly #active: AgentBaseKV;
+    /** The configuration each identity was created with. */
     readonly #configs: AgentBaseKV;
     /** Which creation an identity belongs to, and whether that creation has finished. */
     readonly #creations: AgentBaseKV;
+    /** The live `Agent` instances this process has built, keyed by identity. */
     readonly #agents = new Map<string, Agent>();
     // One agent has one store for the life of the collection, so inspecting an agent's durable
     // work and running that agent never end up looking at two different stores.
     readonly #persistences = new Map<string, AgentBasePersistence>();
+    /** Per-agent locks handed out by `#lockFor`, created lazily the first time an ID is touched. */
     readonly #locks = new Map<string, AsyncLock>();
 
+    /** Wire this collection to its storage, providers, and feature configuration. */
     constructor(options: AgentSystemLocalOptions) {
-        this.#featureClasses = options.features;
+        this.#createAgentId = options.createAgentId ?? createId;
+        this.#featureClasses = options.features ?? [];
+        this.#sharedFeatures = (options.sharedFeatures ?? []).map((Feature) => new Feature());
         this.#storage = options.storage;
         this.#providers = options.providers;
         this.#provider = options.provider;
@@ -96,7 +145,24 @@ export class AgentSystemLocal implements AgentSystem {
      * observer that finds a pending identity is told it does not exist yet, rather than being
      * handed an agent whose creation may still roll back underneath it.
      */
-    async create(ctx: Context, agentId: string, config: AgentConfig): Promise<Agent> {
+    async create(
+        ctx: Context,
+        config: AgentConfig,
+        initialContext?: AgentInitialContext,
+    ): Promise<Agent> {
+        return await this.createWithId(ctx, this.#createAgentId(), config, initialContext);
+    }
+
+    /**
+     * Deterministic identity seam for storage recovery tests and importing an externally owned
+     * identity. Normal callers, including collaboration, use `create`.
+     */
+    async createWithId(
+        ctx: Context,
+        agentId: string,
+        config: AgentConfig,
+        initialContext?: AgentInitialContext,
+    ): Promise<Agent> {
         if (!Value.Check(agentConfigSchema, config)) {
             throw new Error(`The configuration for agent "${agentId}" is not valid.`);
         }
@@ -126,6 +192,9 @@ export class AgentSystemLocal implements AgentSystem {
                 // was released. This agent is a different agent and starts from nothing: it must
                 // not wake up inside its predecessor's conversation, settings, or feature state.
                 await this.#wipe(lockCtx, agentId);
+                if (initialContext !== undefined) {
+                    await this.#seedInitialContext(lockCtx, agentId, initialContext.messages);
+                }
                 const agent = await this.#instantiate(lockCtx, agentId, owned);
                 await this.#creations.write(lockCtx, agentId, { token });
                 return agent;
@@ -217,6 +286,24 @@ export class AgentSystemLocal implements AgentSystem {
         );
     }
 
+    /** Install a projected conversation before the new agent is started. */
+    async #seedInitialContext(
+        ctx: Context,
+        agentId: string,
+        messages: readonly SessionMessage[],
+    ): Promise<void> {
+        if (messages.length === 0) return;
+        const persistence = this.#persistenceFor(agentId);
+        await agentBaseWithStoreStill(ctx, persistence, (storeCtx) =>
+            persistence.transaction(storeCtx, async (txCtx) => {
+                await persistence.append(txCtx, {
+                    type: "compaction",
+                    messages: structuredClone(messages),
+                });
+            }),
+        );
+    }
+
     /** The configuration an agent was created with, or undefined when there is no such agent. */
     async config(ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
         const stored = await this.#configs.read(ctx, agentId);
@@ -227,6 +314,10 @@ export class AgentSystemLocal implements AgentSystem {
         return stored;
     }
 
+    /**
+     * The live agent for an ID, loading and starting it if this process has not seen it yet.
+     * Concurrent resolutions of the same ID share one load.
+     */
     async resolve(ctx: Context, agentId: string): Promise<Agent> {
         const existing = this.#agents.get(agentId);
         if (existing !== undefined) return existing;
@@ -264,8 +355,10 @@ export class AgentSystemLocal implements AgentSystem {
      * that has no live instance yet.
      */
     async #instantiate(ctx: Context, agentId: string, config: AgentConfig): Promise<Agent> {
-        const agentCtx = withAgentConfig(withAgentSystem(ctx, this), config);
+        const agentCtx = withAgentConfig(withAgentSystem(ctx, this.#ref), config);
+        await this.#loadShared(ctx);
         const features = this.#featureClasses.map((Feature) => new Feature(agentId));
+        const ownedFeatures = [...this.#sharedFeatures, ...features];
         const activity = this.#activityFeature(agentId);
         // Every load is waited for even when one of them fails: a load that is still running has
         // resources in flight, and abandoning it would let a retry of this same creation overlap
@@ -275,38 +368,85 @@ export class AgentSystemLocal implements AgentSystem {
         );
         const failed = loads.find((load) => load.status === "rejected");
         if (failed !== undefined) throw failed.reason;
-        const agent = new Agent(agentCtx, {
+        // An identity built here may already have durable state — this is the path a restart
+        // resolves through — so the agent is loaded rather than created, and knows whether it
+        // has work left before anything asks it.
+        const agent = await Agent.load(agentCtx, {
             id: agentId,
             providers: this.#providers,
             provider: this.#provider,
             persistence: this.#persistenceFor(agentId),
-            features: [...features, activity],
+            // Shared first: the instructions they contribute — above all the system prompt —
+            // open every agent's prompt, before anything one agent alone was configured with.
+            features: [...ownedFeatures, activity],
         });
         agent.start();
         this.#agents.set(agentId, agent);
         return agent;
     }
 
-    /** Resolve and resume every agent that has work left from before this process started. */
-    async start(ctx: Context): Promise<void> {
-        const active = new Set(
-            (await this.#active.list(ctx))
-                .filter(({ value }) => value === true)
-                .map(({ key }) => key),
+    /**
+     * Load the shared features once, before the first agent that needs them exists. They belong
+     * to the collection rather than to any agent, so they load on the collection's own context:
+     * whatever they read at load time must not come from whichever agent happened to be built
+     * first. A failed load is forgotten, so the next agent tries again instead of inheriting a
+     * collection that can never build one; a shared load must therefore not resolve an agent,
+     * which would wait for the very load it is part of.
+     */
+    async #loadShared(ctx: Context): Promise<void> {
+        this.#sharedLoad ??= this.#loadSharedFeatures(withAgentSystem(ctx, this.#ref)).catch(
+            (error: unknown) => {
+                this.#sharedLoad = undefined;
+                throw error;
+            },
         );
+        await this.#sharedLoad;
+    }
+
+    /** Load every shared feature once, on the collection's own context. */
+    async #loadSharedFeatures(sharedCtx: Context): Promise<void> {
+        const loads = await Promise.allSettled(
+            this.#sharedFeatures.map(async (feature) => feature.load?.(sharedCtx)),
+        );
+        const failed = loads.find((load) => load.status === "rejected");
+        if (failed !== undefined) throw failed.reason;
+    }
+
+    /**
+     * Resolve and resume every agent that has work left from before this process started.
+     *
+     * The active index is a fast answer, not the authority. It is written by a live run and can
+     * only ever describe the moment it was read: a process that committed a message and died
+     * before publishing another active span leaves an identity that owes an answer and appears
+     * in no index at all. So an identity the index does not vouch for is not dismissed — its own
+     * store is asked, which is where the evidence actually is.
+     */
+    async start(ctx: Context): Promise<void> {
+        const active = (await this.#active.list(ctx))
+            .filter(({ value }) => value === true)
+            .map(({ key }) => key);
         const created = await this.#configs.list(ctx);
         await Promise.all(
             created.map(async ({ key: agentId }) => {
                 // An identity another owner is still creating is not this process's to resume:
                 // its creation may yet roll back, and until it finishes there is no agent.
                 if (await this.#beingCreated(ctx, agentId)) return;
-                // The activity index alone cannot answer this: a message accepted while an
-                // agent was settling is durable before the settle's index deletion commits, and
-                // the agent that owes the answer would otherwise be invisible to this process.
-                const owed = await agentBaseOwesWork(ctx, this.#persistenceFor(agentId));
-                if (!active.has(agentId) && !owed) return;
+                if (!active.includes(agentId) && !(await this.#owesWork(ctx, agentId))) return;
                 await this.resolve(ctx, agentId);
             }),
+        );
+    }
+
+    /**
+     * Whether one identity's own store has work left. The store is held still for the question,
+     * so what it answers is a settled state rather than the middle of some owner's step — a
+     * consumed message whose record has landed while the queue entry that carried it has not
+     * would otherwise read as two different conversations depending on the instant.
+     */
+    async #owesWork(ctx: Context, agentId: string): Promise<boolean> {
+        const persistence = this.#persistenceFor(agentId);
+        return await agentBaseWithStoreStill(ctx, persistence, (storeCtx) =>
+            agentBaseStoreOwesWork(storeCtx, persistence),
         );
     }
 
@@ -317,6 +457,12 @@ export class AgentSystemLocal implements AgentSystem {
         return this.#storage.kv.scoped("features", feature);
     }
 
+    /** A collection-wide feature by its stable name. */
+    feature(name: string): AgentFeature | undefined {
+        return this.#sharedFeatures.find((feature) => feature.name === name);
+    }
+
+    /** The durable store for one agent, created once and reused for the life of the collection. */
     #persistenceFor(agentId: string): AgentBasePersistence {
         const existing = this.#persistences.get(agentId);
         if (existing !== undefined) return existing;
@@ -338,6 +484,7 @@ export class AgentSystemLocal implements AgentSystem {
         return created;
     }
 
+    /** Queue a steered message for an agent. */
     async steer(
         ctx: Context,
         agentId: string,
@@ -346,9 +493,9 @@ export class AgentSystemLocal implements AgentSystem {
     ): Promise<void> {
         const agent = await this.resolve(ctx, agentId);
         await agent.steer(ctx, message, options);
-        await this.#publish(ctx, agentId);
     }
 
+    /** Queue a message for an agent. */
     async send(
         ctx: Context,
         agentId: string,
@@ -357,26 +504,22 @@ export class AgentSystemLocal implements AgentSystem {
     ): Promise<void> {
         const agent = await this.resolve(ctx, agentId);
         await agent.send(ctx, message, options);
-        await this.#publish(ctx, agentId);
     }
 
-    /**
-     * Make an agent discoverable before its caller is told the message was accepted. Acceptance
-     * means durable and findable: a process lost the moment a send resolves must still have a
-     * way to reach the agent that owes the answer.
-     */
-    async #publish(ctx: Context, agentId: string): Promise<void> {
-        await this.#active.write(ctx, agentId, true);
-    }
-
+    /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */
     async abort(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void> {
         await (await this.resolve(ctx, agentId)).abort(ctx, options);
     }
 
+    /** Ask an agent for its conversation to be replaced by the provider's summary of it. */
     async compact(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void> {
         await (await this.resolve(ctx, agentId)).compact(ctx, options);
     }
 
+    /**
+     * Build the lifecycle hook that marks an agent active when its loop starts and idle once the
+     * loop has finished.
+     */
     #activityFeature(agentId: string): AgentFeature {
         return {
             name: "agents-activity",
@@ -384,15 +527,20 @@ export class AgentSystemLocal implements AgentSystem {
                 await this.#active.write(ctx, agentId, true);
             },
             afterAgentSettled: async (ctx) => {
-                // The index says an agent is worth resuming, and this agent settling says only
-                // that this agent has nothing left to do. Another owner over the same store may
-                // owe work — including work accepted while this deletion was in flight — so the
-                // store is asked again afterwards, and an entry that turned out to still be
-                // needed is put back rather than left missing.
-                const persistence = this.#persistenceFor(agentId);
-                if (await agentBaseOwesWork(ctx, persistence)) return;
+                // One agent's store can have several live owners, and the index describes the
+                // identity rather than any one of them. This owner having nothing left to do
+                // does not mean the identity has: another owner may be mid-response right now,
+                // and clearing the index under it would leave a working agent that the next
+                // process has no reason to resume. So the store decides, not this run.
+                if (await this.#owesWork(ctx, agentId)) return;
                 await this.#active.delete(ctx, agentId);
-                if (await agentBaseOwesWork(ctx, persistence)) {
+                // The index holds a boolean, so there is nothing in it to tell one owner's entry
+                // from another's and no way to remove only one's own. An owner that began while
+                // this deletion was in flight is erased by it, and no check made beforehand can
+                // see that far — so the store is asked once more afterwards and an identity that
+                // turns out to owe work is put back. Nothing depends on the index being right in
+                // between: a start reads every created identity's own store regardless.
+                if (await this.#owesWork(ctx, agentId)) {
                     await this.#active.write(ctx, agentId, true);
                 }
             },

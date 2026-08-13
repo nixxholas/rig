@@ -18,6 +18,7 @@ export const agentPlatformSchema = Type.Union([
     Type.Literal("win32"),
 ]);
 
+/** The TypeScript type inferred from {@link agentPlatformSchema}. */
 export type AgentPlatform = Static<typeof agentPlatformSchema>;
 
 /**
@@ -26,6 +27,7 @@ export type AgentPlatform = Static<typeof agentPlatformSchema>;
  */
 export const agentFeatureConfigSchema = Type.Record(Type.String(), Type.Unknown());
 
+/** The TypeScript type inferred from {@link agentFeatureConfigSchema}. */
 export type AgentFeatureConfig = Static<typeof agentFeatureConfigSchema>;
 
 /**
@@ -35,6 +37,7 @@ export type AgentFeatureConfig = Static<typeof agentFeatureConfigSchema>;
 export const agentEnvironmentSchema = Type.Object({
     /** The operating system release, as a human-readable version string. */
     osVersion: Type.String(),
+    /** The operating system the agent runs on. */
     platform: agentPlatformSchema,
     /** The absolute path the agent's work is rooted at. */
     workingDirectory: Type.String(),
@@ -42,6 +45,7 @@ export const agentEnvironmentSchema = Type.Object({
     shell: Type.String(),
 });
 
+/** The TypeScript type inferred from {@link agentEnvironmentSchema}. */
 export type AgentEnvironment = Static<typeof agentEnvironmentSchema>;
 
 /**
@@ -51,11 +55,13 @@ export type AgentEnvironment = Static<typeof agentEnvironmentSchema>;
  * the very same agent it was created as.
  */
 export const agentConfigSchema = Type.Object({
+    /** The machine this agent was told it works on, when it was told anything at all. */
     environment: Type.Optional(agentEnvironmentSchema),
     /** Per-feature settings, keyed by feature name; each entry is opaque to the agent. */
     features: Type.Optional(Type.Record(Type.String(), agentFeatureConfigSchema)),
 });
 
+/** The TypeScript type inferred from {@link agentConfigSchema}. */
 export type AgentConfig = Static<typeof agentConfigSchema>;
 
 /**
@@ -73,6 +79,7 @@ export function currentAgentEnvironment(): AgentEnvironment {
     };
 }
 
+/** The context slot the agent's configuration is carried in, unset until an agent attaches one. */
 const configNamespace = createContextNamespace<AgentConfig | undefined>(
     "happyAgentBase.agentConfig",
     undefined,

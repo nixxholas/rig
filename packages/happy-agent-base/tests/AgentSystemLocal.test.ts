@@ -2,12 +2,13 @@ import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
+    agentId,
     AgentBaseKV,
     agentConfig,
     agentFeatureConfig,
     AgentStorage,
     AgentSystemLocal,
-    type AgentSystem,
+    AgentSystemRef,
     agentSystem as agentsFromContext,
     type AgentConfig,
     type AgentEnvironment,
@@ -49,7 +50,7 @@ describe("AgentSystemLocal", () => {
         const provider = new ScriptedProvider([]);
         const managerPersistence = new InMemoryPersistence();
         const started: string[] = [];
-        const owners: AgentSystem[] = [];
+        const owners: AgentSystemRef[] = [];
         const releases: (() => void)[] = [];
 
         const feature = (name: string): AgentFeatureConstructor =>
@@ -84,7 +85,7 @@ describe("AgentSystemLocal", () => {
             models: [],
         });
 
-        const first = agentSystem.create(ctx, "agent-1", {
+        const first = agentSystem.createWithId(ctx, "agent-1", {
             environment: environmentOf("/tmp/agent-1"),
         });
         const second = agentSystem.resolve(ctx, "agent-1");
@@ -96,7 +97,10 @@ describe("AgentSystemLocal", () => {
         const [firstAgent, secondAgent] = await Promise.all([first, second]);
         expect(firstAgent).toBe(secondAgent);
         expect(optionLoads).toBe(1);
-        expect(owners).toEqual([agentSystem, agentSystem]);
+        // Both loads were handed the very same reference, and never the collection itself.
+        expect(owners).toHaveLength(2);
+        expect(owners[0]).toBeInstanceOf(AgentSystemRef);
+        expect(owners[1]).toBe(owners[0]);
         await firstAgent.close();
     });
 
@@ -157,7 +161,7 @@ describe("AgentSystemLocal", () => {
             models: [],
         });
 
-        await agentSystem.create(ctx, "agent-1", {});
+        await agentSystem.createWithId(ctx, "agent-1", {});
         await agentSystem.send(ctx, "agent-1", user("send"), { await: true });
         const agent = await agentSystem.resolve(ctx, "agent-1");
         await agent.waitForIdle();
@@ -229,7 +233,7 @@ describe("AgentSystemLocal configuration", () => {
         const settings: (Record<string, unknown> | undefined)[] = [];
         const agentSystem = collectionOf(managerPersistence, seen, settings);
 
-        const agent = await agentSystem.create(ctx, "agent-1", config);
+        const agent = await agentSystem.createWithId(ctx, "agent-1", config);
         expect(seen).toEqual([config]);
         // A feature sees only its own opaque entry, which the collection never interprets.
         expect(settings).toEqual([{ verbosity: "high" }]);
@@ -253,8 +257,8 @@ describe("AgentSystemLocal configuration", () => {
 
     it("refuses to create the same agent twice", async () => {
         const agentSystem = collectionOf(new InMemoryPersistence(), [], []);
-        const agent = await agentSystem.create(ctx, "agent-1", {});
-        await expect(agentSystem.create(ctx, "agent-1", config)).rejects.toThrow(
+        const agent = await agentSystem.createWithId(ctx, "agent-1", {});
+        await expect(agentSystem.createWithId(ctx, "agent-1", config)).rejects.toThrow(
             'Agent "agent-1" already exists.',
         );
         // The original configuration is untouched.
@@ -265,11 +269,195 @@ describe("AgentSystemLocal configuration", () => {
     it("rejects a configuration that does not match the schema", async () => {
         const agentSystem = collectionOf(new InMemoryPersistence(), [], []);
         await expect(
-            agentSystem.create(ctx, "agent-1", {
+            agentSystem.createWithId(ctx, "agent-1", {
                 // An environment is all or nothing: a partial one is not a configuration.
                 environment: { platform: "darwin" },
             } as unknown as AgentConfig),
         ).rejects.toThrow('The configuration for agent "agent-1" is not valid.');
         expect(await agentSystem.config(ctx, "agent-1")).toBeUndefined();
+    });
+});
+
+describe("AgentSystemLocal individual and shared features", () => {
+    /** A shared feature that records, per agent, everything it was told from the context. */
+    class SharedRecorder implements AgentFeature {
+        static readonly instances: SharedRecorder[] = [];
+        static readonly loads: (AgentConfig | undefined)[] = [];
+
+        readonly name = "shared-recorder";
+        /** Which agents this one instance served, in the order it first saw them. */
+        readonly served: string[] = [];
+
+        constructor() {
+            SharedRecorder.instances.push(this);
+        }
+
+        load(loadCtx: Context): Promise<void> {
+            // A shared feature belongs to the collection, so it must not be handed one agent's
+            // configuration at load time.
+            SharedRecorder.loads.push(agentConfig(loadCtx));
+            return Promise.resolve();
+        }
+
+        readonly instructions = (hookCtx: Context): string => {
+            const id = agentId(hookCtx) ?? "unknown";
+            if (!this.served.includes(id)) this.served.push(id);
+            return `shared for ${id}`;
+        };
+    }
+
+    /** An individual feature: one instance per agent, configured by that agent alone. */
+    class IndividualRecorder implements AgentFeature {
+        static readonly instances: IndividualRecorder[] = [];
+
+        readonly name = "individual-recorder";
+        readonly agentId: string;
+        settings: Record<string, unknown> | undefined;
+
+        constructor(agentId: string) {
+            this.agentId = agentId;
+            IndividualRecorder.instances.push(this);
+        }
+
+        load(loadCtx: Context): Promise<void> {
+            this.settings = agentFeatureConfig(loadCtx, this.name);
+            return Promise.resolve();
+        }
+
+        readonly instructions = (): string => `individual for ${this.agentId}`;
+    }
+
+    function collectionOf(provider: ScriptedProvider): AgentSystemLocal {
+        return new AgentSystemLocal({
+            features: [IndividualRecorder],
+            sharedFeatures: [SharedRecorder],
+            storage: new AgentStorage({
+                kv: managerKV(new InMemoryPersistence()),
+                persistence: () => new InMemoryPersistence(),
+            }),
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+    }
+
+    it("gives every agent one shared instance and an individual instance of its own", async () => {
+        SharedRecorder.instances.length = 0;
+        SharedRecorder.loads.length = 0;
+        IndividualRecorder.instances.length = 0;
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const agentSystem = collectionOf(provider);
+
+        const first = await agentSystem.createWithId(ctx, "agent-1", {
+            features: { "individual-recorder": { objective: "first" } },
+        });
+        const second = await agentSystem.createWithId(ctx, "agent-2", {
+            features: { "individual-recorder": { objective: "second" } },
+        });
+
+        // One shared instance for the collection, loaded once, without any agent's configuration.
+        expect(SharedRecorder.instances).toHaveLength(1);
+        expect(SharedRecorder.loads).toEqual([undefined]);
+        expect(first.feature("shared-recorder")).toBe(second.feature("shared-recorder"));
+
+        // One individual instance per agent, each configured by the agent it belongs to.
+        expect(IndividualRecorder.instances.map((feature) => feature.agentId)).toEqual([
+            "agent-1",
+            "agent-2",
+        ]);
+        expect(IndividualRecorder.instances.map((feature) => feature.settings)).toEqual([
+            { objective: "first" },
+            { objective: "second" },
+        ]);
+        expect(first.feature("individual-recorder")).not.toBe(
+            second.feature("individual-recorder"),
+        );
+
+        // The shared instance serves both agents, and its instructions open every prompt.
+        await first.send(ctx, user("first"), { await: true });
+        await first.waitForIdle();
+        await second.send(ctx, user("second"), { await: true });
+        await second.waitForIdle();
+        expect(SharedRecorder.instances[0]?.served).toEqual(["agent-1", "agent-2"]);
+        expect(provider.sessions.map((session) => session.options.instructions)).toEqual([
+            "shared for agent-1\n\nindividual for agent-1",
+            "shared for agent-2\n\nindividual for agent-2",
+        ]);
+
+        await first.close();
+        await second.close();
+    });
+
+    it("hands features the collection as a reference rather than itself", async () => {
+        let seen: unknown;
+        class Peek implements AgentFeature {
+            readonly name = "peek";
+            load(loadCtx: Context): Promise<void> {
+                seen = agentsFromContext(loadCtx);
+                return Promise.resolve();
+            }
+        }
+        const agentSystem = new AgentSystemLocal({
+            sharedFeatures: [Peek],
+            storage: new AgentStorage({
+                kv: managerKV(new InMemoryPersistence()),
+                persistence: () => new InMemoryPersistence(),
+            }),
+            providers: providersOf(new ScriptedProvider([])),
+            provider: "scripted",
+            models: [],
+        });
+
+        const agent = await agentSystem.createWithId(ctx, "agent-1", {});
+
+        expect(seen).toBeInstanceOf(AgentSystemRef);
+        // Nothing that ends an agent's life, or waits for one, is reachable from inside.
+        expect(Object.getOwnPropertyNames(Object.getPrototypeOf(seen)).sort()).toEqual([
+            "abort",
+            "compact",
+            "config",
+            "constructor",
+            "create",
+            "feature",
+            "featureState",
+            "models",
+            "resolve",
+            "send",
+            "steer",
+        ]);
+        await agent.close();
+    });
+
+    it("retries a shared load that failed, and builds no agent until it succeeds", async () => {
+        let failures = 1;
+        class FailsOnce implements AgentFeature {
+            readonly name = "fails-once";
+            load(): Promise<void> {
+                if (failures > 0) {
+                    failures -= 1;
+                    return Promise.reject(new Error("shared load unavailable"));
+                }
+                return Promise.resolve();
+            }
+        }
+        const agentSystem = new AgentSystemLocal({
+            sharedFeatures: [FailsOnce],
+            storage: new AgentStorage({
+                kv: managerKV(new InMemoryPersistence()),
+                persistence: () => new InMemoryPersistence(),
+            }),
+            providers: providersOf(new ScriptedProvider([])),
+            provider: "scripted",
+            models: [],
+        });
+
+        await expect(agentSystem.createWithId(ctx, "agent-1", {})).rejects.toThrow(
+            "shared load unavailable",
+        );
+        // The failed creation left no identity behind, so the same ID can be created again.
+        expect(await agentSystem.config(ctx, "agent-1")).toBeUndefined();
+        const agent = await agentSystem.createWithId(ctx, "agent-1", {});
+        expect(agent.feature("fails-once")).toBeDefined();
+        await agent.close();
     });
 });

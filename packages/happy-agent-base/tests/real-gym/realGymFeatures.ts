@@ -4,14 +4,10 @@ import type { Context } from "@steve.kite/stdlib";
 
 import {
     defineAgentTool,
-    FeatureAutocompaction,
-    FeatureModels,
-    FeatureSubagents,
-    FeatureSystem,
     knownModels,
     type AgentFeature,
-    type AgentFeatureConstructor,
     type AgentModel,
+    type SharedAgentFeatureConstructor,
 } from "../../sources/index.js";
 import type { RealGymVendor } from "./loadRealProvider.js";
 
@@ -42,6 +38,7 @@ export class FeatureGymHarness implements AgentFeature {
         ),
         returnType: Type.Object({ recorded: Type.String() }),
         durable: false,
+        shouldReviewInAutoMode: () => false,
         execute: (_ctx: Context, { answer }) => {
             this.recorded.push(answer);
             return Promise.resolve({ recorded: answer });
@@ -62,14 +59,14 @@ export class FeatureGymHarness implements AgentFeature {
         ].join("\n");
 }
 
-/** The feature classes every gym agent runs with, named as the report lists them. */
-export const REAL_GYM_FEATURES: readonly { name: string; Feature: AgentFeatureConstructor }[] = [
-    { name: "system", Feature: FeatureSystem },
-    { name: "models", Feature: FeatureModels },
-    { name: "subagents", Feature: FeatureSubagents },
-    { name: "autocompaction", Feature: FeatureAutocompaction },
-    { name: "gym", Feature: FeatureGymHarness },
-];
+/**
+ * The feature classes every gym agent runs with, named as the report lists them. All of them are
+ * shared: one instance of each serves every agent the gym's collection builds.
+ */
+export const REAL_GYM_FEATURES: readonly {
+    name: string;
+    Feature: SharedAgentFeatureConstructor;
+}[] = [{ name: "gym", Feature: FeatureGymHarness }];
 
 const EFFORTS: readonly SessionReasoningEffort[] = [
     "off",

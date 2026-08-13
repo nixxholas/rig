@@ -2,6 +2,7 @@ import { asyncLock, type AsyncLock, type Context } from "@steve.kite/stdlib";
 
 import type { AgentBasePersistence } from "./AgentBasePersistence.js";
 
+/** Every lock handed out for a store, so `agentBaseWithStoreStill` can find and hold them all. */
 const owners = new WeakMap<AgentBasePersistence, AsyncLock[]>();
 
 /**
@@ -32,6 +33,7 @@ export async function agentBaseWithStoreStill<Result>(
     work: (ctx: Context) => Promise<Result>,
 ): Promise<Result> {
     const held = [...(owners.get(persistence) ?? [])];
+    /** Take the next lock in `held` and recurse, running `work` once every owner is held. */
     const enter = async (index: number, entered: Context): Promise<Result> => {
         const lock = held[index];
         if (lock === undefined) return await work(entered);

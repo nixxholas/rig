@@ -25,13 +25,12 @@ export type AgentBaseRecord =
           readonly type: "compaction";
           readonly messages: readonly SessionMessage[];
           /**
-           * Whether the replacement ends on something that is still owed an answer. A summary is
-           * not a question however it happens to end, so a restart does not respond to one — but
-           * a replacement also keeps whatever joined the conversation after its snapshot, and a
-           * message kept that way is owed exactly what it was owed before the rewrite. The
-           * rewrite is the only place that still knows which of the two it wrote.
+           * Whether inference should continue from the replacement's tail. A summary is not a
+           * request however it happens to end, but a replacement also preserves messages that
+           * joined after its snapshot. The rewrite is the only place that knows whether its tail
+           * came from the summary or that live suffix.
            */
-          readonly owed?: boolean;
+          readonly continuesInference?: boolean;
       };
 
 /**
@@ -50,7 +49,9 @@ export interface AgentBasePersistence {
      * error rolls them all back.
      */
     transaction<Result>(ctx: Context, work: (ctx: Context) => Promise<Result>): Promise<Result>;
+    /** Every record in the main context store, in append order. */
     load(ctx: Context): Promise<readonly AgentBaseRecord[]>;
+    /** Add one more record to the end of the main context store. */
     append(ctx: Context, record: AgentBaseRecord): Promise<void>;
     /**
      * Physically delete every record in the main context store. Called only inside the
@@ -63,6 +64,7 @@ export interface AgentBasePersistence {
         ctx: Context,
         prefix: string,
     ): Promise<readonly { readonly key: string; readonly value: unknown }[]>;
+    /** Store the value under `key`, replacing whatever was there before. */
     writeValue(ctx: Context, key: string, value: unknown): Promise<void>;
     /**
      * Write the value only if the key is absent, and report whether this call is the one that
@@ -85,6 +87,7 @@ export interface AgentBasePersistence {
         expected: unknown,
         value: unknown,
     ): Promise<boolean>;
+    /** Remove the entry stored under `key`, if any. */
     deleteValue(ctx: Context, key: string): Promise<void>;
     /**
      * Delete the key and report whether this call is the one that removed it. The check and the

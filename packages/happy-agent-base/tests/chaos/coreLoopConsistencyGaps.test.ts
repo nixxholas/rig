@@ -8,7 +8,7 @@ import type {
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, agentBaseKV, type AgentBaseKV } from "../../sources/index.js";
+import { AgentBase, agentKV, type AgentBaseKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
 import { providersOf, textTurn, user } from "../gym/fixtures.js";
@@ -43,7 +43,7 @@ describe("core loop consistency gaps", () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("switched"), textTurn("after the switch")]);
         let escapedKV: AgentBaseKV | undefined;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "escaped-model-change-kv",
             providers: providersOf(provider),
             provider: "scripted",
@@ -51,7 +51,7 @@ describe("core loop consistency gaps", () => {
             model: "anthropic/claude",
             hooks: {
                 modelChanged: (hookCtx) => {
-                    escapedKV = agentBaseKV(hookCtx);
+                    escapedKV = agentKV(hookCtx);
                     return undefined;
                 },
             },
@@ -130,7 +130,7 @@ describe("core loop consistency gaps", () => {
             }
         };
 
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "atomic-hook-actions",
             providers: providersOf(provider),
             provider: "scripted",
@@ -186,7 +186,7 @@ describe("core loop consistency gaps", () => {
         let turnsStarted = 0;
         let turnsFinished = 0;
         let inferences = 0;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "mid-inference-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -231,7 +231,7 @@ describe("core loop consistency gaps", () => {
 
     it("makes a reentrant concurrent close await the first session destruction", async () => {
         const provider = new ScriptedProvider([textTurn("ready to close")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "concurrent-close",
             providers: providersOf(provider),
             provider: "scripted",
@@ -282,7 +282,7 @@ describe("core loop consistency gaps", () => {
         const events: SessionEvent[] = [];
         let aborting: Promise<void> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "abort-from-normal-done",
             providers: providersOf(provider),
             provider: "scripted",

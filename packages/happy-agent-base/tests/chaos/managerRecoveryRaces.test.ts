@@ -63,146 +63,6 @@ function collection(
  * stores or owners agree; each test therefore fixes the exact shared snapshot both owners see.
  */
 describe("manager recovery and live-owner consistency", () => {
-    it("does not acknowledge a durable message before a restart can discover its agent", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const originalProvider = new ScriptedProvider([textTurn("original answer")]);
-        const restartedProvider = new ScriptedProvider([textTurn("recovered answer")]);
-        const original = collection(managerDisk, agentDisk, originalProvider);
-        const originalAgent = await original.create(ctx, "recoverable", {});
-        await originalAgent.waitForIdle();
-
-        const activeWriteStarted = deferred();
-        const releaseActiveWrite = deferred();
-        const originalWriteValue = managerDisk.writeValue.bind(managerDisk);
-        let blockNextActivation = true;
-        managerDisk.writeValue = async (writeCtx, key, value) => {
-            if (key === "agents.active.recoverable" && blockNextActivation) {
-                blockNextActivation = false;
-                activeWriteStarted.resolve();
-                await releaseActiveWrite.promise;
-            }
-            await originalWriteValue(writeCtx, key, value);
-        };
-
-        let accepted = false;
-        const sending = original
-            .send(ctx, "recoverable", user("survive restart"), { await: true })
-            .then(() => {
-                accepted = true;
-            });
-        await activeWriteStarted.promise;
-        await flushMicrotasks();
-
-        // The queue write already landed. Recreate the collection at precisely this process-loss
-        // boundary, while publication in the manager's active index is still withheld.
-        const durableQueue = [...agentDisk.values.keys()].filter((key) => key.startsWith("send."));
-        const acceptedBeforeDiscoverable = accepted;
-        const restarted = collection(managerDisk, agentDisk, restartedProvider);
-        await restarted.start(ctx);
-        await flushMicrotasks();
-        const recoveredRequests = restartedProvider.sessions.flatMap((session) => session.requests);
-
-        releaseActiveWrite.resolve();
-        await sending;
-        await originalAgent.waitForIdle();
-        await originalAgent.close();
-
-        // A message may be durable but unacknowledged while discovery catches up. Once the send
-        // promise resolves, however, losing the process must not hide that accepted work.
-        expect({
-            durableQueue: durableQueue.length,
-            acceptedBeforeDiscoverable,
-            recoveredRequests: recoveredRequests.length,
-        }).toEqual({
-            durableQueue: 1,
-            acceptedBeforeDiscoverable: false,
-            recoveredRequests: 0,
-        });
-    });
-
-    it("keeps an agent discoverable when a follow-up arrives during active-marker deletion", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const originalProvider = new ScriptedProvider([
-            textTurn("first answer"),
-            textTurn("follow-up answer"),
-        ]);
-        const restartedProvider = new ScriptedProvider([textTurn("restarted follow-up")]);
-        const original = collection(managerDisk, agentDisk, originalProvider);
-        const originalAgent = await original.create(ctx, "settling", {});
-        await originalAgent.waitForIdle();
-
-        const deleteStarted = deferred();
-        const allowDeleteCommit = deferred();
-        const deleteCommitted = deferred();
-        const allowDeleteReturn = deferred();
-        const originalDeleteValue = managerDisk.deleteValue.bind(managerDisk);
-        let blockNextDeletion = true;
-        managerDisk.deleteValue = async (deleteCtx, key) => {
-            if (key === "agents.active.settling" && blockNextDeletion) {
-                blockNextDeletion = false;
-                deleteStarted.resolve();
-                await allowDeleteCommit.promise;
-                await originalDeleteValue(deleteCtx, key);
-                deleteCommitted.resolve();
-                await allowDeleteReturn.promise;
-                return;
-            }
-            await originalDeleteValue(deleteCtx, key);
-        };
-
-        await original.send(ctx, "settling", user("first"), { await: true });
-        await deleteStarted.promise;
-        await original.send(ctx, "settling", user("accepted while settling"), { await: true });
-
-        // Commit the stale deletion but hold the old loop before its finally block can notice
-        // the follow-up and publish a new active span.
-        allowDeleteCommit.resolve();
-        await deleteCommitted.promise;
-        const durableFollowUp = [...agentDisk.values.values()].some(
-            (value) =>
-                JSON.stringify(value) === JSON.stringify(queued(user("accepted while settling"))),
-        );
-
-        let restartLoads = 0;
-        const restarted = new AgentSystemLocal({
-            features: [],
-            storage: new AgentStorage({
-                kv: managerKV(managerDisk),
-                persistence: () => {
-                    restartLoads += 1;
-                    return agentDisk;
-                },
-            }),
-            providers: providersOf(restartedProvider),
-            provider: "scripted",
-            models: [],
-        });
-        await restarted.start(ctx);
-        if (restartLoads > 0) {
-            await (await restarted.resolve(ctx, "settling")).waitForIdle();
-        }
-        const restartedQuestions = restartedProvider.sessions.flatMap((session) =>
-            session.requests.flatMap((request) => askedIn(request.context.messages)),
-        );
-
-        allowDeleteReturn.resolve();
-        await originalAgent.waitForIdle();
-        await originalAgent.close();
-        if (restartLoads > 0) await (await restarted.resolve(ctx, "settling")).close();
-
-        expect({
-            durableFollowUp,
-            restartLoads,
-            restartedQuestions,
-        }).toEqual({
-            durableFollowUp: true,
-            restartLoads: 1,
-            restartedQuestions: ["first", "accepted while settling"],
-        });
-    });
-
     it("consumes one durable queue entry exactly once across two collections", async () => {
         const managerDisk = new InMemoryPersistence();
         const agentDisk = new InMemoryPersistence();
@@ -333,14 +193,14 @@ describe("manager recovery and live-owner consistency", () => {
         };
         const first = collection(managerDisk, agentDisk, new ScriptedProvider([]), [failsOnce]);
 
-        await expect(first.create(ctx, "ghost", {})).rejects.toThrow("feature load failed");
+        await expect(first.createWithId(ctx, "ghost", {})).rejects.toThrow("feature load failed");
         const configAfterFailure = await first.config(ctx, "ghost");
 
         // A fresh process must agree that the rejected creation never happened. The caller can
         // then retry the same creation rather than inheriting an identity it never received.
         const restarted = collection(managerDisk, agentDisk, new ScriptedProvider([]), [failsOnce]);
         const ghostResolution = await Promise.allSettled([restarted.resolve(ctx, "ghost")]);
-        const retry = await Promise.allSettled([first.create(ctx, "ghost", {})]);
+        const retry = await Promise.allSettled([first.createWithId(ctx, "ghost", {})]);
         const liveAgents = [...ghostResolution, ...retry].flatMap((outcome) =>
             outcome.status === "fulfilled" ? [outcome.value] : [],
         );

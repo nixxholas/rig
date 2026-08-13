@@ -43,14 +43,14 @@ describe("durability under concurrent callers", () => {
         const disk = new InMemoryPersistence();
         const providers = new AgentProviders();
         providers.add("responding", new RespondingProvider(), "gym");
-        const build = () =>
-            new AgentBase(ctx, {
+        const build = async () =>
+            await AgentBase.create(ctx, {
                 id: "concurrent-agent",
                 providers,
                 provider: "responding",
                 persistence: disk,
             });
-        const agent = build();
+        const agent = await build();
 
         // Everything at once, with no ordering between the callers beyond what the agent
         // imposes on itself.
@@ -79,7 +79,7 @@ describe("durability under concurrent callers", () => {
         await agent.close();
 
         // A restart finishes whatever the interruptions left owed, the way a supervisor would.
-        const resumed = build();
+        const resumed = await build();
         resumed.start();
         await resumed.waitForIdle();
         await resumed.close();

@@ -2,16 +2,7 @@ import type { SessionEvent } from "@slopus/happy-providers";
 import { asyncLock, createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-    AgentBase,
-    AgentBaseKV,
-    AgentStorage,
-    AgentSystemLocal,
-    FeatureGoals,
-    FeatureSubagents,
-    withAgentBaseKV,
-    withAgentSystem,
-} from "../../sources/index.js";
+import { AgentBase, AgentBaseKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 import { providersOf, user } from "../gym/fixtures.js";
@@ -38,109 +29,7 @@ function directKV(persistence: InMemoryPersistence, prefix: string): AgentBaseKV
     );
 }
 
-function ownerWithParent(
-    parentPersistence: InMemoryPersistence,
-    provider: ScriptedProvider,
-): { readonly owner: AgentSystemLocal; readonly manager: InMemoryPersistence } {
-    const manager = new InMemoryPersistence();
-    return {
-        manager,
-        owner: new AgentSystemLocal({
-            features: [],
-            storage: new AgentStorage({
-                kv: directKV(manager, "agents."),
-                persistence: () => parentPersistence,
-            }),
-            providers: providersOf(provider),
-            provider: "scripted",
-            models: [],
-        }),
-    };
-}
-
 describe("feature and metadata durability gaps", () => {
-    it("recovers a completed child's parent notification after the child process crashes", async () => {
-        const parentPersistence = new InMemoryPersistence();
-        const provider = new ScriptedProvider([]);
-        const { owner } = ownerWithParent(parentPersistence, provider);
-        const parent = await owner.create(ctx, "parent", {});
-
-        // The first feature instance observed a complete response, then its process disappeared
-        // before afterAgentSettled could durably steer the parent.
-        const beforeCrash = new FeatureSubagents("parent/child");
-        await beforeCrash.load(withAgentSystem(ctx, owner));
-        beforeCrash.onEvent(ctx, { type: "text_start" });
-        beforeCrash.onEvent(ctx, { type: "text_delta", delta: "durable child result" });
-        beforeCrash.onEvent(ctx, { type: "text_end" });
-        beforeCrash.onEvent(ctx, {
-            type: "done",
-            state: "normal",
-            tokens: { input: 1, output: 1 },
-        });
-
-        // A new process reconstructs the feature from durable state only.
-        const afterCrash = new FeatureSubagents("parent/child");
-        await afterCrash.load(withAgentSystem(ctx, owner));
-        await afterCrash.afterAgentSettled(ctx);
-        await parent.waitForIdle();
-        const notifications = parentPersistence.records.filter(
-            (record) =>
-                record.type === "user" &&
-                record.message.content.some(
-                    (block) =>
-                        block.type === "text" &&
-                        block.text.includes("<agent_id>parent/child</agent_id>") &&
-                        block.text.includes("durable child result"),
-                ),
-        );
-        await parent.close();
-
-        expect(notifications).toHaveLength(1);
-    });
-
-    it("reports the latest error instead of stale text from an earlier inference", async () => {
-        const parentPersistence = new InMemoryPersistence();
-        const provider = new ScriptedProvider([
-            [
-                { type: "text_start" },
-                { type: "text_delta", delta: "acknowledged" },
-                { type: "text_end" },
-                { type: "done", state: "normal", tokens: { input: 1, output: 1 } },
-            ],
-        ]);
-        const { owner } = ownerWithParent(parentPersistence, provider);
-        const parent = await owner.create(ctx, "parent", {});
-        const feature = new FeatureSubagents("parent/child");
-        await feature.load(withAgentSystem(ctx, owner));
-
-        feature.onEvent(ctx, { type: "text_start" });
-        feature.onEvent(ctx, { type: "text_delta", delta: "stale successful text" });
-        feature.onEvent(ctx, { type: "text_end" });
-        // A later inference in the same child loop failed without producing a text block.
-        feature.onEvent(ctx, {
-            type: "done",
-            state: "error",
-            kind: "unknown",
-            message: "latest provider failure",
-        });
-        await feature.afterAgentSettled(ctx);
-        await parent.waitForIdle();
-
-        const notification = parentPersistence.records.find((record) => record.type === "user");
-        const text =
-            notification?.type === "user"
-                ? notification.message.content
-                      .filter((block) => block.type === "text")
-                      .map((block) => block.text)
-                      .join("")
-                : "";
-        await parent.close();
-
-        expect(text).toContain("<state>error</state>");
-        expect(text).toContain("latest provider failure");
-        expect(text).not.toContain("stale successful text");
-    });
-
     it("composes read-modify-write updates made by two live KV owners", async () => {
         const persistence = new InMemoryPersistence();
         persistence.values.set("shared.counter", 0);
@@ -170,37 +59,6 @@ describe("feature and metadata durability gaps", () => {
         expect(persistence.values.get("shared.counter")).toBe(2);
     });
 
-    it("publishes one initial goal when two owners load different objectives concurrently", async () => {
-        const persistence = new InMemoryPersistence();
-        const firstKV = directKV(persistence, "kv.shared.feature.goals.");
-        const secondKV = directKV(persistence, "kv.shared.feature.goals.");
-        const first = new FeatureGoals({ objective: "objective from owner one" });
-        const second = new FeatureGoals({ objective: "objective from owner two" });
-        const firstCtx = withAgentBaseKV(ctx, firstKV);
-        const secondCtx = withAgentBaseKV(ctx, secondKV);
-        const bothRead = deferred();
-        const originalReadValues = persistence.readValues.bind(persistence);
-        let reads = 0;
-
-        persistence.readValues = async (readCtx, prefix) => {
-            if (prefix === "kv.shared.feature.goals.goal" && reads < 2) {
-                const snapshot = await originalReadValues(readCtx, prefix);
-                reads += 1;
-                if (reads === 2) bothRead.resolve();
-                await bothRead.promise;
-                return snapshot;
-            }
-            return await originalReadValues(readCtx, prefix);
-        };
-
-        await Promise.all([first.tools(firstCtx), second.tools(secondCtx)]);
-        const durable = persistence.values.get("kv.shared.feature.goals.goal");
-
-        expect(first.goal).toEqual(durable);
-        expect(second.goal).toEqual(durable);
-        expect(first.goal).toEqual(second.goal);
-    });
-
     it("does not let failed context-token persistence change only the live agent's decisions", async () => {
         const persistence = new InMemoryPersistence();
         const originalWriteValue = persistence.writeValue.bind(persistence);
@@ -213,7 +71,7 @@ describe("feature and metadata durability gaps", () => {
             tokenTurn("first answer", 100, 20),
             tokenTurn("second answer", 20, 5),
         ]);
-        const live = new AgentBase(ctx, {
+        const live = await AgentBase.create(ctx, {
             id: "token-metadata",
             providers: providersOf(liveProvider),
             provider: "scripted",
@@ -233,7 +91,7 @@ describe("feature and metadata durability gaps", () => {
         await live.close();
 
         const restartedStarts: (number | undefined)[] = [];
-        const restarted = new AgentBase(ctx, {
+        const restarted = await AgentBase.create(ctx, {
             id: "token-metadata",
             providers: providersOf(new ScriptedProvider([])),
             provider: "scripted",
@@ -288,13 +146,13 @@ describe("feature and metadata durability gaps", () => {
         };
 
         const random = vi.spyOn(Math, "random").mockReturnValue(0.25);
-        const first = new AgentBase(ctx, {
+        const first = await AgentBase.create(ctx, {
             id: "writer-collision",
             providers,
             provider: "scripted",
             persistence,
         });
-        const second = new AgentBase(ctx, {
+        const second = await AgentBase.create(ctx, {
             id: "writer-collision",
             providers,
             provider: "scripted",

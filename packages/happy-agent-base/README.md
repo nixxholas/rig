@@ -9,6 +9,17 @@ assistant reply joins the history. When the model stops for tool calls, the agen
 and feeds the results back. The conversation is observable only through hooks; there is no
 external transcript or status surface.
 
+## Prepared host features
+
+The package also exports isolated `execution`, `git`, `workspaces`, `permissions`, `user-input`,
+`image-generation`, `search`, `secrets`, and `workflows` features. Each directory owns its tool
+array, agent hooks, direct public API, TypeBox boundary schemas, injected host ports, and focused
+tests. The features do not import one another; an application composes their ports at its own
+boundary.
+
+These features are additive migration preparation. They do not switch Rig to this package or
+remove `rig-execution`.
+
 ## Core API
 
 ```ts
@@ -62,6 +73,10 @@ interface AgentBaseHooks {
     onEvent?: (ctx: Context, event: SessionEvent) => void;
     instructions?: (ctx: Context) => MaybePromise<string>; // extends state.instructions
     tools?: (ctx: Context) => MaybePromise<readonly AnyAgentTool[]>; // extends state.tools
+    aroundToolExecution?: (
+        ctx: Context,
+        execution: AgentBaseToolExecution,
+    ) => MaybePromise<unknown>; // after argument validation, immediately around execute
     modelChanged?: (
         ctx: Context,
         change: AgentBaseModelChange,
@@ -79,6 +94,13 @@ interface AgentBaseHooks {
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
     afterAgentLoop?: (ctx: Context) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
     afterAgentSettled?: (ctx: Context) => MaybePromise<void>;
+}
+
+interface AgentBaseToolExecution {
+    callId: string;
+    tool: AnyAgentTool;
+    arguments: unknown;
+    execute(): Promise<unknown>; // repeated calls join the same downstream execution
 }
 
 interface AgentBaseInference {
@@ -105,6 +127,20 @@ interface AgentEnvironment {
 interface AgentConfig {
     environment?: AgentEnvironment; // all of it, or none of it
     features?: { [featureName: string]: { [key: string]: unknown } };
+}
+
+interface AgentFeatureConstructor {
+    new (agentId: string): AgentFeature; // individual: one instance per agent
+}
+
+interface SharedAgentFeatureConstructor {
+    new (): AgentFeature; // shared: one instance for the whole collection
+}
+
+interface AgentFeature {
+    name: string;
+    load?: (ctx: Context) => Promise<void>;
+    // Plus any subset of AgentBaseHooks. aroundToolExecution wrappers nest in feature order.
 }
 
 class AgentBaseKV {
@@ -142,6 +178,14 @@ type AgentFeatureAction =
 interface AgentTool<Args extends TSchema = TSchema, Result extends TSchema = TSchema> {
     // The provider-facing descriptor fields of SessionTool, with parameters typed as Args, plus:
     durable?: boolean;
+    autoPermissionInstructions?: string;
+    describeAutoPermissionAction?: (args: Static<Args>, ctx: Context) => string;
+    requiresAutoOrFullAccess?: boolean;
+    shouldReviewInAutoMode: (args: Static<Args>, ctx: Context) => boolean | Promise<boolean>;
+    shouldRunInFullAccessInAutoMode?: (
+        args: Static<Args>,
+        ctx: Context,
+    ) => boolean | Promise<boolean>;
     returnType: Result;
     execute(ctx: Context, args: Static<Args>): Promise<Static<Result>>;
     toLLM(result: Static<Result>): readonly SessionOutputBlock[];
@@ -278,9 +322,10 @@ compaction, which resolves on completion and rejects when the provider reports f
 the history untouched.
 
 Hooks receive the agent's context first. That context — shared by tool executions — is derived
-once at construction and carries the agent's provider registry ID, model, effort, and
-service tier — all serializable values — readable through the exported `agentBaseProvider`,
-`agentBaseModel`, `agentBaseEffort`, and `agentBaseServiceTier` accessors. The
+once at construction and carries the agent's ID, provider registry ID, model, effort, and
+service tier — all serializable values — readable through the exported `agentBaseId`,
+`agentBaseProvider`, `agentBaseModel`, `agentBaseEffort`, and `agentBaseServiceTier` accessors.
+The
 `instructions` and `tools` hooks extend the mutable state — the state comes first, the hook's
 answer follows — and are consulted for session creation, every inference request, compaction,
 and tool lookup. They are correctness hooks: a failure there, including two tools sharing one
@@ -320,11 +365,8 @@ context size, persisted under the `context` key and restored on load, so a resta
 how large its conversation is before it runs anything. A cancelled or failed response measures
 nothing and reports no counts, leaving the last real measurement in place; a completed
 compaction clears it, since the conversation it described is gone. Both turn hooks carry that
-size as `contextTokens`. `FeatureAutocompaction` is built on exactly this: from `beforeTurn`,
-when the size reaches the current model's threshold — its `autoCompactWindow` from the curated
-`knownModels` catalog, minus the output and summary reserves — it returns a `compact` action, so
-the compaction runs before the turn's first inference rather than after a turn that may still
-owe tool results. A model missing from the catalog is left alone.
+size as `contextTokens`, allowing an external feature to return a `compact` action from
+`beforeTurn` when its own threshold is reached.
 
 `abort` cancels the active turn; when idle it is a no-op. It returns once the cancellation has
 been signalled, and with `await: true` once the loop has actually unwound.
@@ -345,11 +387,13 @@ per-feature isolation so one throwing feature never silences the others, and lif
 concatenate with a failing feature losing only its own actions. Instructions and tools
 concatenate after the base state and stay loud: a failing feature fails the turn. For a model
 change every feature observes the change, the first returned handoff wins, and a feature
-failure during an incompatible change rejects the switch so the history survives.
+failure during an incompatible change rejects the switch so the history survives. `feature(name)`
+hands back the instance running under that name, which is how the owner of an agent reaches what
+belongs to it — a goal to pause, for instance.
 
 `AgentSystem` is the type of a collection of agents, and `AgentSystemLocal` is the implementation
 that lazily resolves and owns the `Agent` instances of one. An agent exists only
-once `create(ctx, agentId, config)` has been called for it: the `AgentConfig` is validated,
+once `create(ctx, config)` has generated its cuid2 identity: the `AgentConfig` is validated,
 persisted under the collection's storage, and then stays in effect for the agent's whole life,
 so `resolve` on an ID that was never created is an error and `create` on one that already
 exists is too. The configuration carries the environment the agent works on — `osVersion`,
@@ -358,7 +402,20 @@ about its machine is ever half-true — plus one opaque settings map per feature
 name; the agent never looks inside a feature's entry, so a feature validates its own against its
 own schema. Every context the agent derives carries the configuration, readable
 through the exported `agentConfig` and `agentFeatureConfig` accessors, from feature `load` all
-the way down to a tool execution. `start(ctx)` resolves and resumes every agent that was still
+the way down to a tool execution.
+
+A collection is given its features as two arrays, because there are two kinds. An **individual**
+feature is built once per agent — `new Feature(agentId)` — so it may hold that one agent's state
+and be configured for it alone. A **shared** feature is built once for the whole collection and
+handed to every agent it builds. A shared feature therefore learns which agent a hook is serving
+from the context — `agentBaseId`, the store on the context, and the agent's configuration —
+rather than from anything it was constructed with, and keeps what one run remembers keyed by
+that ID, dropping it when the agent settles. Its `load` runs once, before the first agent exists,
+on the collection's own context and so without any agent's configuration; a failed shared load
+is forgotten, so the next agent tries again rather than inheriting a collection that can never
+build one. Shared features come before the individual ones in every agent's feature list.
+
+`start(ctx)` resolves and resumes every agent that was still
 working when the previous process stopped, and `steer`, `send`, `abort`, and `compact` resolve
 an agent by ID before acting on it, forwarding the same options the agent takes.
 `featureState(feature)` hands a feature durable storage shared by every agent in the collection
@@ -366,9 +423,6 @@ and outliving all of them — an agent's own store belongs to its conversation a
 the ID is created again, so work one agent owes another lives here instead. `delete` closes an
 agent and releases its identity while leaving what it wrote in place; creating the ID again is
 what clears the store, so the new agent never wakes up inside its predecessor's conversation.
-`FeatureSubagents` creates each child explicitly, inheriting
-its parent's configuration, so a task name already in use fails the tool call instead of
-silently joining an existing child.
 
 Asking and waiting are separate everywhere. `steer`, `send`, `abort`, and `compact` all return
 once the agent has taken the request on, and `await: true` asks for the part only the run loop
@@ -383,20 +437,25 @@ because the tool it would wait for may be waiting for the caller. Note that
 an operation nobody waits for still reports nothing: a fire-and-forget `send` whose durable write
 fails is a message that silently never arrives.
 
-`AgentSystemRef` and `AgentRef` are the same collection seen from inside an agent. They are the
-same operations with the flag removed: not offered, and never passed on, so nothing reached
-through them can wait for any agent's loop. That is blunter than the agent's own check on
-purpose — the check is exact but depends on the caller's context being the right one, and a
-reference stored on a feature or used from a callback that outlived its hook carries no such
-guarantee. `close`, `waitForIdle`, `delete`, and `start` are absent entirely, and `create` and
-`resolve` hand back an `AgentRef` rather than the `Agent` that would carry them.
+`AgentSystemRef` and `AgentRef` are the same collection seen from inside an agent, and the only
+form of it a context ever carries: a collection puts a reference on every context it derives, so
+a feature hook or a tool — code some loop is waiting for — can never reach an operation that
+waits for a loop. `close`, `waitForIdle`, `delete`, and `start` are absent entirely, `create` and
+`resolve` hand back an `AgentRef` rather than the `Agent` that would carry them, and `compact`
+and `abort` are requests that return once they have been made. The returned `AgentRef.id` is the
+same system-generated cuid2 used for all later addressing.
 
-`FeatureSystem` injects the vendor base prompt for the agent's currently effective model and
-follows it with an `# Environment` section built from the configured environment: the working
-directory, platform, shell, and OS version, then the standing guidance about working in that
-environment. An agent created without an environment gets no section at all, so the model is
-never told a guessed working directory. `currentAgentEnvironment()` reads a complete environment
-from the running process, ready to hand to `create`.
+A message is the one thing a caller here is told about, because accepting one is a durable queue
+write rather than a turn: addressed to another agent, `steer` and `send` resolve once the message
+really is part of that agent's conversation and reject when the write fails, which is what lets a
+child know its parent has its report. Addressed to the agent the caller is running inside — whose
+loop would have to make that write — the message is queued and nothing is waited for. The
+context decides, since it names the agent the caller is in; a context naming none proves nothing
+and waits for nothing. The agent's own `await: true`, which also covers a finished compaction and
+an unwound turn, is never offered here and never passed on.
+
+`currentAgentEnvironment()` reads a complete environment from the running process, ready to hand
+to `create`.
 
 `AgentProviders` is a mutable registry of provider instances keyed by caller-supplied IDs, so the
 same provider class can be registered under several IDs. `add(id, provider, type)` registers an
@@ -545,23 +604,16 @@ a chaos seed and has its own focused test in `tests/blackbox/`:
 - **Two scopes could collide through a dot.** A feature named `alpha.beta` and the relative key
   `beta.state` under the feature `alpha` produced the same absolute key, so one silently read
   and overwrote the other's state. Scope segments are now escaped, and each is exactly one level.
-- **A goal could be completed and paused at once.** Pause and resume read the status, then wrote
-  from that stale read, so a transition racing a completion could revive a finished goal. A
-  transition now reads, checks, and writes under one hold of the store's lock.
-- **A child's completion could be lost.** The subagent feature cleared the outcome before
-  notifying the parent, so a failed notification wrote it off entirely. The outcome is now
-  forgotten only once the parent has durably accepted it.
 
 ## Real gym
 
 `tests/real-gym/` runs the agent against live models instead of scripted ones. Each scenario
 goes through an `AgentSystemLocal` collection, exactly the way the product assembles an agent: the agent
 is created with its configuration — the real machine environment and the gym's own feature
-config — and resolved from the collection, which loads `FeatureSystem`, `FeatureModels`,
-`FeatureSubagents`, `FeatureAutocompaction`, and a `FeatureGymHarness` that contributes one real
-`record_answer` tool. So the assembled system prompt, the tool set, the loop, and the durable
-records are all the product's own, and the credentials are the ones the installed Codex and
-Claude Code assistants already manage, resolved in the same order Rig itself resolves them.
+config — and resolved from the collection, which loads a shared `FeatureGymHarness` that
+contributes one real `record_answer` tool. So the assembled instructions, tool set, loop, and
+durable records are all the product's own, and the credentials are the ones the installed Codex
+and Claude Code assistants already manage, resolved in the same order Rig itself resolves them.
 Nothing is mocked, so the suite runs only when it is asked for by name:
 
 ```sh

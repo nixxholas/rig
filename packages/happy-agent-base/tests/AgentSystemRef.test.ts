@@ -9,6 +9,7 @@ import {
     AgentSystemLocal,
     AgentSystemRef,
     defineAgentTool,
+    withAgentContext,
     type AgentFeature,
     type AgentFeatureConstructor,
 } from "../sources/index.js";
@@ -53,8 +54,8 @@ describe("AgentSystemRef", () => {
         const system = localSystem(new ScriptedProvider([textTurn("answered")]), stores);
         const ref = new AgentSystemRef(system);
 
-        const created = await ref.create(ctx, "referenced", {});
-        const resolved = await ref.resolve(ctx, "referenced");
+        const created = await ref.create(ctx, {});
+        const resolved = await ref.resolve(ctx, created.id);
 
         expect({
             created: created instanceof AgentRef,
@@ -65,11 +66,12 @@ describe("AgentSystemRef", () => {
         }).toEqual({
             created: true,
             resolved: true,
-            id: "referenced",
+            id: created.id,
             reachable: ["abort", "compact", "constructor", "id", "send", "steer"],
         });
 
-        await system.delete(ctx, "referenced");
+        expect(created.id).toMatch(/^[a-z0-9]+$/);
+        await system.delete(ctx, created.id);
     });
 
     it("sends and steers through the reference exactly as the agent does", async () => {
@@ -78,11 +80,11 @@ describe("AgentSystemRef", () => {
         const system = localSystem(provider, stores);
         const ref = new AgentSystemRef(system);
 
-        const agent = await ref.create(ctx, "talker", {});
+        const agent = await ref.create(ctx, {});
         await agent.send(ctx, user("hello"));
-        await (await system.resolve(ctx, "talker")).waitForIdle();
+        await (await system.resolve(ctx, agent.id)).waitForIdle();
         await agent.steer(ctx, user("and this"));
-        await (await system.resolve(ctx, "talker")).waitForIdle();
+        await (await system.resolve(ctx, agent.id)).waitForIdle();
 
         const asked = provider.sessions.flatMap((session) =>
             session.requests.flatMap((request) =>
@@ -95,9 +97,49 @@ describe("AgentSystemRef", () => {
                 ),
             ),
         );
-        await system.delete(ctx, "talker");
+        await system.delete(ctx, agent.id);
 
         expect(asked).toEqual(["hello", "hello", "and this"]);
+    });
+
+    it("reports whether another agent accepted a message, and never waits on the caller's own", async () => {
+        const stores = new Map<string, InMemoryPersistence>();
+        const system = localSystem(new ScriptedProvider([textTurn("answered")]), stores);
+        const ref = new AgentSystemRef(system);
+        const target = await ref.create(ctx, {});
+        const store = stores.get(target.id);
+        if (store === undefined) throw new Error("The agent's store was not created.");
+        const writeValue = store.writeValue.bind(store);
+        store.writeValue = (writeCtx, key, value) =>
+            key.startsWith("steering.")
+                ? Promise.reject(new Error("queue write unavailable"))
+                : writeValue(writeCtx, key, value);
+
+        // From another agent, acceptance is a durable write this caller may be told about.
+        const fromElsewhere = withAgentContext(ctx, { id: "caller", provider: "scripted" });
+        const elsewhere = await ref
+            .steer(fromElsewhere, target.id, user("from another agent"))
+            .then(() => "accepted")
+            .catch((error: unknown) => (error as Error).message);
+
+        // From inside the target's own loop, the write is the loop's to make: the message is
+        // queued and nothing is waited for.
+        const fromItself = withAgentContext(ctx, {
+            id: target.id,
+            provider: "scripted",
+        });
+        const itself = await ref
+            .steer(fromItself, target.id, user("from itself"))
+            .then(() => "queued")
+            .catch((error: unknown) => (error as Error).message);
+
+        store.writeValue = writeValue;
+        await system.delete(ctx, target.id);
+
+        expect({ elsewhere, itself }).toEqual({
+            elsewhere: "queue write unavailable",
+            itself: "queued",
+        });
     });
 
     it("returns from a compaction as soon as it is asked for", async () => {
@@ -105,9 +147,9 @@ describe("AgentSystemRef", () => {
         const provider = new ScriptedProvider([textTurn("answered")]);
         const system = localSystem(provider, stores);
         const ref = new AgentSystemRef(system);
-        const agent = await ref.create(ctx, "compacting", {});
+        const agent = await ref.create(ctx, {});
         await agent.send(ctx, user("hello"));
-        const live = await system.resolve(ctx, "compacting");
+        const live = await system.resolve(ctx, agent.id);
         await live.waitForIdle();
         const session = provider.sessions[0];
         if (session === undefined) throw new Error("The provider session was not created.");
@@ -124,7 +166,7 @@ describe("AgentSystemRef", () => {
         const compactedWhenAsked = session.compactions.length;
         await live.waitForIdle();
         const compactedAfterTheTurn = session.compactions.length;
-        await system.delete(ctx, "compacting");
+        await system.delete(ctx, agent.id);
 
         // The request is the whole answer: it resolves before the compaction has run, which is
         // exactly what makes it safe to ask for from inside the turn that would run it.
@@ -158,6 +200,7 @@ describe("AgentSystemRef", () => {
                     name: "compact_me",
                     parameters: Type.Object({}),
                     returnType: Type.Object({}),
+                    shouldReviewInAutoMode: () => false,
                     execute: async (callCtx: Context) => {
                         try {
                             await reference.compact(callCtx, this.#agentId);
@@ -173,7 +216,7 @@ describe("AgentSystemRef", () => {
         const system = localSystem(provider, stores, [feature]);
         const reference = new AgentSystemRef(system);
 
-        const agent = await system.create(ctx, "self", {});
+        const agent = await system.createWithId(ctx, "self", {});
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
         await system.delete(ctx, "self");
@@ -213,7 +256,7 @@ describe("AgentSystemRef", () => {
         const system = localSystem(provider, stores, [feature]);
         const reference = new AgentSystemRef(system);
 
-        const agent = await system.create(ctx, "aborter", {});
+        const agent = await system.createWithId(ctx, "aborter", {});
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
         await system.delete(ctx, "aborter");

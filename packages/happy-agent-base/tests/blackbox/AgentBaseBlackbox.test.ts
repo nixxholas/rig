@@ -10,10 +10,10 @@ import { describe, expect, it } from "vitest";
 
 import {
     AgentBase,
-    agentBaseEffort,
-    agentBaseModel,
-    agentBaseProvider,
-    agentBaseServiceTier,
+    agentEffort,
+    agentModel,
+    agentProvider,
+    agentServiceTier,
     defineAgentTool,
     type AnyAgentTool,
 } from "../../sources/index.js";
@@ -127,7 +127,7 @@ describe("AgentBase black-box stream and request behavior", () => {
         ];
         const observed: SessionEvent[] = [];
         const provider = new ScriptedProvider([[...scriptedEvents]]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "stream-observer",
             providers: providersOf(provider),
             provider: "scripted",
@@ -157,11 +157,12 @@ describe("AgentBase black-box stream and request behavior", () => {
             description: "Reads a file.",
             parameters: Type.Object({ path: Type.String() }),
             returnType: Type.Object({ value: Type.String() }),
+            shouldReviewInAutoMode: () => false,
             execute: async () => ({ value: "contents" }),
             toLLM: (result) => [{ type: "text", text: result.value }],
         });
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "request-forwarding",
             providers: providersOf(provider),
             provider: "scripted",
@@ -193,10 +194,10 @@ describe("AgentBase black-box stream and request behavior", () => {
         const requestContext = session?.requestContexts[0];
         expect(requestContext).toBeDefined();
         if (requestContext !== undefined) {
-            expect(agentBaseModel(requestContext)).toBe("model-under-test");
-            expect(agentBaseEffort(requestContext)).toBe("xhigh");
-            expect(agentBaseProvider(requestContext)).toBe("scripted");
-            expect(agentBaseServiceTier(requestContext)).toBe("priority");
+            expect(agentModel(requestContext)).toBe("model-under-test");
+            expect(agentEffort(requestContext)).toBe("xhigh");
+            expect(agentProvider(requestContext)).toBe("scripted");
+            expect(agentServiceTier(requestContext)).toBe("priority");
         }
         await agent.close();
     });
@@ -218,7 +219,7 @@ describe("AgentBase black-box stream and request behavior", () => {
         const events: SessionEvent[] = [done];
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([[done]]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: `done-${done.state}`,
             providers: providersOf(provider),
             provider: "scripted",
@@ -241,7 +242,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             [{ type: "done", state: "normal", tokens: { input: 1, output: 0 } }],
             textTurn("second reply"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "empty-assistant",
             providers: providersOf(provider),
             provider: "scripted",
@@ -276,7 +277,7 @@ describe("AgentBase black-box stream and request behavior", () => {
                 { type: "done", state: "normal", tokens: { input: 1, output: 0 } },
             ],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "empty-text-block",
             providers: providersOf(provider),
             provider: "scripted",
@@ -300,7 +301,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             textTurn("two"),
             textTurn("three"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "sequential-turns",
             providers: providersOf(provider),
             provider: "scripted",
@@ -342,7 +343,7 @@ describe("AgentBase black-box stream and request behavior", () => {
         })();
         const provider = new ScriptedProvider([textTurn("eventually")]);
         let done = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "send-timing",
             providers: providersOf(provider),
             provider: "scripted",
@@ -393,7 +394,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             { type: "user", message: user("question two") },
         ]);
         const provider = new ScriptedProvider([textTurn("new answer"), textTurn("next answer")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "replay-boundaries",
             providers: providersOf(provider),
             provider: "scripted",
@@ -433,7 +434,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         persistence.values.set("send.00000000000001.000000", queued(user("old one")));
         persistence.values.set("send.00000000000002.000000", queued(user("old two")));
         const provider = new ScriptedProvider([textTurn("caught up")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "pending-replay",
             providers: providersOf(provider),
             provider: "scripted",
@@ -473,7 +474,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         };
         const events: SessionEvent[] = [];
         const provider = new ScriptedProvider([textTurn("never")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "pending-atomicity",
             providers: providersOf(provider),
             provider: "scripted",
@@ -524,7 +525,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             { type: "tool", message: result },
         ]);
         const provider = new ScriptedProvider([textTurn("continued")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "tool-result-restart",
             providers: providersOf(provider),
             provider: "scripted",
@@ -582,13 +583,14 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                 name,
                 durable,
                 returnType: Type.Object({ value: Type.String() }),
+                shouldReviewInAutoMode: () => false,
                 execute: async () => {
                     executions.push(name);
                     return { value: `${name} result` };
                 },
                 toLLM: (result) => [{ type: "text", text: result.value }],
             });
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "partial-tool-restart",
             providers: providersOf(provider),
             provider: "scripted",
@@ -639,7 +641,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         ]);
         const provider = new ScriptedProvider([textTurn("answered")]);
         const executions: string[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "undispatched-tool-restart",
             providers: providersOf(provider),
             provider: "scripted",
@@ -650,6 +652,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                         name: "fragile",
                         durable: false,
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             executions.push("fragile");
                             return Promise.resolve({ value: "fragile result" });
@@ -699,7 +702,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             textTurn("recovered"),
         ]);
         const executions: string[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "stranded-call",
             providers: providersOf(provider),
             provider: "scripted",
@@ -709,6 +712,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                     defineAgentTool({
                         name: "never-run",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             executions.push("never-run");
                             return Promise.resolve({});
@@ -758,7 +762,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             { type: "block", block: { type: "text", text: "answered" } },
         ]);
         const provider = new ScriptedProvider([]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "buried-call",
             providers: providersOf(provider),
             provider: "scripted",
@@ -796,7 +800,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             { type: "system", message: system("The last turn failed: the store fell over.") },
         ]);
         const provider = new ScriptedProvider([textTurn("here is the answer")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "failed-turn-restart",
             providers: providersOf(provider),
             provider: "scripted",
@@ -825,7 +829,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             },
         ]);
         const provider = new ScriptedProvider([textTurn("unwanted")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "restart-on-compaction",
             providers: providersOf(provider),
             provider: "scripted",
@@ -851,9 +855,9 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             provider: "scripted",
             persistence,
         };
-        const first = new AgentBase(ctx, options);
+        const first = await AgentBase.create(ctx, options);
         await first.send(ctx, user("first"), { await: true });
-        const second = new AgentBase(ctx, options);
+        const second = await AgentBase.create(ctx, options);
         await second.send(ctx, user("second"), { await: true });
 
         const stored = [...persistence.pending.entries()]
@@ -894,13 +898,14 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                 name: "durable",
                 durable: true,
                 returnType: Type.Object({ value: Type.String() }),
+                shouldReviewInAutoMode: () => false,
                 execute: async () => {
                     firstExecutions += 1;
                     return { value: "result" };
                 },
                 toLLM: (result) => [{ type: "text", text: result.value }],
             });
-        const firstAgent = new AgentBase(ctx, {
+        const firstAgent = await AgentBase.create(ctx, {
             id: "crash-before-result",
             providers: providersOf(firstProvider),
             provider: "scripted",
@@ -923,7 +928,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         await firstAgent.close();
 
         const secondProvider = new ScriptedProvider([textTurn("recovered")]);
-        const secondAgent = new AgentBase(ctx, {
+        const secondAgent = await AgentBase.create(ctx, {
             id: "recover-after-crash",
             providers: providersOf(secondProvider),
             provider: "scripted",
@@ -976,6 +981,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             name: "known",
             parameters: Type.Object({ path: Type.String() }),
             returnType: Type.Object({ value: Type.String() }),
+            shouldReviewInAutoMode: () => false,
             execute: async () => ({ value: "ok" }),
             toLLM: (result) => [{ type: "text", text: result.value }],
         });
@@ -986,7 +992,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         tools: readonly AnyAgentTool[] = [knownTool()],
     ): Promise<void> {
         const provider = new ScriptedProvider([toolCallTurn([call]), textTurn("follow-up")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: `invalid-${call.callId}`,
             providers: providersOf(provider),
             provider: "scripted",
@@ -1041,7 +1047,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             toolCallTurn([{ callId: "empty", name: "empty_args", arguments: " \n\t" }]),
             textTurn("done"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "empty-arguments",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1051,6 +1057,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                     defineAgentTool({
                         name: "empty_args",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: async (_toolCtx, args) => {
                             received = args;
                             return { value: "accepted" };
@@ -1078,6 +1085,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             namespace: "web",
             namespaceDescription: "Web tools",
             returnType: Type.Object({ answer: Type.String() }),
+            shouldReviewInAutoMode: () => false,
             execute: async () => {
                 executed += 1;
                 return { answer: "found" };
@@ -1088,7 +1096,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             toolCallTurn([{ callId: "namespaced", name: "search", namespace: "web" }]),
             textTurn("done"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "namespaced-tools",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1112,6 +1120,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             name: "search",
             namespace: "files",
             returnType: Type.Object({ answer: Type.String() }),
+            shouldReviewInAutoMode: () => false,
             execute: async () => ({ answer: "wrong tool" }),
             toLLM: (result) => [{ type: "text", text: result.answer }],
         });
@@ -1128,6 +1137,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         const invalidResultTool = defineAgentTool({
             name: "invalid_result",
             returnType: Type.Object({ value: Type.String() }),
+            shouldReviewInAutoMode: () => false,
             execute: async () => ({ value: 123 }) as unknown as { value: string },
             toLLM: () => {
                 rendered += 1;
@@ -1137,6 +1147,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         const errorResultTool = defineAgentTool({
             name: "structured_error",
             returnType: Type.Object({ value: Type.String(), failed: Type.Boolean() }),
+            shouldReviewInAutoMode: () => false,
             execute: async () => ({ value: "warning", failed: true }),
             toLLM: (result) => [{ type: "text", text: result.value }],
             isError: (result) => result.failed,
@@ -1148,7 +1159,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             ]),
             textTurn("handled"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "result-validation",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1175,7 +1186,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             ]),
             textTurn("continued"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "throwing-tool",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1185,6 +1196,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                     defineAgentTool({
                         name: "throws",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => {
                             throw new Error("execute failed");
                         },
@@ -1193,6 +1205,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                     defineAgentTool({
                         name: "works",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => ({ value: "ok" }),
                         toLLM: (result) => [{ type: "text", text: result.value }],
                     }),
@@ -1234,7 +1247,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                 { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
             ],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "server-settled",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1245,6 +1258,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                         name: "server_tool",
                         server: { type: "native_server" },
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => {
                             executed = true;
                             return {};
@@ -1282,7 +1296,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         const provider = new ScriptedProvider([
             [{ type: "done", state: "tool_call", tokens: { input: 1, output: 0 } }],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "empty-tool-batch",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1311,6 +1325,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             defineAgentTool({
                 name: call.name,
                 returnType: Type.Object({ value: Type.String() }),
+                shouldReviewInAutoMode: () => false,
                 execute: async () => {
                     if (index === 0) {
                         keysAtFirstStart = [...persistence.values.keys()].filter((key) =>
@@ -1330,7 +1345,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             }),
         );
         const provider = new ScriptedProvider([toolCallTurn(calls), textTurn("all done")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "parallel-order",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1367,7 +1382,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
 describe("AgentBase black-box lifecycle behavior", () => {
     it("resolves waitForIdle immediately when idle and rejects sends and starts after close", async () => {
         const provider = new ScriptedProvider([]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "close-contract",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1386,7 +1401,7 @@ describe("AgentBase black-box lifecycle behavior", () => {
 
     it("destroys the provider session once when closing an active session", async () => {
         const provider = new ScriptedProvider([textTurn("reply")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "destroy-contract",
             providers: providersOf(provider),
             provider: "scripted",

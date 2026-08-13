@@ -118,7 +118,7 @@ describe("hook and event re-entrancy", () => {
         let turnsStarted = 0;
         let turnsFinished = 0;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "event-self-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -173,7 +173,7 @@ describe("hook and event re-entrancy", () => {
         let steering: Promise<void> | undefined;
         let laterSend: Promise<void> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "event-self-steer",
             providers: providersOf(provider),
             provider: "scripted",
@@ -204,7 +204,7 @@ describe("hook and event re-entrancy", () => {
         const events: SessionEvent[] = [];
         let aborting: Promise<void> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "event-self-abort",
             providers: providersOf(new ScriptedProvider([textTurn("must be interrupted")])),
             provider: "scripted",
@@ -234,7 +234,7 @@ describe("hook and event re-entrancy", () => {
         const hookEntered = deferred();
         let closing: Promise<void> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "event-self-close",
             providers: providersOf(provider),
             provider: "scripted",
@@ -281,7 +281,7 @@ describe("hook and event re-entrancy", () => {
         const hookEntered = deferred();
         let compacting: Promise<Outcome<void>> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "event-self-compact",
             providers: providersOf(provider),
             provider: "scripted",
@@ -317,7 +317,7 @@ describe("hook and event re-entrancy", () => {
         let turnsFinished = 0;
         let sent = false;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "before-turn-self-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -357,7 +357,7 @@ describe("hook and event re-entrancy", () => {
     it("does not deadlock when beforeInference awaits an abort of its own turn", async () => {
         const hookEntered = deferred();
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "before-inference-self-abort",
             providers: providersOf(new ScriptedProvider([textTurn("must not run")])),
             provider: "scripted",
@@ -383,7 +383,7 @@ describe("hook and event re-entrancy", () => {
         let turnsFinished = 0;
         let inferences = 0;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "after-inference-self-steer",
             providers: providersOf(provider),
             provider: "scripted",
@@ -427,7 +427,7 @@ describe("hook and event re-entrancy", () => {
     it("does not deadlock when afterTurn awaits closing its own agent", async () => {
         const hookEntered = deferred();
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "after-turn-self-close",
             providers: providersOf(new ScriptedProvider([textTurn("complete first")])),
             provider: "scripted",
@@ -453,7 +453,7 @@ describe("hook and event re-entrancy", () => {
         let settlements = 0;
         let selfSend: Promise<void> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "settled-self-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -496,7 +496,7 @@ describe("hook and event re-entrancy", () => {
         const hookEntered = deferred();
         let compacting: Promise<Outcome<void>> | undefined;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "settled-self-compact",
             providers: providersOf(provider),
             provider: "scripted",
@@ -546,7 +546,7 @@ describe("hook and event re-entrancy", () => {
             new ScriptedProvider([textTurn("after switch"), textTurn("after self-send")]),
             [reentrantFeature],
         );
-        const agent = await owner.create(ctx, "self", {});
+        const agent = await owner.createWithId(ctx, "self", {});
         await agent.waitForIdle();
 
         await owner.send(ctx, "self", user("switch"), { await: true, model: "openai/gpt" });
@@ -577,8 +577,8 @@ describe("hook and event re-entrancy", () => {
         };
         const provider = new ScriptedProvider([textTurn("target"), textTurn("source")]);
         const owner = collection(managerDisk, disks, provider, [reentrantFeature]);
-        const source = await owner.create(ctx, "source", {});
-        const target = await owner.create(ctx, "target", {});
+        const source = await owner.createWithId(ctx, "source", {});
+        const target = await owner.createWithId(ctx, "target", {});
         await Promise.all([source.waitForIdle(), target.waitForIdle()]);
 
         await owner.send(ctx, "source", user("switch"), { await: true, model: "openai/gpt" });

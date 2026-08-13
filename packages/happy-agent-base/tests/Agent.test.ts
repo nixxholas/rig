@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { Agent, agentBaseKV, defineAgentTool, type AgentFeature } from "../sources/index.js";
+import { Agent, agentKV, defineAgentTool, type AgentFeature } from "../sources/index.js";
 import { providersOf, system, textTurn, user } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
@@ -14,6 +14,7 @@ function tool(name: string) {
     return defineAgentTool({
         name,
         returnType: Type.Object({}),
+        shouldReviewInAutoMode: () => false,
         execute: () => Promise.resolve({}),
         toLLM: () => [{ type: "text", text: "ok" }],
     });
@@ -23,7 +24,57 @@ function feature(hooks: Omit<AgentFeature, "load">): AgentFeature {
     return { ...hooks, load: () => Promise.resolve() };
 }
 
+function toolCallTurn(callId: string, name: string, argumentsJson: string): SessionEvent[] {
+    return [
+        { type: "toolcall_start", callId, name },
+        { type: "toolcall_end", callId, arguments: argumentsJson },
+        { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
+    ];
+}
+
 describe("Agent", () => {
+    it("preserves each tool's Auto review and Full-access policy through feature assembly", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const reviewedTool = defineAgentTool({
+            name: "publish",
+            parameters: Type.Object({ target: Type.String() }),
+            returnType: Type.Object({}),
+            autoPermissionInstructions:
+                "In Auto mode, describe why publishing this target is necessary.",
+            describeAutoPermissionAction: ({ target }) => `publish ${JSON.stringify(target)}`,
+            requiresAutoOrFullAccess: true,
+            shouldReviewInAutoMode: ({ target }) => target === "production",
+            shouldRunInFullAccessInAutoMode: async ({ target }) => target === "production",
+            execute: () => Promise.resolve({}),
+            toLLM: () => [{ type: "text", text: "ok" }],
+        });
+        const agent = await Agent.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            features: [feature({ name: "publishing", tools: () => [reviewedTool] })],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        const assembled = provider.sessions[0]?.options.tools?.[0];
+        expect(assembled).toBe(reviewedTool);
+        expect(reviewedTool.autoPermissionInstructions).toContain("why publishing");
+        expect(reviewedTool.requiresAutoOrFullAccess).toBe(true);
+        expect(await reviewedTool.shouldReviewInAutoMode?.({ target: "production" }, ctx)).toBe(
+            true,
+        );
+        expect(
+            await reviewedTool.shouldRunInFullAccessInAutoMode?.({ target: "production" }, ctx),
+        ).toBe(true);
+        expect(reviewedTool.describeAutoPermissionAction?.({ target: "production" }, ctx)).toBe(
+            'publish "production"',
+        );
+        await agent.close();
+    });
+
     it("merges instructions and tools from every feature in order", async () => {
         const searchTool = tool("search");
         const editTool = tool("edit");
@@ -38,7 +89,7 @@ describe("Agent", () => {
             instructions: () => "You can edit.",
             tools: () => [editTool],
         });
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -56,6 +107,65 @@ describe("Agent", () => {
         await agent.close();
     });
 
+    it("composes tool middleware in feature order without executing downstream work twice", async () => {
+        const provider = new ScriptedProvider([
+            toolCallTurn("call-1", "mutate", "{}"),
+            textTurn("done"),
+        ]);
+        const order: string[] = [];
+        let executions = 0;
+        const mutate = defineAgentTool({
+            name: "mutate",
+            parameters: Type.Object({}, { additionalProperties: false }),
+            returnType: Type.Object({ value: Type.String() }),
+            shouldReviewInAutoMode: () => false,
+            execute: async () => {
+                executions += 1;
+                order.push("tool");
+                return { value: "ok" };
+            },
+            toLLM: ({ value }) => [{ type: "text", text: value }],
+        });
+        const wrapper = (name: string): AgentFeature =>
+            feature({
+                name,
+                aroundToolExecution: async (_hookCtx, execution) => {
+                    order.push(`${name}:before`);
+                    const [first, second] = await Promise.all([
+                        execution.execute(),
+                        execution.execute(),
+                    ]);
+                    expect(second).toBe(first);
+                    order.push(`${name}:after`);
+                    return first;
+                },
+            });
+        const agent = await Agent.create(ctx, {
+            id: "middleware-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            features: [
+                wrapper("outer"),
+                wrapper("inner"),
+                feature({ name: "tools", tools: () => [mutate] }),
+            ],
+        });
+
+        await agent.send(ctx, user("mutate"), { await: true });
+        await agent.waitForIdle();
+
+        expect(executions).toBe(1);
+        expect(order).toEqual([
+            "outer:before",
+            "inner:before",
+            "tool",
+            "inner:after",
+            "outer:after",
+        ]);
+        await agent.close();
+    });
+
     it("fans events out to every feature in order", async () => {
         const seen: string[] = [];
         const observe = (name: string): AgentFeature =>
@@ -66,7 +176,7 @@ describe("Agent", () => {
                 },
             });
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -99,7 +209,7 @@ describe("Agent", () => {
                 return undefined;
             },
         });
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -142,7 +252,7 @@ describe("Agent", () => {
                 return system("should lose");
             },
         });
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -192,7 +302,7 @@ describe("Agent", () => {
                 return [{ type: "send", message: user("follow up") }];
             },
         });
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -215,7 +325,7 @@ describe("Agent", () => {
     it("supports asynchronous feature hooks", async () => {
         const asyncTool = tool("async_tool");
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -246,7 +356,7 @@ describe("Agent", () => {
                 throw new Error("handoff broke");
             },
         });
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -278,7 +388,7 @@ describe("Agent", () => {
     it("fails the turn when two features register the same tool", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const events: string[] = [];
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -308,7 +418,7 @@ describe("Agent", () => {
     it("keeps the base fallbacks when no feature implements a hook", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const events: SessionEvent[] = [];
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -338,7 +448,7 @@ describe("Agent", () => {
         const memory = feature({
             name: "memory",
             afterTurn: async (hookCtx) => {
-                const kv = agentBaseKV(hookCtx);
+                const kv = agentKV(hookCtx);
                 if (kv === undefined) throw new Error("No store on the context.");
                 await kv.write(hookCtx, "note", "remembered");
                 listed.push(await kv.list(hookCtx));
@@ -348,14 +458,14 @@ describe("Agent", () => {
         const other = feature({
             name: "other",
             afterTurn: async (hookCtx) => {
-                const kv = agentBaseKV(hookCtx);
+                const kv = agentKV(hookCtx);
                 if (kv === undefined) throw new Error("No store on the context.");
                 // A feature sees only its own scope, never a sibling's entries.
                 listed.push(await kv.list(hookCtx));
                 return undefined;
             },
         });
-        const agent = new Agent(ctx, {
+        const agent = await Agent.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",

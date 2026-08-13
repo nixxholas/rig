@@ -80,6 +80,7 @@ function selfTool(
         name,
         parameters: Type.Object({}),
         returnType: Type.Object({}),
+        shouldReviewInAutoMode: () => false,
         execute: async (callCtx) => {
             await execute(callCtx);
             return {};
@@ -144,7 +145,7 @@ describe("self-reentrant tool calls", () => {
             await agent.send(callCtx, user("sent by the tool"));
             sendCompleted = true;
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "await-self-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -179,7 +180,7 @@ describe("self-reentrant tool calls", () => {
         const tool = selfTool(async (callCtx) => {
             await agent.steer(callCtx, user("steered by the tool"));
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "await-self-steer",
             providers: providersOf(provider),
             provider: "scripted",
@@ -210,7 +211,7 @@ describe("self-reentrant tool calls", () => {
             sending = agent.send(callCtx, user("fire-and-forget send"));
             return Promise.resolve();
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "fire-and-forget-self-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -237,7 +238,7 @@ describe("self-reentrant tool calls", () => {
         const tool = selfTool(async (callCtx) => {
             insideResult = await observeWithin(agent.compact(callCtx, { await: true }));
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "await-self-compaction",
             providers: providersOf(provider),
             provider: "scripted",
@@ -269,7 +270,7 @@ describe("self-reentrant tool calls", () => {
         const tool = selfTool(async (callCtx) => {
             abortResult = await observeWithin(agent.abort(callCtx));
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "await-self-abort",
             providers: providersOf(provider),
             provider: "scripted",
@@ -304,7 +305,7 @@ describe("self-reentrant tool calls", () => {
         const tool = selfTool(async () => {
             closeResult = await observeWithin(agent.close());
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "await-self-close",
             providers: providersOf(provider),
             provider: "scripted",
@@ -332,7 +333,7 @@ describe("self-reentrant tool calls", () => {
             closing = agent.close();
             return Promise.resolve();
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "fire-and-forget-self-close",
             providers: providersOf(provider),
             provider: "scripted",
@@ -359,7 +360,7 @@ describe("self-reentrant tool calls", () => {
             resolved = await manager.resolve(callCtx, "managed-self");
         });
         manager = harness.manager;
-        agent = await manager.create(ctx, "managed-self", {});
+        agent = await manager.createWithId(ctx, "managed-self", {});
 
         await agent.send(ctx, user("start"), { await: true });
         await agent.waitForIdle();
@@ -384,7 +385,7 @@ describe("self-reentrant tool calls", () => {
             );
         });
         manager = harness.manager;
-        const agent = await manager.create(ctx, "managed-self-send", {});
+        const agent = await manager.createWithId(ctx, "managed-self-send", {});
 
         await agent.send(ctx, user("start"), { await: true });
         await agent.waitForIdle();
@@ -416,7 +417,7 @@ describe("self-reentrant tool calls", () => {
             );
         });
         manager = harness.manager;
-        const agent = await manager.create(ctx, "managed-self-compaction", {});
+        const agent = await manager.createWithId(ctx, "managed-self-compaction", {});
 
         await agent.send(ctx, user("start"), { await: true });
         await agent.waitForIdle();

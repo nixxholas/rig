@@ -15,7 +15,7 @@ const trace: RealGymTrace = {
         workingDirectory: "/work",
         shell: "/bin/zsh",
     },
-    features: ["system", "models", "subagents", "autocompaction", "gym"],
+    features: ["gym"],
     models: ["openai/gpt-5.6-sol"],
     sessions: [
         {
@@ -77,7 +77,7 @@ describe("renderRealGymReport", () => {
         expect(html).toContain("1.00 s");
         expect(html).toContain("120 in / 3 out");
         // The agent's own shape: features, offered models, and the environment it works in.
-        expect(html).toContain("autocompaction");
+        expect(html).toContain("gym");
         expect(html).toContain("/work");
         expect(html).toContain("darwin 25.5.0");
         // What the features assembled, and what the model did with it.

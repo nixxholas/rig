@@ -5,8 +5,9 @@ import type { AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentBaseKV } from "./AgentBaseKV.js";
 import type { AgentConfig } from "./AgentConfig.js";
 import type { AgentModel } from "./AgentModel.js";
-import { AgentRef } from "./AgentRef.js";
-import type { AgentSystem } from "./AgentSystem.js";
+import type { AgentFeature } from "./AgentFeature.js";
+import { acceptanceIsWaitable, AgentRef } from "./AgentRef.js";
+import type { AgentInitialContext, AgentSystem } from "./AgentSystem.js";
 
 /**
  * A reference to a collection of agents that cannot deadlock, for code that runs inside an agent
@@ -15,15 +16,23 @@ import type { AgentSystem } from "./AgentSystem.js";
  *
  * What is missing is missing on purpose. `delete` closes an agent and `start` resumes whole
  * agents; both are the owning caller's business, and both would wait for a loop that may be
- * waiting for the very code asking. The operations that remain keep only their asking form: the
- * `await: true` the agents themselves accept is not offered here and is never passed on, so no
- * call made through this type can wait for any agent's loop. Agents come back as `AgentRef` for
- * the same reason — handing out the real `Agent` would hand that flag back, along with `close`
- * and `waitForIdle`.
+ * waiting for the very code asking. Agents come back as `AgentRef` for the same reason — handing
+ * out the real `Agent` would hand back `close` and `waitForIdle` along with the `await: true`
+ * that waits for a compaction or an unwound turn.
+ *
+ * A message is the one thing a caller here may be told about, because accepting one is a durable
+ * queue write rather than a turn: `steer` and `send` resolve once the message is safely part of
+ * the target agent's conversation, and reject when that write fails, so a caller routing work to
+ * another agent knows whether it arrived. The exception is the caller's own agent, whose loop is
+ * what would have to perform that write — asked for itself, the message is queued and not waited
+ * for. That is decided from the context, which names the agent the caller is running inside; a
+ * context that names none proves nothing, so nothing is waited for there either.
  */
 export class AgentSystemRef {
+    /** The collection this reference forwards every operation to without waiting on its loops. */
     readonly #system: AgentSystem;
 
+    /** Wrap a collection as the deadlock-free reference given to code running inside it. */
     constructor(system: AgentSystem) {
         this.#system = system;
     }
@@ -33,9 +42,13 @@ export class AgentSystemRef {
         return this.#system.models;
     }
 
-    /** Create an agent and get a reference to it. Creating an existing ID is an error. */
-    async create(ctx: Context, agentId: string, config: AgentConfig): Promise<AgentRef> {
-        return new AgentRef(await this.#system.create(ctx, agentId, config));
+    /** Create an agent with a new system-generated cuid2 identity. */
+    async create(
+        ctx: Context,
+        config: AgentConfig,
+        initialContext?: AgentInitialContext,
+    ): Promise<AgentRef> {
+        return new AgentRef(await this.#system.create(ctx, config, initialContext));
     }
 
     /** A reference to an existing agent; resolving one that was never created is an error. */
@@ -48,29 +61,48 @@ export class AgentSystemRef {
         return this.#system.featureState(feature);
     }
 
+    /** A collection-wide feature by its stable name. */
+    feature(name: string): AgentFeature | undefined {
+        return this.#system.feature(name);
+    }
+
     /** The configuration an agent was created with, or undefined when there is no such agent. */
     async config(ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
         return await this.#system.config(ctx, agentId);
     }
 
-    /** Queue a steered message, and resolve once the agent has taken it on. */
+    /**
+     * Queue a steered message. For another agent this resolves once the message is durably
+     * accepted and rejects when that write fails; for the caller's own agent it resolves as soon
+     * as the agent has taken the request on.
+     */
     async steer(
         ctx: Context,
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<void> {
-        await this.#system.steer(ctx, agentId, message, { ...options, await: false });
+        await this.#system.steer(ctx, agentId, message, {
+            ...options,
+            await: acceptanceIsWaitable(ctx, agentId),
+        });
     }
 
-    /** Queue a sent message, and resolve once the agent has taken it on. */
+    /**
+     * Queue a sent message. For another agent this resolves once the message is durably accepted
+     * and rejects when that write fails; for the caller's own agent it resolves as soon as the
+     * agent has taken the request on.
+     */
     async send(
         ctx: Context,
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<void> {
-        await this.#system.send(ctx, agentId, message, { ...options, await: false });
+        await this.#system.send(ctx, agentId, message, {
+            ...options,
+            await: acceptanceIsWaitable(ctx, agentId),
+        });
     }
 
     /** Ask an agent to compact, and resolve once it has been asked. */

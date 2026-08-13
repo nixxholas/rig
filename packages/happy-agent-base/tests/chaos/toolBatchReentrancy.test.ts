@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, agentBaseKV, defineAgentTool } from "../../sources/index.js";
+import { AgentBase, agentKV, defineAgentTool } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 import { providersOf, textTurn, user } from "../gym/fixtures.js";
@@ -40,6 +40,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             name: "collide",
             parameters: Type.Object({}),
             returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
             execute: () => {
                 executions += 1;
                 return Promise.resolve({});
@@ -47,7 +48,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             toLLM: () => [{ type: "text", text: "ran" }],
         });
         const persistence = new InMemoryPersistence();
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "duplicate-call-ids",
             providers: providersOf(
                 new ScriptedProvider([
@@ -92,8 +93,9 @@ describe("tool batch concurrency and re-entrancy", () => {
             name: "concurrent",
             parameters: Type.Object({}),
             returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
             execute: async (callCtx: Context) => {
-                const kv = agentBaseKV(callCtx);
+                const kv = agentKV(callCtx);
                 entered += 1;
                 const mine = entered;
                 await kv?.write(callCtx, "mine", mine);
@@ -106,7 +108,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             },
             toLLM: () => [{ type: "text", text: "ran" }],
         });
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "concurrent-scopes",
             providers: providersOf(
                 new ScriptedProvider([
@@ -136,6 +138,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             name: "reenter",
             parameters: Type.Object({}),
             returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
             execute: async (callCtx: Context) => {
                 try {
                     await agent.compact(callCtx, { await: true });
@@ -146,7 +149,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             },
             toLLM: () => [{ type: "text", text: "ran" }],
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "reentrant-compaction",
             providers: providersOf(
                 new ScriptedProvider([
@@ -172,7 +175,7 @@ describe("tool batch concurrency and re-entrancy", () => {
         let failure: string | undefined;
         let asked = false;
         let agent!: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "reentrant-hook-compaction",
             providers: providersOf(new ScriptedProvider([textTurn("answered")])),
             provider: "scripted",
@@ -205,6 +208,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             name: "stop",
             parameters: Type.Object({}),
             returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
             execute: async (callCtx: Context) => {
                 // The asking form of abort is what a tool may use: the cancellation is complete
                 // once it is signalled, so nothing here waits for the turn it just cancelled.
@@ -213,7 +217,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             },
             toLLM: () => [{ type: "text", text: "ran" }],
         });
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "tool-aborts-its-turn",
             providers: providersOf(
                 new ScriptedProvider([
@@ -241,6 +245,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             name: "report",
             parameters: Type.Object({}),
             returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
             execute: async (callCtx: Context) => {
                 try {
                     await agent.send(callCtx, user("waited"), { await: true });
@@ -258,7 +263,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             textTurn("after the tool"),
             textTurn("after the message"),
         ]);
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "waited-message-from-tool",
             providers: providersOf(provider),
             provider: "scripted",

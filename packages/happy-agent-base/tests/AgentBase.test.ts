@@ -11,11 +11,11 @@ import { describe, expect, it } from "vitest";
 
 import {
     AgentBase,
-    agentBaseEffort,
-    agentBaseKV,
-    agentBaseModel,
-    agentBaseProvider,
-    agentBaseServiceTier,
+    agentEffort,
+    agentKV,
+    agentModel,
+    agentProvider,
+    agentServiceTier,
     AgentProviders,
     defineAgentTool,
     type AgentBaseInference,
@@ -32,6 +32,7 @@ function tool(name: string) {
     return defineAgentTool({
         name,
         returnType: Type.Object({}),
+        shouldReviewInAutoMode: () => false,
         execute: () => Promise.resolve({}),
         toLLM: () => [{ type: "text", text: "ok" }],
     });
@@ -49,7 +50,7 @@ describe("AgentBase", () => {
     it("streams one inference from the provider session", async () => {
         const provider = new ScriptedProvider([textTurn("hello there")]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -81,7 +82,7 @@ describe("AgentBase", () => {
             ],
             textTurn("two"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -98,6 +99,7 @@ describe("AgentBase", () => {
             defineAgentTool({
                 name: "late_tool",
                 returnType: Type.Object({}),
+                shouldReviewInAutoMode: () => false,
                 execute: () => {
                     executed = true;
                     return Promise.resolve({});
@@ -127,7 +129,7 @@ describe("AgentBase", () => {
         const provider = new ScriptedProvider([textTurn("one"), textTurn("two")]);
         let agent: AgentBase;
         let sentSecond = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -167,7 +169,7 @@ describe("AgentBase", () => {
             textTurn("done reading"),
         ]);
         const seen: string[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -178,6 +180,7 @@ describe("AgentBase", () => {
                         name: "read_file",
                         parameters: Type.Object({ path: Type.String() }),
                         returnType: Type.Object({ contents: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: (_toolCtx, args) => {
                             // args is statically typed as { path: string } by the schema.
                             seen.push(args.path);
@@ -216,6 +219,61 @@ describe("AgentBase", () => {
         await agent.close();
     });
 
+    it("offers only schema-validated tool calls to the around-execution hook", async () => {
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "read_file" },
+                {
+                    type: "toolcall_end",
+                    callId: "call-1",
+                    arguments: '{"path":42}',
+                },
+                { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
+            ],
+            textTurn("invalid"),
+        ]);
+        let hooks = 0;
+        let executions = 0;
+        const agent = await AgentBase.create(ctx, {
+            id: "validated-hook-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                aroundToolExecution: async (_hookCtx, execution) => {
+                    hooks += 1;
+                    return await execution.execute();
+                },
+            },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "read_file",
+                        parameters: Type.Object({ path: Type.String() }),
+                        returnType: Type.Null(),
+                        shouldReviewInAutoMode: () => false,
+                        execute: async () => {
+                            executions += 1;
+                            return null;
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
+        });
+
+        await agent.send(ctx, user("read it"), { await: true });
+        await agent.waitForIdle();
+
+        expect(hooks).toBe(0);
+        expect(executions).toBe(0);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toMatchObject({
+            role: "tool",
+            isError: true,
+        });
+        await agent.close();
+    });
+
     it("runs tool calls in parallel and converts failures to error tool results", async () => {
         const provider = new ScriptedProvider([
             [
@@ -230,7 +288,7 @@ describe("AgentBase", () => {
             textTurn("all done"),
         ]);
         const finished: string[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -240,6 +298,7 @@ describe("AgentBase", () => {
                     defineAgentTool({
                         name: "slow_tool",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => {
                             await new Promise((resolve) => setTimeout(resolve, 20));
                             finished.push("slow");
@@ -250,6 +309,7 @@ describe("AgentBase", () => {
                     defineAgentTool({
                         name: "failing_tool",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             finished.push("failing");
                             return Promise.reject(new Error("tool blew up"));
@@ -298,7 +358,7 @@ describe("AgentBase", () => {
             textTurn("sorry"),
         ]);
         let executed = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -309,6 +369,7 @@ describe("AgentBase", () => {
                         name: "read_file",
                         parameters: Type.Object({ path: Type.String() }),
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             executed = true;
                             return Promise.resolve({});
@@ -357,7 +418,7 @@ describe("AgentBase", () => {
             ],
         ]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -394,7 +455,7 @@ describe("AgentBase", () => {
     it("fails the turn when the provider ID is not registered", async () => {
         const persistence = new InMemoryPersistence();
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: new AgentProviders(),
             provider: "missing",
@@ -425,7 +486,7 @@ describe("AgentBase", () => {
         }
         const provider = new FailingProvider([]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -456,7 +517,7 @@ describe("AgentBase persistence", () => {
             { type: "block", block: { type: "text", text: "answer" } },
         ]);
         const provider = new ScriptedProvider([textTurn("fresh"), textTurn("again")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -501,7 +562,7 @@ describe("AgentBase persistence", () => {
             ],
             textTurn("ok"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -511,6 +572,7 @@ describe("AgentBase persistence", () => {
                     defineAgentTool({
                         name: "read_file",
                         returnType: Type.Object({ contents: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => Promise.resolve({ contents: "contents" }),
                         toLLM: (result) => [{ type: "text", text: result.contents }],
                     }),
@@ -567,7 +629,7 @@ describe("AgentBase persistence", () => {
         ]);
         let agent: AgentBase;
         let sentMid = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -596,7 +658,7 @@ describe("AgentBase persistence", () => {
         expect(persistence.pending.size).toBe(0);
 
         const reloadedProvider = new ScriptedProvider([textTurn("hello again")]);
-        const reloaded = new AgentBase(ctx, {
+        const reloaded = await AgentBase.create(ctx, {
             id: "test-agent-reloaded",
             providers: providersOf(reloadedProvider),
             provider: "scripted",
@@ -626,7 +688,7 @@ describe("AgentBase persistence", () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("slow reply")]);
         let done = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -669,7 +731,7 @@ describe("AgentBase persistence", () => {
             await write(writeCtx, key, value);
         };
         const provider = new ScriptedProvider([textTurn("reply")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -699,7 +761,7 @@ describe("AgentBase persistence", () => {
         const persistence = new InMemoryPersistence();
         persistence.writeValue = () => Promise.reject(new Error("disk full"));
         const provider = new ScriptedProvider([textTurn("never")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -720,7 +782,7 @@ describe("AgentBase persistence", () => {
         persistence.deleteValue = () => Promise.reject(new Error("delete failed"));
         const provider = new ScriptedProvider([textTurn("never")]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -761,7 +823,7 @@ describe("AgentBase persistence", () => {
         persistence.load = () => Promise.reject(new Error("storage offline"));
         const provider = new ScriptedProvider([textTurn("never")]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -801,7 +863,7 @@ describe("AgentBase persistence", () => {
             textTurn("done"),
         ]);
         let keysDuringFast: string[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -811,6 +873,7 @@ describe("AgentBase persistence", () => {
                     defineAgentTool({
                         name: "slow_tool",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => {
                             await new Promise((resolve) => setTimeout(resolve, 20));
                             return { value: "slow" };
@@ -820,6 +883,7 @@ describe("AgentBase persistence", () => {
                     defineAgentTool({
                         name: "fast_tool",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             // Both calls are already durable in the sorted store while running.
                             keysDuringFast = [...persistence.values.keys()].filter((key) =>
@@ -871,7 +935,7 @@ describe("AgentBase persistence", () => {
         const provider = new ScriptedProvider([textTurn("recovered")]);
         let durableRuns = 0;
         let fragileRuns = 0;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -882,6 +946,7 @@ describe("AgentBase persistence", () => {
                         name: "durable_tool",
                         durable: true,
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             durableRuns += 1;
                             return Promise.resolve({ value: "retried result" });
@@ -891,6 +956,7 @@ describe("AgentBase persistence", () => {
                     defineAgentTool({
                         name: "fragile_tool",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => {
                             fragileRuns += 1;
                             return Promise.resolve({});
@@ -961,7 +1027,7 @@ describe("AgentBase persistence", () => {
             { type: "user", message: user("still waiting") },
         ]);
         const provider = new ScriptedProvider([textTurn("here now")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -985,7 +1051,7 @@ describe("AgentBase persistence", () => {
         const persistence = new InMemoryPersistence();
         persistence.values.set("send.00000000000001.000000", queued(user("lost send")));
         const provider = new ScriptedProvider([textTurn("caught up")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1028,7 +1094,7 @@ describe("AgentBase persistence", () => {
             }
         }
         const provider = new OpenStreamProvider([textTurn("hello")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1080,7 +1146,7 @@ describe("AgentBase persistence", () => {
             ],
         ]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1110,7 +1176,7 @@ describe("AgentBase persistence", () => {
         await agent.close();
 
         const reloadedProvider = new ScriptedProvider([textTurn("next reply")]);
-        const reloaded = new AgentBase(ctx, {
+        const reloaded = await AgentBase.create(ctx, {
             id: "test-agent-reloaded",
             providers: providersOf(reloadedProvider),
             provider: "scripted",
@@ -1139,7 +1205,7 @@ describe("AgentBase persistence", () => {
         let started = false;
         let lifetime: AbortSignal | undefined;
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1150,6 +1216,7 @@ describe("AgentBase persistence", () => {
                     defineAgentTool({
                         name: "hang_tool",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: (toolCtx) => {
                             started = true;
                             lifetime = toolCtx.lifetime;
@@ -1186,7 +1253,7 @@ describe("AgentBase persistence", () => {
 
     it("abort is a no-op when idle and the agent keeps working afterwards", async () => {
         const provider = new ScriptedProvider([textTurn("still fine")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1208,7 +1275,7 @@ describe("AgentBase persistence", () => {
             { type: "block", block: { type: "text", text: "hello" } },
         ]);
         const provider = new ScriptedProvider([textTurn("never")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1227,7 +1294,7 @@ describe("AgentBase persistence", () => {
 describe("AgentBase per-message settings", () => {
     it("applies settings carried by a message and keeps them for later messages", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1261,9 +1328,9 @@ describe("AgentBase per-message settings", () => {
         const secondContext = session?.requestContexts[1];
         expect(secondContext).toBeDefined();
         if (secondContext !== undefined) {
-            expect(agentBaseModel(secondContext)).toBe("anthropic/better");
-            expect(agentBaseEffort(secondContext)).toBe("high");
-            expect(agentBaseServiceTier(secondContext)).toBe("priority");
+            expect(agentModel(secondContext)).toBe("anthropic/better");
+            expect(agentEffort(secondContext)).toBe("high");
+            expect(agentServiceTier(secondContext)).toBe("priority");
         }
         await agent.close();
     });
@@ -1273,7 +1340,7 @@ describe("AgentBase per-message settings", () => {
         const provider = new ScriptedProvider([textTurn("claude says"), textTurn("gpt says")]);
         const providers = providersOf(provider);
         const changes: unknown[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers,
             provider: "scripted",
@@ -1323,7 +1390,7 @@ describe("AgentBase per-message settings", () => {
 
     it("starts the fresh context completely empty when no hook injects a message", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1343,7 +1410,7 @@ describe("AgentBase per-message settings", () => {
     it("keeps the history and the session on a compatible model change", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const changes: unknown[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1387,7 +1454,7 @@ describe("AgentBase per-message settings", () => {
         providers.add("claude", claudeProvider, "claude");
         providers.add("bedrock", bedrockProvider, "bedrock");
         const changes: unknown[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers,
             provider: "claude",
@@ -1436,7 +1503,7 @@ describe("AgentBase per-message settings", () => {
         const providers = new AgentProviders();
         providers.add("claude-a", firstProvider, "claude");
         providers.add("claude-b", secondProvider, "claude");
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers,
             provider: "claude-a",
@@ -1469,7 +1536,7 @@ describe("AgentBase per-message settings", () => {
             providers.add("bedrock", bedrock, "bedrock");
             return providers;
         };
-        const firstAgent = new AgentBase(ctx, {
+        const firstAgent = await AgentBase.create(ctx, {
             id: "provider-restart",
             providers: makeProviders(claudeProvider, bedrockProvider),
             provider: "claude",
@@ -1482,7 +1549,7 @@ describe("AgentBase per-message settings", () => {
 
         const laterClaude = new ScriptedProvider([textTurn("unused")]);
         const laterBedrock = new ScriptedProvider([textTurn("still bedrock")]);
-        const secondAgent = new AgentBase(ctx, {
+        const secondAgent = await AgentBase.create(ctx, {
             id: "provider-restart",
             providers: makeProviders(laterClaude, laterBedrock),
             provider: "claude",
@@ -1502,7 +1569,7 @@ describe("AgentBase per-message settings", () => {
     it("keeps the effective settings across a restart", async () => {
         const persistence = new InMemoryPersistence();
         const firstProvider = new ScriptedProvider([textTurn("first")]);
-        const firstAgent = new AgentBase(ctx, {
+        const firstAgent = await AgentBase.create(ctx, {
             id: "settings-restart",
             providers: providersOf(firstProvider),
             provider: "scripted",
@@ -1514,7 +1581,7 @@ describe("AgentBase per-message settings", () => {
         await firstAgent.close();
 
         const secondProvider = new ScriptedProvider([textTurn("second")]);
-        const secondAgent = new AgentBase(ctx, {
+        const secondAgent = await AgentBase.create(ctx, {
             id: "settings-restart",
             providers: providersOf(secondProvider),
             provider: "scripted",
@@ -1545,7 +1612,7 @@ describe("AgentBase message delivery strategies", () => {
         const entered = new Promise<void>((resolve) => {
             hookEntered = resolve;
         });
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1590,7 +1657,7 @@ describe("AgentBase message delivery strategies", () => {
             await inLoad;
             return load();
         };
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1613,7 +1680,7 @@ describe("AgentBase message delivery strategies", () => {
     it("steering while idle triggers a new turn on its own", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("answered")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1643,7 +1710,7 @@ describe("AgentBase message delivery strategies", () => {
         ]);
         let agent: AgentBase;
         let queued = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1678,7 +1745,7 @@ describe("AgentBase message delivery strategies", () => {
         const provider = new ScriptedProvider([textTurn("one"), textTurn("two")]);
         let agent: AgentBase;
         let queued = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1715,7 +1782,7 @@ describe("AgentBase message delivery strategies", () => {
         ]);
         let agent: AgentBase;
         let queued = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1746,7 +1813,7 @@ describe("AgentBase message delivery strategies", () => {
         const provider = new ScriptedProvider([textTurn("one"), textTurn("two")]);
         let agent: AgentBase;
         let queued = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1784,7 +1851,7 @@ describe("AgentBase message delivery strategies", () => {
         ]);
         let agent: AgentBase;
         let queued = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1826,7 +1893,7 @@ describe("AgentBase message delivery strategies", () => {
             textTurn("answered"),
         ]);
         let agent: AgentBase;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1836,6 +1903,7 @@ describe("AgentBase message delivery strategies", () => {
                     defineAgentTool({
                         name: "lookup",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => Promise.resolve({ value: "found" }),
                         toLLM: (result) => [{ type: "text", text: result.value }],
                     }),
@@ -1894,7 +1962,7 @@ describe("AgentBase compaction", () => {
             textTurn("next reply"),
         ]);
         let started = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1904,6 +1972,7 @@ describe("AgentBase compaction", () => {
                     defineAgentTool({
                         name: "slow_tool",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => {
                             started = true;
                             await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1955,7 +2024,7 @@ describe("AgentBase compaction", () => {
             { type: "block", block: { type: "text", text: "hello" } },
         ]);
         const provider = new ScriptedProvider([]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -1999,7 +2068,7 @@ describe("AgentBase compaction", () => {
             (session as ScriptedSession).compactionResults = [completed([compactionMessage])];
             return session;
         };
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2033,7 +2102,7 @@ describe("AgentBase compaction", () => {
             ];
             return session;
         };
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2077,7 +2146,7 @@ describe("AgentBase compaction", () => {
             (session as ScriptedSession).compactionResults = [completed([compactionMessage])];
             return session;
         };
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2100,7 +2169,7 @@ describe("AgentBase compaction", () => {
             { type: "block", block: { type: "text", text: "newer answer" } },
         ]);
         const provider = new ScriptedProvider([textTurn("reply")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2135,13 +2204,14 @@ describe("AgentBase instructions and tools hooks", () => {
         const hookedTool = defineAgentTool({
             name: "hooked",
             returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
             execute: () => {
                 executions += 1;
                 return Promise.resolve({});
             },
             toLLM: () => [{ type: "text", text: "ok" }],
         });
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2150,7 +2220,7 @@ describe("AgentBase instructions and tools hooks", () => {
             hooks: {
                 instructions: (hookCtx) => {
                     // The hook context carries the agent's configuration namespaces.
-                    expect(agentBaseProvider(hookCtx)).toBe("scripted");
+                    expect(agentProvider(hookCtx)).toBe("scripted");
                     return "hooked instructions";
                 },
                 tools: () => [hookedTool],
@@ -2177,7 +2247,7 @@ describe("AgentBase instructions and tools hooks", () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("answer")]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2210,7 +2280,7 @@ describe("AgentBase instructions and tools hooks", () => {
     it("fails the turn when two tools share a name", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2238,7 +2308,7 @@ describe("AgentBase instructions and tools hooks", () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         // The first inference flips the feature state, exactly like a tool execution would.
         let current = [toolA];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2269,7 +2339,7 @@ describe("AgentBase instructions and tools hooks", () => {
     it("supports asynchronous configuration hooks", async () => {
         const asyncTool = tool("async_tool");
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2298,7 +2368,7 @@ describe("AgentBase instructions and tools hooks", () => {
             textTurn("done"),
         ]);
         let seenModel: string | undefined;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2309,8 +2379,9 @@ describe("AgentBase instructions and tools hooks", () => {
                     defineAgentTool({
                         name: "check_ctx",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: (toolCtx) => {
-                            seenModel = agentBaseModel(toolCtx);
+                            seenModel = agentModel(toolCtx);
                             return Promise.resolve({});
                         },
                         toLLM: () => [],
@@ -2342,7 +2413,7 @@ describe("AgentBase inference errors", () => {
         const events: SessionEvent[] = [];
         let agent: AgentBase;
         let queued = false;
-        agent = new AgentBase(ctx, {
+        agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2381,7 +2452,7 @@ describe("AgentBase inference errors", () => {
             [{ type: "done", state: "error", kind: "unknown", message: "model overloaded" }],
             textTurn("second answer"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2414,7 +2485,7 @@ describe("AgentBase inference errors", () => {
             [{ type: "done", state: "error", kind: "unknown", message: "model overloaded" }],
             textTurn("never"),
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2433,7 +2504,7 @@ describe("AgentBase lifecycle hooks", () => {
     it("fires the lifecycle hooks in order around a turn", async () => {
         const order: string[] = [];
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2497,7 +2568,7 @@ describe("AgentBase lifecycle hooks", () => {
                 { type: "text_end" },
             ],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2538,7 +2609,7 @@ describe("AgentBase lifecycle hooks", () => {
                 { type: "done", state: "normal", tokens: { input: 400, output: 30 } },
             ],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2578,7 +2649,7 @@ describe("AgentBase lifecycle hooks", () => {
             ],
             [{ type: "done", state: "error", kind: "unknown", message: "provider exploded" }],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2621,7 +2692,7 @@ describe("AgentBase lifecycle hooks", () => {
                 { type: "done", state: "normal", tokens: { input: 500, output: 40 } },
             ],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(first),
             provider: "scripted",
@@ -2636,7 +2707,7 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.close();
 
         // A fresh agent reads the size back instead of starting out uninformed.
-        const restarted = new AgentBase(ctx, {
+        const restarted = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(new ScriptedProvider([textTurn("again")])),
             provider: "scripted",
@@ -2653,7 +2724,7 @@ describe("AgentBase lifecycle hooks", () => {
         const order: string[] = [];
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let injected = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2683,7 +2754,7 @@ describe("AgentBase lifecycle hooks", () => {
     it("applies every returned action together", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let injected = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2718,7 +2789,7 @@ describe("AgentBase lifecycle hooks", () => {
         const order: string[] = [];
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let injected = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2758,7 +2829,7 @@ describe("AgentBase lifecycle hooks", () => {
         };
         const provider = new ScriptedProvider([textTurn("answer")]);
         let requested = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2821,7 +2892,7 @@ describe("AgentBase load retry", () => {
         };
         const events: SessionEvent[] = [];
         const provider = new ScriptedProvider([textTurn("recovered reply")]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2866,7 +2937,7 @@ describe("AgentBase scoped persistence", () => {
         ]);
         const persistence = new InMemoryPersistence();
         const seen: unknown[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2876,8 +2947,9 @@ describe("AgentBase scoped persistence", () => {
                     defineAgentTool({
                         name: "remember",
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: async (toolCtx) => {
-                            const kv = agentBaseKV(toolCtx);
+                            const kv = agentKV(toolCtx);
                             if (kv === undefined) throw new Error("No store on the context.");
                             await kv.write(toolCtx, "note", "stashed");
                             seen.push(await kv.read(toolCtx, "note"));
@@ -2903,14 +2975,14 @@ describe("AgentBase scoped persistence", () => {
     it("gives hooks the session-scoped store", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const persistence = new InMemoryPersistence();
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
             hooks: {
                 instructions: async (hookCtx) => {
-                    const kv = agentBaseKV(hookCtx);
+                    const kv = agentKV(hookCtx);
                     if (kv === undefined) throw new Error("No store on the context.");
                     await kv.write(hookCtx, "prepared", true);
                     return "hooked";
@@ -2928,7 +3000,7 @@ describe("AgentBase scoped persistence", () => {
     it("lets a model-change hook persist without deadlocking on the agent's lock", async () => {
         const provider = new ScriptedProvider([textTurn("claude"), textTurn("gpt")]);
         const persistence = new InMemoryPersistence();
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -2936,7 +3008,7 @@ describe("AgentBase scoped persistence", () => {
             model: "anthropic/claude",
             hooks: {
                 modelChanged: async (hookCtx, change) => {
-                    const kv = agentBaseKV(hookCtx);
+                    const kv = agentKV(hookCtx);
                     if (kv === undefined) throw new Error("No store on the context.");
                     await kv.write(hookCtx, "last-model", change.model);
                     return system("handoff");

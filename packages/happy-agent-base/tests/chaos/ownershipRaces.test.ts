@@ -100,13 +100,13 @@ describe("consistency at concurrent ownership boundaries", () => {
             return await originalLoad();
         };
 
-        const first = new AgentBase(ctx, {
+        const first = await AgentBase.create(ctx, {
             id: "shared-agent",
             providers,
             provider: "scripted",
             persistence: disk,
         });
-        const second = new AgentBase(ctx, {
+        const second = await AgentBase.create(ctx, {
             id: "shared-agent",
             providers,
             provider: "scripted",
@@ -185,13 +185,13 @@ describe("consistency at concurrent ownership boundaries", () => {
             return session;
         };
         const providers = providersOf(provider);
-        const compactingOwner = new AgentBase(ctx, {
+        const compactingOwner = await AgentBase.create(ctx, {
             id: "shared-agent",
             providers,
             provider: "scripted",
             persistence: disk,
         });
-        const writingOwner = new AgentBase(ctx, {
+        const writingOwner = await AgentBase.create(ctx, {
             id: "shared-agent",
             providers,
             provider: "scripted",
@@ -233,7 +233,7 @@ describe("consistency at concurrent ownership boundaries", () => {
         const beforeTurnStarted = deferred();
         const releaseBeforeTurn = deferred();
         const doneStates: string[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "aborted-before-inference",
             providers: providersOf(provider),
             provider: "scripted",
@@ -290,7 +290,7 @@ describe("consistency at concurrent ownership boundaries", () => {
             return session;
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "aborted-compaction",
             providers: providersOf(provider),
             provider: "scripted",
@@ -396,7 +396,7 @@ describe("consistency at concurrent ownership boundaries", () => {
             return session;
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "stream-cleanup",
             providers: providersOf(provider),
             provider: "scripted",
@@ -452,7 +452,7 @@ describe("consistency at concurrent ownership boundaries", () => {
         let cleanupActive = false;
         let inferenceCount = 0;
         let secondInferenceOverlappedCleanup = false;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "tool-cleanup",
             providers: providersOf(provider),
             provider: "scripted",
@@ -463,6 +463,7 @@ describe("consistency at concurrent ownership boundaries", () => {
                         name: "cleanup_tool",
                         parameters: Type.Object({}),
                         returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
                         execute: async (toolCtx) => {
                             const signal = toolCtx.lifetime;
                             if (signal === undefined) {
@@ -542,7 +543,7 @@ describe("consistency at concurrent ownership boundaries", () => {
             await originalWriteValue(writeCtx, key, value);
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "closing-agent",
             providers: providersOf(provider),
             provider: "scripted",
@@ -641,8 +642,8 @@ describe("consistency at concurrent ownership boundaries", () => {
         ];
 
         const outcomes = await Promise.allSettled([
-            first.create(ctx, "shared", configs[0]!),
-            second.create(ctx, "shared", configs[1]!),
+            first.createWithId(ctx, "shared", configs[0]!),
+            second.createWithId(ctx, "shared", configs[1]!),
         ]);
         const created = outcomes.flatMap((outcome) =>
             outcome.status === "fulfilled" ? [outcome.value] : [],

@@ -64,7 +64,7 @@ export async function createRealGym(
     // records they end up holding.
     const persistence = new InMemoryPersistence();
     const agents = new AgentSystemLocal({
-        features: REAL_GYM_FEATURES.map((feature) => feature.Feature),
+        sharedFeatures: REAL_GYM_FEATURES.map((feature) => feature.Feature),
         storage: new AgentStorage({
             kv: new AgentBaseKV(new InMemoryPersistence(), "agents.", async (opCtx, work) =>
                 work(opCtx),
@@ -75,7 +75,7 @@ export async function createRealGym(
         provider: options.vendor,
         models,
     });
-    const agent = await agents.create(ctx, agentId, {
+    const agent = await agents.createWithId(ctx, agentId, {
         environment,
         features: { gym: { scenario: options.scenario } },
     });

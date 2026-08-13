@@ -7,13 +7,17 @@ import {
     type AgentBaseMessageOptions,
     type AgentBaseOptions,
 } from "./AgentBase.js";
-import { agentBaseKV, withAgentBaseKV } from "./AgentBaseContext.js";
+import { agentKV, withAgentKV } from "./AgentContexts.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import type { AgentFeature } from "./AgentFeature.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
+/**
+ * Everything `AgentBase` is constructed with, except its hooks: an agent's behavior comes from
+ * its features, and the singular hooks the base runs with are merged from them.
+ */
 export interface AgentOptions<Tool extends AnyAgentTool = AnyAgentTool> extends Omit<
     AgentBaseOptions,
     "hooks"
@@ -37,24 +41,68 @@ export interface AgentOptions<Tool extends AnyAgentTool = AnyAgentTool> extends 
  * incompatible change rejects the switch so the history survives.
  */
 export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
+    /** The session this agent is a facade over; every operation delegates straight to it. */
     readonly #base: AgentBase;
+    /** The features whose hooks were merged into the base, kept in the order they were given. */
+    readonly #features: readonly AgentFeature<Tool>[];
 
-    constructor(ctx: Context, options: AgentOptions<Tool>) {
-        const { features, ...base } = options;
-        this.#base = new AgentBase(ctx, {
-            ...base,
-            hooks: mergeFeatures(features ?? []),
-        });
+    /**
+     * A new agent over a fresh identity, with its features' hooks merged into one set. Touches
+     * no storage.
+     */
+    static async create<Tool extends AnyAgentTool = AnyAgentTool>(
+        ctx: Context,
+        options: AgentOptions<Tool>,
+    ): Promise<Agent<Tool>> {
+        const { features, base } = split(options);
+        return new Agent(await AgentBase.create(ctx, base), features);
     }
 
+    /**
+     * An agent over an identity that may already have durable state, with that state's one
+     * externally meaningful fact — whether it has work left — read before it is handed back.
+     */
+    static async load<Tool extends AnyAgentTool = AnyAgentTool>(
+        ctx: Context,
+        options: AgentOptions<Tool>,
+    ): Promise<Agent<Tool>> {
+        const { features, base } = split(options);
+        return new Agent(await AgentBase.load(ctx, base), features);
+    }
+
+    /**
+     * Wrap an already-built base. Private, because an agent is made by `create` or by `load`,
+     * and which of the two the caller means is worth saying.
+     */
+    private constructor(base: AgentBase, features: readonly AgentFeature<Tool>[]) {
+        this.#features = features;
+        this.#base = base;
+    }
+
+    /** The stable session identity this agent was created with. */
     get id(): string {
         return this.#base.id;
     }
 
+    /**
+     * The feature this agent runs under `name`, when it has one. An individual feature holds the
+     * state of the single agent it was built for, so this is how that agent's owner reaches what
+     * belongs to it — a goal to pause, for instance. A shared feature is answered here too, but
+     * it is the collection's instance, serving every agent at once.
+     */
+    feature(name: string): AgentFeature<Tool> | undefined {
+        return this.#features.find((feature) => feature.name === name);
+    }
+
+    /**
+     * The base's mutable instructions and tools, which every inference reads and every feature's
+     * own contribution extends.
+     */
     get state(): AgentBaseState {
         return this.#base.state;
     }
 
+    /** Queue a user message that injects as soon as the current response and tool batch finish. */
     async steer(
         ctx: Context,
         message: SessionUserMessage,
@@ -63,6 +111,7 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
         await this.#base.steer(ctx, message, options);
     }
 
+    /** Queue a user message that injects only when the agent would otherwise stop. */
     async send(
         ctx: Context,
         message: SessionUserMessage,
@@ -71,22 +120,27 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
         await this.#base.send(ctx, message, options);
     }
 
+    /** Start the loop without a new message, continuing a turn an earlier run left unfinished. */
     start(): void {
         this.#base.start();
     }
 
+    /** Wait until the agent has nothing left to do, including work it accepted but never began. */
     async waitForIdle(): Promise<void> {
         await this.#base.waitForIdle();
     }
 
+    /** Ask for the conversation to be replaced by the provider's summary of it. */
     async compact(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
         await this.#base.compact(ctx, options);
     }
 
+    /** Cancel the active turn, leaving queued messages durable for the next one. */
     async abort(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
         await this.#base.abort(ctx, options);
     }
 
+    /** Finish everything already accepted, then destroy the provider session. */
     async close(): Promise<void> {
         await this.#base.close();
     }
@@ -97,11 +151,27 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
  * when at least one feature implements it, so the base's own behavior — the mutable state alone
  * for instructions and tools — stays in effect otherwise.
  */
+/**
+ * Separate the features from the options the base is built with, and merge their hooks into the
+ * one set the base observes the run through. Both factories need exactly this, and the merge has
+ * to happen before the base exists.
+ */
+function split<Tool extends AnyAgentTool>(
+    options: AgentOptions<Tool>,
+): { features: readonly AgentFeature<Tool>[]; base: AgentBaseOptions } {
+    const { features, ...rest } = options;
+    const resolved = features ?? [];
+    return { features: resolved, base: { ...rest, hooks: mergeFeatures(resolved) } };
+}
+
 function mergeFeatures<Tool extends AnyAgentTool>(
     features: readonly AgentFeature<Tool>[],
 ): AgentBaseHooks {
     const withInstructions = features.filter((feature) => feature.instructions !== undefined);
     const withTools = features.filter((feature) => feature.tools !== undefined);
+    const withToolExecution = features.filter(
+        (feature) => feature.aroundToolExecution !== undefined,
+    );
     const withModelChanged = features.filter((feature) => feature.modelChanged !== undefined);
     const withEvents = features.filter((feature) => feature.onEvent !== undefined);
     // Observing hooks fan out with per-feature isolation: one throwing feature must never
@@ -120,6 +190,20 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                 } catch {
                     // Features observe independently; one failing never silences the rest.
                 }
+            }
+        };
+    };
+    // Transactional hooks run in order inside one transaction, and a failure propagates: the
+    // features here are writing alongside the fact being committed, so containing one feature's
+    // failure would commit a conclusion the rest of the transaction contradicts.
+    const chain = (
+        pick: (feature: AgentFeature<Tool>) => ((ctx: Context) => MaybePromise<void>) | undefined,
+    ): ((ctx: Context) => Promise<void>) | undefined => {
+        const implemented = features.filter((feature) => pick(feature) !== undefined);
+        if (implemented.length === 0) return undefined;
+        return async (ctx) => {
+            for (const feature of implemented) {
+                await pick(feature)?.(featureCtx(ctx, feature));
             }
         };
     };
@@ -195,6 +279,26 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                       return tools;
                   },
               }),
+        ...(withToolExecution.length === 0
+            ? {}
+            : {
+                  // Correctness middleware: the first feature is the outermost wrapper, and a
+                  // failure propagates to the base so it becomes this call's error result.
+                  aroundToolExecution: async (ctx, execution) => {
+                      const invoke = async (index: number): Promise<unknown> => {
+                          const feature = withToolExecution[index];
+                          if (feature === undefined) return await execution.execute();
+                          let continued: Promise<unknown> | undefined;
+                          return await feature.aroundToolExecution?.(featureCtx(ctx, feature), {
+                              ...execution,
+                              // A wrapper may inspect the continuation from more than one code
+                              // path; every call joins the same downstream execution.
+                              execute: () => (continued ??= invoke(index + 1)),
+                          });
+                      };
+                      return await invoke(0);
+                  },
+              }),
         ...(withModelChanged.length === 0
             ? {}
             : {
@@ -249,6 +353,10 @@ function mergeFeatures<Tool extends AnyAgentTool>(
             collect((feature) => feature.afterAgentLoop),
         ),
         ...spread(
+            "afterAgentSettledTransact",
+            chain((feature) => feature.afterAgentSettledTransact),
+        ),
+        ...spread(
             "afterAgentSettled",
             fanOut((feature) => feature.afterAgentSettled),
         ),
@@ -260,10 +368,14 @@ function mergeFeatures<Tool extends AnyAgentTool>(
  * to the feature's own name, so features never see each other's persisted entries.
  */
 function featureCtx(ctx: Context, feature: { readonly name: string }): Context {
-    const kv = agentBaseKV(ctx);
-    return kv === undefined ? ctx : withAgentBaseKV(ctx, kv.scoped("feature", feature.name));
+    const kv = agentKV(ctx);
+    return kv === undefined ? ctx : withAgentKV(ctx, kv.scoped("feature", feature.name));
 }
 
+/**
+ * One optional entry to spread into the merged hooks: the key when a merged implementation
+ * exists, and nothing at all when no feature implemented it, so the base keeps its own behavior.
+ */
 function spread<Key extends string, Value>(
     key: Key,
     value: Value | undefined,

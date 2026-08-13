@@ -1,4 +1,4 @@
-import type { SessionUserMessage } from "@slopus/happy-providers";
+import type { SessionMessage, SessionUserMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { Agent } from "./Agent.js";
@@ -6,6 +6,13 @@ import type { AgentBaseAwaitOptions, AgentBaseMessageOptions } from "./AgentBase
 import type { AgentBaseKV } from "./AgentBaseKV.js";
 import type { AgentConfig } from "./AgentConfig.js";
 import type { AgentModel } from "./AgentModel.js";
+import type { AgentFeature } from "./AgentFeature.js";
+
+/** Conversation state installed atomically before a newly created agent starts. */
+export interface AgentInitialContext {
+    /** The conversation installed as the agent's history before its first turn runs. */
+    readonly messages: readonly SessionMessage[];
+}
 
 /**
  * A collection of agents addressed by ID: what an owner can ask of the agents it runs. An agent
@@ -23,12 +30,11 @@ export interface AgentSystem {
     readonly models: readonly AgentModel[];
 
     /**
-     * Create an agent with the configuration it keeps for its whole life, and resolve it. The
-     * configuration is persisted before the agent runs, so every later process resolves the agent
-     * exactly as it was created. Creating an ID that already exists is an error, and a creation
-     * that fails to produce an agent leaves no identity behind.
+     * Create an agent with a new system-generated cuid2 identity and the configuration it keeps
+     * for its whole life. The configuration and optional initial context are persisted before
+     * the agent runs; a creation that fails to produce an agent leaves no identity behind.
      */
-    create(ctx: Context, agentId: string, config: AgentConfig): Promise<Agent>;
+    create(ctx: Context, config: AgentConfig, initialContext?: AgentInitialContext): Promise<Agent>;
 
     /** Close an agent and release its identity, so the same ID can be created again. */
     delete(ctx: Context, agentId: string): Promise<void>;
@@ -51,6 +57,13 @@ export interface AgentSystem {
      */
     featureState(feature: string): AgentBaseKV;
 
+    /** A collection-wide feature by its stable name. */
+    feature(name: string): AgentFeature | undefined;
+
+    /**
+     * Queue a user message for an agent, injected as soon as its current response and tool batch
+     * finish.
+     */
     steer(
         ctx: Context,
         agentId: string,
@@ -58,6 +71,7 @@ export interface AgentSystem {
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<void>;
 
+    /** Queue a user message for an agent that injects only when the agent would otherwise stop. */
     send(
         ctx: Context,
         agentId: string,
@@ -65,7 +79,9 @@ export interface AgentSystem {
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<void>;
 
+    /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */
     abort(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void>;
 
+    /** Ask an agent for its conversation to be replaced by the provider's summary of it. */
     compact(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void>;
 }

@@ -120,7 +120,7 @@ describe("consistency across destructive history boundaries", () => {
             }
             await clearRecords(clearCtx);
         };
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "repair-versus-suffix",
             providers: providersOf(new ScriptedProvider([])),
             provider: "scripted",
@@ -179,7 +179,7 @@ describe("consistency across destructive history boundaries", () => {
                 { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
             ],
         ]);
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "failed-result-with-live-sibling",
             providers: providersOf(provider),
             provider: "scripted",
@@ -189,12 +189,14 @@ describe("consistency across destructive history boundaries", () => {
                     defineAgentTool({
                         name: "quick",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: () => Promise.resolve({ value: "quick result" }),
                         toLLM: (result) => [{ type: "text", text: result.value }],
                     }),
                     defineAgentTool({
                         name: "slow",
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: async () => {
                             slowToolStarted.resolve();
                             await releaseSlowTool.promise;
@@ -236,7 +238,7 @@ describe("consistency across destructive history boundaries", () => {
             compactingProvider,
             completedCompaction([system("summary of the old history")]),
         );
-        const compactingOwner = new AgentBase(ctx, {
+        const compactingOwner = await AgentBase.create(ctx, {
             id: "stale-owner-compaction",
             providers: providersOf(compactingProvider),
             provider: "scripted",
@@ -250,7 +252,7 @@ describe("consistency across destructive history boundaries", () => {
             },
         });
         const writingProvider = new ScriptedProvider([textTurn("committed answer")]);
-        const writingOwner = new AgentBase(ctx, {
+        const writingOwner = await AgentBase.create(ctx, {
             id: "stale-owner-compaction",
             providers: providersOf(writingProvider),
             provider: "scripted",
@@ -296,7 +298,7 @@ describe("consistency across destructive history boundaries", () => {
             compactionStarted,
             releaseCompaction,
         );
-        const compactingOwner = new AgentBase(ctx, {
+        const compactingOwner = await AgentBase.create(ctx, {
             id: "compaction-with-owed-suffix",
             providers: providersOf(compactingProvider),
             provider: "scripted",
@@ -315,7 +317,7 @@ describe("consistency across destructive history boundaries", () => {
         await compactingOwner.close();
 
         const recoveryProvider = new ScriptedProvider([textTurn("recovered answer")]);
-        const recovered = new AgentBase(ctx, {
+        const recovered = await AgentBase.create(ctx, {
             id: "compaction-with-owed-suffix",
             providers: providersOf(recoveryProvider),
             provider: "scripted",
@@ -354,7 +356,7 @@ describe("consistency across destructive history boundaries", () => {
             ],
             textTurn("second answer"),
         ]);
-        const live = new AgentBase(ctx, {
+        const live = await AgentBase.create(ctx, {
             id: "missing-text-end",
             providers: providersOf(liveProvider),
             provider: "scripted",
@@ -367,7 +369,7 @@ describe("consistency across destructive history boundaries", () => {
         await live.close();
 
         const restartedProvider = new ScriptedProvider([textTurn("third answer")]);
-        const restarted = new AgentBase(ctx, {
+        const restarted = await AgentBase.create(ctx, {
             id: "missing-text-end",
             providers: providersOf(restartedProvider),
             provider: "scripted",
@@ -403,7 +405,7 @@ describe("consistency across destructive history boundaries", () => {
         const disk = new InMemoryPersistence();
         const executions: string[] = [];
         const events: SessionEvent[] = [];
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "duplicate-provider-call-ids",
             providers: providersOf(provider),
             provider: "scripted",
@@ -417,6 +419,7 @@ describe("consistency across destructive history boundaries", () => {
                         name: "work",
                         parameters: Type.Object({ value: Type.String() }),
                         returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
                         execute: (_toolCtx, args) => {
                             executions.push(args.value);
                             return Promise.resolve({ value: args.value });

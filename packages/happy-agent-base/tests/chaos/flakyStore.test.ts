@@ -36,7 +36,7 @@ describe("durability under a flaky store", () => {
         const persistence = new FlakyPersistence(disk, (operation) => broken.has(operation));
         const providers = new AgentProviders();
         providers.add("responding", new RespondingProvider(), "gym");
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "flaky-agent",
             providers,
             provider: "responding",
@@ -75,7 +75,7 @@ describe("durability under a flaky store", () => {
         // it. Every message the caller was told had been accepted is now answered, exactly once
         // and in order: a failure that struck between the durable queue and the conversation
         // costs a turn, never the message.
-        const healthy = new AgentBase(ctx, {
+        const healthy = await AgentBase.create(ctx, {
             id: "flaky-agent",
             providers,
             provider: "responding",

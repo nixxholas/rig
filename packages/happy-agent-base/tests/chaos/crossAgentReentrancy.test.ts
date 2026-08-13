@@ -35,6 +35,11 @@ interface Deferred {
 }
 
 type ToolAction = (ctx: Context, owner: AgentSystem, agentId: string) => Promise<void>;
+
+/** The collection under test, which exists only once the features it is built with do. */
+interface OwnerHolder {
+    owner?: AgentSystem;
+}
 type RunScript = readonly SessionEvent[] | ((ctx: Context) => SessionStream);
 
 function deferred(): Deferred {
@@ -168,12 +173,14 @@ class RoutedProvider extends BaseProvider {
     }
 }
 
-function crossAgentFeature(actions: ReadonlyMap<string, ToolAction>): AgentFeatureConstructor {
+function crossAgentFeature(
+    actions: ReadonlyMap<string, ToolAction>,
+    holder: OwnerHolder,
+): AgentFeatureConstructor {
     return class implements AgentFeature {
         readonly name = "cross-agent-reentrancy";
         readonly #agentId: string;
         readonly #tool: AnyAgentTool;
-        #owner: AgentSystem | undefined;
 
         constructor(agentId: string) {
             this.#agentId = agentId;
@@ -182,12 +189,18 @@ function crossAgentFeature(actions: ReadonlyMap<string, ToolAction>): AgentFeatu
                 parameters: Type.Object({}),
                 returnType: Type.Object({}),
                 durable: false,
+                shouldReviewInAutoMode: () => false,
                 execute: async (toolCtx) => {
                     const action = actions.get(this.#agentId);
                     if (action === undefined) {
                         throw new Error(`No cross-agent action for "${this.#agentId}".`);
                     }
-                    await action(toolCtx, this.owner, this.#agentId);
+                    // These scenarios are about the owner's surface being used from inside a
+                    // tool, so they reach for the collection itself rather than the reference a
+                    // context carries.
+                    const owner = holder.owner;
+                    if (owner === undefined) throw new Error("The collection is not built yet.");
+                    await action(toolCtx, owner, this.#agentId);
                     return {};
                 },
                 toLLM: () => [{ type: "text", text: "Cross-agent operation completed." }],
@@ -196,16 +209,12 @@ function crossAgentFeature(actions: ReadonlyMap<string, ToolAction>): AgentFeatu
 
         readonly tools = (): readonly AnyAgentTool[] => [this.#tool];
 
-        async load(loadCtx: Context): Promise<void> {
-            this.#owner = agentSystem(loadCtx);
-            if (this.#owner === undefined) {
+        load(loadCtx: Context): Promise<void> {
+            // A feature is given the collection as a reference, and nothing more.
+            if (agentSystem(loadCtx) === undefined) {
                 throw new Error("Cross-agent feature requires its owning collection.");
             }
-        }
-
-        private get owner(): AgentSystem {
-            if (this.#owner === undefined) throw new Error("Feature has not loaded.");
-            return this.#owner;
+            return Promise.resolve();
         }
     };
 }
@@ -237,8 +246,9 @@ function harness(
         return created;
     };
     const provider = new RoutedProvider(scripts, compactions);
+    const holder: OwnerHolder = {};
     const owner = new AgentSystemLocal({
-        features: [crossAgentFeature(actions)],
+        features: [crossAgentFeature(actions, holder)],
         storage: new AgentStorage({
             kv: managerKV(manager),
             persistence,
@@ -247,6 +257,7 @@ function harness(
         provider: "scripted",
         models: [],
     });
+    holder.owner = owner;
     return { owner, provider, manager, persistence };
 }
 
@@ -274,8 +285,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [textTurn("B answered")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await a.send(ctx, user("start A"), { await: true });
         await Promise.all([a.waitForIdle(), b.waitForIdle()]);
@@ -312,8 +323,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [textTurn("B handled steering")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await a.send(ctx, user("start A"), { await: true });
         await Promise.all([a.waitForIdle(), b.waitForIdle()]);
@@ -347,8 +358,8 @@ describe("cross-agent tool re-entrancy", () => {
             ]),
             new Map([["B", [completedCompaction("summary of B only")]]]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
         await b.send(ctx, user("seed B history"), { await: true });
         await b.waitForIdle();
 
@@ -403,8 +414,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [toolTurn("B-to-A"), textTurn("B closed its tool call")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await a.send(ctx, user("start cycle"), { await: true });
         const settled = await settlesWithin(Promise.all([a.waitForIdle(), b.waitForIdle()]), 500);
@@ -453,8 +464,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [toolTurn("B-cross"), textTurn("B tool settled"), textTurn("B answered A")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await Promise.all([
             a.send(ctx, user("start A"), { await: true }),
@@ -508,8 +519,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [completedCompaction("B summary")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await Promise.all([
             a.send(ctx, user("start A"), { await: true }),
@@ -560,8 +571,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [toolTurn("B-closes-A"), textTurn("B continued")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await Promise.all([
             a.send(ctx, user("start A"), { await: true }),
@@ -611,8 +622,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ["B", [toolTurn("B-deletes-A"), textTurn("B continued")]],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
 
         await Promise.all([
             a.send(ctx, user("start A"), { await: true }),
@@ -677,8 +688,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
         await b.send(ctx, user("block B"), { await: true });
         await bStarted.promise;
 
@@ -738,8 +749,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
         await b.send(ctx, user("finish B before close"), { await: true });
         await bStarted.promise;
 
@@ -802,8 +813,8 @@ describe("cross-agent tool re-entrancy", () => {
                 ],
             ]),
         );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
+        const a = await world.owner.createWithId(ctx, "A", {});
+        const b = await world.owner.createWithId(ctx, "B", {});
         await b.send(ctx, user("finish before deletion"), { await: true });
         await bStarted.promise;
 

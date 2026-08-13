@@ -9,7 +9,7 @@ import type {
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, agentBaseKV } from "../../sources/index.js";
+import { AgentBase, agentKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
 import { providersOf, system, textTurn, user } from "../gym/fixtures.js";
@@ -90,7 +90,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         const provider = new ScriptedProvider([textTurn("must not run")]);
         const hookStarted = deferred();
         const releaseHook = deferred();
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "abort-before-agent-loop",
             providers: providersOf(provider),
             provider: "scripted",
@@ -125,7 +125,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         const hookStarted = deferred();
         const releaseHook = deferred();
         let hookCalls = 0;
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "abort-during-after-turn",
             providers: providersOf(provider),
             provider: "scripted",
@@ -205,7 +205,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             return session;
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "abort-provider-compaction",
             providers: providersOf(provider),
             provider: "scripted",
@@ -278,7 +278,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             return session;
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "close-stream-cleanup",
             providers: providersOf(provider),
             provider: "scripted",
@@ -338,7 +338,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             return session;
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "recreate-stream-cleanup",
             providers: providersOf(provider),
             provider: "scripted",
@@ -421,7 +421,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             return session;
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "abort-while-settling",
             providers: providersOf(provider),
             provider: "scripted",
@@ -463,7 +463,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             await originalWriteValue(writeCtx, key, value);
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "idle-admitted-send",
             providers: providersOf(provider),
             provider: "scripted",
@@ -500,7 +500,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             await originalAppend(appendCtx, record);
         };
 
-        const agent = new AgentBase(ctx, {
+        const agent = await AgentBase.create(ctx, {
             id: "model-change-kv-rollback",
             providers: providersOf(provider),
             provider: "scripted",
@@ -508,7 +508,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             model: "anthropic/claude",
             hooks: {
                 modelChanged: async (hookCtx, change) => {
-                    const kv = agentBaseKV(hookCtx);
+                    const kv = agentKV(hookCtx);
                     if (kv === undefined) throw new Error("No model-change KV.");
                     await kv.write(hookCtx, "selected-model", change.model);
                     return system("handoff");

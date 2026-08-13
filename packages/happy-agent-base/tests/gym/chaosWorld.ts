@@ -78,6 +78,7 @@ function toolsFor(world: ChaosWorld, generation: number): AnyAgentTool[] {
             durable,
             parameters: Type.Object({ call: Type.String() }, { additionalProperties: false }),
             returnType: Type.Object({ call: Type.String() }),
+            shouldReviewInAutoMode: () => false,
             execute: (_toolCtx, { call }) => {
                 // A process that has already died cannot run anything, so a straggling call from
                 // an abandoned agent must not count as a side effect of the world.
@@ -139,7 +140,7 @@ export async function runProcess(
     providers.add("responding", provider, "gym");
     const dones: SessionDoneState[] = [];
     let events = 0;
-    const agent = new AgentBase(ctx, {
+    const agent = await AgentBase.create(ctx, {
         id: "chaos-agent",
         providers,
         provider: "responding",

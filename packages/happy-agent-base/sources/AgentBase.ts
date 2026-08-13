@@ -25,8 +25,15 @@ import {
     type Context,
 } from "@steve.kite/stdlib";
 
-import { withAgentBaseContext, withAgentBaseKV } from "./AgentBaseContext.js";
+import { withAgentContext, withAgentKV } from "./AgentContexts.js";
+import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
 import { AgentBaseKV } from "./AgentBaseKV.js";
+import {
+    AGENT_BASE_PENDING_KEY,
+    agentBasePendingStateOf,
+    type AgentBasePendingStage,
+    type AgentBasePendingState,
+} from "./AgentBasePending.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBasePersistence, AgentBaseRecord } from "./AgentBasePersistence.js";
 import { agentBaseStoreLock, agentBaseWithStoreStill } from "./AgentBaseStoreLock.js";
@@ -39,21 +46,11 @@ import type { AnyAgentTool } from "./AgentTool.js";
 const ABORTED = Symbol("aborted");
 
 /**
- * The agent's own record of whether it owes an answer. It is written in the transaction that
- * accepts a message and removed in the settle commitment, so anyone asking whether an agent
- * still has work reads a committed fact instead of inspecting its queues.
- */
-const OWED_KEY = "owed";
-
-/** The durable queues whose contents mean the agent still owes an answer. */
-const OWED_PREFIXES = ["steering.", "send.", "tool."] as const;
-
-/**
  * The agents whose run loop the current execution is running inside. Hooks and tool executions
  * receive a context carrying this, so an operation that would wait for the very loop it is part
  * of can say so instead of hanging for ever.
  */
-const insideTurn = createContextNamespace<readonly string[]>("agentBaseInsideTurn", []);
+const insideTurn = createContextNamespace<readonly string[]>("agentInsideTurn", []);
 
 /**
  * The same fact as `insideTurn`, tracked by the runtime rather than carried by a context. Not
@@ -86,8 +83,11 @@ export type AgentBaseQueueMode = "one-at-a-time" | "all";
 export interface AgentBaseMessageOptions {
     /** The registry ID of the provider to switch to. */
     readonly provider?: string;
+    /** The model to switch to; an incompatible one resets the conversation. */
     readonly model?: string;
+    /** How hard the model should think about the request. */
     readonly effort?: SessionReasoningEffort;
+    /** Which of the provider's service tiers to bill and schedule the request on. */
     readonly serviceTier?: SessionServiceTier;
 }
 
@@ -113,25 +113,31 @@ export interface AgentBaseAwaitOptions {
 
 /** A durably queued message together with the settings it carries. */
 interface QueueEntry {
+    /** The store key the message was written under, and the one a consumption claims it by. */
     readonly key: string;
     readonly message: SessionUserMessage;
+    /** The settings this message makes effective when it is consumed. */
     readonly options: AgentBaseMessageOptions;
 }
 
 /** One call in a dispatched batch, with the reason it must not run when it is ambiguous. */
 interface ToolBatchEntry {
+    /** The pending-tool key the call is durable under until its result commits. */
     readonly key: string;
     readonly call: SessionToolCallBlock;
+    /** Present when the call must be answered with this refusal instead of being executed. */
     readonly rejected?: string;
 }
 
 /** One message offered to a durable queue, before it has a key. */
 interface QueueRequest {
+    /** Which of the two queues it belongs in, and so when it will be injected. */
     readonly kind: "steering" | "send";
     readonly message: SessionUserMessage;
     readonly options: AgentBaseMessageOptions;
 }
 
+/** Everything an agent session is constructed with; only the identity and store are required. */
 export interface AgentBaseOptions {
     /** Stable session identity supplied by the caller. */
     readonly id: string;
@@ -139,14 +145,21 @@ export interface AgentBaseOptions {
     readonly providers: AgentProviders;
     /** The registry ID of the provider to use; serializable alongside model and effort. */
     readonly provider: string;
+    /** The append-only store the conversation, the queues, and the settings live in. */
     readonly persistence: AgentBasePersistence;
+    /** Observers and correctness hooks the run is assembled from; `Agent` merges features here. */
     readonly hooks?: AgentBaseHooks;
     /** Copied into the agent's own mutable `state`. */
     readonly initialState?: Partial<AgentBaseState>;
+    /** The initial model, superseded by the first message that carries one. */
     readonly model?: string;
+    /** The initial reasoning effort, superseded by the first message that carries one. */
     readonly effort?: SessionReasoningEffort;
+    /** The initial service tier, superseded by the first message that carries one. */
     readonly serviceTier?: SessionServiceTier;
+    /** How the steering queue drains; one message per response by default. */
     readonly steeringMode?: AgentBaseQueueMode;
+    /** How the send queue drains; one message per response by default. */
     readonly sendMode?: AgentBaseQueueMode;
 }
 
@@ -171,9 +184,8 @@ export interface AgentBaseOptions {
  *
  * ## Accepting a message
  *
- * A message is accepted exactly once, or not at all. Its durable write, the writes of every
- * other message in the same batch, and the marker saying this agent now owes an answer all
- * commit in one transaction under one hold of the lock. So:
+ * A message is accepted exactly once, or not at all. Its durable write and the writes of every
+ * other message in the same batch commit in one transaction under one hold of the lock. So:
  *
  * - `steer` and `send` with `await: true` resolve only once the message is durable; a failed
  *   write keeps it out of the conversation entirely. Without the flag they return early, but the
@@ -263,13 +275,6 @@ export interface AgentBaseOptions {
  * `abort(ctx, { await: true })` additionally waits for the loop to stop, which is what an owner
  * outside the agent usually wants and what code inside it must not ask for — see below.
  *
- * ## Settling
- *
- * Settling is committed, not inferred. Under the lock, and only when the durable queues really
- * are empty, the agent removes its own marker — so a message accepted at that moment either
- * commits first and is seen, or waits for the lock and sets the marker again. Another process
- * asks that committed fact through `agentBaseOwesWork` instead of reading the agent's queues.
- *
  * ## Close
  *
  * Close is a barrier, published before any of the shutdown runs. Nothing new is admitted from
@@ -309,6 +314,7 @@ export interface AgentBaseOptions {
  * an agent should be handed.
  */
 export class AgentBase {
+    /** The caller-supplied session identity: the name of this agent's store and of its loop. */
     readonly id: string;
     /**
      * The agent's own copy of the initial state, mutable directly; every inference reads the
@@ -316,14 +322,27 @@ export class AgentBase {
      */
     readonly state: AgentBaseState;
 
+    /**
+     * The agent's own lifetime, without the selection on it. Every context the agent derives
+     * starts here, so a change of provider or model rebuilds one context from a known base
+     * rather than layering another value onto whatever the last one happened to carry.
+     */
     readonly #baseCtx: Context;
+    /** The base context extended with the effective selection and the agent's key-value store. */
     #ctx: Context;
+    /** The registry the provider ID is resolved through, each time a session is created. */
     readonly #providers: AgentProviders;
+    /** The registry ID of the provider in force; durable, so a restart resumes on the same one. */
     #providerId: string;
+    /** The append-only store behind the conversation, the queues and the persisted settings. */
     readonly #persistence: AgentBasePersistence;
+    /** The model in force. Changing it to an incompatible one resets the conversation. */
     #model: string | undefined;
+    /** The reasoning effort in force. */
     #effort: SessionReasoningEffort | undefined;
+    /** The service tier in force. */
     #serviceTier: SessionServiceTier | undefined;
+    /** The single set of hooks the run is observed by and its configuration extended from. */
     readonly #hooks: AgentBaseHooks;
     /**
      * Serializes every persistence operation together with its in-memory effect, so storage
@@ -334,15 +353,22 @@ export class AgentBase {
 
     /** The session-scoped key-value store carried on every context the agent derives. */
     readonly #kv: AgentBaseKV;
+    /** Whether steering drains one message per response or all of them at once. */
     readonly #steeringMode: AgentBaseQueueMode;
+    /** Whether sends drain one message per response or all of them at once. */
     readonly #sendMode: AgentBaseQueueMode;
 
+    /** The provider session requests run on, created on first use and stateful thereafter. */
     #session: BaseSession | undefined;
     /** The provider-facing configuration the current session was created with. */
     #sessionConfig: string | undefined;
+    /** The conversation as this instance last knew it, reloaded from the store every turn. */
     #messages: SessionMessage[] = [];
+    /** The durable steering queue, in the order its keys sort. */
     #steering: QueueEntry[] = [];
+    /** The durable send queue, in the order its keys sort. */
     #sends: QueueEntry[] = [];
+    /** A dispatched tool batch whose results have not all landed yet, and so has to be resumed. */
     #pendingTools: { readonly key: string; readonly call: SessionToolCallBlock }[] = [];
     /**
      * True when the pending tools were reconstructed from an unanswered trailing tool call
@@ -352,6 +378,7 @@ export class AgentBase {
     #pendingToolsUndispatched = false;
     /** How many tool batches are running, so a caller can tell a waiting turn from a busy one. */
     #toolsRunning = 0;
+    /** The in-flight or finished load of the durable state; cleared at the start of every turn. */
     #loaded: Promise<void> | undefined;
     /**
      * Identifies this instance's writes, so no other writer can produce one of its keys. It is a
@@ -371,7 +398,7 @@ export class AgentBase {
      * Whether that last record was a replacement that ended on a message still owed an answer.
      * Only the rewrite that wrote it can tell a summary's own last message from a suffix it kept.
      */
-    #lastRecordOwed = false;
+    #lastRecordContinuesInference = false;
     /**
      * How many durable records the in-memory conversation accounts for: the ones it was loaded
      * from, plus every one this instance has appended since. A rewrite replaces exactly those.
@@ -380,7 +407,38 @@ export class AgentBase {
      * already covers into the replacement a second time.
      */
     #loadedRecordCount = 0;
+    /**
+     * Whether this instance has checked whether a cut-off run should resume inference. The
+     * question is only meaningful once, against the state the agent first loaded: afterwards a
+     * trailing user message is ordinary, since a response may legitimately have no blocks.
+     */
     #recoveryChecked = false;
+    /**
+     * The outstanding work this agent has recorded, held in memory exactly as the store holds
+     * it. Its presence is the whole of the active flag, so the one thing anyone outside can ask
+     * about the agent is answered from here without touching the disk.
+     */
+    #pending: AgentBasePendingState | undefined;
+    /**
+     * The pending state this instance last wrote, so a write that would change nothing is
+     * skipped. The loop passes through the same stage many times in a turn, and a store is not
+     * worth touching to tell it what it already says.
+     */
+    #pendingWritten: string | undefined;
+    /**
+     * The outstanding work this agent's store already held when this instance first wrote to it:
+     * what a process that died mid-run left behind, or nothing when the last run settled
+     * cleanly. It is what recovery decides from, in place of guessing from the transcript's
+     * shape.
+     */
+    #inherited: AgentBasePendingState | undefined;
+    /** Whether that inherited record has been read; it can only be read before it is overwritten. */
+    #inheritedRead = false;
+    /**
+     * The compaction that has been asked for and not carried out yet, together with the promise
+     * every caller waiting for it shares. Requesting one while it is pending joins that promise
+     * rather than queueing a second compaction.
+     */
     #compaction:
         | {
               readonly promise: Promise<void>;
@@ -388,6 +446,7 @@ export class AgentBase {
               readonly reject: (error: unknown) => void;
           }
         | undefined;
+    /** The scope the current stretch of work is cancelled on, which an abort signals. */
     #abortController: AbortController | undefined;
     /**
      * Raised when close begins. Only the tool batch listens: a running tool may be waiting for
@@ -395,8 +454,6 @@ export class AgentBase {
      * inference stream and everything already accepted.
      */
     readonly #closeController = new AbortController();
-    /** Whether a close stopped waiting for a running tool, which also ends the turn it was in. */
-    #abandonedTools = false;
     /**
      * The true size of the conversation in tokens, as the provider last measured it. Durable,
      * so a restart keeps knowing how large the conversation is, and cleared whenever the
@@ -405,9 +462,13 @@ export class AgentBase {
     #contextTokens: number | undefined;
     /** Whether the current turn was cancelled before it could finish. */
     #turnAborted = false;
+    /** Whether something has asked for a turn that has not been answered yet. */
     #turnRequested = false;
+    /** The run loop while it is running; the field is cleared once it has actually stopped. */
     #runPromise: Promise<void> | undefined;
+    /** The barrier: true from the moment close is called, and nothing new is admitted after it. */
     #closed = false;
+    /** The one shutdown every closing caller shares, so a session is never destroyed twice. */
     #closing: Promise<void> | undefined;
     /** Operations accepted from a caller and not finished yet; a close waits for every one. */
     readonly #admitted = new Set<Promise<void>>();
@@ -426,7 +487,54 @@ export class AgentBase {
      */
     readonly #streamCleanup = new Set<Promise<unknown>>();
 
-    constructor(ctx: Context, options: AgentBaseOptions) {
+    /**
+     * A new agent, wired to its options and touching no storage at all. Use this for an identity
+     * with no durable state yet; whatever the agent needs from the store is read by its first
+     * turn.
+     */
+    static create(ctx: Context, options: AgentBaseOptions): Promise<AgentBase> {
+        return Promise.resolve(new AgentBase(ctx, options));
+    }
+
+    /**
+     * An agent for an identity that may already have durable state, with the one externally
+     * meaningful fact about that state — whether it has work left — read before it is handed
+     * back, so `active` is answerable straight away.
+     *
+     * Only the flag is read. The conversation, the queues and the settings are deliberately not:
+     * they are needed by the first turn and by nothing before it, so an owner resuming a hundred
+     * identities at startup pays for a hundred small reads rather than a hundred transcripts.
+     * The rest loads on the way into the turn that actually needs it.
+     */
+    static async load(ctx: Context, options: AgentBaseOptions): Promise<AgentBase> {
+        const agent = new AgentBase(ctx, options);
+        await agent.#loadPendingState();
+        return agent;
+    }
+
+    /**
+     * Read the outstanding work the store already holds, before this instance has written any of
+     * its own. It is both what `active` answers from and what an interrupted run is recognized
+     * by, so reading it here leaves the later stage writes nothing to learn from the store.
+     */
+    async #loadPendingState(): Promise<void> {
+        await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            const stored = await agentBasePendingStateOf(lockCtx, this.#persistence);
+            this.#inherited = stored;
+            this.#inheritedRead = true;
+            this.#pending = stored;
+            this.#pendingWritten =
+                stored === undefined ? undefined : deterministicStringify(stored);
+        });
+    }
+
+    /**
+     * Build the agent from its options, without touching the store. Nothing is loaded here: the
+     * durable state is read by the first turn, so constructing one stays cheap even for a session
+     * nobody goes on to run. Private, because an agent is made by `create` or by `load`, and
+     * which of the two the caller means is worth saying.
+     */
+    private constructor(ctx: Context, options: AgentBaseOptions) {
         this.id = options.id;
         // An agent is its own lifetime. Whatever call happened to construct it — a tool of
         // another agent, most often — is not a loop this one runs inside, so an inherited
@@ -454,14 +562,79 @@ export class AgentBase {
         this.#sendMode = options.sendMode ?? "one-at-a-time";
     }
 
+    /**
+     * The context everything the agent does runs on: its identity and effective selection, plus
+     * the session-scoped key-value store. Rebuilt whenever the selection changes.
+     */
     #deriveCtx(): Context {
-        const ctx = withAgentBaseContext(this.#baseCtx, {
+        const ctx = withAgentContext(this.#baseCtx, {
+            id: this.id,
             provider: this.#providerId,
             model: this.#model,
             effort: this.#effort,
             serviceTier: this.#serviceTier,
         });
-        return withAgentBaseKV(ctx, this.#kv);
+        return withAgentKV(ctx, this.#kv);
+    }
+
+    /**
+     * Whether the agent has anything left to do. This is the only thing about an agent's state
+     * anyone outside it may read: the queues and the stage behind this answer are the run's own
+     * business, and can be cleared but never inspected. Even this is rarely wanted — it is here
+     * for the owner deciding which agents a restarted process has to resume.
+     */
+    get active(): boolean {
+        return this.#pending !== undefined;
+    }
+
+    /**
+     * Record what the agent is doing, so a process that dies here is discovered owing exactly
+     * this. Writing runs on the caller's context: given a transaction's context it commits with
+     * whatever else that transaction is writing, which is how a consumed message and the
+     * inference it owes become durable as one fact rather than two.
+     */
+    async #recordPending(ctx: Context, pending: AgentBasePendingState): Promise<void> {
+        const serialized = deterministicStringify(pending);
+        if (this.#pendingWritten === serialized) return;
+        await this.#persistence.writeValue(ctx, AGENT_BASE_PENDING_KEY, pending);
+        this.#pending = pending;
+        this.#pendingWritten = serialized;
+    }
+
+    /**
+     * Record the stage the run has reached, taking the store lock when not already inside it.
+     *
+     * The first of these also reads what the store already held, before overwriting it. That
+     * reading is the only chance to see it: from this point the record says what this instance
+     * is doing, and a run interrupted by a dead process would be indistinguishable from the one
+     * starting here.
+     */
+    async #enterStage(stage: AgentBasePendingStage): Promise<void> {
+        const pending: AgentBasePendingState = { stage };
+        if (deterministicStringify(pending) === this.#pendingWritten && this.#inheritedRead) return;
+        try {
+            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+                if (!this.#inheritedRead) {
+                    this.#inheritedRead = true;
+                    this.#inherited = await agentBasePendingStateOf(lockCtx, this.#persistence);
+                }
+                await this.#recordPending(lockCtx, pending);
+            });
+        } catch {
+            // Losing the record costs recovery precision, never the work itself: the turn is
+            // already running and will answer whatever it was going to answer.
+        }
+    }
+
+    /**
+     * Erase the outstanding work, which is what makes the agent idle. Runs on the caller's
+     * context so it can be part of the transaction that settles the agent, letting a hook commit
+     * its own conclusion of the run alongside the fact that the run is over.
+     */
+    async #clearPending(ctx: Context): Promise<void> {
+        await this.#persistence.deleteValue(ctx, AGENT_BASE_PENDING_KEY);
+        this.#pending = undefined;
+        this.#pendingWritten = undefined;
     }
 
     /**
@@ -566,9 +739,6 @@ export class AgentBase {
                     });
                     accepted.push({ key, request });
                 }
-                // Accepting the work and owing an answer for it commit together, so the store
-                // never holds a message the agent's own settle marker says nobody owes.
-                await this.#persistence.writeValue(txCtx, OWED_KEY, true);
             });
             for (const { key, request } of accepted) {
                 // The queue is resolved inside the lock: a history load running just before this
@@ -585,26 +755,6 @@ export class AgentBase {
             await admitted;
         } finally {
             this.#admitted.delete(admitted);
-        }
-    }
-
-    /**
-     * Commit the fact that this agent owes nothing. Under the persistence lock, and only when the
-     * durable queues really are empty, the settle marker is removed. A message accepted at the
-     * same moment either commits before this and is seen here, or waits for the lock and writes
-     * the marker again afterwards — so an agent that owes an answer never looks settled.
-     */
-    async #commitSettled(): Promise<void> {
-        try {
-            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
-                for (const prefix of OWED_PREFIXES) {
-                    if ((await this.#persistence.readValues(lockCtx, prefix)).length > 0) return;
-                }
-                await this.#persistence.deleteValue(lockCtx, OWED_KEY);
-            });
-        } catch {
-            // A settle that could not be committed leaves the marker in place: the agent stays
-            // discoverable, which costs an idle resume rather than a lost answer.
         }
     }
 
@@ -676,6 +826,10 @@ export class AgentBase {
         pending.reject(new Error(reason));
     }
 
+    /**
+     * The pending compaction, requesting one if none is pending. Every caller shares the same
+     * promise, and the request is what starts the loop that will carry it out.
+     */
     #ensureCompaction(): Promise<void> {
         if (this.#compaction === undefined) {
             let resolve!: () => void;
@@ -691,11 +845,6 @@ export class AgentBase {
         return this.#compaction.promise;
     }
 
-    /**
-     * The system prompt for the next request: the mutable state extended by the hook's answer.
-     * Instructions and tools are correctness hooks — a failure here fails the turn loudly
-     * instead of silently running with a wrong configuration.
-     */
     /**
      * Track work that outlived the response it belonged to, so the next request can wait for it.
      * Failures are the unwinding work's own business and never reach the turn.
@@ -728,6 +877,11 @@ export class AgentBase {
         }
     }
 
+    /**
+     * The system prompt for the next request: the mutable state extended by the hook's answer.
+     * Instructions and tools are correctness hooks — a failure here fails the turn loudly
+     * instead of silently running with a wrong configuration.
+     */
     async #instructions(): Promise<string> {
         const hooked = await this.#hooks.instructions?.(this.#ctx);
         return [this.state.instructions, hooked ?? ""]
@@ -873,6 +1027,10 @@ export class AgentBase {
         await this.#closing;
     }
 
+    /**
+     * Make sure the run loop is running. A loop already in flight picks up the request on its
+     * next pass, so this never starts a second one.
+     */
     #startRun(): void {
         if (this.#runPromise !== undefined) return;
         // The loop is a lifetime of its own, so it marks itself rather than inheriting whatever
@@ -892,6 +1050,12 @@ export class AgentBase {
             });
     }
 
+    /**
+     * Answer turns until nothing is asked for any more. The inner loop is one turn each: reload
+     * the durable state, ask the pre-turn hooks what to do, run the inference and its tools, then
+     * ask the post-turn hooks. The outer loop reopens when an `afterAgentLoop` action asks for
+     * more work, so the loop hooks always bracket a settled-to-settled span.
+     */
     async #runLoop(): Promise<void> {
         // The outer loop reopens when an `afterAgentLoop` action requests more work, so the
         // loop hooks always bracket a settled-to-settled span.
@@ -900,6 +1064,11 @@ export class AgentBase {
             // owns everything the run does — its opening hook as much as its inference — so a
             // run cancelled while it is still starting up never reaches the model at all.
             let abort = this.#openAbortScope();
+            // The agent is working from here, and says so durably before it does anything a
+            // crash could interrupt. What it records is refined as the run reaches each stage;
+            // what matters at this point is that the record exists at all, since its absence is
+            // what a later process reads as an agent that finished.
+            await this.#enterStage("inference");
             await this.#invokeHook(this.#hooks.beforeAgentLoop);
             do {
                 this.#turnAborted = false;
@@ -932,6 +1101,48 @@ export class AgentBase {
             } while (true);
             await this.#applyActions(this.#hooks.afterAgentLoop, abort.signal);
         } while (this.#turnRequested && !this.#closed);
+        // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
+        // makes the agent idle, and it commits together with whatever the settling hooks write,
+        // so no owner can ever see the agent finished without their conclusions or their
+        // conclusions without the agent being finished.
+        await this.#settleDurably();
+    }
+
+    /**
+     * Erase the outstanding work and let the transactional settling hooks write in the same
+     * transaction. A failure leaves the record in place: an agent wrongly believed to be working
+     * is resumed and finds nothing to do, while one wrongly believed to be finished is never
+     * resumed at all.
+     */
+    async #settleDurably(): Promise<void> {
+        try {
+            await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
+                this.#persistence.transaction(lockCtx, async (txCtx) => {
+                    await this.#clearPending(txCtx);
+                    await this.#invokeTransactionalSettle(txCtx);
+                }),
+            );
+        } catch {
+            // The run itself is over and succeeded; only the record of its ending failed.
+        }
+    }
+
+    /**
+     * Call the settling hooks that write inside the settling transaction. They are lent a store
+     * bound to that transaction — a capability taken back when they return, so it cannot be kept
+     * and used to write outside the transaction it belongs to. A throwing hook rolls the
+     * settlement back with it, because a hook here is writing a conclusion about the very fact
+     * being committed, and half of that pair is worse than neither.
+     */
+    async #invokeTransactionalSettle(txCtx: Context): Promise<void> {
+        const hook = this.#hooks.afterAgentSettledTransact;
+        if (hook === undefined) return;
+        const { kv, release } = this.#kv.locked(txCtx);
+        try {
+            await hook(withAgentKV(insideTurn.set(txCtx, []), kv));
+        } finally {
+            release();
+        }
     }
 
     /**
@@ -949,15 +1160,13 @@ export class AgentBase {
      * Commit and announce the settle, once the loop has actually stopped rather than as its last
      * act. The difference matters to whoever is listening: a hook told the agent has settled is
      * being told something it can act on, and asking for a compaction — or anything else the
-     * loop carries out — has to reach a loop that can still be started. Settling is committed
-     * before it is announced, so a feature reacting to it is already backed by a durable fact.
+     * loop carries out — has to reach a loop that can still be started.
      *
      * The work is admitted rather than left to run loose, so an idle agent is one whose settle
      * has finished, and a close waits for it like anything else it took on.
      */
     #announceSettled(): void {
         const announced = (async () => {
-            await this.#commitSettled();
             // The settle runs once the loop has stopped, so its hook is not inside a turn and
             // its context does not claim to be: a compaction it waits for reaches a loop that
             // can still be started.
@@ -967,6 +1176,7 @@ export class AgentBase {
         void announced.finally(() => this.#admitted.delete(announced));
     }
 
+    /** Call an observing hook on the given context; a throwing hook is swallowed, never fatal. */
     async #invokeHookOn<Arguments extends readonly unknown[]>(
         ctx: Context,
         hook: ((ctx: Context, ...args: Arguments) => MaybePromise<void>) | undefined,
@@ -979,6 +1189,7 @@ export class AgentBase {
         }
     }
 
+    /** Call an observing hook on the agent's own context. */
     async #invokeHook<Arguments extends readonly unknown[]>(
         hook: ((ctx: Context, ...args: Arguments) => MaybePromise<void>) | undefined,
         ...args: Arguments
@@ -986,12 +1197,6 @@ export class AgentBase {
         await this.#invokeHookOn(this.#ctx, hook, ...args);
     }
 
-    /**
-     * Ask a lifecycle hook what to do next and carry its actions out: queue steering or sent
-     * messages through the ordinary durable path, or trigger a compaction. Every returned
-     * action is applied before the loop continues, so they all take effect at the same point.
-     * Neither a throwing hook nor a failing action ever fails the run.
-     */
     /**
      * Ask a hook what to do next, on a scope that may be cancelled while the hook is still
      * thinking. An abort owns the whole of the turn it cancelled, including the answer of a hook
@@ -1020,6 +1225,13 @@ export class AgentBase {
         await this.#carryOutActions(actions);
     }
 
+    /**
+     * Ask a lifecycle hook what to do next and carry its actions out: queue steering or sent
+     * messages through the ordinary durable path, or trigger a compaction. Every returned
+     * action is applied before the loop continues, so they all take effect at the same point.
+     * Neither a throwing hook nor a failing action ever fails the run. Unlike `#applyActions`
+     * this belongs to no turn's scope, so nothing can cancel the answer out from under it.
+     */
     async #applyActionsAlways<Arguments extends readonly unknown[]>(
         hook:
             | ((
@@ -1069,6 +1281,12 @@ export class AgentBase {
         await flush();
     }
 
+    /**
+     * One turn's work: resume an interrupted tool batch, run a requested compaction, then cycle
+     * between draining the queues and asking the model, dispatching each response's tool calls,
+     * until nothing is owed an answer. Every failure is caught here and surfaced to the
+     * conversation, so a turn ends with a complete context whatever went wrong.
+     */
     async #runInference(abort: AbortController): Promise<void> {
         // One shared promise for the turn's scope keeps races from piling up listeners on the
         // signal, and a scope that was aborted before this point settles it immediately: a
@@ -1090,33 +1308,21 @@ export class AgentBase {
                 // A batch that was never committed has certainly not run — the commit precedes
                 // every execution — so it is dispatched as the fresh batch it never got to be,
                 // rather than resumed, which would refuse the non-durable calls.
-                await this.#runToolBatch(resumed, !undispatched, abort.signal, abortPromise);
+                if (await this.#runToolBatch(resumed, !undispatched, abort.signal, abortPromise)) {
+                    return;
+                }
             }
             // A requested compaction runs before this turn's first inference, so the model
             // always receives a settled conversation — never one still owing tool results.
             await this.#runCompaction(abort.signal);
-            // A response is owed without any injection when tool results from a resumed batch
+            // An inference is needed without any injection when tool results from a resumed batch
             // end the context, or — checked once, against the freshly loaded durable state —
             // when a cut-off run left its trailing user or tool message unanswered. Afterwards
             // a trailing user message can be legitimate: a response may have zero blocks.
-            let responseOwed = resumed.length > 0;
+            let needsInference = resumed.length > 0;
             if (!this.#recoveryChecked) {
                 this.#recoveryChecked = true;
-                // A conversation whose last record is a consumed message, a tool result, or the
-                // note a failed turn left behind was cut off before it was answered, and the
-                // answer is still owed. A conversation that ends in a compaction was not cut
-                // off — it was replaced — and asking the model to respond to a summary nobody
-                // requested would put words in the conversation that nobody asked for.
-                responseOwed ||=
-                    this.#lastRecordType === "user" ||
-                    this.#lastRecordType === "tool" ||
-                    this.#lastRecordType === "system" ||
-                    // A replacement record is not a question in itself, however it happens to
-                    // end — but it keeps the suffix that joined the conversation after its
-                    // snapshot, and a consumed message in that suffix is owed an answer just as
-                    // much as it was before the rewrite. Which of the two a replacement ends on
-                    // is not visible in the messages, so the rewrite that knew records it.
-                    (this.#lastRecordType === "compaction" && this.#lastRecordOwed);
+                needsInference ||= this.#resumesInterruptedRun();
             }
             // Each cycle first drains the queues, then runs one inference. Steering injects at
             // every stop between responses and always outranks sends; sent messages inject
@@ -1133,25 +1339,21 @@ export class AgentBase {
                 // the last response already reported its own terminal event, and a second one
                 // would contradict it for the same response.
                 if (abort.signal.aborted) {
-                    const owed =
-                        responseOwed || this.#steering.length > 0 || this.#sends.length > 0;
-                    if (owed) this.#emit({ type: "done", state: "cancelled" });
+                    const hasPendingWork =
+                        needsInference || this.#steering.length > 0 || this.#sends.length > 0;
+                    if (hasPendingWork) this.#emit({ type: "done", state: "cancelled" });
                     break;
                 }
-                // A close that had to abandon running tools ends the turn here. Their results
-                // are committed and the conversation owes nothing, but the abandoned work is
-                // still in flight over a stateful session, so nothing may be asked of it again.
-                if (this.#abandonedTools) break;
                 let injected = await this.#consumeQueue(
                     this.#steering,
                     this.#steeringMode,
                     "steering.",
                 );
-                if (!injected && !responseOwed) {
+                if (!injected && !needsInference) {
                     injected = await this.#consumeQueue(this.#sends, this.#sendMode, "send.");
                 }
                 // Nothing to answer — a start() on an idle history, or the queues ran dry.
-                if (!injected && !responseOwed) break;
+                if (!injected && !needsInference) break;
                 const instructions = await this.#instructions();
                 const tools = await this.#tools();
                 const session = await this.#ensureSession(instructions, tools);
@@ -1187,7 +1389,7 @@ export class AgentBase {
                 if (content.length > 0) {
                     this.#messages.push({ role: "assistant", content });
                 }
-                responseOwed = false;
+                needsInference = false;
                 pendingError = state === "error" ? errorMessage : undefined;
                 if (state !== "tool_call") {
                     // A response can carry a tool call and still not end in one — a stream that
@@ -1224,7 +1426,7 @@ export class AgentBase {
                         await this.#appendFailure(message);
                         break;
                     }
-                    await this.#runToolBatch(
+                    const closedDuringTools = await this.#runToolBatch(
                         toolBatchEntries(calls).map(({ call, rejected }, index) => ({
                             key: this.#toolKey(index, call.callId),
                             call,
@@ -1234,7 +1436,8 @@ export class AgentBase {
                         abort.signal,
                         abortPromise,
                     );
-                    responseOwed = true;
+                    if (closedDuringTools) break;
+                    needsInference = true;
                     continue;
                 }
                 // A natural stop keeps draining, and so does a provider-reported error: the
@@ -1261,6 +1464,36 @@ export class AgentBase {
             await this.#appendFailure(error instanceof Error ? error.message : String(error));
         }
         this.#turnAborted = abort.signal.aborted;
+    }
+
+    /**
+     * Whether this agent is picking up a run that was cut off rather than starting a fresh one,
+     * and so owes an inference nobody asked for again.
+     *
+     * What is outstanding is read from the conversation: a tail that is a consumed message, a
+     * tool result, or the note a failed turn left behind is owed an answer, while a replacement
+     * written by a compaction is owed one only when the suffix it kept ends in a request.
+     *
+     * The pending record deliberately does not decide this, because one store may have several
+     * live owners and there is only one record. An owner working right now leaves behind exactly
+     * what a process that died would have left, so deciding from the record alone would have
+     * each owner treat the others' work as abandoned and answer it a second time. What the
+     * record adds is the knowledge that some run reached the model: a listener shown the
+     * beginning of a block that will now never arrive is told to drop it. Only finished blocks
+     * are ever persisted, so the conversation is intact and it is the view being corrected.
+     */
+    #resumesInterruptedRun(): boolean {
+        const owed =
+            this.#lastRecordType === "user" ||
+            this.#lastRecordType === "tool" ||
+            this.#lastRecordType === "system" ||
+            // A replacement record is not a question in itself, however it happens to end — but
+            // it keeps the suffix that joined the conversation after its snapshot, and a consumed
+            // message in that suffix still needs inference. Which kind of message ends the
+            // replacement is not visible in the messages, so the rewrite that knew records it.
+            (this.#lastRecordType === "compaction" && this.#lastRecordContinuesInference);
+        if (owed && this.#inherited?.stage === "inference") this.#emit({ type: "block_reset" });
+        return owed;
     }
 
     /** Load the durable state once. A failed load is not sticky: the next turn retries it. */
@@ -1302,6 +1535,7 @@ export class AgentBase {
         const pending = this.#compaction;
         if (pending === undefined) return;
         try {
+            await this.#enterStage("compaction");
             const instructions = await this.#instructions();
             const session = await this.#ensureSession(instructions, await this.#tools());
             // The snapshot is the durable conversation, counted as records: everything appended
@@ -1330,10 +1564,9 @@ export class AgentBase {
                     const records = await this.#persistence.load(lockCtx);
                     const suffix = messagesFromRecords(records.slice(snapshotCount));
                     const replaced = [...result.context.messages, ...suffix];
-                    // Only a message the replacement kept can still be owed an answer. The
-                    // summary's own last message is whatever the provider chose to end on, and
-                    // nobody is waiting for a reply to it.
-                    const owed = suffix.length > 0 && owesResponse(replaced);
+                    // Only a message in the live suffix can require another inference. The
+                    // summary's own final message is provider-authored context, not a request.
+                    const continuesInference = suffix.length > 0 && needsInference(replaced);
                     // Physically delete the superseded records and write the replacement —
                     // which keeps the messages that stay — in one atomic step.
                     await this.#recordTransaction(lockCtx, async (txCtx) => {
@@ -1341,12 +1574,12 @@ export class AgentBase {
                         await this.#persistence.append(txCtx, {
                             type: "compaction",
                             messages: replaced,
-                            ...(owed ? { owed: true } : {}),
+                            ...(continuesInference ? { continuesInference: true } : {}),
                         });
                     });
                     this.#messages = [...replaced];
                     this.#lastRecordType = "compaction";
-                    this.#lastRecordOwed = owed;
+                    this.#lastRecordContinuesInference = continuesInference;
                     // The store is now the one replacement record, and memory is exactly it.
                     this.#loadedRecordCount = 1;
                 });
@@ -1362,13 +1595,6 @@ export class AgentBase {
         }
     }
 
-    /**
-     * Surface a failed turn to the conversation as a system message, so the next inference sees
-     * what went wrong. Only unrecovered failures reach here — a later successful response in the
-     * same turn clears its error without a trace. Skipped when the history never loaded, since
-     * there is no context to append to; its own failure is swallowed, so surfacing a failure can
-     * never cause another.
-     */
     /**
      * Answer every call the last response left unanswered with an error result. The rule this
      * keeps is that the durable conversation never holds a tool call without its result: a call
@@ -1424,14 +1650,28 @@ export class AgentBase {
         work: (ctx: Context) => Promise<Result>,
     ): Promise<Result> {
         const counted = this.#loadedRecordCount;
+        // The outstanding work unwinds with the records for the same reason: a stage staged by a
+        // transaction that rolled back was never written, and memory claiming it would make the
+        // agent skip the write that actually records what it is doing.
+        const pending = this.#pending;
+        const written = this.#pendingWritten;
         try {
             return await this.#persistence.transaction(ctx, work);
         } catch (error: unknown) {
             this.#loadedRecordCount = counted;
+            this.#pending = pending;
+            this.#pendingWritten = written;
             throw error;
         }
     }
 
+    /**
+     * Surface a failed turn to the conversation as a system message, so the next inference sees
+     * what went wrong. Only unrecovered failures reach here — a later successful response in the
+     * same turn clears its error without a trace. Skipped when the history never loaded, since
+     * there is no context to append to; its own failure is swallowed, so surfacing a failure can
+     * never cause another.
+     */
     async #appendFailure(message: string): Promise<void> {
         if (this.#loaded === undefined) return;
         const failure: SessionSystemMessage = {
@@ -1540,8 +1780,9 @@ export class AgentBase {
                             // that transaction: what it writes lands and rolls back with the change
                             // it was told about, never on its own.
                             const locked = this.#kv.locked(txCtx);
-                            const changeCtx = withAgentBaseKV(
-                                withAgentBaseContext(this.#baseCtx, {
+                            const changeCtx = withAgentKV(
+                                withAgentContext(this.#baseCtx, {
+                                    id: this.id,
                                     provider,
                                     model,
                                     effort,
@@ -1616,6 +1857,10 @@ export class AgentBase {
                             ...(serviceTier === undefined ? {} : { serviceTier }),
                         });
                     }
+                    // Consuming a message is precisely the act that makes an inference owed, so
+                    // the two commit as one. A crash cannot land between them and leave a
+                    // message in the conversation that nothing remembers having to answer.
+                    await this.#recordPending(txCtx, { stage: "inference" });
                 });
             } catch (error: unknown) {
                 if (error !== LOST_QUEUE_RACE) throw error;
@@ -1671,7 +1916,8 @@ export class AgentBase {
             const records = await this.#persistence.load(lockCtx);
             const last = records[records.length - 1];
             this.#lastRecordType = last?.type;
-            this.#lastRecordOwed = last?.type === "compaction" && last.owed === true;
+            this.#lastRecordContinuesInference =
+                last?.type === "compaction" && last.continuesInference === true;
             this.#loadedRecordCount = records.length;
             let restored = messagesFromRecords(records);
             const steering = await this.#persistence.readValues(lockCtx, "steering.");
@@ -1744,16 +1990,16 @@ export class AgentBase {
                     const current = await this.#persistence.load(txCtx);
                     replaced = [...repaired, ...messagesFromRecords(current.slice(snapshotCount))];
                     // A repair rewrites the real conversation rather than summarizing it, so
-                    // what it ends on is owed exactly what it was owed before the rewrite.
+                    // what it ends on still has the same inference requirement after the rewrite.
                     await this.#persistence.append(txCtx, {
                         type: "compaction",
                         messages: replaced,
-                        ...(owesResponse(replaced) ? { owed: true } : {}),
+                        ...(needsInference(replaced) ? { continuesInference: true } : {}),
                     });
                 });
                 restored = replaced;
                 this.#lastRecordType = "compaction";
-                this.#lastRecordOwed = owesResponse(replaced);
+                this.#lastRecordContinuesInference = needsInference(replaced);
                 this.#loadedRecordCount = 1;
                 this.#messages = [...replaced];
             }
@@ -1775,19 +2021,26 @@ export class AgentBase {
         resume: boolean,
         signal: AbortSignal,
         abortPromise: Promise<typeof ABORTED>,
-    ): Promise<void> {
+    ): Promise<boolean> {
         if (!resume) {
             await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
-                this.#persistence.transaction(lockCtx, async (txCtx) => {
+                this.#recordTransaction(lockCtx, async (txCtx) => {
                     for (const entry of entries) {
                         await this.#persistence.writeValue(txCtx, entry.key, entry.call);
                     }
+                    // The batch and the stage that describes it commit together. A crash can
+                    // then never find calls owed with no record of a run owing them, nor a run
+                    // recorded as running tools that were never written.
+                    await this.#recordPending(txCtx, { stage: "tools" });
                 }),
             );
+        } else {
+            await this.#enterStage("tools");
         }
         const results: (SessionToolResultMessage | undefined)[] = new Array(entries.length);
         // Every execution actually started, whether or not its result reached the conversation.
         const running: Promise<SessionToolResultMessage>[] = [];
+        let closedDuringTools = false;
         let committed = 0;
         // A failed commit ends the turn, and the turn records its own failure at the tail. A
         // sibling still running at that moment no longer owns the append-only tail: its result
@@ -1807,10 +2060,20 @@ export class AgentBase {
                                 type: "tool",
                                 message: result,
                             });
+                            // The call is answered, so what was kept only to let it be retried
+                            // goes with it. What the tool itself wrote under its own call scope
+                            // stays: that is the tool's state, not the batch's bookkeeping, and
+                            // an owner may still want to read what a finished call recorded.
                             await this.#persistence.deleteValue(txCtx, entry.key);
                         });
                         this.#messages.push(result);
                         committed += 1;
+                    }
+                    // The batch is fully answered, so its results are what the model is owed a
+                    // response to. Recording that here means a crash between the last result and
+                    // the next request resumes as an inference rather than as a finished batch.
+                    if (committed === entries.length) {
+                        await this.#recordPending(lockCtx, { stage: "inference" });
                     }
                 });
             } catch (error: unknown) {
@@ -1837,7 +2100,7 @@ export class AgentBase {
                     running.push(execution);
                     outcome = await Promise.race([execution, abortPromise, this.#closingTools()]);
                 }
-                if (outcome === ABORTED && !signal.aborted) this.#abandonedTools = true;
+                if (outcome === ABORTED && !signal.aborted) closedDuringTools = true;
                 results[index] =
                     outcome === ABORTED
                         ? {
@@ -1867,6 +2130,7 @@ export class AgentBase {
         // is in flight. The batch does not wait for it, so a tool that never notices the abort
         // cannot hold the turn open.
         this.#settleLater(Promise.allSettled(running), "tool");
+        return closedDuringTools;
     }
 
     /**
@@ -1883,6 +2147,7 @@ export class AgentBase {
         });
     }
 
+    /** Whether this call's tool may safely be executed again after a restart interrupted it. */
     async #isDurable(call: SessionToolCallBlock): Promise<boolean> {
         const tool = (await this.#tools()).find(
             (candidate) => candidate.name === call.name && candidate.namespace === call.namespace,
@@ -1945,8 +2210,24 @@ export class AgentBase {
         }
         try {
             // A tool execution persists under its own call ID, never in another call's scope.
-            const callCtx = withAgentBaseKV(ctx, this.#kv.scoped("call", call.callId));
-            const result: unknown = await tool.execute(callCtx, args);
+            const callCtx = withAgentTaskContext(
+                withAgentKV(ctx, this.#kv.scoped("call", call.callId)),
+                taskContextBeforeToolCall(this.#messages, call.callId),
+            );
+            let executed: Promise<unknown> | undefined;
+            const execute = (): Promise<unknown> =>
+                (executed ??= Promise.resolve().then(
+                    async () => await tool.execute(callCtx, args),
+                ));
+            const result: unknown =
+                this.#hooks.aroundToolExecution === undefined
+                    ? await execute()
+                    : await this.#hooks.aroundToolExecution(callCtx, {
+                          callId: call.callId,
+                          tool,
+                          arguments: args,
+                          execute,
+                      });
             if (!Value.Check(tool.returnType, result)) {
                 return failure(`Tool "${call.name}" returned an invalid result.`);
             }
@@ -1987,6 +2268,12 @@ export class AgentBase {
         return key(lastSlot, Number(lastSequence) + 1);
     }
 
+    /**
+     * Consume one response stream into the assistant message it spells out, appending each block
+     * to the store as it finishes and reporting every event to the hooks. What comes back is what
+     * the model actually finished saying: a response cut off mid-block keeps the finished blocks
+     * alone, so memory never differs from what a reload would rebuild.
+     */
     async #collect(
         stream: AsyncIterable<SessionEvent>,
         abortPromise: Promise<typeof ABORTED>,
@@ -2182,6 +2469,7 @@ export class AgentBase {
         return this.#session;
     }
 
+    /** Report one stream event to the hooks. Hooks observe the stream; they never fail a run. */
     #emit(event: SessionEvent): void {
         try {
             this.#hooks.onEvent?.(this.#ctx, event);
@@ -2191,13 +2479,8 @@ export class AgentBase {
     }
 }
 
-/**
- * The provider-facing identity of a session configuration. Only descriptor fields the provider
- * sees participate, so re-created tool objects with identical descriptors do not churn the
- * session.
- */
 /** Whether a conversation ends on something the model has not answered. */
-function owesResponse(messages: readonly SessionMessage[]): boolean {
+function needsInference(messages: readonly SessionMessage[]): boolean {
     const last = messages[messages.length - 1];
     return last?.role === "user" || last?.role === "tool" || last?.role === "system";
 }
@@ -2278,6 +2561,11 @@ function repairUnansweredCalls(
     return changed ? repaired : undefined;
 }
 
+/**
+ * The provider-facing identity of a session configuration. Only descriptor fields the provider
+ * sees participate, so re-created tool objects with identical descriptors do not churn the
+ * session.
+ */
 function sessionConfigKey(instructions: string, tools: readonly AnyAgentTool[]): string {
     return deterministicStringify([
         instructions,
@@ -2294,38 +2582,6 @@ function sessionConfigKey(instructions: string, tools: readonly AnyAgentTool[]):
     ]);
 }
 
-/**
- * Whether an agent's store says it still owes an answer. The marker this reads first is written
- * in the same transaction that accepts a message and removed only by a settle that found the
- * durable queues empty, so an owner asking this question gets a committed fact and never has to
- * know how an agent lays its own work out.
- *
- * The marker alone cannot answer it, because it only exists while some owner is still running:
- * a process that died mid-turn took its marker with it, and what it left behind is a
- * conversation ending on something nobody answered. That tail is the same evidence the agent
- * itself recovers from, so it is read here too. The question runs under the store's lock, so it
- * never sees a step another owner has only half applied.
- */
-export async function agentBaseOwesWork(
-    ctx: Context,
-    persistence: AgentBasePersistence,
-): Promise<boolean> {
-    return await agentBaseWithStoreStill(ctx, persistence, async (lockCtx) => {
-        const entries = await persistence.readValues(lockCtx, OWED_KEY);
-        if (entries.some((entry) => entry.key === OWED_KEY)) return true;
-        const records = await persistence.load(lockCtx);
-        const last = records[records.length - 1];
-        return last?.type === "user" || last?.type === "tool" || last?.type === "system";
-    });
-}
-
-/**
- * The calls of one response, reduced to one entry per call ID. A response is allowed to run
- * several tools at once, but only if the model can tell their answers apart: results are matched
- * back by call ID, and two calls sharing one ID have no distinguishable answer. Rather than
- * execute side effects whose results the conversation cannot describe, such a call ID is kept
- * once and refused — before anything runs, since a refusal after the fact would not undo it.
- */
 /**
  * The first call ID a response used for two calls that are not the same call. Repeating one
  * identical call under one ID says nothing new — it is the same request twice, and answering it
@@ -2348,6 +2604,13 @@ function conflictingCallId(calls: readonly SessionToolCallBlock[]): string | und
     return undefined;
 }
 
+/**
+ * The calls of one response, reduced to one entry per call ID. A response is allowed to run
+ * several tools at once, but only if the model can tell their answers apart: results are matched
+ * back by call ID, and two calls sharing one ID have no distinguishable answer. Rather than
+ * execute side effects whose results the conversation cannot describe, such a call ID is kept
+ * once and refused — before anything runs, since a refusal after the fact would not undo it.
+ */
 function toolBatchEntries(
     calls: readonly SessionToolCallBlock[],
 ): readonly { readonly call: SessionToolCallBlock; readonly rejected?: string }[] {

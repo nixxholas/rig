@@ -6,6 +6,8 @@ import type { AnyAgentTool } from "./AgentTool.js";
  * the current values.
  */
 export interface AgentBaseState {
+    /** The base system instructions for the session; hooks may extend this before inference. */
     instructions: string;
+    /** The base tools offered to the model; hooks may extend this before inference or a call. */
     tools: AnyAgentTool[];
 }

@@ -121,6 +121,9 @@ importers:
 
   packages/happy-agent-base:
     dependencies:
+      '@paralleldrive/cuid2':
+        specifier: ^3.3.0
+        version: 3.3.0
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49
