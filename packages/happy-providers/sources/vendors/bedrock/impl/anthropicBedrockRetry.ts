@@ -48,6 +48,28 @@ const ERROR_TYPE_STATUS: Record<string, number> = {
     overloaded_error: 529,
 };
 
+/**
+ * AWS Bedrock Runtime's documented exceptions and the HTTP statuses its schema assigns them. A
+ * mid-stream failure arrives as an eventstream exception carrying no HTTP status, because the
+ * stream itself was an HTTP 200, so retry and classification map the name back onto the status.
+ * The SDK's smithy layer throws the members its deserializer models as AWS ServiceExceptions —
+ * plain Errors carrying `$fault` and a PascalCase name — and every other member as a bare Error
+ * whose name is the camelCase `:exception-type` header and whose message is the raw JSON body.
+ */
+const BEDROCK_EXCEPTION_STATUS: Record<string, number> = {
+    AccessDeniedException: 403,
+    ConflictException: 400,
+    InternalServerException: 500,
+    ModelErrorException: 424,
+    ModelNotReadyException: 429,
+    ModelTimeoutException: 408,
+    ResourceNotFoundException: 404,
+    ServiceQuotaExceededException: 400,
+    ServiceUnavailableException: 503,
+    ThrottlingException: 429,
+    ValidationException: 400,
+};
+
 export function shouldRetryAnthropicBedrock(
     error: unknown,
     failedAttempts: number,
@@ -56,7 +78,6 @@ export function shouldRetryAnthropicBedrock(
     if (failedAttempts > maxRetries) return false;
     if (isEmptyResponseError(error)) return true;
     if (isAnthropicBedrockConnectionFailure(error)) return true;
-    if (!(error instanceof APIError)) return false;
     return isRetryableAnthropicBedrockStatus(resolveAnthropicBedrockErrorStatus(error));
 }
 
@@ -69,23 +90,89 @@ function isRetryableAnthropicBedrockStatus(status: number | undefined): boolean 
     );
 }
 
-/** The error's HTTP status, or the documented equivalent for a mid-stream SSE error event. */
+/**
+ * The error's HTTP status, or the documented equivalent for a mid-stream SSE error event or an
+ * AWS Bedrock eventstream exception.
+ */
 export function resolveAnthropicBedrockErrorStatus(error: unknown): number | undefined {
-    if (!(error instanceof APIError)) return undefined;
-    if (error.status !== undefined) return error.status;
-    const details = anthropicBedrockStreamErrorDetails(error);
-    return details === undefined ? undefined : ERROR_TYPE_STATUS[details.type];
+    if (error instanceof APIError) {
+        if (error.status !== undefined) return error.status;
+        const details = anthropicBedrockStreamErrorDetails(error);
+        return details === undefined ? undefined : ERROR_TYPE_STATUS[details.type];
+    }
+    return anthropicBedrockRuntimeExceptionDetails(error)?.status;
 }
 
 /**
- * Recognizes a retryable SSE `error` event thrown mid-stream, such as an api_error or
- * overloaded_error. Unlike HTTP-level failures these arrive on an already-open response stream,
- * so the session replays them through its block_reset rollback even after content started.
+ * Recognizes a retryable error delivered on an already-open response stream: an Anthropic SSE
+ * `error` event such as api_error or overloaded_error, or an AWS Bedrock eventstream exception.
+ * Unlike HTTP-level failures these can interrupt a response that already produced content, so
+ * the session replays them through its block_reset rollback.
  */
 export function isRetryableAnthropicBedrockStreamError(error: unknown): boolean {
     const details = anthropicBedrockStreamErrorDetails(error);
-    if (details === undefined) return false;
-    return isRetryableAnthropicBedrockStatus(ERROR_TYPE_STATUS[details.type]);
+    if (details !== undefined) {
+        return isRetryableAnthropicBedrockStatus(ERROR_TYPE_STATUS[details.type]);
+    }
+    return isRetryableAnthropicBedrockStatus(
+        anthropicBedrockRuntimeExceptionDetails(error)?.status,
+    );
+}
+
+/**
+ * Parses an AWS Bedrock Runtime exception thrown out of the eventstream, if that is what it is,
+ * resolving the HTTP status AWS's schema assigns its name. Both thrown shapes are recognized: a
+ * modeled ServiceException by its `$fault`, and an unmodeled bare Error by its camelCase Bedrock
+ * exception name. ModelStreamErrorException relays the upstream model's own failure and carries
+ * that status; AWS documents it as retryable, so a missing original status is treated as a
+ * server error. An unrecognized name counts as a server error only when smithy itself attributed
+ * the fault to the server, evidenced by the `$metadata` every deserialized exception carries.
+ */
+export function anthropicBedrockRuntimeExceptionDetails(
+    error: unknown,
+): { name: string; status: number | undefined; message: string | undefined } | undefined {
+    if (!(error instanceof Error)) return undefined;
+    const record = error as unknown as {
+        $fault?: unknown;
+        $metadata?: unknown;
+        originalStatusCode?: unknown;
+    };
+    const decorated =
+        (record.$fault === "client" || record.$fault === "server") &&
+        typeof record.$metadata === "object" &&
+        record.$metadata !== null;
+    const name = error.name.charAt(0).toUpperCase() + error.name.slice(1);
+    const mapped = BEDROCK_EXCEPTION_STATUS[name];
+    const known = typeof mapped === "number" || name === "ModelStreamErrorException";
+    if (!known && !decorated) return undefined;
+    const message = extractBedrockExceptionMessage(error.message);
+    if (name === "ModelStreamErrorException") {
+        return {
+            name,
+            status: typeof record.originalStatusCode === "number" ? record.originalStatusCode : 500,
+            message,
+        };
+    }
+    if (typeof mapped === "number") return { name, status: mapped, message };
+    return { name, status: record.$fault === "server" ? 500 : undefined, message };
+}
+
+/** The unmodeled eventstream throw carries the raw JSON body as its message; lift the text out. */
+function extractBedrockExceptionMessage(raw: string): string | undefined {
+    if (raw.length === 0) return undefined;
+    if (!raw.startsWith("{")) return raw;
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        const record =
+            typeof parsed === "object" && parsed !== null
+                ? (parsed as { message?: unknown; Message?: unknown })
+                : undefined;
+        if (typeof record?.message === "string") return record.message;
+        if (typeof record?.Message === "string") return record.Message;
+        return raw;
+    } catch {
+        return raw;
+    }
 }
 
 /**
@@ -196,8 +283,9 @@ export function describeAnthropicBedrockRetry(
     const status =
         error instanceof APIError && error.status !== undefined
             ? `HTTP ${error.status}`
-            : anthropicBedrockStreamErrorDetails(error) !== undefined
-              ? "server error during the response stream"
+            : anthropicBedrockStreamErrorDetails(error) !== undefined ||
+                anthropicBedrockRuntimeExceptionDetails(error) !== undefined
+              ? "error during the response stream"
               : "connection failure";
     return `Anthropic Bedrock ${status}; retrying in ${formatDelay(delay)}, attempt ${failedAttempts} of ${maxRetries}.`;
 }

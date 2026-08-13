@@ -6,6 +6,7 @@ import {
 } from "@/core/extractProviderErrorDiagnostics.js";
 import type { SessionErrorKind, SessionProviderError } from "@/core/SessionEvent.js";
 import {
+    anthropicBedrockRuntimeExceptionDetails,
     anthropicBedrockStreamErrorDetails,
     isAnthropicBedrockConnectionFailure,
     resolveAnthropicBedrockErrorStatus,
@@ -26,6 +27,8 @@ export function describeAnthropicBedrockErrorMessage(error: unknown): string {
             ? "Anthropic Bedrock reported an error while streaming the response."
             : `Anthropic Bedrock reported an error while streaming the response: ${stream.message}.`;
     }
+    const runtimeException = anthropicBedrockRuntimeExceptionDetails(error);
+    if (runtimeException?.message !== undefined) return runtimeException.message;
     return error instanceof Error ? error.message : String(error);
 }
 
@@ -47,11 +50,9 @@ export function classifyAnthropicBedrockError(error: unknown): SessionErrorKind 
     ) {
         return "billing_error";
     }
-    if (error instanceof APIError) {
-        const status = resolveAnthropicBedrockErrorStatus(error);
-        if (status === 402) return "billing_error";
-        if (status !== undefined && status >= 500) return "internal_error";
-    }
+    const status = resolveAnthropicBedrockErrorStatus(error);
+    if (status === 402) return "billing_error";
+    if (status !== undefined && status >= 500) return "internal_error";
     return "unknown";
 }
 
@@ -60,9 +61,11 @@ export function classifyAnthropicBedrockProviderError(
     attempts: number,
 ): SessionProviderError {
     const message = error instanceof Error ? error.message : String(error);
+    const runtimeException = anthropicBedrockRuntimeExceptionDetails(error);
     const diagnostics = extractProviderErrorDiagnostics(error, {
         attempts: Math.max(1, attempts),
         upstreamMessage: message,
+        ...(runtimeException === undefined ? {} : { errorType: runtimeException.name }),
     });
     const status = diagnostics?.status ?? resolveAnthropicBedrockErrorStatus(error);
     const kind = classifyAnthropicBedrockError(error);

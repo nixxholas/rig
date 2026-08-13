@@ -57,13 +57,16 @@ It also emits opaque ordered response items so interleaved thinking, text, and t
 be persisted and replayed without reordering.
 
 The SDK's hidden retries are disabled. The provider performs Claude-compatible retryable
-connection, 408, 409, 429, and 5xx retries itself and emits `retrying` events. A mid-stream SSE
-`error` event, which the SDK throws without an HTTP status, is mapped onto the status its error
-type is documented to be equivalent to — `api_error` to 500, `overloaded_error` to 529 — and
-follows the same policy. After stream content has begun, only dropped connections and retryable
-mid-stream error events are replayed, through the `block_reset` rollback so no visible output is
-duplicated; a stream that produced compaction output is never replayed because compaction is
-stateful on the server.
+connection, 408, 409, 429, and 5xx retries itself and emits `retrying` events. Failures the
+server delivers on an open stream carry no HTTP status and are mapped onto the status they are
+documented to be equivalent to, then follow the same policy. There are two such shapes: an
+Anthropic SSE `error` event, which the SDK throws as an APIError without a status — `api_error`
+maps to 500, `overloaded_error` to 529 — and an AWS Bedrock Runtime eventstream exception, which
+the SDK's smithy layer throws as an AWS ServiceException — `InternalServerException` maps to 500,
+`ThrottlingException` to 429, and so on. After stream content has begun, only dropped connections
+and retryable mid-stream failures are replayed, through the `block_reset` rollback so no visible
+output is duplicated; a stream that produced compaction output is never replayed because
+compaction is stateful on the server.
 
 `compact()` always uses Bedrock's native server-side compaction with the `compact-2026-01-12`
 beta and `compact_20260112` context-management edit. It pauses at the native compaction boundary,

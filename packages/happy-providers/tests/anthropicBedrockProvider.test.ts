@@ -17,11 +17,13 @@ import {
 } from "@/vendors/bedrock/AnthropicBedrockProvider.js";
 import {
     isAnthropicBedrockConnectionFailure,
+    isRetryableAnthropicBedrockStreamError,
     resolveAnthropicBedrockRetryDelay,
 } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
 import {
     classifyAnthropicBedrockError,
     classifyAnthropicBedrockProviderError,
+    describeAnthropicBedrockErrorMessage,
 } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
 import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
@@ -37,6 +39,117 @@ describe("AnthropicBedrockProvider", () => {
             type: "internal_server_error",
             diagnostics: { attempts: 1, status: 500 },
         });
+    });
+
+    it("classifies AWS Bedrock eventstream exceptions by their documented statuses", () => {
+        const internal = awsServiceException(
+            "InternalServerException",
+            "server",
+            "The system encountered an unexpected error during processing. Try your request again.",
+        );
+        expect(classifyAnthropicBedrockProviderError(internal, 2)).toMatchObject({
+            type: "internal_server_error",
+            diagnostics: {
+                attempts: 2,
+                errorType: "InternalServerException",
+                upstreamMessage:
+                    "The system encountered an unexpected error during processing. Try your request again.",
+            },
+        });
+
+        const throttling = awsServiceException(
+            "ThrottlingException",
+            "client",
+            "Too many requests, please wait before trying again.",
+        );
+        expect(classifyAnthropicBedrockProviderError(throttling, 1)).toMatchObject({
+            type: "rate_limit",
+            diagnostics: { attempts: 1, errorType: "ThrottlingException" },
+        });
+
+        const validation = awsServiceException(
+            "ValidationException",
+            "client",
+            "The provided model identifier is invalid.",
+        );
+        expect(classifyAnthropicBedrockProviderError(validation, 1)).toMatchObject({
+            type: "unclassified",
+        });
+    });
+
+    it("recognizes eventstream exceptions the SDK does not model as ServiceExceptions", () => {
+        // Unmodeled members are thrown as bare Errors named by the camelCase
+        // `:exception-type` header, carrying the raw JSON body as the message and no $fault.
+        const unavailable = awsUnmodeledEventstreamError(
+            "serviceUnavailableException",
+            "The service is currently unavailable. Try your request again.",
+        );
+        expect(isRetryableAnthropicBedrockStreamError(unavailable)).toBe(true);
+        expect(classifyAnthropicBedrockProviderError(unavailable, 1)).toMatchObject({
+            type: "server_overloaded",
+            diagnostics: { errorType: "ServiceUnavailableException" },
+        });
+        expect(describeAnthropicBedrockErrorMessage(unavailable)).toBe(
+            "The service is currently unavailable. Try your request again.",
+        );
+
+        const timeout = awsUnmodeledEventstreamError(
+            "modelTimeoutException",
+            "The request took too long to process.",
+        );
+        expect(isRetryableAnthropicBedrockStreamError(timeout)).toBe(true);
+    });
+
+    it("keeps non-retryable AWS Bedrock exceptions out of the retry policy", () => {
+        expect(
+            isRetryableAnthropicBedrockStreamError(
+                awsServiceException("ConflictException", "client", "Concurrent update conflict."),
+            ),
+        ).toBe(false);
+        expect(
+            isRetryableAnthropicBedrockStreamError(
+                awsServiceException("ValidationException", "client", "Bad request."),
+            ),
+        ).toBe(false);
+        // An arbitrary error merely carrying a smithy-looking fault is not a Bedrock exception.
+        expect(
+            isRetryableAnthropicBedrockStreamError(
+                Object.assign(new Error("wrapped failure"), { $fault: "server" }),
+            ),
+        ).toBe(false);
+        // An unknown modeled exception counts as a server error only with smithy's $metadata.
+        expect(
+            isRetryableAnthropicBedrockStreamError(
+                Object.assign(new Error("future failure"), {
+                    name: "BrandNewException",
+                    $fault: "server",
+                    $metadata: {},
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it("retries a ModelStreamErrorException by the status of the failure it relays", () => {
+        const relayedServerError = Object.assign(new Error("relayed failure"), {
+            name: "ModelStreamErrorException",
+            $fault: "client",
+            originalStatusCode: 502,
+        });
+        expect(isRetryableAnthropicBedrockStreamError(relayedServerError)).toBe(true);
+
+        const relayedClientError = Object.assign(new Error("relayed failure"), {
+            name: "ModelStreamErrorException",
+            $fault: "client",
+            originalStatusCode: 400,
+        });
+        expect(isRetryableAnthropicBedrockStreamError(relayedClientError)).toBe(false);
+
+        // AWS documents the exception as retryable, so no original status means server error.
+        const unattributed = Object.assign(new Error("relayed failure"), {
+            name: "ModelStreamErrorException",
+            $fault: "client",
+        });
+        expect(isRetryableAnthropicBedrockStreamError(unattributed)).toBe(true);
     });
 
     it("uses the same regional inference profiles as Rig's Bedrock catalog", () => {
@@ -1630,6 +1743,10 @@ describe("AnthropicBedrockProvider", () => {
             ]);
             expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
             expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+            // The rolled-back partial output must not survive into the committed message.
+            const assistantMessage = assistantMessageFromEvents(events);
+            expect(JSON.stringify(assistantMessage)).toContain("recovered");
+            expect(JSON.stringify(assistantMessage)).not.toContain("partial answer");
         } finally {
             session.destroy();
             await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -1730,6 +1847,196 @@ describe("AnthropicBedrockProvider", () => {
             session.destroy();
             await new Promise<void>((resolve) => server.close(() => resolve()));
         }
+    });
+
+    it("retries an AWS Bedrock eventstream exception before response content", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-eventstream-exception-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        if (attempts === 1) {
+                            return (async function* () {
+                                yield* streamEvents([
+                                    {
+                                        type: "message_start",
+                                        message: { usage: { input_tokens: 1, output_tokens: 0 } },
+                                    },
+                                ]);
+                                throw awsServiceException(
+                                    "InternalServerException",
+                                    "server",
+                                    "The system encountered an unexpected error during processing. Try your request again.",
+                                );
+                            })();
+                        }
+                        return streamEvents([
+                            {
+                                type: "message_start",
+                                message: { usage: { input_tokens: 1, output_tokens: 0 } },
+                            },
+                            {
+                                type: "content_block_start",
+                                index: 0,
+                                content_block: { type: "text", text: "" },
+                            },
+                            {
+                                type: "content_block_delta",
+                                index: 0,
+                                delta: { type: "text_delta", text: "recovered" },
+                            },
+                            { type: "content_block_stop", index: 0 },
+                            {
+                                type: "message_delta",
+                                delta: { stop_reason: "end_turn", stop_sequence: null },
+                                usage: { output_tokens: 1 },
+                            },
+                            { type: "message_stop" },
+                        ]);
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run(testContext, {
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "survive the aws exception" }],
+                    },
+                ],
+            },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(2);
+        expect(events).toContainEqual(expect.objectContaining({ type: "retrying", attempt: 1 }));
+        expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+    });
+
+    it("retries an AWS Bedrock eventstream exception after response content started", async () => {
+        let attempts = 0;
+        const credential = await BedrockBearerTokenCredential.tryLoad({
+            bearerToken: "bedrock-midstream-eventstream-exception-token",
+        });
+        if (credential === null) throw new Error("Expected a Bedrock test credential.");
+        const client = {
+            beta: {
+                messages: {
+                    create: async () => {
+                        attempts += 1;
+                        if (attempts === 1) {
+                            return (async function* () {
+                                yield* streamEvents([
+                                    {
+                                        type: "message_start",
+                                        message: { usage: { input_tokens: 1, output_tokens: 0 } },
+                                    },
+                                    {
+                                        type: "content_block_start",
+                                        index: 0,
+                                        content_block: { type: "text", text: "" },
+                                    },
+                                    {
+                                        type: "content_block_delta",
+                                        index: 0,
+                                        delta: { type: "text_delta", text: "partial answer" },
+                                    },
+                                ]);
+                                // The SDK's deserializer does not model this member, so smithy
+                                // throws it as a bare camelCase-named error with a JSON body.
+                                throw awsUnmodeledEventstreamError(
+                                    "serviceUnavailableException",
+                                    "The service is currently unavailable. Try your request again.",
+                                );
+                            })();
+                        }
+                        return streamEvents([
+                            {
+                                type: "message_start",
+                                message: { usage: { input_tokens: 1, output_tokens: 0 } },
+                            },
+                            {
+                                type: "content_block_start",
+                                index: 0,
+                                content_block: { type: "text", text: "" },
+                            },
+                            {
+                                type: "content_block_delta",
+                                index: 0,
+                                delta: { type: "text_delta", text: "recovered" },
+                            },
+                            { type: "content_block_stop", index: 0 },
+                            {
+                                type: "message_delta",
+                                delta: { stop_reason: "end_turn", stop_sequence: null },
+                                usage: { output_tokens: 1 },
+                            },
+                            { type: "message_stop" },
+                        ]);
+                    },
+                },
+            },
+        } as unknown as NonNullable<AnthropicBedrockProviderOptions["client"]>;
+        const provider = new AnthropicBedrockProvider({
+            client,
+            credential,
+            model: "anthropic/opus-4-8",
+        });
+        const session = await provider.session("<SESSION_ID>", {
+            instructions: "",
+            tools: [],
+        });
+
+        const events: SessionEvent[] = [];
+        for await (const event of session.run(testContext, {
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "survive mid-stream aws" }],
+                    },
+                ],
+            },
+        })) {
+            events.push(event);
+        }
+
+        expect(attempts).toBe(2);
+        const partialIndex = events.findIndex(
+            (event) => event.type === "text_delta" && event.delta === "partial answer",
+        );
+        expect(partialIndex).toBeGreaterThanOrEqual(0);
+        expect(events.slice(partialIndex + 1, partialIndex + 3)).toEqual([
+            { type: "block_reset" },
+            expect.objectContaining({ type: "retrying", attempt: 1 }),
+        ]);
+        expect(events).toContainEqual({ type: "text_delta", delta: "recovered" });
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        // The rolled-back partial output must not survive into the committed message.
+        const assistantMessage = assistantMessageFromEvents(events);
+        expect(JSON.stringify(assistantMessage)).toContain("recovered");
+        expect(JSON.stringify(assistantMessage)).not.toContain("partial answer");
     });
 
     it("reports a readable error when a mid-response connection failure is not retried", async () => {
@@ -2340,6 +2647,16 @@ function toSse(events: readonly unknown[]): string {
 
 async function* streamEvents(events: readonly unknown[]) {
     for (const event of events) yield event as never;
+}
+
+/** Shapes a modeled ServiceException the way smithy throws AWS Bedrock eventstream exceptions. */
+function awsServiceException(name: string, fault: "client" | "server", message: string): Error {
+    return Object.assign(new Error(message), { name, $fault: fault, $metadata: {} });
+}
+
+/** Shapes the bare error smithy throws for eventstream exception members the SDK does not model. */
+function awsUnmodeledEventstreamError(name: string, message: string): Error {
+    return Object.assign(new Error(JSON.stringify({ message })), { name });
 }
 
 async function* timedOutMidResponseStream() {
