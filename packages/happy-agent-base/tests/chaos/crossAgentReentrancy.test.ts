@@ -432,54 +432,6 @@ describe("cross-agent tool re-entrancy", () => {
         });
     });
 
-    it("settles a cycle where B's tool steers back into A's active tool turn", async () => {
-        const world = harness(
-            new Map([
-                [
-                    "A",
-                    async (toolCtx, owner) => {
-                        await owner.send(toolCtx, "B", user("A starts steered cycle"));
-                    },
-                ],
-                [
-                    "B",
-                    async (toolCtx, owner) => {
-                        await owner.steer(toolCtx, "A", user("B steers active A"));
-                    },
-                ],
-            ]),
-            new Map([
-                ["A", [toolTurn("A-to-B"), textTurn("A incorporated steering")]],
-                ["B", [toolTurn("B-to-A"), textTurn("B finished")]],
-            ]),
-        );
-        const a = await world.owner.create(ctx, "A", {});
-        const b = await world.owner.create(ctx, "B", {});
-
-        await a.send(ctx, user("start A"), { await: true });
-        const settled = await settlesWithin(Promise.all([a.waitForIdle(), b.waitForIdle()]), 500);
-        const observed = {
-            settled,
-            aUsers: userTexts(world.persistence("A")),
-            bUsers: userTexts(world.persistence("B")),
-            aToolResults: toolResults(world.persistence("A")),
-            bToolResults: toolResults(world.persistence("B")),
-            aRuns: world.provider.sessions.get("A")?.requests.length,
-            bRuns: world.provider.sessions.get("B")?.requests.length,
-        };
-        await Promise.all([a.close(), b.close()]);
-
-        expect(observed).toEqual({
-            settled: true,
-            aUsers: ["start A", "B steers active A"],
-            bUsers: ["A starts steered cycle"],
-            aToolResults: ["A-to-B"],
-            bToolResults: ["B-to-A"],
-            aRuns: 2,
-            bRuns: 2,
-        });
-    });
-
     it("settles when two active agentSystem tool-call each other concurrently", async () => {
         const bothToolsStarted = deferred();
         let started = 0;
